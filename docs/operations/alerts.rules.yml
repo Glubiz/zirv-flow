@@ -1,0 +1,142 @@
+# Example Prometheus alert rules for zirv-flow.
+#
+# The thresholds and durations are starting points. Tune them to your traffic, your scrape
+# interval and how quickly your team can respond; a page that fires too often gets ignored.
+#
+# Every alert carries a `runbook` annotation that points at its section in
+# docs/operations/runbooks.md. The series are the `zirv_flow_` ones in the README metric table.
+# The queue, freshness, destination, dirty-set and timer gauges are published by the scheduler
+# leader, so scrape every process and alert on the series, not on one instance.
+#
+# Keep the shape regular: one rule per block, `expr` on one line, and the same indentation
+# throughout. A unit test reads this file line by line to check the series, labels and runbook
+# anchors, and `promtool check rules docs/operations/alerts.rules.yml` accepts it.
+groups:
+  - name: zirv-flow-queue
+    rules:
+      - alert: ZirvFlowJobsBacklog
+        expr: 'sum by (kind) (zirv_flow_jobs{state="ready"}) > 10000'
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'More than 10000 jobs of kind {{ $labels.kind }} have been waiting for 15 minutes'
+          runbook: 'docs/operations/runbooks.md#zirvflowjobsbacklog'
+      - alert: ZirvFlowJobsDead
+        expr: 'sum by (kind) (zirv_flow_jobs{state="dead"}) > 0'
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Jobs of kind {{ $labels.kind }} are dead and will not run again by themselves'
+          runbook: 'docs/operations/runbooks.md#zirvflowjobsdead'
+      - alert: ZirvFlowJobClaimLag
+        expr: 'histogram_quantile(0.99, sum by (le, kind) (rate(zirv_flow_job_claim_lag_seconds_bucket[10m]))) > 60'
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Jobs of kind {{ $labels.kind }} wait over a minute between becoming due and being claimed'
+          runbook: 'docs/operations/runbooks.md#zirvflowjobclaimlag'
+      - alert: ZirvFlowTimerLate
+        expr: 'zirv_flow_timer_lateness_seconds > 300'
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'A flow timer is more than 5 minutes past its wake time'
+          runbook: 'docs/operations/runbooks.md#zirvflowtimerlate'
+  - name: zirv-flow-data
+    rules:
+      - alert: ZirvFlowInboxAge
+        expr: 'zirv_flow_ingest_inbox_age_seconds > 300'
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'The oldest unprocessed ingestion inbox row is more than 5 minutes old'
+          runbook: 'docs/operations/runbooks.md#zirvflowinboxage'
+      - alert: ZirvFlowStreamStale
+        expr: 'max by (workspace, stream) (zirv_flow_stream_state) >= 1 and on (workspace, stream) zirv_flow_stream_freshness_seconds > 3600'
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Stream {{ $labels.stream }} is stale or failing and its data is over an hour old'
+          runbook: 'docs/operations/runbooks.md#zirvflowstreamstale'
+      - alert: ZirvFlowSyncFailing
+        expr: 'sum(increase(zirv_flow_sync_runs_total{outcome="failed"}[1h])) >= 3 and sum(increase(zirv_flow_sync_runs_total{outcome="failed"}[1h])) / sum(increase(zirv_flow_sync_runs_total[1h])) > 0.5'
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Over half of the sync runs in the last hour failed'
+          runbook: 'docs/operations/runbooks.md#zirvflowsyncfailing'
+      - alert: ZirvFlowSegmentDirtyBacklog
+        expr: 'zirv_flow_segment_dirty_age_seconds > 900 or zirv_flow_segment_dirty_backlog > 50000'
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Segment membership is falling behind: the dirty set is large or its oldest mark is over 15 minutes old'
+          runbook: 'docs/operations/runbooks.md#zirvflowsegmentdirtybacklog'
+      - alert: ZirvFlowDecisionLogSize
+        expr: 'zirv_flow_decision_log_bytes > 200e9'
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: 'The decision log takes more than 200 GB on disk'
+          runbook: 'docs/operations/runbooks.md#zirvflowdecisionlogsize'
+  - name: zirv-flow-delivery
+    rules:
+      - alert: ZirvFlowDestinationQueue
+        expr: 'zirv_flow_destination_queue_oldest_seconds > 1800 and on (workspace, destination) zirv_flow_destination_queue_depth > 0'
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Destination {{ $labels.destination }} has an item waiting for delivery for over 30 minutes'
+          runbook: 'docs/operations/runbooks.md#zirvflowdestinationqueue'
+      - alert: ZirvFlowForwardingLag
+        expr: 'zirv_flow_destination_forwarding_lag_seconds > 600'
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Forwarding to destination {{ $labels.destination }} is more than 10 minutes behind'
+          runbook: 'docs/operations/runbooks.md#zirvflowforwardinglag'
+      - alert: ZirvFlowForwardingDead
+        expr: 'sum(increase(zirv_flow_destination_forwarding_dead_total[1h])) > 0'
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Forwarding outbox rows were settled as dead letters in the last hour'
+          runbook: 'docs/operations/runbooks.md#zirvflowforwardingdead'
+      - alert: ZirvFlowRenderRestarts
+        expr: 'sum(increase(zirv_flow_render_restarts_total[15m])) > 3'
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'The render host restarted more than 3 times in 15 minutes'
+          runbook: 'docs/operations/runbooks.md#zirvflowrenderrestarts'
+  - name: zirv-flow-platform
+    rules:
+      - alert: ZirvFlowDbPoolSaturated
+        expr: 'zirv_flow_db_pool_connections{state="in_use"} / ignoring (state) zirv_flow_db_pool_max_connections > 0.9'
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Over 90 percent of the {{ $labels.pool }} database pool is in use'
+          runbook: 'docs/operations/runbooks.md#zirvflowdbpoolsaturated'
+      - alert: ZirvFlowNotReady
+        expr: 'sum(increase(zirv_flow_http_requests_total{route="/readyz",status="503"}[5m])) > 0'
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: '/readyz has answered 503: the database is unreachable or its schema is not up to date'
+          runbook: 'docs/operations/runbooks.md#zirvflownotready'

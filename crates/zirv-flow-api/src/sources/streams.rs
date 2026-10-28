@@ -722,7 +722,6 @@ pub(crate) async fn configure(
         Some(("stream", stream.id)),
         json!({
             "source_id": source_id,
-            "name": stream.name,
             "enabled": stream.enabled,
             "sync_mode": stream.sync_mode,
             "run_started": run_started,

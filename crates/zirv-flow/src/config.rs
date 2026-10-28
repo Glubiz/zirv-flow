@@ -39,7 +39,7 @@ use zirv_flow_store::{
     JOB_HISTORY_DAYS_BOUNDS, TEST_SEND_MONTHS_BOUNDS,
 };
 
-const CONFIG_KEYS: [&str; 66] = [
+pub(crate) const CONFIG_KEYS: [&str; 66] = [
     "server.bind",
     "server.cookie_secure",
     "server.public_url",

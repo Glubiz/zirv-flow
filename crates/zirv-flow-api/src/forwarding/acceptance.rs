@@ -356,6 +356,22 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_token_shaped_event_name_is_created_and_audited_without_the_name(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let event = "subscription_renewal_reminder_sent_v2";
+        let mut rule = fx.rule("Renewals");
+        rule["event_name"] = json!(event);
+
+        let created = fx.as_admin("POST", "/forwarding/rules", Some(rule)).await;
+
+        assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+        assert_eq!(fx.audit_actions().await, ["forwarding.rule_created"]);
+        let audit = zirv_flow_store::list_audit(&pool, 50).await.unwrap();
+        assert!(!format!("{audit:?}").contains(event));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_admin_creates_reads_changes_and_deletes_a_rule_with_an_audit_entry_each(
         pool: PgPool,
     ) {

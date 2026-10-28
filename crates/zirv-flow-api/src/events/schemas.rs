@@ -203,13 +203,6 @@ fn check_description(description: &str) -> Result<(), AdminError> {
     }
 }
 
-fn property_names(properties: &[SchemaProperty]) -> Vec<&str> {
-    properties
-        .iter()
-        .map(|property| property.name.as_str())
-        .collect()
-}
-
 /// Creates a schema entry with its first draft and audits it.
 pub(crate) async fn create_schema(
     pool: &PgPool,
@@ -250,7 +243,7 @@ pub(crate) async fn create_schema(
         Some(workspace),
         "event_schema.created",
         None,
-        json!({ "name": schema.name, "mode": schema.mode.as_str() }),
+        json!({ "mode": schema.mode.as_str() }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -276,7 +269,7 @@ pub(crate) async fn save_draft(
         Some(workspace),
         "event_schema.draft_saved",
         None,
-        json!({ "name": schema.name, "fields": property_names(&properties) }),
+        json!({ "property_count": properties.len() }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -307,7 +300,7 @@ pub(crate) async fn publish_draft(
         Some(workspace),
         "event_schema.published",
         None,
-        json!({ "name": schema.name, "version": schema.current_version }),
+        json!({ "version": schema.current_version }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -363,7 +356,7 @@ pub(crate) async fn update_schema(
         Some(workspace),
         "event_schema.updated",
         None,
-        json!({ "name": schema.name, "fields": fields }),
+        json!({ "fields": fields }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;

@@ -8,7 +8,7 @@
 //! before `authorize` ran is never what a denied caller sees.
 
 #[cfg(test)]
-mod tests {
+pub(in crate::rbac) mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
     use std::time::Instant;
@@ -30,7 +30,7 @@ mod tests {
     use crate::rbac::{Class, Method, ROUTES, Route};
     use crate::{AppState, router};
 
-    const PASSWORD: &str = "correct horse battery";
+    pub(in crate::rbac) const PASSWORD: &str = "correct horse battery";
     const GHOST: &str = "ghost";
     const UNAUTHENTICATED: &str = "authentication required";
     const NOT_FOUND: &str = "no such resource";
@@ -44,7 +44,7 @@ mod tests {
 
     /// Everyone the walk calls as.
     #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
-    enum Who {
+    pub(in crate::rbac) enum Who {
         Owner,
         Admin,
         Publisher,
@@ -127,7 +127,7 @@ mod tests {
             }
         }
 
-        fn is_session(self) -> bool {
+        pub(in crate::rbac) fn is_session(self) -> bool {
             matches!(self.kind(), Kind::Owner | Kind::Member(..) | Kind::Stranger)
         }
     }
@@ -496,12 +496,12 @@ mod tests {
 
     // ---- requests built from the OpenAPI document ----
 
-    struct Operations {
+    pub(in crate::rbac) struct Operations {
         document: Value,
     }
 
     impl Operations {
-        fn new() -> Self {
+        pub(in crate::rbac) fn new() -> Self {
             Self {
                 document: serde_json::to_value(crate::openapi()).unwrap(),
             }
@@ -606,7 +606,7 @@ mod tests {
         }
 
         /// The content type and body of the request, and the query it needs.
-        fn request(&self, row: &Route) -> (Option<(String, Vec<u8>)>, String) {
+        pub(in crate::rbac) fn request(&self, row: &Route) -> (Option<(String, Vec<u8>)>, String) {
             let Some(operation) = self.operation(row) else {
                 return (None, String::new());
             };
@@ -675,12 +675,12 @@ mod tests {
 
     // ---- fixtures ----
 
-    struct Login {
-        cookie: String,
-        csrf: String,
+    pub(in crate::rbac) struct Login {
+        pub(in crate::rbac) cookie: String,
+        pub(in crate::rbac) csrf: String,
     }
 
-    enum Auth<'a> {
+    pub(in crate::rbac) enum Auth<'a> {
         Anonymous,
         Key(&'a str),
         Session(&'a Login),
@@ -767,7 +767,7 @@ mod tests {
         }
     }
 
-    async fn sign_in(router: &Router, email: &str) -> Login {
+    pub(in crate::rbac) async fn sign_in(router: &Router, email: &str) -> Login {
         let body = json!({"email": email, "password": PASSWORD}).to_string();
         let response = router
             .clone()
@@ -796,16 +796,16 @@ mod tests {
     }
 
     /// The workspaces, their people and every principal of the walk.
-    struct World {
-        pool: PgPool,
-        router: Router,
-        ws: WorkspaceId,
-        sessions: BTreeMap<Who, Login>,
-        keys: BTreeMap<Who, String>,
+    pub(in crate::rbac) struct World {
+        pub(in crate::rbac) pool: PgPool,
+        pub(in crate::rbac) router: Router,
+        pub(in crate::rbac) ws: WorkspaceId,
+        pub(in crate::rbac) sessions: BTreeMap<Who, Login>,
+        pub(in crate::rbac) keys: BTreeMap<Who, String>,
     }
 
     impl World {
-        fn auth(&self, who: Who) -> Auth<'_> {
+        pub(in crate::rbac) fn auth(&self, who: Who) -> Auth<'_> {
             match who {
                 Who::Anonymous => Auth::Anonymous,
                 _ if who.is_session() => Auth::Session(&self.sessions[&who]),
@@ -813,7 +813,7 @@ mod tests {
             }
         }
 
-        fn url(&self, tail: &str) -> String {
+        pub(in crate::rbac) fn url(&self, tail: &str) -> String {
             format!("/api/v1/workspaces/{}{tail}", self.ws.as_uuid())
         }
     }
@@ -827,12 +827,12 @@ mod tests {
             .id
     }
 
-    async fn world(pool: &PgPool) -> World {
+    pub(in crate::rbac) async fn world(pool: &PgPool) -> World {
         build_world(pool, None).await
     }
 
     /// A world whose process runs a render host, so a render reaches the data.
-    async fn rendering_world(pool: &PgPool) -> World {
+    pub(in crate::rbac) async fn rendering_world(pool: &PgPool) -> World {
         let command = zirv_flow_render::ChildCommand::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -857,7 +857,10 @@ mod tests {
         build_world(pool, Some(render)).await
     }
 
-    async fn build_world(pool: &PgPool, render: Option<zirv_flow_render::RenderPool>) -> World {
+    pub(in crate::rbac) async fn build_world(
+        pool: &PgPool,
+        render: Option<zirv_flow_render::RenderPool>,
+    ) -> World {
         zirv_flow_store::migrate(pool).await.unwrap();
         let master = MasterKey::generate();
         let root = HmacRoot::bootstrap_from(&master);
@@ -1084,6 +1087,7 @@ mod tests {
             })
             .collect();
         assert!(leaked.is_empty(), "{}", leaked.join("\n"));
+        crate::test_support::assert_audit_log_holds_ids_only(&pool).await;
     }
 
     #[test]
@@ -1204,9 +1208,9 @@ mod tests {
 
     // ---- the seeded-personal-data walk ----
 
-    const EMAIL: &str = "zq.ada.7731@seed-pii.test";
-    const PHONE_DIGITS: &str = "70123499";
-    const NAME: &str = "Zqfirstname";
+    pub(in crate::rbac) const EMAIL: &str = "zq.ada.7731@seed-pii.test";
+    pub(in crate::rbac) const PHONE_DIGITS: &str = "70123499";
+    pub(in crate::rbac) const NAME: &str = "Zqfirstname";
     const PROPERTY: &str = "ZQ-PROP-31337";
     const EXTERNAL: &str = "ZQ-EXT-9912";
     const EVIDENCE: &str = "ZQ-EVIDENCE-8814";
@@ -1219,7 +1223,7 @@ mod tests {
     const CONTACT_KEY: &str = "zq-contact";
 
     /// The seeded personal values, by what they are.
-    const PERSONAL: [(&str, &str); 8] = [
+    pub(in crate::rbac) const PERSONAL: [(&str, &str); 8] = [
         ("an email", EMAIL),
         ("a phone number", PHONE_DIGITS),
         ("a name trait", NAME),
@@ -1452,7 +1456,7 @@ mod tests {
     const PENDING: [(&str, &str); 0] = [];
 
     /// The smallest valid body of each read-style `POST`, by the end of its path.
-    fn read_post_body(path: &str, seeded: &Seeded) -> Option<Value> {
+    pub(in crate::rbac) fn read_post_body(path: &str, seeded: &Seeded) -> Option<Value> {
         let range = || {
             let now = time::OffsetDateTime::now_utc();
             let format = time::format_description::well_known::Rfc3339;
@@ -1517,29 +1521,29 @@ mod tests {
     }
 
     /// The ids of the seeded rows, by the kind of path they stand in.
-    struct Seeded {
-        person: Uuid,
-        conflict: Uuid,
-        list: Uuid,
-        segment: Uuid,
-        flow: Uuid,
-        enrollment: Uuid,
-        import: Uuid,
-        rule: Uuid,
-        template: Uuid,
-        source: Uuid,
-        run: Uuid,
-        destination: Uuid,
-        sender: Uuid,
+    pub(in crate::rbac) struct Seeded {
+        pub(in crate::rbac) person: Uuid,
+        pub(in crate::rbac) conflict: Uuid,
+        pub(in crate::rbac) list: Uuid,
+        pub(in crate::rbac) segment: Uuid,
+        pub(in crate::rbac) flow: Uuid,
+        pub(in crate::rbac) enrollment: Uuid,
+        pub(in crate::rbac) import: Uuid,
+        pub(in crate::rbac) rule: Uuid,
+        pub(in crate::rbac) template: Uuid,
+        pub(in crate::rbac) source: Uuid,
+        pub(in crate::rbac) run: Uuid,
+        pub(in crate::rbac) destination: Uuid,
+        pub(in crate::rbac) sender: Uuid,
         /// The account the test sends go to.
-        recipient: Uuid,
-        export: Uuid,
-        webhook: Uuid,
-        snippet: Uuid,
-        theme: Uuid,
-        credential: Uuid,
-        domain: Uuid,
-        asset: Uuid,
+        pub(in crate::rbac) recipient: Uuid,
+        pub(in crate::rbac) export: Uuid,
+        pub(in crate::rbac) webhook: Uuid,
+        pub(in crate::rbac) snippet: Uuid,
+        pub(in crate::rbac) theme: Uuid,
+        pub(in crate::rbac) credential: Uuid,
+        pub(in crate::rbac) domain: Uuid,
+        pub(in crate::rbac) asset: Uuid,
     }
 
     impl Seeded {
@@ -1697,7 +1701,7 @@ mod tests {
     }
 
     /// Fills the workspace with the seeded values on every surface that could echo one.
-    async fn seed(world: &World) -> Seeded {
+    pub(in crate::rbac) async fn seed(world: &World) -> Seeded {
         let pool = &world.pool;
         let ws = world.ws;
         for (key, pii) in [("first_name", true), ("plan", false)] {
@@ -2257,7 +2261,7 @@ mod tests {
     }
 
     /// The needles of `PERSONAL` that `text` holds.
-    fn found(text: &str) -> Vec<&'static str> {
+    pub(in crate::rbac) fn found(text: &str) -> Vec<&'static str> {
         PERSONAL
             .iter()
             .filter(|(_, needle)| holds(text, needle))
@@ -2647,6 +2651,7 @@ mod tests {
             leaks.len(),
             leaks.join("\n")
         );
+        crate::test_support::assert_audit_log_holds_ids_only(&pool).await;
     }
 
     #[sqlx::test]
@@ -2775,5 +2780,6 @@ mod tests {
             rejects_listed,
             "the rejected event is not on the rejects list"
         );
+        crate::test_support::assert_audit_log_holds_ids_only(&pool).await;
     }
 }

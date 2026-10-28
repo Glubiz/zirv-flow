@@ -362,7 +362,6 @@ pub(crate) async fn create_webhook(
         "webhook.created",
         Some(("webhook", hook.id)),
         json!({
-            "name": hook.name,
             "source_id": hook.source_id,
             "signature_header": hook.signature_header,
             "timestamp_header": hook.timestamp_header,
@@ -538,7 +537,7 @@ pub(crate) async fn delete_webhook(
         Some(workspace),
         "webhook.deleted",
         Some(("webhook", id)),
-        json!({"name": hook.name, "source_id": hook.source_id}),
+        json!({"source_id": hook.source_id}),
     )
     .await?;
     admin::audit_secret_deleted(&mut tx, context, workspace, secret).await?;

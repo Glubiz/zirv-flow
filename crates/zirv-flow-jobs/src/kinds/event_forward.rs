@@ -44,7 +44,7 @@ use zirv_flow_store::{
 
 use super::workspace_and_id;
 use crate::delivery::attempt::AttemptTarget;
-use crate::delivery::credential::open_credential;
+use crate::delivery::credential::{Usage, open_credential};
 use crate::delivery::{self, Attempt, Verdict};
 use crate::worker::{random_unit, retry_delay};
 use crate::{JobContext, JobError, JobKind};
@@ -207,7 +207,8 @@ async fn forward_one(
                 }
             }
             if credential.is_none() {
-                *credential = Some(open_credential(ctx, workspace, destination).await?);
+                *credential =
+                    Some(open_credential(ctx, workspace, destination, Usage::Forward).await?);
             }
             match credential.as_ref() {
                 Some(Ok(credential)) => {

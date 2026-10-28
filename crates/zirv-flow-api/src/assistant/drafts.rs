@@ -1522,7 +1522,6 @@ async fn apply_template(
         "template.draft_saved",
         Some(("template", template_id)),
         json!({
-            "name": locked.template().name,
             "revision": saved.revision,
             "via": "ai_draft",
         }),
@@ -1578,7 +1577,7 @@ async fn apply_flow(
         Some(workspace),
         "flow.updated",
         Some(("flow", flow.id)),
-        json!({ "name": flow.name, "fields": ["graph", "settings"], "via": "ai_draft" }),
+        json!({ "fields": ["graph", "settings"], "via": "ai_draft" }),
     )
     .await?;
     Ok(flow)
@@ -1680,7 +1679,7 @@ fn audit_summary(draft: &AiDraft) -> Value {
         DraftKind::Mapping | DraftKind::Manifest => json!({
             "kind": draft.kind.as_str(),
             "source_id": draft.source_id,
-            "stream": draft.stream_name,
+            "has_stream": draft.stream_name.is_some(),
         }),
     }
 }

@@ -569,6 +569,7 @@ mod tests {
                 .await;
             assert_eq!(n, count, "{action}");
         }
+        crate::test_support::assert_audit_log_holds_ids_only(&pool).await;
     }
 
     #[sqlx::test]
@@ -1913,6 +1914,7 @@ mod tests {
         assert_eq!(after.body["code"], "flow_archived");
         zirv_flow_store::decisions_testing::seed_personal_values(&f.pool, f.ws).await;
         zirv_flow_store::decisions_testing::assert_decisions_hold_no_personal_data(&f.pool).await;
+        crate::test_support::assert_audit_log_holds_ids_only(&pool).await;
     }
 
     #[sqlx::test]

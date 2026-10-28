@@ -201,7 +201,7 @@ pub(crate) async fn create_sending_domain(
         Some(workspace),
         "sending_domain.created",
         Some(("sending_domain", created.id)),
-        json!({"domain": created.domain, "selector": created.selector}),
+        json!({"selector": created.selector}),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -228,7 +228,7 @@ pub(crate) async fn request_verification(
         Some(workspace),
         "sending_domain.verification_requested",
         Some(("sending_domain", id)),
-        json!({"domain": domain.domain, "queued": queued}),
+        json!({"queued": queued}),
     )
     .await?;
     let records = zirv_flow_store::list_domain_records(&mut *tx, workspace, id).await?;
@@ -245,7 +245,7 @@ pub(crate) async fn delete_sending_domain(
     id: Uuid,
 ) -> Result<(), ApiError> {
     let mut tx = zirv_flow_store::begin(pool).await?;
-    let domain = zirv_flow_store::find_sending_domain(&mut *tx, workspace, id)
+    zirv_flow_store::find_sending_domain(&mut *tx, workspace, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
     match zirv_flow_store::delete_sending_domain(&mut tx, workspace, id).await? {
@@ -262,7 +262,7 @@ pub(crate) async fn delete_sending_domain(
         Some(workspace),
         "sending_domain.deleted",
         Some(("sending_domain", id)),
-        json!({"domain": domain.domain}),
+        json!({}),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;

@@ -12,6 +12,8 @@ mod config;
 mod e2e;
 mod healthcheck;
 mod log;
+#[cfg(test)]
+mod ops_docs;
 mod otlp;
 mod secrets;
 
@@ -1118,7 +1120,8 @@ async fn run_replay_erasures(
 ) -> u8 {
     let context = zirv_flow_api::admin::Context::system();
     match zirv_flow_api::admin::replay_erasures(pool, &context, workspace, root, from).await {
-        Ok(report) => {
+        Ok(replayed) => {
+            let report = replayed.report;
             let _ = write!(
                 stdout,
                 "replayed {} erasure request(s): {} suppression(s) added, {} person(s) erased, \
@@ -1133,7 +1136,21 @@ async fn run_replay_erasures(
                 );
             }
             let _ = writeln!(stdout);
-            0
+            for error in &replayed.bad_files {
+                let _ = writeln!(stderr, "error: admin: {error}");
+            }
+            if replayed.bad_files.is_empty() {
+                0
+            } else {
+                let _ = writeln!(
+                    stderr,
+                    "error: admin: {} ledger file(s) could not be used and were skipped; the \
+                     other entries were applied. Repair or re-request those erasures before \
+                     serving",
+                    replayed.bad_files.len()
+                );
+                1
+            }
         }
         Err(error) => {
             let _ = writeln!(stderr, "error: admin: {error}");
@@ -1906,7 +1923,8 @@ endpoint = \"http://collector:4318/\""
         );
         assert_eq!(ledger_rows(&pool).await, 1);
 
-        // One corrupt file stops the command, naming it; the good file beside it is not merged.
+        // One corrupt file is named and fails the command, but the good file beside it is merged
+        // in the same run.
         let mixed = LedgerDir::new();
         zirv_flow_store::write_ledger_file(&mixed.0, &ledger_entry(ws.as_uuid())).unwrap();
         fs::write(mixed.0.join("broken.json"), b"{ not json").unwrap();
@@ -1915,12 +1933,21 @@ endpoint = \"http://collector:4318/\""
         let code =
             run_replay_erasures(None, Some(&mixed.0), &root, &pool, &mut stdout, &mut stderr).await;
         assert_eq!(code, 1);
-        assert!(stdout.is_empty());
-        assert_eq!(
-            String::from_utf8(stderr).unwrap(),
-            "error: admin: broken.json is not a valid ledger file\n"
+        assert!(
+            String::from_utf8(stdout)
+                .unwrap()
+                .contains("; 1 ledger entr(ies) merged")
         );
-        assert_eq!(ledger_rows(&pool).await, 1);
+        let stderr = String::from_utf8(stderr).unwrap();
+        assert!(
+            stderr.starts_with("error: admin: broken.json is not a valid ledger file\n"),
+            "{stderr}"
+        );
+        assert!(
+            stderr.contains("1 ledger file(s) could not be used"),
+            "{stderr}"
+        );
+        assert_eq!(ledger_rows(&pool).await, 2);
     }
 
     #[sqlx::test]

@@ -272,7 +272,7 @@ pub(crate) async fn discover_source(
         Some(workspace),
         "source.discovered",
         Some(("source", id)),
-        json!({"name": call.source.name, "streams": found.len()}),
+        json!({"streams": found.len()}),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;

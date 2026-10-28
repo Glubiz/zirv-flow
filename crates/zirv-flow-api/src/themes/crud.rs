@@ -174,7 +174,7 @@ pub(crate) async fn create_theme(
         Some(workspace),
         "theme.created",
         Some(("theme", theme.id)),
-        json!({ "name": theme.name }),
+        json!({}),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -184,6 +184,7 @@ pub(crate) async fn create_theme(
 /// Renames a theme. Not audited as its own action: the name is in every later audit row.
 async fn rename_theme(
     pool: &PgPool,
+    context: &Context,
     workspace: WorkspaceId,
     id: Uuid,
     request: UpdateThemeRequest,
@@ -198,6 +199,15 @@ async fn rename_theme(
     let draft = zirv_flow_store::find_theme_draft(&mut *tx, workspace, id)
         .await?
         .ok_or_else(ApiError::internal)?;
+    admin::audit(
+        &mut tx,
+        context,
+        Some(workspace),
+        "theme.updated",
+        Some(("theme", id)),
+        json!({}),
+    )
+    .await?;
     zirv_flow_store::commit(tx).await?;
     Ok((theme, draft))
 }
@@ -233,7 +243,7 @@ pub(crate) async fn save_draft(
         Some(workspace),
         "theme.draft_saved",
         Some(("theme", id)),
-        json!({ "name": theme.name, "revision": draft.revision }),
+        json!({ "revision": draft.revision }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -260,7 +270,7 @@ pub(crate) async fn archive_theme(
         Some(workspace),
         "theme.archived",
         Some(("theme", id)),
-        json!({ "name": theme.name, "version": theme.current_version }),
+        json!({ "version": theme.current_version }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -411,7 +421,14 @@ pub(crate) async fn update(
     ApiJson(body): ApiJson<UpdateThemeRequest>,
 ) -> Result<Json<ThemeDetailBody>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
-    let (theme, draft) = rename_theme(&state.pool, workspace.id, path_id(&id)?, body).await?;
+    let (theme, draft) = rename_theme(
+        &state.pool,
+        &principal.context(),
+        workspace.id,
+        path_id(&id)?,
+        body,
+    )
+    .await?;
     Ok(Json(ThemeDetailBody::new(&theme, &draft)))
 }
 

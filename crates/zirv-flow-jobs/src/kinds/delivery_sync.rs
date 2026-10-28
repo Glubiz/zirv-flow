@@ -46,7 +46,7 @@ use zirv_flow_store::{
 };
 
 use crate::delivery::attempt::AttemptTarget;
-use crate::delivery::credential::open_credential;
+use crate::delivery::credential::{Usage, open_credential};
 use crate::delivery::{self, Attempt, Verdict};
 use crate::{JobContext, JobError, JobKind};
 
@@ -363,16 +363,17 @@ async fn call(
         Admission::Gone => return Ok(Called::Done(ended("destination_unavailable"))),
     }
 
-    let credential = match open_credential(ctx, job.workspace, &plan.destination).await? {
-        Ok(credential) => credential,
-        Err(verdict) => {
-            return Ok(Called::Done(Attempt {
-                verdict,
-                elapsed: Duration::ZERO,
-                may_have_arrived: false,
-            }));
-        }
-    };
+    let credential =
+        match open_credential(ctx, job.workspace, &plan.destination, Usage::Sync).await? {
+            Ok(credential) => credential,
+            Err(verdict) => {
+                return Ok(Called::Done(Attempt {
+                    verdict,
+                    elapsed: Duration::ZERO,
+                    may_have_arrived: false,
+                }));
+            }
+        };
     // No redirects: a redirect would turn the call into something that was never the operation.
     let limits = HttpLimits {
         max_redirects: 0,

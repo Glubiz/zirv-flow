@@ -3196,6 +3196,18 @@ mod tests {
         let captured = sink.messages();
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0].mail_from, "news@example.com");
+        // The job opened the destination's credential once: one system row with the credential id
+        // and the use, nothing else.
+        let used = zirv_flow_store::list_audit(&env.pool, 10).await.unwrap();
+        let used: Vec<_> = used
+            .iter()
+            .filter(|row| row.action == "credential.used")
+            .collect();
+        assert_eq!(used.len(), 1);
+        assert_eq!(used[0].actor_kind, "system");
+        assert_eq!(used[0].object_kind.as_deref(), Some("credential"));
+        assert_eq!(used[0].workspace_id, Some(env.ws.as_uuid()));
+        assert_eq!(used[0].summary, json!({"use": "send"}));
         assert_eq!(captured[0].recipients, ["ada@example.com"]);
         let data = &captured[0].data;
         assert_eq!(

@@ -173,6 +173,36 @@ impl World {
     /// built on `public_url`. Tests run on a clock they move; the browser test server on the
     /// database clock, which is the real one.
     pub(super) async fn start(pool: PgPool, public_url: &str) -> Self {
+        Self::build(pool, public_url, None, false).await
+    }
+
+    /// As [`Self::start`], with the worker copying each completed erasure to `ledger_dir`.
+    #[cfg(test)]
+    pub(super) async fn start_with_ledger(
+        pool: PgPool,
+        public_url: &str,
+        ledger_dir: &std::path::Path,
+    ) -> Self {
+        Self::build(pool, public_url, Some(ledger_dir), false).await
+    }
+
+    /// Starts a world on a database an earlier world filled: the workspace is found again, not
+    /// created.
+    #[cfg(test)]
+    pub(super) async fn resume(
+        pool: PgPool,
+        public_url: &str,
+        ledger_dir: &std::path::Path,
+    ) -> Self {
+        Self::build(pool, public_url, Some(ledger_dir), true).await
+    }
+
+    async fn build(
+        pool: PgPool,
+        public_url: &str,
+        ledger_dir: Option<&std::path::Path>,
+        existing: bool,
+    ) -> Self {
         zirv_flow_store::migrate(&pool).await.expect("migrations");
         let master = MasterKey::parse("BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=").expect("key");
         let keyring = Arc::new(Keyring::new(master, None).expect("a keyring"));
@@ -185,14 +215,22 @@ impl World {
         secrets::insert_hmac_root_if_absent(&pool, &sealed)
             .await
             .expect("the HMAC root is stored");
-        let ws = zirv_flow_store::create_workspace(
-            &pool,
-            &WorkspaceName::parse("Acme").expect("a name"),
-            &Slug::parse("acme").expect("a slug"),
-        )
-        .await
-        .expect("a workspace")
-        .id;
+        let ws = if existing {
+            zirv_flow_store::find_workspace_by_slug(&pool, &Slug::parse("acme").expect("a slug"))
+                .await
+                .expect("a lookup")
+                .expect("the workspace of the earlier world")
+                .id
+        } else {
+            zirv_flow_store::create_workspace(
+                &pool,
+                &WorkspaceName::parse("Acme").expect("a name"),
+                &Slug::parse("acme").expect("a slug"),
+            )
+            .await
+            .expect("a workspace")
+            .id
+        };
 
         #[cfg(test)]
         let manual = ManualClock::new(OffsetDateTime::now_utc());
@@ -253,6 +291,7 @@ impl World {
         config.public_url = Some(public_url.to_owned());
         config.keyring = Some(keyring);
         config.egress = loopback;
+        config.ledger_dir = ledger_dir.map(|dir| Arc::new(dir.to_path_buf()));
         config.redaction_key = Some(Arc::new(root.hmac_key(HmacPurpose::Redaction)));
         config.identifier_key = Some(Arc::new(root.hmac_key(HmacPurpose::Identifier)));
         config.tracking_key = Some(Arc::new(root.hmac_key(HmacPurpose::Tracking)));
