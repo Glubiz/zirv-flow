@@ -1,0 +1,53 @@
+# The quickstart's PostgreSQL, key volume and all-role image, isolated per drill run.
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: zirv
+      POSTGRES_PASSWORD: upgrade-drill
+      POSTGRES_DB: zirv_flow
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zirv -d zirv_flow"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  fixture:
+    image: python:3.12.8-slim
+    command: ["python3", "-B", "/fixture.py", "/data"]
+    volumes:
+      - ./upgrade-fixture.py:/fixture.py:ro
+      - ${DRILL_WORK:?scratch directory required}:/data
+
+  zirv-flow-key:
+    image: ${DRILL_IMAGE:?image required}
+    command: ["admin", "generate-master-key", "--out", "/var/lib/zirv-flow/secrets/master.key", "--if-missing"]
+    volumes:
+      - zirv-flow-secrets:/var/lib/zirv-flow/secrets
+
+  zirv-flow:
+    image: ${DRILL_IMAGE:?image required}
+    command: ["all"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      zirv-flow-key:
+        condition: service_completed_successfully
+    volumes:
+      - zirv-flow-secrets:/var/lib/zirv-flow/secrets:ro
+    dns: ["${DRILL_DNS_IP:-127.0.0.1}"]
+    environment:
+      ZIRV_FLOW_SECRETS__MASTER_KEY_FILE: /var/lib/zirv-flow/secrets/master.key
+      ZIRV_FLOW_DATABASE__URL: postgres://zirv:upgrade-drill@postgres:5432/zirv_flow
+      ZIRV_FLOW_DATABASE__MIGRATE_ON_START: "false"
+      ZIRV_FLOW_SERVER__COOKIE_SECURE: "false"
+      ZIRV_FLOW_SERVER__PUBLIC_URL: https://flow.example.com
+      ZIRV_FLOW_EGRESS__ALLOW: '["172.16.0.0/12","192.168.0.0/16","10.0.0.0/8"]'
+    ports:
+      - "127.0.0.1::8080"
+
+volumes:
+  postgres-data:
+  zirv-flow-secrets:

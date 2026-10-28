@@ -1,15 +1,27 @@
 name: CI Pipeline
 
-# CI is a merge gate only: it runs on PRs targeting main or a release/**
-# integration branch (and on demand). It deliberately does NOT run on pushes
+# CI gates merges on PRs targeting main or a release/**
+# integration branch, version tags (including the upgrade drill), and on demand.
+# It deliberately does NOT run on branch pushes
 # to main — a commit can only reach main through a PR that already passed
 # these exact checks, and the CD pipeline publishes from main directly
 # instead of chaining off a post-merge CI run.
 on:
+  push:
+    tags: ['v*']
   pull_request:
     branches: [ main, 'release/**' ]
     types: [opened, synchronize, reopened, edited, labeled, unlabeled]
   workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Upgrade candidate GHCR version tag; empty builds this ref'
+        required: false
+        default: ''
+      previous_tag:
+        description: 'Previous stable version; empty selects the latest published older release'
+        required: false
+        default: ''
 
 jobs:
   test:
@@ -201,6 +213,10 @@ jobs:
         run: bash scripts/generate-changelog.sh --self-test
       - name: Release flags self-test
         run: bash scripts/release-flags.sh --self-test
+      - name: Upgrade drill self-test
+        run: bash scripts/drill/upgrade.sh --self-test
+      - name: Upgrade drill shellcheck
+        run: shellcheck -x scripts/drill/upgrade.sh
 
   web:
     name: Web UI
@@ -404,6 +420,9 @@ jobs:
       - name: Run PostgreSQL Tests
         run: cargo nextest run --run-ignored only --no-fail-fast
 
+      - name: Upgrade integrity SQL self-test
+        run: bash scripts/drill/upgrade.sh --self-test-postgres
+
   # Kafka needs C code (lz4 and zstd) and TLS (ring) in the static musl build the release image
   # ships. This builds and runs the Kafka tests against a real broker natively on amd64.
   kafka-musl:
@@ -585,6 +604,67 @@ jobs:
       # The scan proves itself on every run too.
       - name: Advisory scan self-test
         run: bash scripts/security-scan.sh --self-test
+
+  upgrade-drill:
+    name: Upgrade Drill
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4.4.0
+        with:
+          fetch-depth: 0
+
+      # Match the version-bump job's diff filter; do not filter the whole workflow,
+      # whose other checks remain required for every PR.
+      - name: Select changed paths
+        id: paths
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          run=true
+          if [[ "$EVENT" == pull_request ]]; then
+            changed=$(git diff --name-only --no-renames "origin/$BASE_REF...HEAD")
+            if ! grep -qE '^crates/zirv-flow-store/migrations/|^scripts/drill/|^\.github/workflows/ci\.yaml$' <<< "$changed"; then
+              run=false
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
+      - name: Select previous published release
+        if: steps.paths.outputs.run == 'true'
+        id: previous
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_TAG: ${{ inputs.image_tag || 'upgrade-drill' }}
+          PREVIOUS_TAG: ${{ inputs.previous_tag }}
+        run: bash scripts/drill/upgrade.sh --select-previous --image "$IMAGE_TAG" --previous "$PREVIOUS_TAG"
+
+      - name: Set Up Docker Buildx
+        if: steps.previous.outputs.previous != '' && inputs.image_tag == ''
+        uses: docker/setup-buildx-action@v3.11.1
+
+      - name: Build candidate image
+        if: steps.previous.outputs.previous != '' && inputs.image_tag == ''
+        uses: docker/build-push-action@v6.18.0
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: ghcr.io/glubiz/zirv-flow:upgrade-drill
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Upgrade populated database
+        if: steps.previous.outputs.previous != ''
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag || 'upgrade-drill' }}
+          PREVIOUS_TAG: ${{ steps.previous.outputs.previous }}
+        run: bash scripts/drill/upgrade.sh --image "$IMAGE_TAG" --previous "$PREVIOUS_TAG"
 
   # Proves the clean-checkout promise of the README quickstart: the image
   # builds, the compose stack comes up healthy and /readyz answers 200.

@@ -419,6 +419,10 @@ Alternatively, set `database.migrate_on_start = true`. Role startup refuses a
 database with pending migrations when this setting is false, a partially
 applied migration, or a schema newer than the running binary.
 
+For a populated installation, follow the [upgrade guide](docs/operations/upgrade.md): back up,
+stop every role, migrate with the new binary, then start. It includes the migration lock review,
+rollback procedure and the CI drill from the previous release. Rolling upgrades are not supported.
+
 ## HTTP server
 
 `zirv-flow serve` (and `all`) runs the startup database check, binds
