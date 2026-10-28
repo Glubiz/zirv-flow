@@ -1306,8 +1306,10 @@ mod tests {
         for (key, hours) in [(b"old".as_slice(), 25_i32), (b"new".as_slice(), 1)] {
             sqlx::query(
                 "INSERT INTO api_idempotency \
-                    (workspace_id, route, key_hash, request_hash, status, resource_id, created_at) \
-                 VALUES ($1, 'create_x', $2, '\\x00'::bytea, 201, gen_random_uuid(), \
+                    (workspace_id, route, key_hash, state, reservation, lease_until, \
+                     request_hash, status, resource_id, created_at) \
+                 VALUES ($1, 'create_x', $2, 'done', gen_random_uuid(), now(), \
+                         '\\x00'::bytea, 201, gen_random_uuid(), \
                          now() - make_interval(hours => $3))",
             )
             .bind(ws.as_uuid())
