@@ -141,20 +141,60 @@ headers on a response; the first deprecation calls it from the handler, next to 
 
 ## Idempotency
 
-Creating `POST`s accept an `Idempotency-Key` header (1 to 255 characters). A repeated request with the
-same key and body replays the first response for 24 hours; the same key with another body answers
-`422` with the code `idempotency_key_reused`.
+Creating `POST`s that have no existing retry guard accept an optional `Idempotency-Key` header
+(1 to 255 characters, without control characters): `create_api_key`, `create_ai_draft`,
+`upload_asset`, `upload_import`, `request_erasure` and `request_export`. The key belongs to
+the workspace, operation and caller (user or API key). A request without it behaves as before.
 
-Which operations count as creating is settled as follows. The creates that nothing else makes safe to
-repeat take the key: `create_api_key`, `create_ai_draft`, `upload_asset`, `upload_import`,
-`request_erasure`, `request_export`, `create_user`, `create_workspace`, `create_flow`,
-`create_segment`, `create_template`, `create_source`, `create_destination`, `create_credential` and
-`create_webhook` (and `create_contact`, which had it first). One shared table keyed by workspace,
-route and key holds the request hash, the status and the response body; it has no person column.
-`create_api_key` stores no body, because its response holds a secret shown once; a replay answers
-`409`. A create guarded by a unique name or a draft revision answers `409` on a repeat and takes no
-key, and so do the set additions (`add_*`), the publish operations and the ingestion operations
-(which de-duplicate on `messageId`).
+A completed key is remembered for 24 hours. The same key and request answer
+`409 idempotency_key_replayed`, with the created resource's `resource_id` and
+`Idempotent-Replayed: true`. The original response is never stored or returned: it can contain
+a secret or a person's values. Read the resource through its normal authorized endpoint.
+The same key with another request answers `422 idempotency_key_reused`. The request hash covers
+the method, path, query and body; changing upload metadata changes the request too. It is keyed
+with the server's stable identifier HMAC key, so stored hashes cannot confirm guesses of person
+identifiers without that secret. Keyed requests require the server's HMAC root to be configured.
+
+While the first request runs, a matching retry answers `409 idempotency_key_in_flight` with
+`Retry-After`. A failed request releases its reservation; a retry can take over an expired
+lease. The create and completion of the reservation commit together, so a request whose
+reservation was taken over rolls back. A CSV import reserves before streaming and compares its
+body once it has been hashed. [Architecture section 15](architecture.md#15-api-and-ui) specifies
+the lease lengths and transaction rules.
+
+These creating operations already have retry guards and take no header:
+
+- Unique names, slugs, addresses or keys: `create_user`, `create_workspace`, `create_flow`,
+  `create_segment`, `create_template`, `create_source`, `create_destination`,
+  `create_credential`, `create_webhook`, `create_consent_dimension`,
+  `add_consent_dimension_value`, `create_event_schema`, `create_forwarding_rule`,
+  `create_list`, `create_sender_identity`, `create_sending_domain`, `create_snippet`,
+  `create_theme`, `create_topic` and `create_trait`. A duplicate answers `409`.
+- Consumed draft: `publish_event_schema` answers `409` until another draft is saved.
+- Set additions: `add_list_members`, `add_suppression`, `add_template_preview_person` and
+  `add_test_send_allowlist_entry`. A repeated addition cannot create a second member.
+- A singleton: `create_webhook_signing_secret` answers `409 signing_secret_exists` on a repeat.
+- `enroll_person` uses its existing `idempotency_key` body field; ingestion de-duplicates on
+  `messageId`.
+
+Publishing actions are deliberately outside the keyed-create set: `publish_flow`,
+`publish_snippet`, `publish_template` and `publish_theme` can create another version on a retry.
+Their validation and revision checks protect edits, not retries. After an uncertain response,
+read the published version before deciding to publish again.
+
+The contacts API keeps its existing header on `create_contact`, `replace_contact`,
+`patch_contact` and `delete_contact`. For 24 hours the same key and request return the original
+status with `Idempotent-Replayed: true` and the contact as it is now, without writing again;
+another request under the key is `422 idempotency_key_reused`. Its key is workspace-scoped.
+
+**Erasure and merge, per table.** `api_idempotency` stores the hash of the caller with the key,
+the keyed request hash and response hash, reservation state and lease, status and resource id.
+It stores no response body, person column or client-chosen text. Erasure and merge leave it alone:
+a replay exposes only the created asset, key, import, draft, erasure request or export id, never
+the person's id or values.
+`contact_idempotency` stores the key, request hash and status, with no response body or person
+column. Erasure removes keys containing a person's values; a replay reads the contact's current
+state, including after a merge. Both tables expire after 24 hours.
 
 ## Problem codes
 
@@ -182,6 +222,8 @@ A test reads the sources and fails when a code used there is missing from this l
 | `validation_failed` | A field fails a rule; the detail names the field and the rule (generic 422) |
 | `rate_limited` | Too many requests; `Retry-After` says when to retry (generic 429) |
 | `idempotency_key_reused` | The `Idempotency-Key` was used with another body |
+| `idempotency_key_in_flight` | Another request holds the key; retry after `Retry-After` |
+| `idempotency_key_replayed` | The key already created `resource_id`; the response body is not kept |
 | `invalid_signature` | An inbound call's signature did not verify |
 | `invalid_payload` | An inbound body is not the JSON the receiver needs |
 | `dedupe_missing` | The webhook payload has no usable value at the de-duplication field |

@@ -472,6 +472,20 @@ pub async fn create_api_key(
     name: &str,
     scopes: &[Scope],
 ) -> Result<CreatedApiKey, AdminError> {
+    let mut tx = zirv_flow_store::begin(pool).await?;
+    let created = create_api_key_in(&mut tx, context, workspace, name, scopes).await?;
+    zirv_flow_store::commit(tx).await?;
+    Ok(created)
+}
+
+/// [`create_api_key`] inside the caller's transaction, which the caller commits.
+pub(crate) async fn create_api_key_in(
+    tx: &mut zirv_flow_store::Tx,
+    context: &Context,
+    workspace: WorkspaceId,
+    name: &str,
+    scopes: &[Scope],
+) -> Result<CreatedApiKey, AdminError> {
     let name = name.trim();
     let length = name.chars().count();
     if length == 0 || length > 100 || name.chars().any(char::is_control) {
@@ -494,9 +508,8 @@ pub async fn create_api_key(
         _ => None,
     };
 
-    let mut tx = zirv_flow_store::begin(pool).await?;
     let key = zirv_flow_store::create_api_key(
-        &mut *tx,
+        &mut **tx,
         id,
         workspace,
         name,
@@ -507,7 +520,7 @@ pub async fn create_api_key(
     .await?;
     let scope_names: Vec<&str> = unique.iter().map(|scope| scope.as_str()).collect();
     audit(
-        &mut tx,
+        tx,
         context,
         Some(workspace),
         "api_key.created",
@@ -515,7 +528,6 @@ pub async fn create_api_key(
         json!({ "scopes": scope_names }),
     )
     .await?;
-    zirv_flow_store::commit(tx).await?;
     Ok(CreatedApiKey {
         key,
         plaintext: generated.plaintext,

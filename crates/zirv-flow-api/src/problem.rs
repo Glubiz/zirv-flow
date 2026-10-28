@@ -2,6 +2,7 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use utoipa::ToSchema;
+use uuid::Uuid;
 
 use crate::{request_id, trace};
 
@@ -27,6 +28,9 @@ pub struct Problem {
     /// `search_timeout`; absent for the rest.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
+    /// The id of the resource the first request created, sent with `idempotency_key_replayed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_id: Option<Uuid>,
     /// What is wrong with a segment definition (`segment_invalid`): a JSON pointer into the
     /// definition and a fixed code for each issue, never a value from it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1320,6 +1324,7 @@ impl IntoResponse for ApiError {
             trace_id: trace::current().map(|trace| trace.trace_id.to_string()),
             errors: self.errors,
             code: code.map(str::to_owned),
+            resource_id: None,
             issues: self.segment.as_mut().and_then(|extra| extra.issues.take()),
             cycle: self.segment.as_mut().and_then(|extra| extra.cycle.take()),
             flow_issues: self

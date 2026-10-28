@@ -3,7 +3,8 @@
 
 use axum::Json;
 use axum::extract::{Path, RawQuery, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, Method, StatusCode, Uri};
+use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use serde_json::json;
 use time::OffsetDateTime;
@@ -16,6 +17,7 @@ use super::{PersonTarget, requested_by, resolve};
 use crate::AppState;
 use crate::admin::{self, AdminError, Context};
 use crate::auth::{Need, Principal, authorize, path_id};
+use crate::idempotency::{self, Entry, Keyed, RequestHash, lease};
 use crate::jobs_admin::{encode_cursor, parse_page};
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
@@ -107,7 +109,8 @@ fn unavailable() -> ApiError {
 }
 
 /// Records an erasure request for the person the target names and enqueues the job, in one
-/// transaction, audited as `privacy.erasure_requested` with the request id only.
+/// transaction, audited as `privacy.erasure_requested` with the request id only. The transaction
+/// is returned open, so the caller can finish what belongs with it before it commits.
 pub(crate) async fn request(
     pool: &PgPool,
     key: &HmacKey,
@@ -116,7 +119,7 @@ pub(crate) async fn request(
     target: &PersonTarget,
     requested_by: Option<Uuid>,
     trace: &zirv_flow_core::TraceContext,
-) -> Result<ErasureRequest, AdminError> {
+) -> Result<(ErasureRequest, zirv_flow_store::Tx), AdminError> {
     let person = resolve(pool, workspace, target).await?;
     let mut tx = zirv_flow_store::begin(pool).await?;
     let request =
@@ -132,8 +135,7 @@ pub(crate) async fn request(
         json!({}),
     )
     .await?;
-    zirv_flow_store::commit(tx).await?;
-    Ok(request)
+    Ok((request, tx))
 }
 
 /// Asks for a person to be erased: the ledger keeps the person id and the keyed hashes of
@@ -141,15 +143,26 @@ pub(crate) async fn request(
 /// everything that refers to them is deleted by a background job. The request is given as a
 /// `person_id` or as an `identifier`; one that resolves to no person is a 404. Needs the
 /// workspace admin role and the CSRF token. Audited as `privacy.erasure_requested`.
+///
+/// Send an `Idempotency-Key` header (1 to 255 characters) to make a retry safe for 24 hours.
+/// While the first request runs, the same key answers `409 idempotency_key_in_flight` with
+/// `Retry-After`; once it has recorded the request, the same key and body answer
+/// `409 idempotency_key_replayed` with its id and no body, as the response names the person;
+/// the same key with another body is `422 idempotency_key_reused`. The key belongs to the
+/// caller that sent it.
 #[utoipa::path(
     post,
     operation_id = "request_erasure",
     path = "/api/v1/workspaces/{ws}/privacy/erasures",
     tag = "privacy",
-    params(("ws" = Uuid, Path, description = "Workspace id")),
+    params(
+        ("ws" = Uuid, Path, description = "Workspace id"),
+        ("Idempotency-Key" = Option<String>, Header, description = "1 to 255 characters; makes a retry safe for 24 hours. A key first used for another request answers 422 `idempotency_key_reused`")
+    ),
     request_body = PersonTarget,
     responses(
         (status = 202, description = "The request, pending until the job has run", body = ErasureBody),
+        (status = 409, description = "The Idempotency-Key is in use: `idempotency_key_in_flight` while the first request runs (see Retry-After), or `idempotency_key_replayed` once it recorded the request, with resource_id as the request's id; the response is not kept", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a key without the admin scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or person, or no access", body = Problem, content_type = "application/problem+json"),
@@ -162,12 +175,29 @@ pub(crate) async fn create(
     State(state): State<AppState>,
     principal: Principal,
     Path(ws): Path<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
     ApiJson(body): ApiJson<PersonTarget>,
-) -> Result<(StatusCode, Json<ErasureBody>), ApiError> {
+) -> Result<Response, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
     let key = state.identifier_key.as_deref().ok_or_else(unavailable)?;
     let trace = trace::current().ok_or_else(ApiError::internal)?;
-    let request = request(
+    let request_hash = RequestHash::of_json(&method, &uri, &body)?;
+    let keyed = Keyed::of(&headers, "request_erasure", &principal)?;
+    let reservation = match idempotency::reserve(
+        &state,
+        workspace.id,
+        keyed,
+        request_hash,
+        lease::QUICK,
+    )
+    .await?
+    {
+        Entry::Go(reservation) => reservation,
+        Entry::Answer(response) => return Ok(response),
+    };
+    let (request, mut tx) = request(
         &state.pool,
         key,
         &principal.context(),
@@ -177,7 +207,18 @@ pub(crate) async fn create(
         &trace,
     )
     .await?;
-    Ok((StatusCode::ACCEPTED, Json(request.into())))
+    let body = ErasureBody::from(request);
+    idempotency::complete(
+        reservation.as_ref(),
+        &mut tx,
+        StatusCode::ACCEPTED,
+        body.id,
+        &body,
+    )
+    .await?;
+    zirv_flow_store::commit(tx).await?;
+    idempotency::finish(reservation);
+    Ok((StatusCode::ACCEPTED, Json(body)).into_response())
 }
 
 /// The workspace's erasure requests, newest first, with their status.

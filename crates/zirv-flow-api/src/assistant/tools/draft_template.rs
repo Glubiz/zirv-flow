@@ -9,7 +9,7 @@
 //! The fragment is merged onto the draft's own document, so the sender, the category and the
 //! channel stay what they are.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use utoipa::ToSchema;
 use zirv_flow_ai::{
@@ -36,7 +36,7 @@ const MAX_SUBJECT_CHARS: usize = 300;
 const MAX_LANG_CHARS: usize = 35;
 
 /// What the marketer asks the assistant to do to a template.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, ToSchema)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum TemplateTask {
     /// Write or rewrite the text of the message.

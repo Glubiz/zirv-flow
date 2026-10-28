@@ -27,7 +27,10 @@ pub use retention::{
     REJECT_RETENTION_DAYS, UPLOAD_ABANDONED_AFTER_DAYS, delete_expired_import_data,
     erase_import_values,
 };
-pub use upload::{CHUNK_BYTES, ImportUpload, UploadScan, UploadStart, read_import_chunk};
+pub use upload::{
+    CHUNK_BYTES, ImportUpload, UploadScan, UploadStart, discard_unfinished_import,
+    read_import_chunk,
+};
 
 #[cfg(test)]
 mod tests {

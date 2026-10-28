@@ -439,6 +439,13 @@ export interface paths {
          *     refused. Every attempt is a gated model call: it counts against the
          *     budget and the rate limit, and with the assistant off, nothing is read or sent. A reverse
          *     proxy in front needs a read timeout of at least (1 + `ai.max_repair_attempts`) x 60 s + 30 s.
+         * @description Send an `Idempotency-Key` header (1 to 255 characters) to make a retry safe for 24 hours, so a
+         *     retry after a timeout does not spend the budget twice. While the first request runs, the same
+         *     key answers `409 idempotency_key_in_flight` with `Retry-After`; once it has stored a draft
+         *     (valid or not), the same key and body answer `409 idempotency_key_replayed` with the draft's id
+         *     and no body, as the draft may hold values from the workspace; the same key with another body
+         *     is `422 idempotency_key_reused`. The key belongs to the caller that sent it. A failed run
+         *     stores nothing and leaves the key free.
          */
         post: operations["create_ai_draft"];
         delete?: never;
@@ -540,7 +547,15 @@ export interface paths {
          */
         get: operations["list_api_keys"];
         put?: never;
-        /** Creates a key and returns its secret, once. */
+        /**
+         * Creates a key and returns its secret, once.
+         * @description Send an `Idempotency-Key` header (1 to 255 characters) to make a retry safe for 24 hours:
+         *     while the first request runs, the same key
+         *     answers `409 idempotency_key_in_flight` with `Retry-After`; once it has created the key, the
+         *     same key with the same body answers `409 idempotency_key_replayed` with the id of the key it
+         *     created and never shows the secret again; the same key with another body is
+         *     `422 idempotency_key_reused`. The key belongs to the caller that sent it.
+         */
         post: operations["create_api_key"];
         delete?: never;
         options?: never;
@@ -583,6 +598,12 @@ export interface paths {
          *     its header. The workspace's images may take at most `assets.max_workspace_bytes` together. The
          *     same bytes uploaded again to the workspace return the existing asset with 200. Audited as
          *     `asset.uploaded` with the id, name and size.
+         * @description Send an `Idempotency-Key` header (1 to 255 characters) to make a retry safe for 24 hours.
+         *     While the first request runs, the same key answers `409 idempotency_key_in_flight` with
+         *     `Retry-After`; once it has stored the image, the same key and file answer
+         *     `409 idempotency_key_replayed` with the asset's id and no body, as the name may be a
+         *     person's value; the same key with another file is `422 idempotency_key_reused`. The key
+         *     belongs to the caller that sent it.
          */
         post: operations["upload_asset"];
         delete?: never;
@@ -2026,6 +2047,12 @@ export interface paths {
          *     see values. The import exists as `uploading` (hidden from the history) while the body
          *     arrives, each 1 MiB chunk is stored on its own, and an upload that is refused, breaks off
          *     or stalls for 60 seconds is deleted with its chunks. Audited as `import.created`.
+         * @description Send an `Idempotency-Key` header (1 to 255 characters) to make a retry safe for 24 hours.
+         *     While the first request runs, the same key answers `409 idempotency_key_in_flight` with
+         *     `Retry-After`; once it has stored the import, the same key and file answer
+         *     `409 idempotency_key_replayed` with the import's id and no body, as the answer holds rows of
+         *     the file; the same key with another file is `422 idempotency_key_reused`. The key belongs to
+         *     the caller that sent it.
          */
         post: operations["upload_import"];
         delete?: never;
@@ -2604,6 +2631,12 @@ export interface paths {
          *     everything that refers to them is deleted by a background job. The request is given as a
          *     `person_id` or as an `identifier`; one that resolves to no person is a 404. Needs the
          *     workspace admin role and the CSRF token. Audited as `privacy.erasure_requested`.
+         * @description Send an `Idempotency-Key` header (1 to 255 characters) to make a retry safe for 24 hours.
+         *     While the first request runs, the same key answers `409 idempotency_key_in_flight` with
+         *     `Retry-After`; once it has recorded the request, the same key and body answer
+         *     `409 idempotency_key_replayed` with its id and no body, as the response names the person;
+         *     the same key with another body is `422 idempotency_key_reused`. The key belongs to the
+         *     caller that sent it.
          */
         post: operations["request_erasure"];
         delete?: never;
@@ -2636,6 +2669,12 @@ export interface paths {
          *     (`retention.export_hours`, default 24 hours) once it is ready. The request is given as a
          *     `person_id` or as an `identifier`. Needs the workspace admin role and the CSRF token.
          *     Audited as `privacy.export_requested`.
+         * @description Send an `Idempotency-Key` header (1 to 255 characters) to make a retry safe for 24 hours.
+         *     While the first request runs, the same key answers `409 idempotency_key_in_flight` with
+         *     `Retry-After`; once it has recorded the request, the same key and body answer
+         *     `409 idempotency_key_replayed` with its id and no body, as the response names the person;
+         *     the same key with another body is `422 idempotency_key_reused`. The key belongs to the
+         *     caller that sent it.
          */
         post: operations["request_export"];
         delete?: never;
@@ -8369,6 +8408,11 @@ export interface components {
             issues?: components["schemas"]["SegmentIssueProblem"][] | null;
             /** @description The `x-request-id` of the failed request. */
             request_id?: string | null;
+            /**
+             * Format: uuid
+             * @description The id of the resource the first request created, sent with `idempotency_key_replayed`.
+             */
+            resource_id?: string | null;
             /** @description The templates whose drafts hold a block for a snippet (`snippet_in_use`). */
             snippet_templates?: components["schemas"]["SegmentRefProblem"][] | null;
             /** @description The themes whose published version uses a snippet as its footer (`snippet_in_use`). */
@@ -12543,7 +12587,10 @@ export interface operations {
     create_ai_draft: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description 1 to 255 characters; makes a retry safe for 24 hours. A key first used for another request answers 422 `idempotency_key_reused` */
+                "Idempotency-Key"?: string | null;
+            };
             path: {
                 /** @description Workspace id */
                 ws: string;
@@ -13011,7 +13058,10 @@ export interface operations {
     create_api_key: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description 1 to 255 characters; makes a retry safe for 24 hours. A key first used for another request answers 422 `idempotency_key_reused` */
+                "Idempotency-Key"?: string | null;
+            };
             path: {
                 /** @description Workspace id */
                 ws: string;
@@ -13053,6 +13103,15 @@ export interface operations {
             };
             /** @description No such workspace, or no access to it */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The Idempotency-Key is in use: `idempotency_key_in_flight` while the first request runs (see Retry-After), or `idempotency_key_replayed` once it created a key, with resource_id as its id and no secret */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -13191,7 +13250,10 @@ export interface operations {
                 /** @description A name for the image, 1 to 200 characters without path separators */
                 name: string;
             };
-            header?: never;
+            header?: {
+                /** @description 1 to 255 characters; makes a retry safe for 24 hours. A key first used for another request answers 422 `idempotency_key_reused` */
+                "Idempotency-Key"?: string | null;
+            };
             path: {
                 /** @description Workspace id */
                 ws: string;
@@ -13261,6 +13323,15 @@ export interface operations {
             };
             /** @description No byte arrived for 60 seconds */
             408: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The Idempotency-Key is in use: `idempotency_key_in_flight` while the first request runs (see Retry-After), or `idempotency_key_replayed` once it stored the image, with resource_id as the asset's id; the response is not kept */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -19372,7 +19443,10 @@ export interface operations {
                 /** @description comma, semicolon or tab; detected when absent */
                 delimiter?: string;
             };
-            header?: never;
+            header?: {
+                /** @description 1 to 255 characters; makes a retry safe for 24 hours. A key first used for another request answers 422 `idempotency_key_reused` */
+                "Idempotency-Key"?: string | null;
+            };
             path: {
                 /** @description Workspace id */
                 ws: string;
@@ -19433,6 +19507,15 @@ export interface operations {
             };
             /** @description No byte arrived for 60 seconds; the upload was abandoned and nothing was kept */
             408: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The Idempotency-Key is in use: `idempotency_key_in_flight` while the first request runs (see Retry-After), or `idempotency_key_replayed` once it uploaded the import, with resource_id as the import's id; the response is not kept */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -21691,7 +21774,10 @@ export interface operations {
     request_erasure: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description 1 to 255 characters; makes a retry safe for 24 hours. A key first used for another request answers 422 `idempotency_key_reused` */
+                "Idempotency-Key"?: string | null;
+            };
             path: {
                 /** @description Workspace id */
                 ws: string;
@@ -21733,6 +21819,15 @@ export interface operations {
             };
             /** @description No such workspace or person, or no access */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The Idempotency-Key is in use: `idempotency_key_in_flight` while the first request runs (see Retry-After), or `idempotency_key_replayed` once it recorded the request, with resource_id as the request's id; the response is not kept */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -21827,7 +21922,10 @@ export interface operations {
     request_export: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description 1 to 255 characters; makes a retry safe for 24 hours. A key first used for another request answers 422 `idempotency_key_reused` */
+                "Idempotency-Key"?: string | null;
+            };
             path: {
                 /** @description Workspace id */
                 ws: string;
@@ -21869,6 +21967,15 @@ export interface operations {
             };
             /** @description No such workspace or person, or no access */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The Idempotency-Key is in use: `idempotency_key_in_flight` while the first request runs (see Retry-After), or `idempotency_key_replayed` once it recorded the request, with resource_id as the export's id; the response is not kept */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

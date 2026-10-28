@@ -32,7 +32,6 @@ use crate::AppState;
 use crate::auth::{Principal, may_view_pii};
 use crate::problem::{ApiError, ItemProblem};
 
-const MAX_IDEMPOTENCY_KEY_CHARS: usize = 255;
 /// The most field names a problem's `detail` lists.
 const DETAIL_FIELDS: usize = 5;
 
@@ -189,21 +188,9 @@ impl IdempotencyKey {
         uri: &Uri,
         body: &Value,
     ) -> Result<Option<Self>, ApiError> {
-        let Some(value) = headers.get("idempotency-key") else {
+        let Some(key) = crate::idempotency::key_header(headers)? else {
             return Ok(None);
         };
-        let key = value
-            .to_str()
-            .ok()
-            .filter(|key| {
-                (1..=MAX_IDEMPOTENCY_KEY_CHARS).contains(&key.chars().count())
-                    && !key.chars().any(char::is_control)
-            })
-            .ok_or_else(|| {
-                ApiError::unprocessable(
-                    "Idempotency-Key: must be 1 to 255 characters without control characters",
-                )
-            })?;
         let request_hash = sha256(&format!("{method}\n{}\n{body}", uri.path()));
         Ok(Some(Self {
             key: key.to_owned(),

@@ -26,7 +26,8 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, Method, StatusCode, Uri};
+use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use time::Duration;
@@ -65,6 +66,7 @@ use crate::auth::{Need, Principal, authorize, path_id};
 use crate::flows::crud::{FlowDetailBody, check_document};
 use crate::flows::test_mode::simulation::{SimulationBody, simulate};
 use crate::flows::{flow_error, issue_problems, parse_graph, parse_settings};
+use crate::idempotency::{self, Entry, Keyed, RequestHash, lease};
 use crate::imports::MappingBody;
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem, SegmentIssueProblem};
@@ -116,7 +118,7 @@ impl DraftKindBody {
 }
 
 /// What to draft.
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct DraftRequest {
     kind: DraftKindBody,
@@ -749,12 +751,23 @@ async fn dry_run_manifest(
 /// refused. Every attempt is a gated model call: it counts against the
 /// budget and the rate limit, and with the assistant off, nothing is read or sent. A reverse
 /// proxy in front needs a read timeout of at least (1 + `ai.max_repair_attempts`) x 60 s + 30 s.
+///
+/// Send an `Idempotency-Key` header (1 to 255 characters) to make a retry safe for 24 hours, so a
+/// retry after a timeout does not spend the budget twice. While the first request runs, the same
+/// key answers `409 idempotency_key_in_flight` with `Retry-After`; once it has stored a draft
+/// (valid or not), the same key and body answer `409 idempotency_key_replayed` with the draft's id
+/// and no body, as the draft may hold values from the workspace; the same key with another body
+/// is `422 idempotency_key_reused`. The key belongs to the caller that sent it. A failed run
+/// stores nothing and leaves the key free.
 #[utoipa::path(
     post,
     operation_id = "create_ai_draft",
     path = "/api/v1/workspaces/{ws}/ai/drafts",
     tag = "ai",
-    params(("ws" = Uuid, Path, description = "Workspace id")),
+    params(
+        ("ws" = Uuid, Path, description = "Workspace id"),
+        ("Idempotency-Key" = Option<String>, Header, description = "1 to 255 characters; makes a retry safe for 24 hours. A key first used for another request answers 422 `idempotency_key_reused`")
+    ),
     request_body = DraftRequest,
     responses(
         (status = 201, description = "The draft run: a validated draft with its changes and dry run, or the problems of the last attempt", body = DraftBody),
@@ -775,8 +788,11 @@ pub(crate) async fn create(
     State(state): State<AppState>,
     principal: Principal,
     Path(ws): Path<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
     ApiJson(request): ApiJson<DraftRequest>,
-) -> Result<(StatusCode, Json<DraftBody>), ApiError> {
+) -> Result<Response, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, draft_need(&principal)).await?;
     let user = session_user(&principal)?;
     let kind = request.kind.store();
@@ -787,6 +803,21 @@ pub(crate) async fn create(
         authorize(&state, &principal, workspace.id, Need::Admin).await?;
     }
     check_request(&request)?;
+    // A retry of a draft that already ran answers from the key and spends nothing.
+    let request_hash = RequestHash::of_json(&method, &uri, &request)?;
+    let keyed = Keyed::of(&headers, "create_ai_draft", &principal)?;
+    let reservation = match idempotency::reserve(
+        &state,
+        workspace.id,
+        keyed,
+        request_hash,
+        lease::draft(state.ai.config.max_repair_attempts),
+    )
+    .await?
+    {
+        Entry::Go(reservation) => reservation,
+        Entry::Answer(response) => return Ok(response),
+    };
     // The assistant being off is the first answer, before anything is read.
     let dispatcher = Dispatcher::open(&state, Some(user), workspace.id, kind.as_str())
         .await
@@ -1028,6 +1059,14 @@ pub(crate) async fn create(
                 ),
                 _ => None,
             };
+            // A segment has no dry run on the server: the builder shows the live count of the draft.
+            let dry_run = match (kind, &stream, source_id) {
+                (DraftKind::Segment | DraftKind::Flow, _, _) => None,
+                (_, Some(stream), Some(source_id)) => {
+                    Some(dry_run_mapping(&context, source_id, stream, &content).await)
+                }
+                _ => Some(dry_run_manifest(&context, source.as_ref(), &content).await),
+            };
             let mut tx = zirv_flow_store::begin(&state.pool).await?;
             zirv_flow_store::insert_ai_draft(
                 &mut tx,
@@ -1051,22 +1090,12 @@ pub(crate) async fn create(
                 },
             )
             .await?;
-            zirv_flow_store::commit(tx).await?;
-            // A segment has no dry run on the server: the builder shows the live count of the draft.
-            let dry_run = match (kind, &stream, source_id) {
-                (DraftKind::Segment | DraftKind::Flow, _, _) => None,
-                (_, Some(stream), Some(source_id)) => {
-                    Some(dry_run_mapping(&context, source_id, stream, &content).await)
-                }
-                _ => Some(dry_run_manifest(&context, source.as_ref(), &content).await),
-            };
-            run_outcome(kind, "valid");
             let repaired = if attempts > 1 {
                 places(&earlier)
             } else {
                 Vec::new()
             };
-            DraftBody {
+            let body = DraftBody {
                 id,
                 kind: request.kind,
                 status: "valid",
@@ -1079,7 +1108,18 @@ pub(crate) async fn create(
                 subject_variants,
                 renders,
                 repaired,
-            }
+            };
+            idempotency::complete(
+                reservation.as_ref(),
+                &mut tx,
+                StatusCode::CREATED,
+                id,
+                &body,
+            )
+            .await?;
+            zirv_flow_store::commit(tx).await?;
+            run_outcome(kind, "valid");
+            body
         }
         Ok(RepairOutcome::Exhausted(issues, attempts)) => {
             let mut tx = zirv_flow_store::begin(&state.pool).await?;
@@ -1102,9 +1142,7 @@ pub(crate) async fn create(
                 },
             )
             .await?;
-            zirv_flow_store::commit(tx).await?;
-            run_outcome(kind, "invalid");
-            DraftBody {
+            let body = DraftBody {
                 id,
                 kind: request.kind,
                 status: "invalid",
@@ -1117,7 +1155,18 @@ pub(crate) async fn create(
                 subject_variants: Vec::new(),
                 renders: None,
                 repaired: Vec::new(),
-            }
+            };
+            idempotency::complete(
+                reservation.as_ref(),
+                &mut tx,
+                StatusCode::CREATED,
+                id,
+                &body,
+            )
+            .await?;
+            zirv_flow_store::commit(tx).await?;
+            run_outcome(kind, "invalid");
+            body
         }
         Err(RepairError::Dispatch(error)) => {
             run_outcome(kind, "failed");
@@ -1128,7 +1177,8 @@ pub(crate) async fn create(
             return Err(error);
         }
     };
-    Ok((StatusCode::CREATED, Json(body)))
+    idempotency::finish(reservation);
+    Ok((StatusCode::CREATED, Json(body)).into_response())
 }
 
 /// Re-checks a stored draft against the current state: the saved version is unchanged since the
