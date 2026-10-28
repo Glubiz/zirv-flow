@@ -704,22 +704,51 @@ fn declares(line: &str, name: &str) -> bool {
     rest.starts_with(&format!("fn {name}("))
 }
 
+/// Whether an attribute that starts with `start` marks a test.
+fn is_test_attribute(start: &str) -> bool {
+    start == "#[test]" || start.starts_with("#[sqlx::test") || start.starts_with("#[tokio::test")
+}
+
+/// The index of the first line of the attribute or doc comment that ends on line `end`, or none
+/// when `lines[end]` ends neither. Attributes may span lines; doc comments are `///` lines or one
+/// `/** */` block.
+fn block_start(lines: &[&str], end: usize) -> Option<usize> {
+    let line = lines[end].trim();
+    if line.starts_with("#[") || line.starts_with("///") {
+        Some(end)
+    } else if line.ends_with("*/") {
+        (end.saturating_sub(200)..=end)
+            .rev()
+            .find(|at| lines[*at].trim_start().starts_with("/**"))
+    } else if line.ends_with(']') {
+        (end.saturating_sub(30)..end)
+            .rev()
+            .find(|at| lines[*at].trim_start().starts_with("#["))
+    } else {
+        None
+    }
+}
+
 /// Whether `source` defines a test function `name`: a real declaration of that exact name with a
-/// test attribute among the attribute lines directly above it.
+/// test attribute among the attribute and doc-comment blocks directly above it, multi-line
+/// attributes and both doc-comment forms included.
 fn test_defined(source: &str, name: &str) -> bool {
     let lines: Vec<&str> = source.lines().collect();
     lines.iter().enumerate().any(|(at, line)| {
-        declares(line, name)
-            && lines[..at]
-                .iter()
-                .rev()
-                .map(|above| above.trim())
-                .take_while(|above| above.starts_with("#[") || above.starts_with("///"))
-                .any(|above| {
-                    above == "#[test]"
-                        || above.starts_with("#[sqlx::test")
-                        || above.starts_with("#[tokio::test")
-                })
+        if !declares(line, name) {
+            return false;
+        }
+        let mut above = at;
+        while above > 0 {
+            let Some(start) = block_start(&lines, above - 1) else {
+                return false;
+            };
+            if is_test_attribute(lines[start].trim()) {
+                return true;
+            }
+            above = start;
+        }
+        false
     })
 }
 
@@ -737,6 +766,58 @@ fn slug(heading: &str) -> String {
         .collect()
 }
 
+/// A heading as GitHub renders it before slugging: closing `#`s dropped, `[text](url)` as `text`,
+/// inline HTML tags dropped, emphasis markers dropped and code-span text kept.
+fn rendered_heading(heading: &str) -> String {
+    let heading = heading.trim();
+    let heading = match heading.trim_end_matches('#') {
+        shorter if shorter.len() < heading.len() && shorter.ends_with(' ') => shorter.trim_end(),
+        _ => heading,
+    };
+    let chars: Vec<char> = heading.chars().collect();
+    let mut out = String::new();
+    let mut at = 0;
+    while at < chars.len() {
+        let c = chars[at];
+        let rest = &chars[at..];
+        if c == '['
+            && let Some(close) = rest.iter().position(|c| *c == ']')
+            && rest.get(close + 1) == Some(&'(')
+            && let Some(end) = rest[close..].iter().position(|c| *c == ')')
+        {
+            out.extend(&rest[1..close]);
+            at += close + end + 1;
+        } else if c == '<'
+            && rest
+                .get(1)
+                .is_some_and(|n| n.is_ascii_alphabetic() || *n == '/')
+            && let Some(end) = rest.iter().position(|c| *c == '>')
+        {
+            at += end + 1;
+        } else if c == '*' {
+            at += 1;
+        } else if c == '_' {
+            let before = at
+                .checked_sub(1)
+                .map(|i| chars[i])
+                .is_some_and(is_ident_char);
+            let after = chars.get(at + 1).copied().is_some_and(is_ident_char);
+            if before && after {
+                out.push(c);
+            }
+            at += 1;
+        } else {
+            out.push(c);
+            at += 1;
+        }
+    }
+    out
+}
+
+fn is_ident_char(c: char) -> bool {
+    c.is_alphanumeric()
+}
+
 /// The anchors a Markdown file offers: its headings and its explicit `id="..."` attributes.
 fn anchors_of(markdown: &str) -> BTreeSet<String> {
     let mut anchors = BTreeSet::new();
@@ -751,7 +832,7 @@ fn anchors_of(markdown: &str) -> BTreeSet<String> {
         let heading = line.trim_start_matches('#');
         if heading.len() < line.len() && heading.starts_with(' ') {
             // A repeated heading gets `-1`, `-2` and so on, in order.
-            let base = slug(heading);
+            let base = slug(&rendered_heading(heading));
             let mut anchor = base.clone();
             let mut repeat = 0;
             while anchors.contains(&anchor) {
@@ -1555,5 +1636,75 @@ fn another() {}
         assert!(!test_defined(source, "only_in_a_comment"));
         assert!(!test_defined(source, "in_a_string"));
         assert!(!test_defined(source, "real"), "no attribute");
+    }
+
+    #[test]
+    fn multi_line_attributes_and_block_doc_comments_do_not_hide_a_test() {
+        let source = concat!(
+            "#[sqlx::test(
+    migrations = \"m\",
+    fixtures(\"f\")
+)]
+",
+            "#[ignore = \"x\"]
+async fn spread(p: P) {}
+",
+            "#[tokio::test(
+    flavor = \"multi_thread\"
+)]
+",
+            "/** A block
+ * doc comment.
+ */
+",
+            "async fn tokio_one() {}
+",
+            "/** doc */
+#[test]
+/// doc
+fn mixed() {}
+",
+            "#[derive(
+    Debug,
+)]
+fn not_a_test() {}
+",
+            "/** only a doc */
+fn bare() {}
+",
+        );
+
+        assert!(test_defined(source, "spread"));
+        assert!(test_defined(source, "tokio_one"));
+        assert!(test_defined(source, "mixed"));
+        assert!(!test_defined(source, "not_a_test"));
+        assert!(!test_defined(source, "bare"));
+    }
+
+    #[test]
+    fn headings_are_slugged_from_their_rendered_text() {
+        for (heading, anchor) in [
+            ("Guide ##", "guide"),
+            ("Guide #1", "guide-1"),
+            ("See [the page](x.md#y) now", "see-the-page-now"),
+            ("A <b>bold</b> <br/>word", "a-bold-word"),
+            ("The `send` pipeline", "the-send-pipeline"),
+            (
+                "*Strong* and **bolder** and _soft_",
+                "strong-and-bolder-and-soft",
+            ),
+            ("Keep snake_case_names", "keep-snake_case_names"),
+            ("1 < 2 and a<3", "1--2-and-a3"),
+        ] {
+            let found = anchors_of(&format!(
+                "## {heading}
+"
+            ));
+
+            assert!(
+                found.contains(anchor),
+                "{heading:?} gave {found:?}, not {anchor:?}"
+            );
+        }
     }
 }
