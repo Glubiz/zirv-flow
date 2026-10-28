@@ -168,6 +168,10 @@ const VALUE_FREE: &[(&[&str], &str)] = &[
         "retention settings: day counts per workspace and the last run of each window as a row count, no person column",
     ),
     (
+        &["api_idempotency"],
+        "Idempotency-Key bookkeeping: hashes of the key and the request, a status and the created resource's id; a body only for a route whose response holds no secret and no person's value; 24 hour expiry",
+    ),
+    (
         &["ai_calls", "ai_drafts", "ai_settings"],
         "AI use: counters and mapping drafts; the free text is in ai_transcripts",
     ),
@@ -749,6 +753,16 @@ mod tests {
             .unwrap();
 
         assert_eq!(unclassified(&pool).await, ["zz_new_feature_notes"]);
+    }
+
+    #[test]
+    fn the_api_idempotency_table_is_classified_as_holding_no_person_value() {
+        let value_free = VALUE_FREE
+            .iter()
+            .any(|(names, _)| names.contains(&"api_idempotency"));
+
+        assert!(value_free);
+        assert!(!BY_VALUE.iter().any(|(name, _)| *name == "api_idempotency"));
     }
 
     #[test]

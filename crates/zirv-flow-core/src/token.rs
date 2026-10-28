@@ -22,6 +22,29 @@ pub fn sha256(value: &str) -> [u8; 32] {
     Sha256::digest(value.as_bytes()).into()
 }
 
+/// The SHA-256 digest of bytes.
+pub fn sha256_bytes(value: &[u8]) -> [u8; 32] {
+    Sha256::digest(value).into()
+}
+
+/// A SHA-256 digest built from pieces, for a body that is streamed.
+#[derive(Default)]
+pub struct Sha256Stream(Sha256);
+
+impl Sha256Stream {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn update(&mut self, piece: &[u8]) {
+        self.0.update(piece);
+    }
+
+    pub fn finish(self) -> [u8; 32] {
+        self.0.finalize().into()
+    }
+}
+
 /// Compares two byte strings in constant time (for equal lengths).
 pub fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     left.ct_eq(right).into()
@@ -52,6 +75,16 @@ mod tests {
     #[test]
     fn tokens_are_not_repeated() {
         assert_ne!(random_token(32), random_token(32));
+    }
+
+    #[test]
+    fn a_streamed_digest_equals_the_one_shot_digest() {
+        let mut stream = Sha256Stream::new();
+        stream.update(b"a");
+        stream.update(b"bc");
+
+        assert_eq!(stream.finish(), sha256("abc"));
+        assert_eq!(sha256_bytes(b"abc"), sha256("abc"));
     }
 
     #[test]

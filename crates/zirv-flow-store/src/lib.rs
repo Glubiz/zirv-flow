@@ -2,6 +2,7 @@
 
 mod accounts;
 mod ai;
+mod api_idempotency;
 mod api_keys;
 mod assets;
 mod audit;
@@ -63,6 +64,10 @@ pub use ai::{
     insert_ai_draft, insert_ai_transcript, lock_ai_settings, mark_ai_draft_accepted, month_start,
     purge_expired_ai_drafts, purge_expired_ai_transcripts, put_ai_settings, record_ai_call,
     reserve_ai_call, spent_this_month,
+};
+pub use api_idempotency::{
+    NewRememberedRequest, RememberedRequest, expire_api_idempotency, lock_api_idempotency,
+    remember_api_idempotency,
 };
 pub use api_keys::{
     ApiKey, StoredApiKey, create_api_key, find_api_key_for_auth, list_api_keys, revoke_api_key,
