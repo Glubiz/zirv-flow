@@ -801,7 +801,12 @@ use crate::workspaces::{
         retention::LastRunBody,
         retention::PutRetentionRequest,
     )),
-    modifiers(&SecuritySchemes, &PreviewTag, &SegmentSchemas, &FlowSchemas)
+    modifiers(
+        &SecuritySchemes,
+        &PreviewTag,
+        &SegmentSchemas,
+        &FlowSchemas
+    )
 )]
 struct ApiDoc;
 
@@ -1619,5 +1624,149 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The creating operations that take an `Idempotency-Key` (architecture section 15): those
+    /// that no unique name or draft revision already guards.
+    const IDEMPOTENT_CREATES: [&str; 6] = [
+        "create_api_key",
+        "create_ai_draft",
+        "upload_asset",
+        "upload_import",
+        "request_erasure",
+        "request_export",
+    ];
+
+    #[test]
+    fn every_creating_post_in_the_audit_has_a_key_or_a_documented_exemption() {
+        let document = serde_json::to_value(openapi()).unwrap();
+        let policy = section(&policy(), "Idempotency");
+        let audit = include_str!("../../../docs/api-audit.md");
+        let mut seen = std::collections::BTreeSet::new();
+        for line in audit.lines().filter(|line| {
+            ["| GET |", "| POST |", "| PUT |", "| PATCH |", "| DELETE |"]
+                .iter()
+                .any(|prefix| line.starts_with(prefix))
+        }) {
+            let cells: Vec<_> = line.split('|').map(str::trim).collect();
+            let method = cells[1].to_ascii_lowercase();
+            let path = cells[2].trim_matches('`');
+            let id = cells[3].trim_matches('`');
+            let operation = &document["paths"][path][&method];
+            assert_eq!(operation["operationId"], id, "stale audit row: {line}");
+            assert!(seen.insert(id), "duplicate audit row: {id}");
+            let header = operation["parameters"]
+                .as_array()
+                .is_some_and(|parameters| {
+                    parameters.iter().any(|parameter| {
+                        parameter["in"] == "header" && parameter["name"] == "Idempotency-Key"
+                    })
+                });
+            let creating = method == "post"
+                && (operation["responses"]["201"].is_object()
+                    || ["create_", "add_", "upload_", "request_", "enroll_"]
+                        .iter()
+                        .any(|prefix| id.starts_with(prefix)));
+            match cells[4] {
+                "has" => assert!(header, "{id} does not document Idempotency-Key"),
+                "has (body field)" => {
+                    let schema = operation["requestBody"]["content"]["application/json"]["schema"]
+                        ["$ref"]
+                        .as_str()
+                        .unwrap()
+                        .strip_prefix("#/components/schemas/")
+                        .unwrap();
+                    assert!(
+                        document["components"]["schemas"][schema]["properties"]["idempotency_key"]
+                            .is_object()
+                    );
+                    assert!(policy.contains(&format!("`{id}`")), "{id}");
+                    assert!(creating && !header, "{id}");
+                }
+                "guarded" | "exempt action" => {
+                    assert!(creating && !header, "{id}");
+                    assert!(
+                        policy.contains(&format!("`{id}`")),
+                        "{id} has no policy exemption"
+                    );
+                    assert!(!IDEMPOTENT_CREATES.contains(&id), "{id} needs a key");
+                }
+                "not a creating POST" => assert!(!creating && !header, "{id} needs a decision"),
+                other => panic!("{id} has an unresolved idempotency decision: {other}"),
+            }
+        }
+        assert_eq!(
+            seen.len(),
+            operations(&document).len(),
+            "audit is incomplete"
+        );
+        for id in IDEMPOTENT_CREATES {
+            assert!(
+                policy.contains(&format!("`{id}`")),
+                "{id} is missing from the policy"
+            );
+        }
+    }
+
+    #[test]
+    fn every_idempotent_create_documents_the_idempotency_key_header() {
+        let document = serde_json::to_value(openapi()).unwrap();
+        let mut documented = Vec::new();
+        for item in document["paths"].as_object().unwrap().values() {
+            for operation in item.as_object().unwrap().values() {
+                let id = operation["operationId"].as_str().unwrap_or_default();
+                let header = operation["parameters"]
+                    .as_array()
+                    .is_some_and(|parameters| {
+                        parameters.iter().any(|parameter| {
+                            parameter["in"] == "header" && parameter["name"] == "Idempotency-Key"
+                        })
+                    });
+                if IDEMPOTENT_CREATES.contains(&id) {
+                    assert!(header, "{id} does not document Idempotency-Key");
+                    assert!(
+                        operation["responses"]["422"].is_object(),
+                        "{id} does not document the reused key"
+                    );
+                    assert_eq!(
+                        operation["responses"]["409"]["content"]["application/problem+json"]["schema"]
+                            ["$ref"],
+                        "#/components/schemas/Problem",
+                        "{id} does not document the in-flight and replay 409"
+                    );
+                }
+                if header {
+                    documented.push(id.to_owned());
+                }
+            }
+        }
+        for id in IDEMPOTENT_CREATES {
+            assert!(documented.iter().any(|documented| documented == id), "{id}");
+        }
+    }
+
+    #[test]
+    fn the_problem_schema_documents_replays_without_changing_required_fields() {
+        let document = serde_json::to_value(openapi()).unwrap();
+
+        let schema = &document["components"]["schemas"]["Problem"];
+
+        assert_eq!(schema["type"], "object");
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["type", "title", "status", "detail"])
+        );
+        assert_eq!(
+            schema["properties"]["code"]["type"],
+            serde_json::json!(["string", "null"])
+        );
+        assert_eq!(
+            schema["properties"]["resource_id"],
+            serde_json::json!({
+                "type": ["string", "null"],
+                "format": "uuid",
+                "description": "The id of the resource the first request created, sent with `idempotency_key_replayed`."
+            })
+        );
     }
 }

@@ -2,6 +2,7 @@
 
 mod accounts;
 mod ai;
+mod api_idempotency;
 mod api_keys;
 mod assets;
 mod audit;
@@ -63,6 +64,10 @@ pub use ai::{
     insert_ai_draft, insert_ai_transcript, lock_ai_settings, mark_ai_draft_accepted, month_start,
     purge_expired_ai_drafts, purge_expired_ai_transcripts, put_ai_settings, record_ai_call,
     reserve_ai_call, spent_this_month,
+};
+pub use api_idempotency::{
+    ApiIdempotencyKey, Reserved, bind_api_idempotency_hash, complete_api_idempotency,
+    expire_api_idempotency, release_api_idempotency, reserve_api_idempotency,
 };
 pub use api_keys::{
     ApiKey, StoredApiKey, create_api_key, find_api_key_for_auth, list_api_keys, revoke_api_key,
@@ -181,9 +186,10 @@ pub use imports::{
     ImportRetention, ImportStatus, ImportUpload, REJECT_CHECK_MIN_ROWS, REJECT_RETENTION_DAYS,
     RUN_JOB_KIND, RejectReason, RejectedRow, RowDetail, StoredReason, TransitionError,
     UPLOAD_ABANDONED_AFTER_DAYS, UploadScan, UploadStart, cancel_import, commit_dry_run_batch,
-    commit_import_batch, delete_expired_import_data, enqueue_import_job, erase_import_values,
-    fail_import, find_import, finish_import_dry_run, finish_import_run, list_import_rejects,
-    list_imports, read_import_chunk, set_import_mapping, start_import_dry_run, start_import_run,
+    commit_import_batch, delete_expired_import_data, discard_unfinished_import, enqueue_import_job,
+    erase_import_values, fail_import, find_import, finish_import_dry_run, finish_import_run,
+    list_import_rejects, list_imports, read_import_chunk, set_import_mapping, start_import_dry_run,
+    start_import_run,
 };
 pub use ingest::{
     DRAIN_JOB_KIND, DrainOutcome, InboxHead, IngestItem, IngestPayload, Shard, append_inbox,

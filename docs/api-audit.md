@@ -1,12 +1,12 @@
 # API freeze audit
 
-Release evidence for the `/api/v1` freeze ([API contract policy](api.md), issue #406). One row per operation of `crates/zirv-flow-api/openapi.json` at version 0.185.0: 288 operations. Architecture section 15 and the route table `crates/zirv-flow-api/src/rbac.rs` are the references. This is the state **after** the fixes of phase B that the policy records, except that the `Idempotency-Key` column is the state of this branch: the header and its replay land in their own change (group G1), and the column is regenerated when that merges.
+Release evidence for the `/api/v1` freeze ([API contract policy](api.md), issue #406). One row per operation of `crates/zirv-flow-api/openapi.json` at version 0.186.0: 288 operations. Architecture section 15 and the route table `crates/zirv-flow-api/src/rbac.rs` are the references. This includes the Idempotency-Key change (group G1); every creating operation now has a header, a body key, an existing retry guard or a publishing-action exemption recorded in the policy.
 
 ## How the table was built
 
-A throwaway script read `openapi.json`, the route table and the Rust sources of `zirv-flow-api`; the counts below are its output, not hand counts. The rules, so the table can be reproduced and challenged:
+A throwaway script read `openapi.json`, the route table and the Rust sources of `zirv-flow-api`. The Idempotency-Key column was reconciled with the final policy and is held against the document by a no-database test. The rules, so the table can be reproduced and challenged:
 
-- **Idempotency-Key.** `has`: the operation documents an `Idempotency-Key` header parameter. `has (body field)`: the request body carries an `idempotency_key` field instead of the header. `needed`: a `POST` that answers `201`, or whose operation id starts with `create_`, `add_`, `upload_`, `request_` or `enroll_`, and has neither. Everything else is `not a creating POST`. Which `needed` operations take the header is settled in [the policy](api.md#idempotency).
+- **Idempotency-Key.** `has`: the operation documents an `Idempotency-Key` header parameter. `has (body field)`: the request body carries an `idempotency_key` field instead. `guarded`: a creating `POST` whose existing unique key, revision, set membership or singleton prevents a duplicate, named in [the policy](api.md#idempotency). `exempt action`: publishing a flow, snippet, template or theme may create another version on a retry, and the policy deliberately excludes these actions from the keyed-create set. Creating candidates are `POST`s that answer `201` or whose operation id starts with `create_`, `add_`, `upload_`, `request_` or `enroll_`. Everything else is `not a creating POST`. No candidate remains undecided.
 - **Pagination.** Only `GET` operations named `list_*` with a JSON body are lists. `ok` is the shared shape: query `limit` and `cursor`, response `next_cursor`. `bounded collection` is a bare array the policy names; `exempt shape` is reference data the policy names. An `outlier` is anything else; there is none. Streams and file exports are `n/a`.
 - **Problem codes.** From the handler (found by its `operation_id`) and the `ApiError::new` calls in the functions it calls in the same module, up to three levels, plus the `bad_request` and `unprocessable` calls of the handler itself: every client error (400, 409, 413, 415, 422, 429) built without a `.with_code(..)`. `ok`: none. `generic (n)`: n errors carry no specific code and answer the generic code of their status ([the policy](api.md#problem-codes)), which every such response gets. Errors raised in other modules and converted by `?` are not followed, so the cell is a lower bound. The credentials handlers live under a path the audit's tooling does not read, so their cell is `not scanned`; their codes are held by the same source test as the rest.
 - **Names and types.** Operation level: the path starts with `/api/v1/` (but for the three documented exceptions `/hooks/{id}`, `/healthz` and `/readyz`, see CONTRIBUTING); `update_*` uses `PATCH`; `DELETE` answers `204`; archive is not a `POST` action; a create answers one success status. The operations that break these rules on purpose are the conventions of [the policy](api.md#conventions-that-look-like-exceptions) (`convention G7`). Schema level, for the request and 2xx response schemas the operation reaches: names are snake_case (`exception G9`: the ingestion bodies and the status-class keys); `*_at` properties are `date-time` strings; a string whose description lists its values (and gives no "such as" examples) is a closed set typed as a string, which the policy keeps (`strings G8: n`). `ok` means nothing to report; `documented` means every finding is a convention, exception or policy choice; `issue` means a finding the policy does not cover. Schema findings are listed once in the last section.
@@ -17,7 +17,7 @@ A throwaway script read `openapi.json`, the route table and the Rust sources of 
 
 | Check | Result (operations) |
 |-------|---------------------|
-| Idempotency-Key | 247 not a creating POST, 36 needed, 4 has, 1 has (body field) |
+| Idempotency-Key | 247 not a creating POST, 26 guarded, 4 exempt action, 10 has, 1 has (body field) |
 | Pagination | 228 n/a, 36 bounded collection, 21 ok, 3 exempt shape |
 | Problem codes | 260 ok, 20 generic, 8 not scanned |
 | Names and types | 148 ok, 140 documented |
@@ -53,32 +53,32 @@ The problem codes in use are listed in [the policy](api.md#problem-codes), and a
 | POST | `/api/v1/setup` | `complete_setup` | not a creating POST | n/a | ok | ok | ok | no |
 | GET | `/api/v1/source-kinds` | `list_source_kinds` | not a creating POST | bounded collection | ok | strings G8: 1 | ok | no |
 | GET | `/api/v1/users` | `list_users` | not a creating POST | bounded collection | ok | ok | ok | no |
-| POST | `/api/v1/users` | `create_user` | needed | n/a | ok | ok | ok | no |
+| POST | `/api/v1/users` | `create_user` | guarded | n/a | ok | ok | ok | no |
 | GET | `/api/v1/version` | `get_version` | not a creating POST | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces` | `list_workspaces` | not a creating POST | bounded collection | ok | ok | ok | no |
-| POST | `/api/v1/workspaces` | `create_workspace` | needed | n/a | ok | ok | ok | no |
+| POST | `/api/v1/workspaces` | `create_workspace` | guarded | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}` | `get_workspace` | not a creating POST | n/a | ok | ok | ok | no |
 | PATCH | `/api/v1/workspaces/{ws}` | `update_workspace` | not a creating POST | n/a | ok | ok | ok | no |
-| POST | `/api/v1/workspaces/{ws}/ai/drafts` | `create_ai_draft` | needed | n/a | ok | strings G8: 7 | ok | yes |
+| POST | `/api/v1/workspaces/{ws}/ai/drafts` | `create_ai_draft` | has | n/a | ok | strings G8: 7 | ok | yes |
 | POST | `/api/v1/workspaces/{ws}/ai/drafts/{id}/accept` | `accept_ai_draft` | not a creating POST | n/a | ok | strings G8: 4 | ok | yes |
 | GET | `/api/v1/workspaces/{ws}/ai/models` | `list_ai_models` | not a creating POST | exempt shape | ok | strings G8: 1 | ok | yes |
 | GET | `/api/v1/workspaces/{ws}/ai/settings` | `get_ai_settings` | not a creating POST | n/a | ok | strings G8: 1 | ok | yes |
 | PUT | `/api/v1/workspaces/{ws}/ai/settings` | `put_ai_settings` | not a creating POST | n/a | generic (7) | strings G8: 1 | ok | yes |
 | GET | `/api/v1/workspaces/{ws}/ai/usage` | `get_ai_usage` | not a creating POST | n/a | ok | strings G8: 1 | ok | yes |
 | GET | `/api/v1/workspaces/{ws}/api-keys` | `list_api_keys` | not a creating POST | bounded collection | ok | ok | ok | no |
-| POST | `/api/v1/workspaces/{ws}/api-keys` | `create_api_key` | needed | n/a | ok | ok | ok | no |
+| POST | `/api/v1/workspaces/{ws}/api-keys` | `create_api_key` | has | n/a | ok | ok | ok | no |
 | DELETE | `/api/v1/workspaces/{ws}/api-keys/{id}` | `revoke_api_key` | not a creating POST | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/assets` | `list_assets` | not a creating POST | ok | ok | ok | ok | no |
-| POST | `/api/v1/workspaces/{ws}/assets` | `upload_asset` | needed | n/a | ok | convention G7: 200 for existing, 201 for new | ok | no |
+| POST | `/api/v1/workspaces/{ws}/assets` | `upload_asset` | has | n/a | ok | convention G7: 200 for existing, 201 for new | ok | no |
 | GET | `/api/v1/workspaces/{ws}/assets/{id}` | `get_asset` | not a creating POST | n/a | ok | strings G8: 1 | ok | no |
 | DELETE | `/api/v1/workspaces/{ws}/assets/{id}` | `delete_asset` | not a creating POST | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/audit` | `list_audit` | not a creating POST | ok | ok | strings G8: 1 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/audit/actions` | `list_audit_actions` | not a creating POST | exempt shape | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/audit/export` | `export_audit` | not a creating POST | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/consent/dimensions` | `list_consent_dimensions` | not a creating POST | bounded collection | ok | ok | ok | no |
-| POST | `/api/v1/workspaces/{ws}/consent/dimensions` | `create_consent_dimension` | needed | n/a | ok | ok | ok | no |
+| POST | `/api/v1/workspaces/{ws}/consent/dimensions` | `create_consent_dimension` | guarded | n/a | ok | ok | ok | no |
 | PATCH | `/api/v1/workspaces/{ws}/consent/dimensions/{key}` | `update_consent_dimension` | not a creating POST | n/a | ok | ok | ok | no |
-| POST | `/api/v1/workspaces/{ws}/consent/dimensions/{key}/values` | `add_consent_dimension_value` | needed | n/a | ok | ok | ok | no |
+| POST | `/api/v1/workspaces/{ws}/consent/dimensions/{key}/values` | `add_consent_dimension_value` | guarded | n/a | ok | ok | ok | no |
 | PATCH | `/api/v1/workspaces/{ws}/consent/dimensions/{key}/values/{value}` | `update_consent_dimension_value` | not a creating POST | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/consent/export` | `export_consent` | not a creating POST | n/a | ok | ok | ok | no |
 | POST | `/api/v1/workspaces/{ws}/consent/import` | `import_consent` | not a creating POST | n/a | ok | strings G8: 1 | ok | no |
@@ -100,7 +100,7 @@ The problem codes in use are listed in [the policy](api.md#problem-codes), and a
 | DELETE | `/api/v1/workspaces/{ws}/contacts/{key}` | `delete_contact` | has | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/credential-kinds` | `list_credential_kinds` | not a creating POST | bounded collection | not scanned | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/credentials` | `list_credentials` | not a creating POST | bounded collection | not scanned | strings G8: 2 | ok | no |
-| POST | `/api/v1/workspaces/{ws}/credentials` | `create_credential` | needed | n/a | not scanned | strings G8: 2 | ok | no |
+| POST | `/api/v1/workspaces/{ws}/credentials` | `create_credential` | guarded | n/a | not scanned | strings G8: 2 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/credentials/{id}` | `get_credential` | not a creating POST | n/a | not scanned | strings G8: 2 | ok | no |
 | PATCH | `/api/v1/workspaces/{ws}/credentials/{id}` | `update_credential` | not a creating POST | n/a | not scanned | strings G8: 2 | ok | no |
 | DELETE | `/api/v1/workspaces/{ws}/credentials/{id}` | `archive_credential` | not a creating POST | n/a | not scanned | ok | ok | no |
@@ -108,7 +108,7 @@ The problem codes in use are listed in [the policy](api.md#problem-codes), and a
 | POST | `/api/v1/workspaces/{ws}/credentials/{id}/test` | `test_credential` | not a creating POST | n/a | not scanned | strings G8: 1 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/debugger/stream` | `stream_event_debugger` | not a creating POST | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/destinations` | `list_destinations` | not a creating POST | bounded collection | ok | ok | ok | no |
-| POST | `/api/v1/workspaces/{ws}/destinations` | `create_destination` | needed | n/a | ok | ok | ok | no |
+| POST | `/api/v1/workspaces/{ws}/destinations` | `create_destination` | guarded | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/destinations/options` | `list_destination_options` | not a creating POST | bounded collection | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/destinations/{id}` | `get_destination` | not a creating POST | n/a | ok | ok | ok | no |
 | PATCH | `/api/v1/workspaces/{ws}/destinations/{id}` | `update_destination` | not a creating POST | n/a | ok | ok | ok | no |
@@ -119,17 +119,17 @@ The problem codes in use are listed in [the policy](api.md#problem-codes), and a
 | GET | `/api/v1/workspaces/{ws}/event-policy` | `get_event_policy` | not a creating POST | n/a | ok | ok | ok | no |
 | PUT | `/api/v1/workspaces/{ws}/event-policy` | `put_event_policy` | not a creating POST | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/event-schemas` | `list_event_schemas` | not a creating POST | bounded collection | ok | strings G8: 1 | ok | no |
-| POST | `/api/v1/workspaces/{ws}/event-schemas` | `create_event_schema` | needed | n/a | ok | strings G8: 3 | ok | no |
+| POST | `/api/v1/workspaces/{ws}/event-schemas` | `create_event_schema` | guarded | n/a | ok | strings G8: 3 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/event-schemas/{name}` | `get_event_schema` | not a creating POST | n/a | ok | strings G8: 2 | ok | no |
 | PATCH | `/api/v1/workspaces/{ws}/event-schemas/{name}` | `update_event_schema` | not a creating POST | n/a | ok | strings G8: 2 | ok | no |
 | PUT | `/api/v1/workspaces/{ws}/event-schemas/{name}/draft` | `save_event_schema_draft` | not a creating POST | n/a | ok | strings G8: 2 | ok | no |
-| POST | `/api/v1/workspaces/{ws}/event-schemas/{name}/versions` | `publish_event_schema` | needed | n/a | ok | strings G8: 2 | ok | no |
+| POST | `/api/v1/workspaces/{ws}/event-schemas/{name}/versions` | `publish_event_schema` | guarded | n/a | ok | strings G8: 2 | ok | no |
 | POST | `/api/v1/workspaces/{ws}/events/explore/breakdown` | `explore_event_breakdown` | not a creating POST | n/a | ok | strings G8: 1 | ok | yes |
 | POST | `/api/v1/workspaces/{ws}/events/explore/count` | `explore_event_count` | not a creating POST | n/a | generic (1) | strings G8: 1 | ok | yes |
 | POST | `/api/v1/workspaces/{ws}/events/explore/export` | `export_events` | not a creating POST | n/a | ok | strings G8: 1 | ok | yes |
 | POST | `/api/v1/workspaces/{ws}/events/explore/list` | `explore_event_list` | not a creating POST | n/a | generic (2) | strings G8: 2 | ok | yes |
 | GET | `/api/v1/workspaces/{ws}/flows` | `list_flows` | not a creating POST | bounded collection | ok | ok | ok | no |
-| POST | `/api/v1/workspaces/{ws}/flows` | `create_flow` | needed | n/a | ok | strings G8: 1 | ok | no |
+| POST | `/api/v1/workspaces/{ws}/flows` | `create_flow` | guarded | n/a | ok | strings G8: 1 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/flows/{id}` | `get_flow` | not a creating POST | n/a | ok | strings G8: 1 | ok | no |
 | PATCH | `/api/v1/workspaces/{ws}/flows/{id}` | `update_flow` | not a creating POST | n/a | ok | strings G8: 1 | ok | no |
 | POST | `/api/v1/workspaces/{ws}/flows/{id}/ai/explain` | `explain_flow_with_ai` | not a creating POST | n/a | ok | strings G8: 1 | ok | yes |
@@ -140,7 +140,7 @@ The problem codes in use are listed in [the policy](api.md#problem-codes), and a
 | POST | `/api/v1/workspaces/{ws}/flows/{id}/enrollments/{enrollment_id}/retry` | `retry_flow_enrollment` | not a creating POST | n/a | ok | strings G8: 1 | ok | no |
 | POST | `/api/v1/workspaces/{ws}/flows/{id}/enrollments/{enrollment_id}/skip` | `skip_flow_enrollment` | not a creating POST | n/a | ok | strings G8: 1 | ok | no |
 | POST | `/api/v1/workspaces/{ws}/flows/{id}/pause` | `pause_flow` | not a creating POST | n/a | ok | strings G8: 1 | ok | no |
-| POST | `/api/v1/workspaces/{ws}/flows/{id}/publish` | `publish_flow` | needed | n/a | ok | strings G8: 2 | ok | no |
+| POST | `/api/v1/workspaces/{ws}/flows/{id}/publish` | `publish_flow` | exempt action | n/a | ok | strings G8: 2 | ok | no |
 | POST | `/api/v1/workspaces/{ws}/flows/{id}/resume` | `resume_flow` | not a creating POST | n/a | ok | strings G8: 1 | ok | no |
 | POST | `/api/v1/workspaces/{ws}/flows/{id}/start` | `start_flow` | not a creating POST | n/a | generic (1) | ok | ok | no |
 | POST | `/api/v1/workspaces/{ws}/flows/{id}/test` | `test_flow` | not a creating POST | n/a | ok | strings G8: 12 | ok | no |
@@ -152,7 +152,7 @@ The problem codes in use are listed in [the policy](api.md#problem-codes), and a
 | GET | `/api/v1/workspaces/{ws}/forwarding/dead-letters` | `list_forwarding_dead_letters` | not a creating POST | ok | ok | ok | ok | no |
 | POST | `/api/v1/workspaces/{ws}/forwarding/re-drive` | `redrive_forwarding` | not a creating POST | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/forwarding/rules` | `list_forwarding_rules` | not a creating POST | bounded collection | ok | ok | ok | no |
-| POST | `/api/v1/workspaces/{ws}/forwarding/rules` | `create_forwarding_rule` | needed | n/a | ok | ok | ok | no |
+| POST | `/api/v1/workspaces/{ws}/forwarding/rules` | `create_forwarding_rule` | guarded | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/forwarding/rules/{id}` | `get_forwarding_rule` | not a creating POST | n/a | ok | ok | ok | no |
 | PATCH | `/api/v1/workspaces/{ws}/forwarding/rules/{id}` | `update_forwarding_rule` | not a creating POST | n/a | ok | ok | ok | no |
 | DELETE | `/api/v1/workspaces/{ws}/forwarding/rules/{id}` | `delete_forwarding_rule` | not a creating POST | n/a | ok | ok | ok | no |
@@ -161,7 +161,7 @@ The problem codes in use are listed in [the policy](api.md#problem-codes), and a
 | GET | `/api/v1/workspaces/{ws}/identity-conflicts/{id}` | `get_identity_conflict` | not a creating POST | n/a | ok | strings G8: 2 | ok | no |
 | POST | `/api/v1/workspaces/{ws}/identity-conflicts/{id}/resolve` | `resolve_identity_conflict` | not a creating POST | n/a | ok | strings G8: 2 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/imports` | `list_imports` | not a creating POST | ok | ok | strings G8: 1 | ok | no |
-| POST | `/api/v1/workspaces/{ws}/imports` | `upload_import` | needed | n/a | ok | strings G8: 1 | ok | no |
+| POST | `/api/v1/workspaces/{ws}/imports` | `upload_import` | has | n/a | ok | strings G8: 1 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/imports/{id}` | `get_import` | not a creating POST | n/a | ok | strings G8: 1 | ok | no |
 | POST | `/api/v1/workspaces/{ws}/imports/{id}/cancel` | `cancel_import` | not a creating POST | n/a | ok | strings G8: 1 | ok | no |
 | POST | `/api/v1/workspaces/{ws}/imports/{id}/dry-run` | `dry_run_import` | not a creating POST | n/a | ok | strings G8: 1 | ok | no |
@@ -172,12 +172,12 @@ The problem codes in use are listed in [the policy](api.md#problem-codes), and a
 | GET | `/api/v1/workspaces/{ws}/ingest-rejects` | `list_ingest_rejects` | not a creating POST | ok | ok | strings G8: 2 | ok | no |
 | POST | `/api/v1/workspaces/{ws}/ingest-rejects/replay` | `replay_ingest_rejects` | not a creating POST | n/a | generic (4) | strings G8: 3 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/lists` | `list_lists` | not a creating POST | bounded collection | ok | ok | ok | no |
-| POST | `/api/v1/workspaces/{ws}/lists` | `create_list` | needed | n/a | ok | ok | ok | no |
+| POST | `/api/v1/workspaces/{ws}/lists` | `create_list` | guarded | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/lists/{id}` | `get_list` | not a creating POST | n/a | ok | ok | ok | no |
 | PATCH | `/api/v1/workspaces/{ws}/lists/{id}` | `update_list` | not a creating POST | n/a | ok | ok | ok | no |
 | DELETE | `/api/v1/workspaces/{ws}/lists/{id}` | `delete_list` | not a creating POST | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/lists/{id}/members` | `list_list_members` | not a creating POST | ok | ok | strings G8: 1 | ok | no |
-| POST | `/api/v1/workspaces/{ws}/lists/{id}/members` | `add_list_members` | needed | n/a | ok | strings G8: 2 | ok | no |
+| POST | `/api/v1/workspaces/{ws}/lists/{id}/members` | `add_list_members` | guarded | n/a | ok | strings G8: 2 | ok | no |
 | POST | `/api/v1/workspaces/{ws}/lists/{id}/members/import` | `import_list_members` | not a creating POST | n/a | generic (2) | ok | ok | no |
 | POST | `/api/v1/workspaces/{ws}/lists/{id}/members/remove` | `remove_list_members` | not a creating POST | n/a | ok | strings G8: 1 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/members` | `list_members` | not a creating POST | bounded collection | ok | strings G8: 1 | ok | no |
@@ -195,16 +195,16 @@ The problem codes in use are listed in [the policy](api.md#problem-codes), and a
 | GET | `/api/v1/workspaces/{ws}/people/{id}/messages` | `list_person_messages` | not a creating POST | ok | ok | strings G8: 6 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/people/{id}/timeline` | `get_person_timeline` | not a creating POST | n/a | ok | strings G8: 2 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/privacy/erasures` | `list_erasures` | not a creating POST | ok | ok | strings G8: 2 | ok | no |
-| POST | `/api/v1/workspaces/{ws}/privacy/erasures` | `request_erasure` | needed | n/a | ok | strings G8: 3 | ok | no |
+| POST | `/api/v1/workspaces/{ws}/privacy/erasures` | `request_erasure` | has | n/a | ok | strings G8: 3 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/privacy/exports` | `list_exports` | not a creating POST | ok | ok | strings G8: 1 | ok | no |
-| POST | `/api/v1/workspaces/{ws}/privacy/exports` | `request_export` | needed | n/a | ok | strings G8: 2 | ok | no |
+| POST | `/api/v1/workspaces/{ws}/privacy/exports` | `request_export` | has | n/a | ok | strings G8: 2 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/privacy/exports/{id}/download` | `download_export` | not a creating POST | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/privacy/settings` | `get_privacy_settings` | not a creating POST | n/a | ok | ok | ok | no |
 | PUT | `/api/v1/workspaces/{ws}/privacy/settings` | `put_privacy_settings` | not a creating POST | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/retention` | `get_retention` | not a creating POST | n/a | ok | strings G8: 1 | ok | no |
 | PUT | `/api/v1/workspaces/{ws}/retention` | `put_retention` | not a creating POST | n/a | ok | strings G8: 1 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/segments` | `list_segments` | not a creating POST | bounded collection | ok | ok | ok | no |
-| POST | `/api/v1/workspaces/{ws}/segments` | `create_segment` | needed | n/a | ok | ok | ok | no |
+| POST | `/api/v1/workspaces/{ws}/segments` | `create_segment` | guarded | n/a | ok | ok | ok | no |
 | POST | `/api/v1/workspaces/{ws}/segments/preview` | `preview_segment` | not a creating POST | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/segments/{id}` | `get_segment` | not a creating POST | n/a | ok | ok | ok | no |
 | PATCH | `/api/v1/workspaces/{ws}/segments/{id}` | `update_segment` | not a creating POST | n/a | ok | ok | ok | no |
@@ -216,32 +216,32 @@ The problem codes in use are listed in [the policy](api.md#problem-codes), and a
 | GET | `/api/v1/workspaces/{ws}/segments/{id}/versions` | `list_segment_versions` | not a creating POST | bounded collection | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/segments/{id}/versions/{n}` | `get_segment_version` | not a creating POST | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/sender-identities` | `list_sender_identities` | not a creating POST | bounded collection | generic (1) | ok | ok | no |
-| POST | `/api/v1/workspaces/{ws}/sender-identities` | `create_sender_identity` | needed | n/a | ok | ok | ok | no |
+| POST | `/api/v1/workspaces/{ws}/sender-identities` | `create_sender_identity` | guarded | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/sender-identities/options` | `list_sender_identity_options` | not a creating POST | bounded collection | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/sender-identities/{id}` | `get_sender_identity` | not a creating POST | n/a | ok | ok | ok | no |
 | PATCH | `/api/v1/workspaces/{ws}/sender-identities/{id}` | `update_sender_identity` | not a creating POST | n/a | ok | ok | ok | no |
 | DELETE | `/api/v1/workspaces/{ws}/sender-identities/{id}` | `archive_sender_identity` | not a creating POST | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/sending-domains` | `list_sending_domains` | not a creating POST | bounded collection | ok | strings G8: 2 | ok | no |
-| POST | `/api/v1/workspaces/{ws}/sending-domains` | `create_sending_domain` | needed | n/a | ok | strings G8: 2 | ok | no |
+| POST | `/api/v1/workspaces/{ws}/sending-domains` | `create_sending_domain` | guarded | n/a | ok | strings G8: 2 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/sending-domains/{id}` | `get_sending_domain` | not a creating POST | n/a | ok | strings G8: 2 | ok | no |
 | DELETE | `/api/v1/workspaces/{ws}/sending-domains/{id}` | `delete_sending_domain` | not a creating POST | n/a | ok | ok | ok | no |
 | POST | `/api/v1/workspaces/{ws}/sending-domains/{id}/verify` | `verify_sending_domain` | not a creating POST | n/a | ok | strings G8: 2 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/sending/settings` | `get_send_settings` | not a creating POST | n/a | ok | ok | ok | no |
 | PUT | `/api/v1/workspaces/{ws}/sending/settings` | `put_send_settings` | not a creating POST | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/snippets` | `list_snippets` | not a creating POST | bounded collection | ok | ok | ok | no |
-| POST | `/api/v1/workspaces/{ws}/snippets` | `create_snippet` | needed | n/a | ok | ok | ok | no |
+| POST | `/api/v1/workspaces/{ws}/snippets` | `create_snippet` | guarded | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/snippets/{id}` | `get_snippet` | not a creating POST | n/a | ok | ok | ok | no |
 | PUT | `/api/v1/workspaces/{ws}/snippets/{id}` | `update_snippet` | not a creating POST | n/a | ok | convention G7: update by PUT | ok | no |
 | DELETE | `/api/v1/workspaces/{ws}/snippets/{id}` | `archive_snippet` | not a creating POST | n/a | ok | convention G7: DELETE answers 200 | ok | no |
 | PUT | `/api/v1/workspaces/{ws}/snippets/{id}/draft` | `save_snippet_draft` | not a creating POST | n/a | ok | ok | ok | no |
 | POST | `/api/v1/workspaces/{ws}/snippets/{id}/preview` | `preview_snippet` | not a creating POST | n/a | ok | strings G8: 2 | ok | no |
-| POST | `/api/v1/workspaces/{ws}/snippets/{id}/publish` | `publish_snippet` | needed | n/a | ok | strings G8: 2 | ok | no |
+| POST | `/api/v1/workspaces/{ws}/snippets/{id}/publish` | `publish_snippet` | exempt action | n/a | ok | strings G8: 2 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/snippets/{id}/versions` | `list_snippet_versions` | not a creating POST | bounded collection | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/snippets/{id}/versions/{n}` | `get_snippet_version` | not a creating POST | n/a | ok | strings G8: 1 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/snippets/{id}/where-used` | `snippet_where_used` | not a creating POST | n/a | ok | strings G8: 1 | ok | no |
 | POST | `/api/v1/workspaces/{ws}/source-manifests/validate` | `validate_source_manifest` | not a creating POST | n/a | ok | strings G8: 1 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/sources` | `list_sources` | not a creating POST | bounded collection | ok | ok | ok | no |
-| POST | `/api/v1/workspaces/{ws}/sources` | `create_source` | needed | n/a | ok | ok | ok | no |
+| POST | `/api/v1/workspaces/{ws}/sources` | `create_source` | guarded | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/sources/{id}` | `get_source` | not a creating POST | n/a | ok | ok | ok | no |
 | PATCH | `/api/v1/workspaces/{ws}/sources/{id}` | `update_source` | not a creating POST | n/a | ok | ok | ok | no |
 | DELETE | `/api/v1/workspaces/{ws}/sources/{id}` | `delete_source` | not a creating POST | n/a | ok | ok | ok | no |
@@ -257,13 +257,13 @@ The problem codes in use are listed in [the policy](api.md#problem-codes), and a
 | POST | `/api/v1/workspaces/{ws}/sources/{id}/streams/{name}/preview` | `preview_stream_mapping` | not a creating POST | n/a | generic (1) | strings G8: 1 | ok | no |
 | POST | `/api/v1/workspaces/{ws}/sources/{id}/test` | `test_source` | not a creating POST | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/suppressions` | `list_suppressions` | not a creating POST | ok | ok | strings G8: 2 | ok | no |
-| POST | `/api/v1/workspaces/{ws}/suppressions` | `add_suppression` | needed | n/a | ok | strings G8: 1 | ok | no |
+| POST | `/api/v1/workspaces/{ws}/suppressions` | `add_suppression` | guarded | n/a | ok | strings G8: 1 | ok | no |
 | POST | `/api/v1/workspaces/{ws}/suppressions/check` | `check_suppression` | not a creating POST | n/a | ok | strings G8: 1 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/suppressions/export` | `export_suppressions` | not a creating POST | n/a | ok | ok | ok | no |
 | POST | `/api/v1/workspaces/{ws}/suppressions/import` | `import_suppressions` | not a creating POST | n/a | ok | strings G8: 1 | ok | no |
 | POST | `/api/v1/workspaces/{ws}/suppressions/remove` | `remove_suppression` | not a creating POST | n/a | ok | strings G8: 1 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/templates` | `list_templates` | not a creating POST | bounded collection | ok | strings G8: 2 | ok | no |
-| POST | `/api/v1/workspaces/{ws}/templates` | `create_template` | needed | n/a | ok | strings G8: 3 | ok | no |
+| POST | `/api/v1/workspaces/{ws}/templates` | `create_template` | guarded | n/a | ok | strings G8: 3 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/templates/{id}` | `get_template` | not a creating POST | n/a | ok | strings G8: 3 | ok | no |
 | PUT | `/api/v1/workspaces/{ws}/templates/{id}` | `update_template` | not a creating POST | n/a | ok | convention G7: update by PUT; strings G8: 3 | ok | no |
 | DELETE | `/api/v1/workspaces/{ws}/templates/{id}` | `archive_template` | not a creating POST | n/a | ok | convention G7: DELETE answers 200; strings G8: 3 | ok | no |
@@ -271,9 +271,9 @@ The problem codes in use are listed in [the policy](api.md#problem-codes), and a
 | POST | `/api/v1/workspaces/{ws}/templates/{id}/draft/convert-to-mjml` | `convert_template_draft_to_mjml` | not a creating POST | n/a | ok | strings G8: 3 | ok | no |
 | POST | `/api/v1/workspaces/{ws}/templates/{id}/preview` | `preview_template` | not a creating POST | n/a | ok | strings G8: 3 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/templates/{id}/preview-people` | `list_template_preview_people` | not a creating POST | bounded collection | ok | ok | ok | no |
-| POST | `/api/v1/workspaces/{ws}/templates/{id}/preview-people` | `add_template_preview_person` | needed | n/a | ok | ok | ok | no |
+| POST | `/api/v1/workspaces/{ws}/templates/{id}/preview-people` | `add_template_preview_person` | guarded | n/a | ok | ok | ok | no |
 | DELETE | `/api/v1/workspaces/{ws}/templates/{id}/preview-people/{person_id}` | `remove_template_preview_person` | not a creating POST | n/a | ok | ok | ok | no |
-| POST | `/api/v1/workspaces/{ws}/templates/{id}/publish` | `publish_template` | needed | n/a | ok | strings G8: 4 | ok | no |
+| POST | `/api/v1/workspaces/{ws}/templates/{id}/publish` | `publish_template` | exempt action | n/a | ok | strings G8: 4 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/templates/{id}/send-volume` | `template_send_volume` | not a creating POST | n/a | ok | ok | ok | no |
 | POST | `/api/v1/workspaces/{ws}/templates/{id}/test-send` | `test_send_template` | not a creating POST | n/a | generic (3) | strings G8: 1 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/templates/{id}/versions` | `list_template_versions` | not a creating POST | bounded collection | ok | ok | ok | no |
@@ -281,38 +281,38 @@ The problem codes in use are listed in [the policy](api.md#problem-codes), and a
 | GET | `/api/v1/workspaces/{ws}/templates/{id}/versions/{n}/stats` | `get_template_version_stats` | not a creating POST | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/templates/{id}/where-used` | `template_where_used` | not a creating POST | n/a | ok | strings G8: 1 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/test-send-allowlist` | `list_test_send_allowlist` | not a creating POST | exempt shape | ok | ok | ok | no |
-| POST | `/api/v1/workspaces/{ws}/test-send-allowlist` | `add_test_send_allowlist_entry` | needed | n/a | generic (1) | ok | ok | no |
+| POST | `/api/v1/workspaces/{ws}/test-send-allowlist` | `add_test_send_allowlist_entry` | guarded | n/a | generic (1) | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/test-send-allowlist/options` | `list_test_send_allowlist_options` | not a creating POST | bounded collection | ok | ok | ok | no |
 | DELETE | `/api/v1/workspaces/{ws}/test-send-allowlist/{id}` | `delete_test_send_allowlist_entry` | not a creating POST | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/test-sends` | `list_test_sends` | not a creating POST | ok | generic (2) | strings G8: 1 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/test-sends/quota` | `test_send_quota` | not a creating POST | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/themes` | `list_themes` | not a creating POST | bounded collection | ok | ok | ok | no |
-| POST | `/api/v1/workspaces/{ws}/themes` | `create_theme` | needed | n/a | ok | ok | ok | no |
+| POST | `/api/v1/workspaces/{ws}/themes` | `create_theme` | guarded | n/a | ok | ok | ok | no |
 | PUT | `/api/v1/workspaces/{ws}/themes/default` | `set_default_theme` | not a creating POST | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/themes/{id}` | `get_theme` | not a creating POST | n/a | ok | ok | ok | no |
 | PUT | `/api/v1/workspaces/{ws}/themes/{id}` | `update_theme` | not a creating POST | n/a | ok | convention G7: update by PUT | ok | no |
 | DELETE | `/api/v1/workspaces/{ws}/themes/{id}` | `archive_theme` | not a creating POST | n/a | ok | convention G7: DELETE answers 200 | ok | no |
 | PUT | `/api/v1/workspaces/{ws}/themes/{id}/draft` | `save_theme_draft` | not a creating POST | n/a | ok | ok | ok | no |
 | POST | `/api/v1/workspaces/{ws}/themes/{id}/preview` | `preview_theme` | not a creating POST | n/a | ok | strings G8: 2 | ok | no |
-| POST | `/api/v1/workspaces/{ws}/themes/{id}/publish` | `publish_theme` | needed | n/a | ok | strings G8: 2 | ok | no |
+| POST | `/api/v1/workspaces/{ws}/themes/{id}/publish` | `publish_theme` | exempt action | n/a | ok | strings G8: 2 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/themes/{id}/versions` | `list_theme_versions` | not a creating POST | bounded collection | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/themes/{id}/versions/{n}` | `get_theme_version` | not a creating POST | n/a | ok | strings G8: 1 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/themes/{id}/where-used` | `theme_where_used` | not a creating POST | n/a | ok | strings G8: 1 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/topics` | `list_topics` | not a creating POST | bounded collection | ok | ok | ok | no |
-| POST | `/api/v1/workspaces/{ws}/topics` | `create_topic` | needed | n/a | ok | strings G8: 1 | ok | no |
+| POST | `/api/v1/workspaces/{ws}/topics` | `create_topic` | guarded | n/a | ok | strings G8: 1 | ok | no |
 | PATCH | `/api/v1/workspaces/{ws}/topics/{id}` | `update_topic` | not a creating POST | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/traces/{trace_id}` | `get_trace` | not a creating POST | n/a | generic (1) | ok | ok | no |
 | POST | `/api/v1/workspaces/{ws}/traces/{trace_id}/ai/explain` | `explain_trace_with_ai` | not a creating POST | n/a | generic (1) | ok | ok | yes |
 | GET | `/api/v1/workspaces/{ws}/traits` | `list_traits` | not a creating POST | bounded collection | ok | strings G8: 3 | ok | no |
-| POST | `/api/v1/workspaces/{ws}/traits` | `create_trait` | needed | n/a | ok | strings G8: 5 | ok | no |
+| POST | `/api/v1/workspaces/{ws}/traits` | `create_trait` | guarded | n/a | ok | strings G8: 5 | ok | no |
 | PATCH | `/api/v1/workspaces/{ws}/traits/{key}` | `update_trait` | not a creating POST | n/a | ok | strings G8: 3 | ok | no |
 | POST | `/api/v1/workspaces/{ws}/traits/{key}/index` | `index_trait` | not a creating POST | n/a | ok | strings G8: 1 | ok | no |
 | DELETE | `/api/v1/workspaces/{ws}/traits/{key}/index` | `unindex_trait` | not a creating POST | n/a | ok | convention G7: DELETE answers 200; strings G8: 1 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/webhook-signing-secret` | `get_webhook_signing_secret` | not a creating POST | n/a | ok | ok | ok | no |
-| POST | `/api/v1/workspaces/{ws}/webhook-signing-secret` | `create_webhook_signing_secret` | needed | n/a | ok | ok | ok | no |
+| POST | `/api/v1/workspaces/{ws}/webhook-signing-secret` | `create_webhook_signing_secret` | guarded | n/a | ok | ok | ok | no |
 | POST | `/api/v1/workspaces/{ws}/webhook-signing-secret/rotate` | `rotate_webhook_signing_secret` | not a creating POST | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/webhooks` | `list_webhooks` | not a creating POST | bounded collection | ok | ok | ok | no |
-| POST | `/api/v1/workspaces/{ws}/webhooks` | `create_webhook` | needed | n/a | ok | ok | ok | no |
+| POST | `/api/v1/workspaces/{ws}/webhooks` | `create_webhook` | guarded | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/webhooks/{id}` | `get_webhook` | not a creating POST | n/a | ok | ok | ok | no |
 | PATCH | `/api/v1/workspaces/{ws}/webhooks/{id}` | `update_webhook` | not a creating POST | n/a | ok | ok | ok | no |
 | DELETE | `/api/v1/workspaces/{ws}/webhooks/{id}` | `delete_webhook` | not a creating POST | n/a | ok | ok | ok | no |

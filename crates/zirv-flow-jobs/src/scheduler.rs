@@ -15,9 +15,9 @@ use zirv_flow_store::{
     delete_expired_import_data, destination_report, dirty_backlog, dirty_heads, disable_schedule,
     due_schedules, due_sending_domains, end_orphaned_messages, enqueue, enqueue_domain_verify,
     enqueue_drain, enqueue_reevaluate, ensure_decision_partitions, ensure_event_partitions,
-    ensure_forward_job, expire_contact_idempotency, expire_exports, fail_orphaned_runs,
-    forwarding_report, inbox_heads, prune_debugger_feed, queue_depths, reap_expired,
-    reconcile_flow_schedules, reconcile_segment_schedules, record_retention_run,
+    ensure_forward_job, expire_api_idempotency, expire_contact_idempotency, expire_exports,
+    fail_orphaned_runs, forwarding_report, inbox_heads, prune_debugger_feed, queue_depths,
+    reap_expired, reconcile_flow_schedules, reconcile_segment_schedules, record_retention_run,
     sample_enrollments, stream_freshness, try_lead,
 };
 
@@ -259,6 +259,10 @@ impl Scheduler {
         // Contact idempotency keys are remembered for 24 hours.
         if let Err(error) = expire_contact_idempotency(&self.pool).await {
             warn!("could not expire the contact idempotency keys: {error}");
+        }
+        // Idempotency keys of the other creating requests are remembered for 24 hours too.
+        if let Err(error) = expire_api_idempotency(&self.pool).await {
+            warn!("could not expire the api idempotency keys: {error}");
         }
         // Person exports expire 24 hours after they are ready; their content goes with them.
         if let Err(error) = expire_exports(&self.pool).await {
@@ -1292,6 +1296,37 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(left, ["new"]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_leaders_upkeep_forgets_api_idempotency_keys_older_than_a_day(pool: PgPool) {
+        migrated(&pool).await;
+        let ws = inbox_workspace(&pool, "ours").await;
+        for (key, hours) in [(b"old".as_slice(), 25_i32), (b"new".as_slice(), 1)] {
+            sqlx::query(
+                "INSERT INTO api_idempotency \
+                    (workspace_id, route, key_hash, state, reservation, lease_until, \
+                     request_hash, response_hash, status, resource_id, created_at) \
+                 VALUES ($1, 'create_x', $2, 'done', gen_random_uuid(), now(), \
+                         '\\x00'::bytea, '\\x00'::bytea, 201, gen_random_uuid(), \
+                         now() - make_interval(hours => $3))",
+            )
+            .bind(ws.as_uuid())
+            .bind(key)
+            .bind(hours)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        scheduler(&pool).tick().await.unwrap();
+
+        let left: Vec<Vec<u8>> = sqlx::query_scalar("SELECT key_hash FROM api_idempotency")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left, [b"new".to_vec()]);
     }
 
     #[sqlx::test]

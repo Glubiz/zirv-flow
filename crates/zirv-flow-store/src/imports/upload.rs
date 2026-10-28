@@ -210,6 +210,12 @@ async fn delete_unfinished(pool: &PgPool, workspace: WorkspaceId, id: Uuid) {
     .await;
 }
 
+/// Deletes an import that is still `uploading`, with its chunks: for a caller whose last step
+/// after [`ImportUpload::finish`] failed and rolled the finishing statement back.
+pub async fn discard_unfinished_import(pool: &PgPool, workspace: WorkspaceId, id: Uuid) {
+    delete_unfinished(pool, workspace, id).await;
+}
+
 impl Drop for ImportUpload {
     /// A request dropped mid-body (the client went away) takes its half file with it.
     fn drop(&mut self) {

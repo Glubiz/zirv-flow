@@ -6,6 +6,7 @@ use axum::Json;
 use axum::extract::{Path, RawQuery, Request, State};
 use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use futures_util::StreamExt;
 use serde_json::json;
 use zirv_flow_store::{AssetError, NewAsset, begin, commit, store_asset};
@@ -15,6 +16,7 @@ use super::{AssetBody, AssetLimits, MAX_PIXELS, MAX_SIDE_PIXELS};
 use crate::AppState;
 use crate::admin;
 use crate::auth::{Need, Principal, authorize, path_id};
+use crate::idempotency::{self, Entry, Keyed, RequestHash, lease};
 use crate::problem::{ApiError, Problem};
 
 const MAX_NAME_CHARS: usize = 200;
@@ -125,6 +127,13 @@ fn check(bytes: &[u8], declared: ImageKind) -> Result<(u32, u32), ApiError> {
 /// its header. The workspace's images may take at most `assets.max_workspace_bytes` together. The
 /// same bytes uploaded again to the workspace return the existing asset with 200. Audited as
 /// `asset.uploaded` with the id, name and size.
+///
+/// Send an `Idempotency-Key` header (1 to 255 characters) to make a retry safe for 24 hours.
+/// While the first request runs, the same key answers `409 idempotency_key_in_flight` with
+/// `Retry-After`; once it has stored the image, the same key and file answer
+/// `409 idempotency_key_replayed` with the asset's id and no body, as the name may be a
+/// person's value; the same key with another file is `422 idempotency_key_reused`. The key
+/// belongs to the caller that sent it.
 #[utoipa::path(
     post,
     operation_id = "upload_asset",
@@ -132,7 +141,8 @@ fn check(bytes: &[u8], declared: ImageKind) -> Result<(u32, u32), ApiError> {
     tag = "assets",
     params(
         ("ws" = Uuid, Path, description = "Workspace id"),
-        ("name" = String, Query, description = "A name for the image, 1 to 200 characters without path separators")
+        ("name" = String, Query, description = "A name for the image, 1 to 200 characters without path separators"),
+        ("Idempotency-Key" = Option<String>, Header, description = "1 to 255 characters; makes a retry safe for 24 hours. A key first used for another request answers 422 `idempotency_key_reused`")
     ),
     request_body(content = Vec<u8>, content_type = "image/png", description = "The image file; image/jpeg, image/gif and image/webp are accepted too"),
     responses(
@@ -143,6 +153,7 @@ fn check(bytes: &[u8], declared: ImageKind) -> Result<(u32, u32), ApiError> {
         (status = 403, description = "A key without the write scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
         (status = 408, description = "No byte arrived for 60 seconds", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "The Idempotency-Key is in use: `idempotency_key_in_flight` while the first request runs (see Retry-After), or `idempotency_key_replayed` once it stored the image, with resource_id as the asset's id; the response is not kept", body = Problem, content_type = "application/problem+json"),
         (status = 413, description = "asset_too_large: over assets.max_file_bytes; asset_quota_exceeded: the workspace is over assets.max_workspace_bytes", body = Problem, content_type = "application/problem+json"),
         (status = 415, description = "asset_type_unsupported: not a PNG, JPEG, GIF or WebP content type; asset_type_mismatch: the file is not the declared type", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "A bad name, or asset_dimensions_exceeded", body = Problem, content_type = "application/problem+json")
@@ -155,10 +166,13 @@ pub(crate) async fn upload(
     Path(ws): Path<String>,
     RawQuery(query): RawQuery,
     request: Request,
-) -> Result<(StatusCode, Json<AssetBody>), ApiError> {
+) -> Result<Response, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let name = parse_name(&query.unwrap_or_default())?;
     let declared = declared_kind(request.headers())?;
+    let keyed = Keyed::of(request.headers(), "upload_asset", &principal)?;
+    let mut request_hash = RequestHash::new(request.method(), request.uri());
+    request_hash.update(declared.content_type().as_bytes());
     let limits = state.assets;
     let length = request
         .headers()
@@ -170,6 +184,19 @@ pub(crate) async fn upload(
     }
     let bytes = receive(request.into_body(), limits, length).await?;
     let (width, height) = check(&bytes, declared)?;
+    request_hash.update(&bytes);
+    let reservation = match idempotency::reserve(
+        &state,
+        workspace.id,
+        keyed,
+        request_hash,
+        lease::ASSET,
+    )
+    .await?
+    {
+        Entry::Go(reservation) => reservation,
+        Entry::Answer(response) => return Ok(response),
+    };
 
     let mut tx = begin(&state.pool).await?;
     let stored = store_asset(
@@ -209,20 +236,23 @@ pub(crate) async fn upload(
         )
         .await?;
     }
-    commit(tx).await?;
     let status = if stored.created {
         StatusCode::CREATED
     } else {
         StatusCode::OK
     };
-    Ok((
+    let body = AssetBody::new(&stored.asset, stored.references, state.public_url());
+    idempotency::complete(
+        reservation.as_ref(),
+        &mut tx,
         status,
-        Json(AssetBody::new(
-            &stored.asset,
-            stored.references,
-            state.public_url(),
-        )),
-    ))
+        stored.asset.id,
+        &body,
+    )
+    .await?;
+    commit(tx).await?;
+    idempotency::finish(reservation);
+    Ok((status, Json(body)).into_response())
 }
 
 #[cfg(test)]

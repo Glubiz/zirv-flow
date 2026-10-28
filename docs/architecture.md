@@ -2597,7 +2597,52 @@ webhooks have no bucket (10.1).
 REST under `/api/v1`, JSON, OpenAPI 3.1 (utoipa, committed). Workspace resources
 live under `/api/v1/workspaces/{ws}/...`. Cursor pagination,
 `application/problem+json` errors (RFC 9457), `Idempotency-Key` on creating
-POSTs. After 1.0, `/api/v1` changes only additively.
+POSTs that nothing else makes safe to retry. After 1.0, `/api/v1` changes only
+additively.
+
+**Idempotency keys.** A creating POST guarded by a unique name or a draft
+revision (users, workspaces, flows, segments, templates, sources, destinations,
+credentials, webhooks) answers `409` on a retry and takes no key. Set additions
+and ingestion retain their existing de-duplication. Publishing actions are
+excluded from the keyed-create set: flow, snippet, template and theme publishes
+can create another version on a retry; revision checks protect edits, not retries.
+An event-schema publish consumes its draft, so a repeat is `409` until a new draft
+is saved. The complete classification is in `docs/api.md` and `docs/api-audit.md`.
+The six unguarded resource creates take an optional `Idempotency-Key` header of 1 to 255
+characters, remembered for 24 hours: API keys, assistant drafts, asset and CSV
+import uploads, and erasure and export requests.
+
+- **Reservation.** A keyed request first reserves its key in a short
+  transaction of its own, as a `pending` row in `api_idempotency` with a fresh
+  reservation id, the request hash and a lease, and then holds no connection and
+  no lock while the work runs. The create marks the row `done` inside its own
+  transaction with `UPDATE ... WHERE reservation = mine`, so it commits only
+  while it still owns the key; when no row matches, it rolls back and the request
+  answers `409` `idempotency_key_in_flight`. A request that fails, errors or is
+  dropped deletes its own reservation (best effort; the lease covers a crash).
+  An upload that streams its body (the CSV import) reserves first and binds its
+  request hash when the body is in.
+- **Answers.** The same key while the first request holds a live lease: `409`
+  `idempotency_key_in_flight` at once, with `Retry-After` (never a wait). After a
+  create: `409` `idempotency_key_replayed` with the created resource's
+  `resource_id`. The same key with another request: `422`
+  `idempotency_key_reused`. A pending row whose lease ran out is taken over by the
+  next request with a new reservation id; the old owner can then no longer
+  complete and rolls back.
+- **Leases**, by what bounds each route: 30 seconds for an API key, an erasure
+  or an export request (one short transaction); 60 seconds for an asset upload,
+  which reserves after its body (at most 5 MiB) is read; 15 minutes for a CSV
+  import, which reserves before its body streams (a stall is cut after 60 seconds
+  and 512 MiB at 1 MiB/s takes under 9 minutes); `(1 + ai.max_repair_attempts) x
+  60 + 30` seconds for an assistant draft, the read timeout the route documents.
+- **Scope and content.** The row is identified by workspace, route and the hash
+  of the caller (the user, or the API key) together with the key, so another
+  member's identical key is another key and cannot replay or block it. The table
+  holds the key, request and response hashes, a state, a lease, a status and the
+  created resource's id; it has no person column, no client-chosen text and **no
+  response body**, because the responses hold a secret, a person's value or a name
+  that may be one.
+- The contacts API keeps its own `contact_idempotency` table (7.6).
 
 **Authentication:** local accounts (argon2id), server-side sessions in
 HttpOnly SameSite cookies with CSRF tokens on mutations; API keys random, stored

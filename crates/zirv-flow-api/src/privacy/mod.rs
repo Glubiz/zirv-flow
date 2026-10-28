@@ -7,7 +7,7 @@ pub(crate) mod exports;
 pub(crate) mod person;
 pub(crate) mod settings;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_core::people::Identifier;
@@ -17,7 +17,7 @@ use zirv_flow_store::PgPool;
 use crate::admin::AdminError;
 use crate::auth::Principal;
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize, Serialize, ToSchema)]
 pub(crate) struct TargetIdentifier {
     /// `email`, `phone`, `anonymous_id` or `external:<namespace>`.
     #[schema(example = "email")]
@@ -27,7 +27,7 @@ pub(crate) struct TargetIdentifier {
 }
 
 /// The person a privacy request is about: give a `person_id` or an `identifier`, not both.
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize, Serialize, ToSchema)]
 pub(crate) struct PersonTarget {
     /// The person, or the person they were merged into.
     person_id: Option<Uuid>,

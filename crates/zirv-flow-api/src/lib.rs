@@ -16,6 +16,7 @@ mod feedback;
 mod flows;
 mod forwarding;
 mod health;
+mod idempotency;
 mod imports;
 mod ingest;
 mod jobs_admin;
