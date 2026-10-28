@@ -294,7 +294,7 @@ pub async fn assert_fixture(
         matching[0].cause == trace.cause,
         "the fixture cause differs"
     );
-    let mut known = std::collections::HashSet::from([trace.cause.id.clone()]);
+    let mut known: hashbrown::HashSet<String> = hashbrown::HashSet::from([trace.cause.id.clone()]);
     let mut remaining: Vec<_> = records.iter().collect();
     while !remaining.is_empty() {
         let before = remaining.len();

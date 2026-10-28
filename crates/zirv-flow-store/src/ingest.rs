@@ -1699,6 +1699,16 @@ mod tests {
                 .await
                 .unwrap();
 
+            // The drain records the row's API key as the cause, not the request id.
+            let key_id: Uuid = sqlx::query_scalar("SELECT api_key_id FROM ingest_inbox")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            let drained = TraceContext {
+                trace_id: trace.trace_id,
+                cause: Cause::api(key_id.to_string()),
+            };
+
             let outcome = drain_batch_singly(&pool, ws, Shard::ALL, &key(), 500)
                 .await
                 .unwrap();
@@ -1717,7 +1727,7 @@ mod tests {
             crate::decision_testing::assert_fixture(
                 &pool,
                 ws,
-                &trace,
+                &drained,
                 ("record.rejected", "rejected", Some("apply_failed")),
                 json!({"reject": reject}),
             )
