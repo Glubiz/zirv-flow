@@ -110,7 +110,7 @@ function routes({ role = "writer", routes: extra = {}, state = "published" }: Op
     [`GET ${FLOW}/versions/2/counts`]: () => json(counts(2)),
     [`GET ${FLOW}/versions/1/counts`]: () =>
       json({ version: 1, nodes: [nodeCount("bump", "action.update_trait", 4, 1, 3), nodeCount("end", "exit", 1)] }),
-    [`GET ${FLOW}/enrollments`]: () => json({ enrollments: [enrollment(E2), failedEnrollment()], next_before: null }),
+    [`GET ${FLOW}/enrollments`]: () => json({ enrollments: [enrollment(E2), failedEnrollment()], next_cursor: null }),
     [`GET ${FLOW}/enrollments/${E1}`]: () => json(pathBody()),
     ...extra,
   };
@@ -168,9 +168,9 @@ describe("the enrollment inspector", () => {
         routes: {
           [`GET ${FLOW}/enrollments`]: (request) => {
             const query = new URL(request.url).searchParams;
-            if (query.get("state") === "failed") return json({ enrollments: [failedEnrollment()], next_before: null });
-            if (query.get("before") === "cursor-2") return json({ enrollments: [enrollment(E3, { node: "n2" })], next_before: null });
-            return json({ enrollments: [enrollment(E2), failedEnrollment()], next_before: "cursor-2" });
+            if (query.get("state") === "failed") return json({ enrollments: [failedEnrollment()], next_cursor: null });
+            if (query.get("cursor") === "cursor-2") return json({ enrollments: [enrollment(E3, { node: "n2" })], next_cursor: null });
+            return json({ enrollments: [enrollment(E2), failedEnrollment()], next_cursor: "cursor-2" });
           },
         },
       }),
@@ -184,7 +184,7 @@ describe("the enrollment inspector", () => {
     await user.click(within(list).getByRole("button", { name: "Show more" }));
     await waitFor(() => expect(within(rows).getAllByRole("listitem")).toHaveLength(3));
     expect(within(list).queryByRole("button", { name: "Show more" })).not.toBeInTheDocument();
-    expect(calls.filter((call) => call.path === `${FLOW}/enrollments`).at(-1)?.search).toContain("before=cursor-2");
+    expect(calls.filter((call) => call.path === `${FLOW}/enrollments`).at(-1)?.search).toContain("cursor=cursor-2");
 
     await user.selectOptions(within(list).getByLabelText("State"), "failed");
 
@@ -525,7 +525,7 @@ describe("the inspector's states", () => {
           [`GET ${FLOW}/enrollments`]: async (request) => {
             await gate;
             const state = new URL(request.url).searchParams.get("state");
-            return json({ enrollments: state === null ? [] : [], next_before: null });
+            return json({ enrollments: state === null ? [] : [], next_cursor: null });
           },
         },
       }),
@@ -551,7 +551,7 @@ describe("the inspector's states", () => {
         routes: {
           [`GET ${FLOW}/enrollments`]: () => {
             asked += 1;
-            return asked === 1 ? problem(500, "Internal Server Error", "the enrollments could not be read") : json({ enrollments: [enrollment(E2)], next_before: null });
+            return asked === 1 ? problem(500, "Internal Server Error", "the enrollments could not be read") : json({ enrollments: [enrollment(E2)], next_cursor: null });
           },
         },
       }),

@@ -24,7 +24,7 @@ function mount(props: { themeLogo?: boolean; allowUrl?: boolean; role?: "admin" 
     "GET /api/v1/session": () => json(session(user, "csrf-pick")),
     "GET /api/v1/workspaces/ws1/members": () => json(role === null ? [] : members(role, user.id)),
     [`GET ${WS}/assets`]: (request) =>
-      new URL(request.url).searchParams.has("before") ? problem(500, "Broken", "Try later") : json(props.list ?? listBody([A, B])),
+      new URL(request.url).searchParams.has("cursor") ? problem(500, "Broken", "Try later") : json(props.list ?? listBody([A, B])),
   });
   const onPick = vi.fn();
   const onClose = vi.fn();
@@ -216,7 +216,7 @@ describe("the asset picker", () => {
 
   it("says so when more images cannot be loaded", async () => {
     mount({
-      list: listBody([A], { next_before: A.id }),
+      list: listBody([A], { next_cursor: A.id }),
     });
     const user = userEvent.setup();
 

@@ -94,7 +94,7 @@ describe("people routes", () => {
     "GET /api/v1/session": () => json(session(OWNER)),
     "GET /api/v1/workspaces": () => json([WORKSPACE]),
     "GET /api/v1/workspaces/ws1/members": () => json([]),
-    "GET /api/v1/workspaces/ws1/identity-conflicts": () => json({ conflicts: [], next_before: null }),
+    "GET /api/v1/workspaces/ws1/identity-conflicts": () => json({ conflicts: [], next_cursor: null }),
   };
 
   it("serves the search page as People, current in the menu", async () => {
@@ -139,7 +139,7 @@ describe("event routes", () => {
       "GET /api/v1/workspaces": () => json([WORKSPACE]),
       "GET /api/v1/workspaces/ws1/members": () => json([]),
       "GET /api/v1/workspaces/ws1/event-schemas": () => json([]),
-      "GET /api/v1/workspaces/ws1/ingest-rejects": () => json({ rejects: [], next_before: null }),
+      "GET /api/v1/workspaces/ws1/ingest-rejects": () => json({ rejects: [], next_cursor: null }),
       "GET /api/v1/workspaces/ws1/event-policy": () =>
         json({
           unplanned: "draft",
@@ -229,7 +229,7 @@ describe("expired session", () => {
         }
         return problem(401, "Unauthorized", "session expired");
       },
-      "GET /api/v1/admin/jobs/dead": () => json({ jobs: [], next_before: null }),
+      "GET /api/v1/admin/jobs/dead": () => json({ jobs: [], next_cursor: null }),
       "GET /api/v1/setup": () => json({ required: false }),
       "GET /api/v1/version": () => json({ version: "0.10.0" }),
     });

@@ -28,7 +28,7 @@ function setup(retry: () => Response) {
   const calls = mockApi({
     "GET /api/v1/session": () => json(session(OWNER, "csrf-jobs")),
     "GET /api/v1/admin/jobs": () => json(DEPTH),
-    "GET /api/v1/admin/jobs/dead": () => json({ jobs: retried ? [] : [DEAD_JOB], next_before: null }),
+    "GET /api/v1/admin/jobs/dead": () => json({ jobs: retried ? [] : [DEAD_JOB], next_cursor: null }),
     [`POST /api/v1/admin/jobs/${DEAD_JOB.id}/retry`]: () => {
       retried = true;
       return retry();
@@ -90,9 +90,9 @@ describe("jobs admin", () => {
       "GET /api/v1/session": () => json(session(OWNER)),
       "GET /api/v1/admin/jobs": () => json(DEPTH),
       "GET /api/v1/admin/jobs/dead": (request) =>
-        new URL(request.url).searchParams.get("before") === "cursor-1"
-          ? json({ jobs: [job(2)], next_before: null })
-          : json({ jobs: [job(1)], next_before: "cursor-1" }),
+        new URL(request.url).searchParams.get("cursor") === "cursor-1"
+          ? json({ jobs: [job(2)], next_cursor: null })
+          : json({ jobs: [job(1)], next_cursor: "cursor-1" }),
     });
     const user = userEvent.setup();
     renderRoute("/jobs", "/jobs", <JobsPage />);
@@ -104,6 +104,6 @@ describe("jobs admin", () => {
     expect(screen.getAllByText("kind.n2")).toHaveLength(1);
     expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
     const second = calls.filter((call) => call.path === "/api/v1/admin/jobs/dead")[1];
-    expect(second?.search).toContain("before=cursor-1");
+    expect(second?.search).toContain("cursor=cursor-1");
   });
 });

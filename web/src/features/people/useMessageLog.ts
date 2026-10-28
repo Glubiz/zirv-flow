@@ -35,7 +35,7 @@ function query(filter: MessageFilter, before?: string) {
     limit: PAGE_SIZE,
     ...(filter.result ? { result: filter.result } : {}),
     ...(filter.template ? { template_id: filter.template } : {}),
-    ...(before ? { before } : {}),
+    ...(before ? { cursor: before } : {}),
   };
 }
 
@@ -57,7 +57,7 @@ export function useMessageLog(workspaceId: string, personId: string, filter: Mes
   const base = first.status === "ready" ? first.data : null;
   const more = extra !== null && extra.base === base ? extra : null;
   const messages = base ? [...base.messages, ...(more?.messages ?? [])] : [];
-  const nextBefore = base ? (more ? more.nextBefore : (base.next_before ?? null)) : null;
+  const nextBefore = base ? (more ? more.nextBefore : (base.next_cursor ?? null)) : null;
 
   // A request is out, and the page a response must still belong to; two activations before the
   // button disables must not append one page twice.
@@ -84,7 +84,7 @@ export function useMessageLog(workspaceId: string, personId: string, filter: Mes
         setExtra((previous) => ({
           base,
           messages: [...(previous?.base === base ? previous.messages : []), ...page.messages],
-          nextBefore: page.next_before ?? null,
+          nextBefore: page.next_cursor ?? null,
         }));
       },
       (failure: unknown) => {

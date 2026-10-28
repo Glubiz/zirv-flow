@@ -45,7 +45,7 @@ function RejectList({ workspaceId, canReplay }: { workspaceId: string; canReplay
             query: {
               ...(applied.name !== "" ? { name: applied.name } : {}),
               ...(applied.reason !== "" ? { reason: applied.reason } : {}),
-              ...(before !== null ? { before } : {}),
+              ...(before !== null ? { cursor: before } : {}),
             },
           },
         }),
@@ -151,7 +151,7 @@ function RejectList({ workspaceId, canReplay }: { workspaceId: string; canReplay
               </div>
               <div className="panel-pad row">
                 {before !== null ? <Button onClick={() => setBefore(null)}>Back to the newest</Button> : null}
-                {data.next_before ? <Button onClick={() => setBefore(data.next_before ?? null)}>Older rejects</Button> : null}
+                {data.next_cursor ? <Button onClick={() => setBefore(data.next_cursor ?? null)}>Older rejects</Button> : null}
               </div>
             </>
           )}

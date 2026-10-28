@@ -299,7 +299,7 @@ describe("delivery counts on the canvas", () => {
             node("n5", "exit", 20),
           ],
         }),
-      [`GET ${FLOW}/enrollments`]: () => json({ enrollments: [], next_before: null }),
+      [`GET ${FLOW}/enrollments`]: () => json({ enrollments: [], next_cursor: null }),
     };
   }
 

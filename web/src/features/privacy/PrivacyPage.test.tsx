@@ -45,8 +45,8 @@ function adminRoutes(extra: Parameters<typeof mockApi>[0] = {}) {
   return {
     "GET /api/v1/session": () => json(session(OWNER, "csrf-privacy")),
     "GET /api/v1/workspaces/ws1/members": () => json(members("admin", OWNER.id)),
-    [`GET ${BASE}/erasures`]: () => json({ erasures: [], next_before: null }),
-    [`GET ${BASE}/exports`]: () => json({ exports: [], next_before: null }),
+    [`GET ${BASE}/erasures`]: () => json({ erasures: [], next_cursor: null }),
+    [`GET ${BASE}/exports`]: () => json({ exports: [], next_cursor: null }),
     [`GET ${BASE}/settings`]: () => json({ orphan_policy: "keep" }),
     "GET /api/v1/workspaces/ws1/retention": () => json({ windows: [] }),
     ...extra,
@@ -55,7 +55,7 @@ function adminRoutes(extra: Parameters<typeof mockApi>[0] = {}) {
 
 describe("privacy", () => {
   it("lists erasure requests with their status and shows no personal value", async () => {
-    mockApi(adminRoutes({ [`GET ${BASE}/erasures`]: () => json({ erasures: [DONE, FAILED], next_before: null }) }));
+    mockApi(adminRoutes({ [`GET ${BASE}/erasures`]: () => json({ erasures: [DONE, FAILED], next_cursor: null }) }));
     renderRoute("/w/ws1/privacy", ROUTE, <PrivacyPage />);
 
     const table = await screen.findByRole("table", { name: "Erasure requests" });
@@ -84,7 +84,7 @@ describe("privacy", () => {
       adminRoutes({
         [`GET ${BASE}/erasures`]: () => {
           listed += 1;
-          return json({ erasures: listed > 1 ? [{ ...DONE, status: "pending", completed_at: null }] : [], next_before: null });
+          return json({ erasures: listed > 1 ? [{ ...DONE, status: "pending", completed_at: null }] : [], next_cursor: null });
         },
         [`POST ${BASE}/erasures`]: () => json({ ...DONE, status: "pending", completed_at: null }, 202),
       }),
@@ -159,7 +159,7 @@ describe("privacy", () => {
               exportBody({ id: "x3", status: "expired", expires_at: "2026-10-01T10:00:00Z" }),
               exportBody({ id: "x4", status: "failed", ready_at: null, expires_at: null, size_bytes: null }),
             ],
-            next_before: null,
+            next_cursor: null,
           }),
       }),
     );
@@ -180,7 +180,7 @@ describe("privacy", () => {
     mockApi(
       adminRoutes({
         [`GET ${BASE}/exports`]: () =>
-          json({ exports: [exportBody({ expires_at: new Date(Date.now() - 1000).toISOString() })], next_before: null }),
+          json({ exports: [exportBody({ expires_at: new Date(Date.now() - 1000).toISOString() })], next_cursor: null }),
       }),
     );
     renderRoute("/w/ws1/privacy", ROUTE, <PrivacyPage />);
@@ -196,7 +196,7 @@ describe("privacy", () => {
       adminRoutes({
         [`GET ${BASE}/exports`]: () => {
           listed += 1;
-          return json({ exports: listed > 1 ? [exportBody({ status: "pending", ready_at: null, expires_at: null })] : [], next_before: null });
+          return json({ exports: listed > 1 ? [exportBody({ status: "pending", ready_at: null, expires_at: null })] : [], next_cursor: null });
         },
         [`POST ${BASE}/exports`]: () => json(exportBody({ status: "pending" }), 202),
       }),
@@ -280,13 +280,13 @@ describe("privacy", () => {
         adminRoutes({
           [`GET ${BASE}/erasures`]: () => {
             erasures += 1;
-            return json({ erasures: [erasures > 1 ? DONE : { ...DONE, status: "pending", completed_at: null }], next_before: null });
+            return json({ erasures: [erasures > 1 ? DONE : { ...DONE, status: "pending", completed_at: null }], next_cursor: null });
           },
           [`GET ${BASE}/exports`]: () => {
             exports += 1;
             return json({
               exports: [exportBody(exports > 2 ? {} : { status: "pending", ready_at: null, expires_at: null })],
-              next_before: null,
+              next_cursor: null,
             });
           },
         }),
@@ -318,7 +318,7 @@ describe("privacy", () => {
             if (erasures === 2) return problem(500, "Internal Server Error", "internal error");
             return json({
               erasures: [erasures > 2 ? DONE : { ...DONE, status: "pending", completed_at: null }],
-              next_before: null,
+              next_cursor: null,
             });
           },
         }),
@@ -344,11 +344,11 @@ describe("privacy", () => {
           [`GET ${BASE}/erasures`]: async () => {
             erasures += 1;
             if (erasures === 1) {
-              return json({ erasures: [{ ...DONE, status: "pending", completed_at: null }], next_before: null });
+              return json({ erasures: [{ ...DONE, status: "pending", completed_at: null }], next_cursor: null });
             }
             // Slower than two beats.
             await new Promise((resolve) => setTimeout(resolve, 12000));
-            return json({ erasures: [DONE], next_before: null });
+            return json({ erasures: [DONE], next_cursor: null });
           },
         }),
       );
@@ -373,7 +373,7 @@ describe("privacy", () => {
         adminRoutes({
           [`GET ${BASE}/erasures`]: () => {
             erasures += 1;
-            return json({ erasures: [{ ...DONE, status: "pending", completed_at: null }], next_before: null });
+            return json({ erasures: [{ ...DONE, status: "pending", completed_at: null }], next_cursor: null });
           },
         }),
       );

@@ -35,7 +35,7 @@ function base(extra: Record<string, Route> = {}) {
       json([destination(), destination({ id: OTHER_DEST_ID, name: "Mail relay", kind: "smtp", config: {} })]),
     [`GET ${WS}/forwarding/status`]: () => json({ destinations: [queue()] }),
     [`GET ${WS}/forwarding/rules`]: () => json([rule()]),
-    [`GET ${WS}/forwarding/dead-letters`]: () => json({ letters: [letter(), letter({ id: OTHER_LETTER_ID, error: "egress_denied", attempts: 3 })], next_before: null }),
+    [`GET ${WS}/forwarding/dead-letters`]: () => json({ letters: [letter(), letter({ id: OTHER_LETTER_ID, error: "egress_denied", attempts: 3 })], next_cursor: null }),
     ...extra,
   };
 }
@@ -233,7 +233,7 @@ describe("dead letters", () => {
   });
 
   it("shows an empty state when nothing is dead", async () => {
-    mockApi(base({ [`GET ${WS}/forwarding/dead-letters`]: () => json({ letters: [], next_before: null }) }));
+    mockApi(base({ [`GET ${WS}/forwarding/dead-letters`]: () => json({ letters: [], next_cursor: null }) }));
     mount();
 
     expect(await screen.findByText("No dead letters")).toBeInTheDocument();
@@ -252,7 +252,7 @@ describe("dead letters", () => {
       base({
         [`GET ${WS}/forwarding/dead-letters`]: () => {
           attempts += 1;
-          return attempts === 1 ? problem(500, "Internal Server Error", "internal error") : json({ letters: [letter()], next_before: null });
+          return attempts === 1 ? problem(500, "Internal Server Error", "internal error") : json({ letters: [letter()], next_cursor: null });
         },
       }),
     );
@@ -271,8 +271,8 @@ describe("dead letters", () => {
           return () => {
             page += 1;
             return page === 1
-              ? json({ letters: [letter()], next_before: "cursor-1" })
-              : json({ letters: [letter({ id: OTHER_LETTER_ID, error: "egress_denied" })], next_before: null });
+              ? json({ letters: [letter()], next_cursor: "cursor-1" })
+              : json({ letters: [letter({ id: OTHER_LETTER_ID, error: "egress_denied" })], next_cursor: null });
           };
         })(),
       }),
@@ -284,7 +284,7 @@ describe("dead letters", () => {
 
     expect(await screen.findByText("egress_denied")).toBeInTheDocument();
     expect(screen.getByText("http_4xx")).toBeInTheDocument();
-    expect(calls.filter((call) => call.path.endsWith("/dead-letters")).at(-1)?.search).toContain("before=cursor-1");
+    expect(calls.filter((call) => call.path.endsWith("/dead-letters")).at(-1)?.search).toContain("cursor=cursor-1");
     expect(screen.queryByRole("button", { name: "Show more" })).not.toBeInTheDocument();
   });
 
@@ -295,7 +295,7 @@ describe("dead letters", () => {
           let page = 0;
           return () => {
             page += 1;
-            return page === 1 ? json({ letters: [letter()], next_before: "cursor-1" }) : json({ letters: [], next_before: null });
+            return page === 1 ? json({ letters: [letter()], next_cursor: "cursor-1" }) : json({ letters: [], next_cursor: null });
           };
         })(),
       }),

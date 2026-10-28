@@ -64,7 +64,7 @@ function routes(overrides: Record<string, () => Response> = {}) {
     [`POST ${BASE}/events/explore/count`]: () => json(COUNT),
     [`POST ${BASE}/events/explore/breakdown`]: () =>
       json({ property: "plan", values: [{ value: "pro", count: 8 }, { value: "free", count: 3 }], other: 1, missing: 1 }),
-    [`POST ${BASE}/events/explore/list`]: () => json({ events: [EVENT], next_after: null }),
+    [`POST ${BASE}/events/explore/list`]: () => json({ events: [EVENT], next_cursor: null }),
     ...overrides,
   };
 }
@@ -181,7 +181,7 @@ describe("event explorer", () => {
   it("pages to older events with the cursor", async () => {
     const calls = mockApi(
       routes({
-        [`POST ${BASE}/events/explore/list`]: () => json({ events: [EVENT], next_after: "cursor-1" }),
+        [`POST ${BASE}/events/explore/list`]: () => json({ events: [EVENT], next_cursor: "cursor-1" }),
       }),
     );
     const user = userEvent.setup();
@@ -190,7 +190,7 @@ describe("event explorer", () => {
     await user.click(await screen.findByRole("button", { name: "Older events" }));
 
     await waitFor(() => {
-      expect((last(calls, "list")?.body as { after?: string }).after).toBe("cursor-1");
+      expect((last(calls, "list")?.body as { cursor?: string }).cursor).toBe("cursor-1");
     });
     expect(await screen.findByRole("button", { name: "Back to the newest" })).toBeInTheDocument();
   });

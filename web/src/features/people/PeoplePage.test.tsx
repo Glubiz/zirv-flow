@@ -58,7 +58,7 @@ describe("people search", () => {
   });
 
   it("searches by identifier and lists the people with a link to each profile", async () => {
-    const calls = mount({ [SEARCH]: () => json({ people: [hit(ADA, "email", "ada@example.test")], next_after: null }) });
+    const calls = mount({ [SEARCH]: () => json({ people: [hit(ADA, "email", "ada@example.test")], next_cursor: null }) });
 
     await searchByEmail("  ada@example.test ");
 
@@ -72,7 +72,7 @@ describe("people search", () => {
   });
 
   it("builds an external kind from the system name", async () => {
-    const calls = mount({ [SEARCH]: () => json({ people: [], next_after: null }) });
+    const calls = mount({ [SEARCH]: () => json({ people: [], next_cursor: null }) });
     const user = userEvent.setup();
 
     await user.selectOptions(await screen.findByLabelText("Kind"), "external");
@@ -98,7 +98,7 @@ describe("people search", () => {
   });
 
   it("shows hidden identifiers as Hidden with an explanation", async () => {
-    mount({ [SEARCH]: () => json({ people: [hit(BOB, "email", null)], next_after: null }) });
+    mount({ [SEARCH]: () => json({ people: [hit(BOB, "email", null)], next_cursor: null }) });
 
     await searchByEmail("bob@example.test");
 
@@ -109,7 +109,7 @@ describe("people search", () => {
   });
 
   it("says when no one matches", async () => {
-    mount({ [SEARCH]: () => json({ people: [], next_after: null }) });
+    mount({ [SEARCH]: () => json({ people: [], next_cursor: null }) });
 
     await searchByEmail("nobody@example.test");
 
@@ -142,7 +142,7 @@ describe("people search", () => {
               }),
               { status: 503, headers: { "content-type": "application/problem+json" } },
             )
-          : json({ people: [hit(ADA, "email", "ada@example.test")], next_after: null });
+          : json({ people: [hit(ADA, "email", "ada@example.test")], next_cursor: null });
       },
     });
 
@@ -156,10 +156,10 @@ describe("people search", () => {
   it("loads the next page after the last person", async () => {
     const calls = mount({
       [SEARCH]: (request) =>
-        request.clone().json().then((body: { after?: string }) =>
-          body.after === ADA
-            ? json({ people: [hit(BOB, "phone", "+4512345678")], next_after: null })
-            : json({ people: [hit(ADA, "email", "ada@example.test")], next_after: ADA }),
+        request.clone().json().then((body: { cursor?: string }) =>
+          body.cursor === ADA
+            ? json({ people: [hit(BOB, "phone", "+4512345678")], next_cursor: null })
+            : json({ people: [hit(ADA, "email", "ada@example.test")], next_cursor: ADA }),
         ),
     });
 
@@ -170,7 +170,7 @@ describe("people search", () => {
     expect(screen.getByText("ada@example.test")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Show more" })).not.toBeInTheDocument();
     const bodies = calls.filter((call) => call.method === "POST").map((call) => call.body);
-    expect(bodies[1]).toEqual({ identifier: { kind: "email", value: "a" }, limit: 50, after: ADA });
+    expect(bodies[1]).toEqual({ identifier: { kind: "email", value: "a" }, limit: 50, cursor: ADA });
   });
 });
 
@@ -202,7 +202,7 @@ describe("searching by a field value", () => {
   });
 
   it("searches a text field by prefix", async () => {
-    const calls = mount({ [SEARCH]: () => json({ people: [hit(ADA, "email", "ada@example.test")], next_after: null }) });
+    const calls = mount({ [SEARCH]: () => json({ people: [hit(ADA, "email", "ada@example.test")], next_cursor: null }) });
     const user = await openFieldSearch();
 
     await user.selectOptions(screen.getByLabelText("Condition"), "prefix");
@@ -217,7 +217,7 @@ describe("searching by a field value", () => {
   });
 
   it("sends a number as a number and refuses text for it", async () => {
-    const calls = mount({ [SEARCH]: () => json({ people: [], next_after: null }) });
+    const calls = mount({ [SEARCH]: () => json({ people: [], next_cursor: null }) });
     const user = await openFieldSearch();
     await user.selectOptions(screen.getByLabelText("Field"), "age");
     await user.selectOptions(screen.getByLabelText("Condition"), "gte");
@@ -236,7 +236,7 @@ describe("searching by a field value", () => {
   });
 
   it("searches for any value of a field without asking for one", async () => {
-    const calls = mount({ [SEARCH]: () => json({ people: [], next_after: null }) });
+    const calls = mount({ [SEARCH]: () => json({ people: [], next_cursor: null }) });
     const user = await openFieldSearch();
 
     await user.selectOptions(screen.getByLabelText("Condition"), "exists");
@@ -248,7 +248,7 @@ describe("searching by a field value", () => {
   });
 
   it("sends a yes or no choice as a boolean", async () => {
-    const calls = mount({ [SEARCH]: () => json({ people: [], next_after: null }) });
+    const calls = mount({ [SEARCH]: () => json({ people: [], next_cursor: null }) });
     const user = await openFieldSearch();
     await user.selectOptions(screen.getByLabelText("Field"), "vip");
 

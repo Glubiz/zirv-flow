@@ -166,7 +166,7 @@ export function templateRoutes({ role = "admin", detail, preview, uses = [], ver
     [`GET ${WS}/sender-identities/options`]: () => json(SENDER_OPTIONS),
     [`GET ${WS}/destinations/options`]: () => json(DESTINATION_OPTIONS),
     [`GET ${WS}/test-send-allowlist/options`]: () => json([{ id: "a1", name: "q***@example.com" }]),
-    [`GET ${WS}/test-sends`]: () => json({ test_sends: [], next_before: null }),
+    [`GET ${WS}/test-sends`]: () => json({ test_sends: [], next_cursor: null }),
     [`GET ${WS}/test-sends/quota`]: () => json(QUOTA),
     [`GET ${WS}/themes`]: () => json([]),
     [`GET ${WS}/snippets`]: () => json([]),

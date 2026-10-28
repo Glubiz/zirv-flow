@@ -39,7 +39,7 @@ function mountWith(handler: (request: Request) => Response) {
 
 describe("rejects", () => {
   it("lists the reason and each failing property, and expands a masked sample", async () => {
-    mountWith(() => json({ rejects: [REJECT], next_before: null }));
+    mountWith(() => json({ rejects: [REJECT], next_cursor: null }));
     const user = userEvent.setup();
     open();
 
@@ -56,7 +56,7 @@ describe("rejects", () => {
   });
 
   it("shows an empty state and a retry", async () => {
-    mountWith(() => json({ rejects: [], next_before: null }));
+    mountWith(() => json({ rejects: [], next_cursor: null }));
     const first = open();
     expect(await screen.findByText("No rejects")).toBeInTheDocument();
     first.unmount();
@@ -67,7 +67,7 @@ describe("rejects", () => {
   });
 
   it("filters by event name and reason", async () => {
-    const calls = mountWith(() => json({ rejects: [], next_before: null }));
+    const calls = mountWith(() => json({ rejects: [], next_cursor: null }));
     const user = userEvent.setup();
     open();
 
@@ -84,10 +84,10 @@ describe("rejects", () => {
 
   it("pages to older rejects with the cursor and back to the newest", async () => {
     const calls = mountWith((request) => {
-      const before = new URL(request.url).searchParams.get("before");
+      const before = new URL(request.url).searchParams.get("cursor");
       return before === null
-        ? json({ rejects: [REJECT], next_before: "cursor-1" })
-        : json({ rejects: [{ ...REJECT, id: "r2", name: "older_event" }], next_before: null });
+        ? json({ rejects: [REJECT], next_cursor: "cursor-1" })
+        : json({ rejects: [{ ...REJECT, id: "r2", name: "older_event" }], next_cursor: null });
     });
     const user = userEvent.setup();
     open();
@@ -95,7 +95,7 @@ describe("rejects", () => {
     await user.click(await screen.findByRole("button", { name: "Older rejects" }));
 
     expect(await screen.findByText("older_event")).toBeInTheDocument();
-    expect(new URLSearchParams(calls.filter((call) => call.path === URI).at(-1)?.search).get("before")).toBe("cursor-1");
+    expect(new URLSearchParams(calls.filter((call) => call.path === URI).at(-1)?.search).get("cursor")).toBe("cursor-1");
     expect(screen.queryByRole("button", { name: "Older rejects" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Back to the newest" }));
     expect(await screen.findByText("order")).toBeInTheDocument();
@@ -111,7 +111,7 @@ describe("replay", () => {
       "GET /api/v1/workspaces/ws1/members": () =>
         json([{ user_id: user.id, email: "someone@example.test", role, added_at: "2026-10-01T09:00:00Z" }]),
       [`GET ${URI}`]: () =>
-        json({ rejects: [REJECT, { ...REJECT, id: "r-done", replayed_at: "2026-10-02T09:00:00Z" }], next_before: null }),
+        json({ rejects: [REJECT, { ...REJECT, id: "r-done", replayed_at: "2026-10-02T09:00:00Z" }], next_cursor: null }),
       [`POST ${REPLAY_URI}`]: replay,
     });
   }
@@ -181,7 +181,7 @@ describe("replay", () => {
     mockApi({
       "GET /api/v1/session": () => json(session(OWNER)),
       "GET /api/v1/workspaces/ws1/members": () => json([{ user_id: OWNER.id, email: "o@example.test", role: "admin", added_at: "2026-10-01T09:00:00Z" }]),
-      [`GET ${URI}`]: () => json({ rejects: [REJECT], next_before: null }),
+      [`GET ${URI}`]: () => json({ rejects: [REJECT], next_cursor: null }),
       [`POST ${REPLAY_URI}`]: () => json({ dry_run: false, selected: 2, rejects: [], totals: PREVIEW.totals, trace_id: "a".repeat(32) }, 202),
     });
     await user.click(within(dialog).getByRole("button", { name: "Replay 1 event" }));
