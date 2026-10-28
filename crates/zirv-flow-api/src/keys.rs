@@ -2,8 +2,8 @@
 
 use axum::Json;
 use axum::extract::{Path, State};
-use axum::http::{StatusCode, header};
-use axum::response::IntoResponse;
+use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
+use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use utoipa::ToSchema;
@@ -14,6 +14,7 @@ use zirv_flow_store::ApiKey;
 use crate::AppState;
 use crate::admin;
 use crate::auth::{Need, Principal, authorize, path_id};
+use crate::idempotency::{self, Keyed, ReplayedProblem, RequestHash};
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
 
@@ -84,7 +85,7 @@ pub(crate) struct CreatedApiKeyBody {
     key: String,
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize, Serialize, ToSchema)]
 pub(crate) struct CreateApiKeyRequest {
     /// 1 to 100 characters.
     #[schema(example = "ingest worker")]
@@ -120,20 +121,27 @@ pub(crate) async fn list(
     Ok(Json(keys.iter().map(ApiKeyBody::from).collect()))
 }
 
-/// Creates a key and returns its secret, once.
+//// Creates a key and returns its secret, once. Send an `Idempotency-Key` header (1 to 255
+/// characters) to make a retry safe for 24 hours: the same key with the same body answers
+/// `409 idempotency_key_replayed` with the id of the key it created and never shows the secret
+/// again; the same key with another body is `422 idempotency_key_reused`.
 #[utoipa::path(
     post,
     operation_id = "create_api_key",
     path = "/api/v1/workspaces/{ws}/api-keys",
     tag = "api-keys",
-    params(("ws" = Uuid, Path, description = "Workspace id")),
+    params(
+        ("ws" = Uuid, Path, description = "Workspace id"),
+        ("Idempotency-Key" = Option<String>, Header, description = "1 to 255 characters; makes a retry safe for 24 hours")
+    ),
     request_body = CreateApiKeyRequest,
     responses(
         (status = 201, description = "The new key, with its secret", body = CreatedApiKeyBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a missing scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "Invalid name or scopes", body = Problem, content_type = "application/problem+json")
+        (status = 409, description = "The Idempotency-Key already created a key (`idempotency_key_replayed`); resource_id is its id and the secret is not shown again", body = ReplayedProblem, content_type = "application/problem+json"),
+        (status = 422, description = "Invalid name or scopes, or the Idempotency-Key is invalid or reused (`idempotency_key_reused`)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]
@@ -141,20 +149,37 @@ pub(crate) async fn create(
     State(state): State<AppState>,
     principal: Principal,
     Path(ws): Path<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
     ApiJson(body): ApiJson<CreateApiKeyRequest>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<Response, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
     let scopes = body
         .scopes
         .iter()
         .map(|scope| scope.parse::<Scope>())
         .collect::<Result<Vec<_>, _>>()?;
+    let request_hash = RequestHash::of_json(&method, &uri, &body)?;
+    let keyed = Keyed::of(&headers, "create_api_key")?;
+    let guard = match idempotency::enter(&state.pool, workspace.id, keyed, request_hash).await? {
+        Ok(guard) => guard,
+        Err(replay) => return Ok(replay),
+    };
     let created = admin::create_api_key(
         &state.pool,
         &principal.context(),
         workspace.id,
         &body.name,
         &scopes,
+    )
+    .await?;
+    idempotency::finish(
+        guard,
+        request_hash,
+        StatusCode::CREATED,
+        created.key.id.as_uuid(),
+        None,
     )
     .await?;
     Ok((
@@ -164,10 +189,11 @@ pub(crate) async fn create(
             metadata: ApiKeyBody::from(&created.key),
             key: created.plaintext,
         }),
-    ))
+    )
+        .into_response())
 }
 
-/// Revokes a key. Revoked keys are refused with 401 from then on.
+// Revokes a key. Revoked keys are refused with 401 from then on.
 #[utoipa::path(
     delete,
     operation_id = "revoke_api_key",

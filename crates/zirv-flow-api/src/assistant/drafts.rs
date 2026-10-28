@@ -26,7 +26,8 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, Method, StatusCode, Uri};
+use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use time::Duration;
@@ -65,6 +66,7 @@ use crate::auth::{Need, Principal, authorize, path_id};
 use crate::flows::crud::{FlowDetailBody, check_document};
 use crate::flows::test_mode::simulation::{SimulationBody, simulate};
 use crate::flows::{flow_error, issue_problems, parse_graph, parse_settings};
+use crate::idempotency::{self, Keyed, RequestHash};
 use crate::imports::MappingBody;
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem, SegmentIssueProblem};
@@ -116,7 +118,7 @@ impl DraftKindBody {
 }
 
 /// What to draft.
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct DraftRequest {
     kind: DraftKindBody,
@@ -754,7 +756,10 @@ async fn dry_run_manifest(
     operation_id = "create_ai_draft",
     path = "/api/v1/workspaces/{ws}/ai/drafts",
     tag = "ai",
-    params(("ws" = Uuid, Path, description = "Workspace id")),
+    params(
+        ("ws" = Uuid, Path, description = "Workspace id"),
+        ("Idempotency-Key" = Option<String>, Header, description = "1 to 255 characters; makes a retry safe for 24 hours, so a retry after a timeout does not spend the budget twice")
+    ),
     request_body = DraftRequest,
     responses(
         (status = 201, description = "The draft run: a validated draft with its changes and dry run, or the problems of the last attempt", body = DraftBody),
@@ -762,9 +767,9 @@ async fn dry_run_manifest(
         (status = 402, description = "The workspace's monthly AI budget is spent (`ai_budget_exceeded`); nothing was sent", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not an editor, not an admin for a mapping or manifest draft, or an API key (`ai_user_required`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, source or stream, or no access", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "The assistant is off (`ai_disabled`), the source does not use a manifest, or the template is archived (`template_archived`)", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "The assistant is off (`ai_disabled`), the source does not use a manifest, or the template is archived (`template_archived`), or the Idempotency-Key already ran a draft (`idempotency_key_replayed`; `resource_id` is the draft's id and the body is not kept, as it may hold values from the workspace)", body = Problem, content_type = "application/problem+json"),
         (status = 413, description = "The body is over 160 KiB", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "A request that breaks a rule, naming the field, such as a missing prompt, `sample_required` or `sample_not_supported`; for a template `ai_template_too_large` (the document is over 96 KiB) or `ai_template_unsupported` (not an email template, a block layout of a code email, or, without the personal-data opt-in, a `visible_if` too deep or too large to mask)", body = Problem, content_type = "application/problem+json"),
+        (status = 422, description = "The Idempotency-Key is invalid or reused (`idempotency_key_reused`), or a request that breaks a rule, naming the field, such as a missing prompt, `sample_required` or `sample_not_supported`; for a template `ai_template_too_large` (the document is over 96 KiB) or `ai_template_unsupported` (not an email template, a block layout of a code email, or, without the personal-data opt-in, a `visible_if` too deep or too large to mask)", body = Problem, content_type = "application/problem+json"),
         (status = 429, description = "Too many AI calls (`ai_rate_limited`); try again in a minute", body = Problem, content_type = "application/problem+json"),
         (status = 502, description = "The model provider failed (`ai_provider_error`), the source did, or (a template draft) the render host answered unusably (`render_protocol`)", body = Problem, content_type = "application/problem+json"),
         (status = 503, description = "The server has no master key to open the provider key, or (a template draft) the render host stopped (`render_child_exited`) or rendering is not available (`render_unavailable`)", body = Problem, content_type = "application/problem+json")
@@ -775,8 +780,11 @@ pub(crate) async fn create(
     State(state): State<AppState>,
     principal: Principal,
     Path(ws): Path<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
     ApiJson(request): ApiJson<DraftRequest>,
-) -> Result<(StatusCode, Json<DraftBody>), ApiError> {
+) -> Result<Response, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, draft_need(&principal)).await?;
     let user = session_user(&principal)?;
     let kind = request.kind.store();
@@ -787,6 +795,13 @@ pub(crate) async fn create(
         authorize(&state, &principal, workspace.id, Need::Admin).await?;
     }
     check_request(&request)?;
+    // A retry of a draft that already ran answers from the key and spends nothing.
+    let request_hash = RequestHash::of_json(&method, &uri, &request)?;
+    let keyed = Keyed::of(&headers, "create_ai_draft")?;
+    let guard = match idempotency::enter(&state.pool, workspace.id, keyed, request_hash).await? {
+        Ok(guard) => guard,
+        Err(replay) => return Ok(replay),
+    };
     // The assistant being off is the first answer, before anything is read.
     let dispatcher = Dispatcher::open(&state, Some(user), workspace.id, kind.as_str())
         .await
@@ -1127,7 +1142,8 @@ pub(crate) async fn create(
             return Err(error);
         }
     };
-    Ok((StatusCode::CREATED, Json(body)))
+    idempotency::finish(guard, request_hash, StatusCode::CREATED, body.id, None).await?;
+    Ok((StatusCode::CREATED, Json(body)).into_response())
 }
 
 /// Re-checks a stored draft against the current state: the saved version is unchanged since the

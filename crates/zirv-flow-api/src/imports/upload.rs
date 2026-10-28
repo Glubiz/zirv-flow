@@ -7,6 +7,7 @@ use axum::Json;
 use axum::extract::{Path, RawQuery, Request, State};
 use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use futures_util::StreamExt;
 use serde_json::json;
 use zirv_flow_core::csv_file::{CsvError, CsvParser, detect_delimiter};
@@ -17,6 +18,7 @@ use super::{CsvImportDetailBody, ImportLimits, SAMPLE_ROWS};
 use crate::AppState;
 use crate::admin;
 use crate::auth::{Need, Principal, authorize, may_view_pii, path_id};
+use crate::idempotency::{self, Keyed, Opened, ReplayedProblem, RequestHash};
 use crate::problem::{ApiError, Problem};
 use crate::trace::request_trace;
 
@@ -255,6 +257,7 @@ async fn receive(
     body: axum::body::Body,
     limits: ImportLimits,
     delimiter: Option<u8>,
+    hash: &mut RequestHash,
 ) -> Result<(Scan, Vec<String>, Vec<Vec<String>>), ApiError> {
     let mut scan = FileScan::new(delimiter);
     let mut stream = body.into_data_stream();
@@ -274,6 +277,7 @@ async fn receive(
         if total > limits.max_file_bytes {
             return Err(too_large());
         }
+        hash.update(&piece);
         upload.write(&piece).await.map_err(|error| {
             if error.is_erased() {
                 ApiError::new(
@@ -296,6 +300,34 @@ async fn receive(
     Ok((scanned, names, samples))
 }
 
+/// Reads the body of a request whose key was used before, only to hash it, with the limits of an
+/// upload.
+async fn drain(
+    body: axum::body::Body,
+    limits: ImportLimits,
+    hash: &mut RequestHash,
+) -> Result<(), ApiError> {
+    let mut stream = body.into_data_stream();
+    let mut total = 0_u64;
+    loop {
+        let next = tokio::time::timeout(limits.idle_timeout, stream.next())
+            .await
+            .map_err(|_| {
+                ApiError::new(
+                    StatusCode::REQUEST_TIMEOUT,
+                    "no data arrived for too long; the upload was abandoned",
+                )
+            })?;
+        let Some(piece) = next else { return Ok(()) };
+        let piece = piece.map_err(|_| ApiError::bad_request("the upload was interrupted"))?;
+        total += piece.len() as u64;
+        if total > limits.max_file_bytes {
+            return Err(too_large());
+        }
+        hash.update(&piece);
+    }
+}
+
 /// Uploads a CSV file as a new import. The body is the raw `text/csv` file, streamed into the
 /// database in 1 MiB chunks; it must be UTF-8 (a byte order mark is ignored) with a header row
 /// of unique names. The delimiter is detected from `,`, `;` and tab unless one is given. The
@@ -314,7 +346,8 @@ async fn receive(
         ("file_name" = Option<String>, Query, description = "The file's name; defaults to name"),
         ("source" = Option<String>, Query, description = "The source records are written under: a-z, 0-9, _ and -; default csv"),
         ("stream" = Option<String>, Query, description = "The stream records are written under; default the file name without its extension"),
-        ("delimiter" = Option<String>, Query, description = "comma, semicolon or tab; detected when absent")
+        ("delimiter" = Option<String>, Query, description = "comma, semicolon or tab; detected when absent"),
+        ("Idempotency-Key" = Option<String>, Header, description = "1 to 255 characters; makes a retry safe for 24 hours")
     ),
     request_body(content = String, content_type = "text/csv", description = "The CSV file"),
     responses(
@@ -326,7 +359,8 @@ async fn receive(
         (status = 408, description = "No byte arrived for 60 seconds; the upload was abandoned and nothing was kept", body = Problem, content_type = "application/problem+json"),
         (status = 413, description = "The file is over imports.max_file_bytes", body = Problem, content_type = "application/problem+json"),
         (status = 415, description = "The content type is not text/csv", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "Not UTF-8, empty, or a header with blank or repeated names", body = Problem, content_type = "application/problem+json")
+        (status = 409, description = "The Idempotency-Key already uploaded an import (`idempotency_key_replayed`); resource_id is the import's id and the body is not kept, as it holds rows of the file", body = ReplayedProblem, content_type = "application/problem+json"),
+        (status = 422, description = "Not UTF-8, empty, a header with blank or repeated names, or an Idempotency-Key that is invalid or was used for another file (`idempotency_key_reused`)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]
@@ -336,7 +370,7 @@ pub(crate) async fn upload(
     Path(ws): Path<String>,
     RawQuery(query): RawQuery,
     request: Request,
-) -> Result<(StatusCode, Json<CsvImportDetailBody>), ApiError> {
+) -> Result<Response, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let params = UploadParams::parse(&query.unwrap_or_default())?;
     if !is_csv(request.headers()) {
@@ -354,6 +388,17 @@ pub(crate) async fn upload(
     if declared.is_some_and(|length| length > limits.max_file_bytes) {
         return Err(too_large());
     }
+    let keyed = Keyed::of(request.headers(), "upload_import")?;
+    let mut request_hash = RequestHash::new(request.method(), request.uri());
+    // The file streams to the database, so the hash is built as it arrives. A key that was used
+    // before reads the body only to compare it.
+    let guard = match idempotency::open(&state.pool, workspace.id, keyed).await? {
+        Opened::Free(guard) => guard,
+        Opened::Seen(seen) => {
+            drain(request.into_body(), limits, &mut request_hash).await?;
+            return Ok(seen.answer(request_hash.finish()));
+        }
+    };
 
     let trace = request_trace();
     let mut upload = ImportUpload::begin(
@@ -369,7 +414,14 @@ pub(crate) async fn upload(
         },
     )
     .await?;
-    let received = receive(&mut upload, request.into_body(), limits, params.delimiter).await;
+    let received = receive(
+        &mut upload,
+        request.into_body(),
+        limits,
+        params.delimiter,
+        &mut request_hash,
+    )
+    .await;
     let (scanned, names, samples) = match received {
         Ok(received) => received,
         Err(error) => {
@@ -394,11 +446,20 @@ pub(crate) async fn upload(
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
+    idempotency::finish(
+        guard,
+        request_hash.finish(),
+        StatusCode::CREATED,
+        import.id,
+        None,
+    )
+    .await?;
     let may_see = may_view_pii(&state, &principal, workspace.id).await;
     Ok((
         StatusCode::CREATED,
         Json(CsvImportDetailBody::new(&import, samples, may_see)),
-    ))
+    )
+        .into_response())
 }
 
 #[cfg(test)]

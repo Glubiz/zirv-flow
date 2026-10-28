@@ -6,8 +6,8 @@
 use axum::Json;
 use axum::body::Body;
 use axum::extract::{Path, RawQuery, State};
-use axum::http::{HeaderValue, StatusCode, header};
-use axum::response::Response;
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header};
+use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use serde_json::json;
 use time::OffsetDateTime;
@@ -20,6 +20,7 @@ use super::{PersonTarget, requested_by, resolve};
 use crate::AppState;
 use crate::admin::{self, AdminError, Context};
 use crate::auth::{Need, Principal, authorize, path_id};
+use crate::idempotency::{self, Keyed, ReplayedProblem, RequestHash};
 use crate::jobs_admin::{encode_cursor, parse_page};
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
@@ -162,14 +163,18 @@ pub(crate) async fn download(
     operation_id = "request_export",
     path = "/api/v1/workspaces/{ws}/privacy/exports",
     tag = "privacy",
-    params(("ws" = Uuid, Path, description = "Workspace id")),
+    params(
+        ("ws" = Uuid, Path, description = "Workspace id"),
+        ("Idempotency-Key" = Option<String>, Header, description = "1 to 255 characters; makes a retry safe for 24 hours")
+    ),
     request_body = PersonTarget,
     responses(
         (status = 202, description = "The export, pending until the job has run", body = ExportBody),
+        (status = 409, description = "The Idempotency-Key already requested an export (`idempotency_key_replayed`); resource_id is the export's id and the body is not kept, as it names the person", body = ReplayedProblem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a key without the admin scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or person, or no access", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "The body names both or neither of person_id and identifier, or the identifier is malformed", body = Problem, content_type = "application/problem+json")
+        (status = 422, description = "The body names both or neither of person_id and identifier, the identifier is malformed, or the Idempotency-Key is invalid or reused (`idempotency_key_reused`)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]
@@ -177,10 +182,19 @@ pub(crate) async fn create(
     State(state): State<AppState>,
     principal: Principal,
     Path(ws): Path<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
     ApiJson(body): ApiJson<PersonTarget>,
-) -> Result<(StatusCode, Json<ExportBody>), ApiError> {
+) -> Result<Response, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
     let trace = trace::current().ok_or_else(ApiError::internal)?;
+    let request_hash = RequestHash::of_json(&method, &uri, &body)?;
+    let keyed = Keyed::of(&headers, "request_export")?;
+    let guard = match idempotency::enter(&state.pool, workspace.id, keyed, request_hash).await? {
+        Ok(guard) => guard,
+        Err(replay) => return Ok(replay),
+    };
     let export = request(
         &state.pool,
         &principal.context(),
@@ -190,7 +204,8 @@ pub(crate) async fn create(
         &trace,
     )
     .await?;
-    Ok((StatusCode::ACCEPTED, Json(export.into())))
+    idempotency::finish(guard, request_hash, StatusCode::ACCEPTED, export.id, None).await?;
+    Ok((StatusCode::ACCEPTED, Json(ExportBody::from(export))).into_response())
 }
 
 /// The workspace's exports, newest first, with their status and expiry. The content is never

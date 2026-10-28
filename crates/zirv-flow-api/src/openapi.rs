@@ -991,4 +991,46 @@ mod tests {
             }
         }
     }
+
+    /// The creating operations that take an `Idempotency-Key` (architecture section 15): those
+    /// that no unique name or draft revision already guards.
+    const IDEMPOTENT_CREATES: [&str; 6] = [
+        "create_api_key",
+        "create_ai_draft",
+        "upload_asset",
+        "upload_import",
+        "request_erasure",
+        "request_export",
+    ];
+
+    #[test]
+    fn every_idempotent_create_documents_the_idempotency_key_header() {
+        let document = serde_json::to_value(openapi()).unwrap();
+        let mut documented = Vec::new();
+        for item in document["paths"].as_object().unwrap().values() {
+            for operation in item.as_object().unwrap().values() {
+                let id = operation["operationId"].as_str().unwrap_or_default();
+                let header = operation["parameters"]
+                    .as_array()
+                    .is_some_and(|parameters| {
+                        parameters.iter().any(|parameter| {
+                            parameter["in"] == "header" && parameter["name"] == "Idempotency-Key"
+                        })
+                    });
+                if IDEMPOTENT_CREATES.contains(&id) {
+                    assert!(header, "{id} does not document Idempotency-Key");
+                    assert!(
+                        operation["responses"]["422"].is_object(),
+                        "{id} does not document the reused key"
+                    );
+                }
+                if header {
+                    documented.push(id.to_owned());
+                }
+            }
+        }
+        for id in IDEMPOTENT_CREATES {
+            assert!(documented.iter().any(|documented| documented == id), "{id}");
+        }
+    }
 }

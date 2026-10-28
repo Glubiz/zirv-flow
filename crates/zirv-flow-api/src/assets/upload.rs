@@ -6,6 +6,7 @@ use axum::Json;
 use axum::extract::{Path, RawQuery, Request, State};
 use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use futures_util::StreamExt;
 use serde_json::json;
 use zirv_flow_store::{AssetError, NewAsset, begin, commit, store_asset};
@@ -15,6 +16,7 @@ use super::{AssetBody, AssetLimits, MAX_PIXELS, MAX_SIDE_PIXELS};
 use crate::AppState;
 use crate::admin;
 use crate::auth::{Need, Principal, authorize, path_id};
+use crate::idempotency::{self, Keyed, RequestHash};
 use crate::problem::{ApiError, Problem};
 
 const MAX_NAME_CHARS: usize = 200;
@@ -132,7 +134,8 @@ fn check(bytes: &[u8], declared: ImageKind) -> Result<(u32, u32), ApiError> {
     tag = "assets",
     params(
         ("ws" = Uuid, Path, description = "Workspace id"),
-        ("name" = String, Query, description = "A name for the image, 1 to 200 characters without path separators")
+        ("name" = String, Query, description = "A name for the image, 1 to 200 characters without path separators"),
+        ("Idempotency-Key" = Option<String>, Header, description = "1 to 255 characters; makes a retry safe for 24 hours. The same key with the same file replays the first answer, with its status and body")
     ),
     request_body(content = Vec<u8>, content_type = "image/png", description = "The image file; image/jpeg, image/gif and image/webp are accepted too"),
     responses(
@@ -145,7 +148,7 @@ fn check(bytes: &[u8], declared: ImageKind) -> Result<(u32, u32), ApiError> {
         (status = 408, description = "No byte arrived for 60 seconds", body = Problem, content_type = "application/problem+json"),
         (status = 413, description = "asset_too_large: over assets.max_file_bytes; asset_quota_exceeded: the workspace is over assets.max_workspace_bytes", body = Problem, content_type = "application/problem+json"),
         (status = 415, description = "asset_type_unsupported: not a PNG, JPEG, GIF or WebP content type; asset_type_mismatch: the file is not the declared type", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "A bad name, or asset_dimensions_exceeded", body = Problem, content_type = "application/problem+json")
+        (status = 422, description = "A bad name, asset_dimensions_exceeded, or an Idempotency-Key that is invalid or was used for another file (`idempotency_key_reused`)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]
@@ -155,10 +158,13 @@ pub(crate) async fn upload(
     Path(ws): Path<String>,
     RawQuery(query): RawQuery,
     request: Request,
-) -> Result<(StatusCode, Json<AssetBody>), ApiError> {
+) -> Result<Response, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let name = parse_name(&query.unwrap_or_default())?;
     let declared = declared_kind(request.headers())?;
+    let keyed = Keyed::of(request.headers(), "upload_asset")?;
+    let mut request_hash = RequestHash::new(request.method(), request.uri());
+    request_hash.update(declared.content_type().as_bytes());
     let limits = state.assets;
     let length = request
         .headers()
@@ -170,6 +176,12 @@ pub(crate) async fn upload(
     }
     let bytes = receive(request.into_body(), limits, length).await?;
     let (width, height) = check(&bytes, declared)?;
+    request_hash.update(&bytes);
+    let request_hash = request_hash.finish();
+    let guard = match idempotency::enter(&state.pool, workspace.id, keyed, request_hash).await? {
+        Ok(guard) => guard,
+        Err(replay) => return Ok(replay),
+    };
 
     let mut tx = begin(&state.pool).await?;
     let stored = store_asset(
@@ -215,14 +227,17 @@ pub(crate) async fn upload(
     } else {
         StatusCode::OK
     };
-    Ok((
+    let shown = AssetBody::new(&stored.asset, stored.references, state.public_url());
+    let remembered = serde_json::to_value(&shown).map_err(|_| ApiError::internal())?;
+    idempotency::finish(
+        guard,
+        request_hash,
         status,
-        Json(AssetBody::new(
-            &stored.asset,
-            stored.references,
-            state.public_url(),
-        )),
-    ))
+        stored.asset.id,
+        Some(&remembered),
+    )
+    .await?;
+    Ok((status, Json(remembered)).into_response())
 }
 
 #[cfg(test)]

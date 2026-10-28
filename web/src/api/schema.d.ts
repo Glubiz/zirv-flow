@@ -540,7 +540,11 @@ export interface paths {
          */
         get: operations["list_api_keys"];
         put?: never;
-        /** Creates a key and returns its secret, once. */
+        /**
+         * characters) to make a retry safe for 24 hours: the same key with the same body answers
+         *     `409 idempotency_key_replayed` with the id of the key it created and never shows the secret
+         *     again; the same key with another body is `422 idempotency_key_reused`.
+         */
         post: operations["create_api_key"];
         delete?: never;
         options?: never;
@@ -558,7 +562,6 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Revokes a key. Revoked keys are refused with 401 from then on. */
         delete: operations["revoke_api_key"];
         options?: never;
         head?: never;
@@ -8786,6 +8789,29 @@ export interface components {
             filter?: null | components["schemas"]["ReplayFilter"];
             ids?: string[] | null;
         };
+        /** @description The `409` of a replay on a route that stores no body. */
+        ReplayedProblem: {
+            /** @description Always `idempotency_key_replayed`. */
+            code: string;
+            detail: string;
+            /** @description The `x-request-id` of the request. */
+            request_id?: string | null;
+            /**
+             * Format: uuid
+             * @description The id of the resource the first request created.
+             */
+            resource_id: string;
+            /** Format: int32 */
+            status: number;
+            title: string;
+            /** @description The `x-trace-id` of the request. */
+            trace_id?: string | null;
+            /**
+             * @description Problem type URI; `about:blank`.
+             * @example about:blank
+             */
+            type: string;
+        };
         /** @description How to close a conflict. */
         ResolveRequest: {
             /** @enum {string} */
@@ -12537,7 +12563,10 @@ export interface operations {
     create_ai_draft: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description 1 to 255 characters; makes a retry safe for 24 hours, so a retry after a timeout does not spend the budget twice */
+                "Idempotency-Key"?: string | null;
+            };
             path: {
                 /** @description Workspace id */
                 ws: string;
@@ -12595,7 +12624,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The assistant is off (`ai_disabled`), the source does not use a manifest, or the template is archived (`template_archived`) */
+            /** @description The assistant is off (`ai_disabled`), the source does not use a manifest, or the template is archived (`template_archived`), or the Idempotency-Key already ran a draft (`idempotency_key_replayed`; `resource_id` is the draft's id and the body is not kept, as it may hold values from the workspace) */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -12613,7 +12642,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description A request that breaks a rule, naming the field, such as a missing prompt, `sample_required` or `sample_not_supported`; for a template `ai_template_too_large` (the document is over 96 KiB) or `ai_template_unsupported` (not an email template, a block layout of a code email, or, without the personal-data opt-in, a `visible_if` too deep or too large to mask) */
+            /** @description The Idempotency-Key is invalid or reused (`idempotency_key_reused`), or a request that breaks a rule, naming the field, such as a missing prompt, `sample_required` or `sample_not_supported`; for a template `ai_template_too_large` (the document is over 96 KiB) or `ai_template_unsupported` (not an email template, a block layout of a code email, or, without the personal-data opt-in, a `visible_if` too deep or too large to mask) */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -13005,7 +13034,10 @@ export interface operations {
     create_api_key: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description 1 to 255 characters; makes a retry safe for 24 hours */
+                "Idempotency-Key"?: string | null;
+            };
             path: {
                 /** @description Workspace id */
                 ws: string;
@@ -13054,7 +13086,16 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Invalid name or scopes */
+            /** @description The Idempotency-Key already created a key (`idempotency_key_replayed`); resource_id is its id and the secret is not shown again */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ReplayedProblem"];
+                };
+            };
+            /** @description Invalid name or scopes, or the Idempotency-Key is invalid or reused (`idempotency_key_reused`) */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -13185,7 +13226,10 @@ export interface operations {
                 /** @description A name for the image, 1 to 200 characters without path separators */
                 name: string;
             };
-            header?: never;
+            header?: {
+                /** @description 1 to 255 characters; makes a retry safe for 24 hours. The same key with the same file replays the first answer, with its status and body */
+                "Idempotency-Key"?: string | null;
+            };
             path: {
                 /** @description Workspace id */
                 ws: string;
@@ -13280,7 +13324,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description A bad name, or asset_dimensions_exceeded */
+            /** @description A bad name, asset_dimensions_exceeded, or an Idempotency-Key that is invalid or was used for another file (`idempotency_key_reused`) */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -19366,7 +19410,10 @@ export interface operations {
                 /** @description comma, semicolon or tab; detected when absent */
                 delimiter?: string;
             };
-            header?: never;
+            header?: {
+                /** @description 1 to 255 characters; makes a retry safe for 24 hours */
+                "Idempotency-Key"?: string | null;
+            };
             path: {
                 /** @description Workspace id */
                 ws: string;
@@ -19434,6 +19481,15 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
+            /** @description The Idempotency-Key already uploaded an import (`idempotency_key_replayed`); resource_id is the import's id and the body is not kept, as it holds rows of the file */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ReplayedProblem"];
+                };
+            };
             /** @description The file is over imports.max_file_bytes */
             413: {
                 headers: {
@@ -19452,7 +19508,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not UTF-8, empty, or a header with blank or repeated names */
+            /** @description Not UTF-8, empty, a header with blank or repeated names, or an Idempotency-Key that is invalid or was used for another file (`idempotency_key_reused`) */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -21676,7 +21732,10 @@ export interface operations {
     request_erasure: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description 1 to 255 characters; makes a retry safe for 24 hours */
+                "Idempotency-Key"?: string | null;
+            };
             path: {
                 /** @description Workspace id */
                 ws: string;
@@ -21725,7 +21784,16 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The body names both or neither of person_id and identifier, or the identifier is malformed */
+            /** @description The Idempotency-Key already requested an erasure (`idempotency_key_replayed`); resource_id is the request's id and the body is not kept, as it names the person */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ReplayedProblem"];
+                };
+            };
+            /** @description The body names both or neither of person_id and identifier, the identifier is malformed, or the Idempotency-Key is invalid or reused (`idempotency_key_reused`) */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -21812,7 +21880,10 @@ export interface operations {
     request_export: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description 1 to 255 characters; makes a retry safe for 24 hours */
+                "Idempotency-Key"?: string | null;
+            };
             path: {
                 /** @description Workspace id */
                 ws: string;
@@ -21861,7 +21932,16 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The body names both or neither of person_id and identifier, or the identifier is malformed */
+            /** @description The Idempotency-Key already requested an export (`idempotency_key_replayed`); resource_id is the export's id and the body is not kept, as it names the person */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["ReplayedProblem"];
+                };
+            };
+            /** @description The body names both or neither of person_id and identifier, the identifier is malformed, or the Idempotency-Key is invalid or reused (`idempotency_key_reused`) */
             422: {
                 headers: {
                     [name: string]: unknown;

@@ -1882,6 +1882,18 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "1 to 255 characters; makes a retry safe for 24 hours, so a retry after a timeout does not spend the budget twice",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "requestBody": {
@@ -1946,7 +1958,7 @@
             }
           },
           "409": {
-            "description": "The assistant is off (`ai_disabled`), the source does not use a manifest, or the template is archived (`template_archived`)",
+            "description": "The assistant is off (`ai_disabled`), the source does not use a manifest, or the template is archived (`template_archived`), or the Idempotency-Key already ran a draft (`idempotency_key_replayed`; `resource_id` is the draft's id and the body is not kept, as it may hold values from the workspace)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1966,7 +1978,7 @@
             }
           },
           "422": {
-            "description": "A request that breaks a rule, naming the field, such as a missing prompt, `sample_required` or `sample_not_supported`; for a template `ai_template_too_large` (the document is over 96 KiB) or `ai_template_unsupported` (not an email template, a block layout of a code email, or, without the personal-data opt-in, a `visible_if` too deep or too large to mask)",
+            "description": "The Idempotency-Key is invalid or reused (`idempotency_key_reused`), or a request that breaks a rule, naming the field, such as a missing prompt, `sample_required` or `sample_not_supported`; for a template `ai_template_too_large` (the document is over 96 KiB) or `ai_template_unsupported` (not an email template, a block layout of a code email, or, without the personal-data opt-in, a `visible_if` too deep or too large to mask)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2516,7 +2528,7 @@
         "tags": [
           "api-keys"
         ],
-        "summary": "Creates a key and returns its secret, once.",
+        "summary": "characters) to make a retry safe for 24 hours: the same key with the same body answers\n`409 idempotency_key_replayed` with the id of the key it created and never shows the secret\nagain; the same key with another body is `422 idempotency_key_reused`.",
         "operationId": "create_api_key",
         "parameters": [
           {
@@ -2527,6 +2539,18 @@
             "schema": {
               "type": "string",
               "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "1 to 255 characters; makes a retry safe for 24 hours",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           }
         ],
@@ -2581,8 +2605,18 @@
               }
             }
           },
+          "409": {
+            "description": "The Idempotency-Key already created a key (`idempotency_key_replayed`); resource_id is its id and the secret is not shown again",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplayedProblem"
+                }
+              }
+            }
+          },
           "422": {
-            "description": "Invalid name or scopes",
+            "description": "Invalid name or scopes, or the Idempotency-Key is invalid or reused (`idempotency_key_reused`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2607,7 +2641,6 @@
         "tags": [
           "api-keys"
         ],
-        "summary": "Revokes a key. Revoked keys are refused with 401 from then on.",
         "operationId": "revoke_api_key",
         "parameters": [
           {
@@ -2802,6 +2835,18 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "1 to 255 characters; makes a retry safe for 24 hours. The same key with the same file replays the first answer, with its status and body",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "requestBody": {
@@ -2912,7 +2957,7 @@
             }
           },
           "422": {
-            "description": "A bad name, or asset_dimensions_exceeded",
+            "description": "A bad name, asset_dimensions_exceeded, or an Idempotency-Key that is invalid or was used for another file (`idempotency_key_reused`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -12094,6 +12139,18 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "1 to 255 characters; makes a retry safe for 24 hours",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "requestBody": {
@@ -12168,6 +12225,16 @@
               }
             }
           },
+          "409": {
+            "description": "The Idempotency-Key already uploaded an import (`idempotency_key_replayed`); resource_id is the import's id and the body is not kept, as it holds rows of the file",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplayedProblem"
+                }
+              }
+            }
+          },
           "413": {
             "description": "The file is over imports.max_file_bytes",
             "content": {
@@ -12189,7 +12256,7 @@
             }
           },
           "422": {
-            "description": "Not UTF-8, empty, or a header with blank or repeated names",
+            "description": "Not UTF-8, empty, a header with blank or repeated names, or an Idempotency-Key that is invalid or was used for another file (`idempotency_key_reused`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -15651,6 +15718,18 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "1 to 255 characters; makes a retry safe for 24 hours",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "requestBody": {
@@ -15704,8 +15783,18 @@
               }
             }
           },
+          "409": {
+            "description": "The Idempotency-Key already requested an erasure (`idempotency_key_replayed`); resource_id is the request's id and the body is not kept, as it names the person",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplayedProblem"
+                }
+              }
+            }
+          },
           "422": {
-            "description": "The body names both or neither of person_id and identifier, or the identifier is malformed",
+            "description": "The body names both or neither of person_id and identifier, the identifier is malformed, or the Idempotency-Key is invalid or reused (`idempotency_key_reused`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -15851,6 +15940,18 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "1 to 255 characters; makes a retry safe for 24 hours",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "requestBody": {
@@ -15904,8 +16005,18 @@
               }
             }
           },
+          "409": {
+            "description": "The Idempotency-Key already requested an export (`idempotency_key_replayed`); resource_id is the export's id and the body is not kept, as it names the person",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplayedProblem"
+                }
+              }
+            }
+          },
           "422": {
-            "description": "The body names both or neither of person_id and identifier, or the identifier is malformed",
+            "description": "The body names both or neither of person_id and identifier, the identifier is malformed, or the Idempotency-Key is invalid or reused (`idempotency_key_reused`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -38164,6 +38275,59 @@
               "type": "string",
               "format": "uuid"
             }
+          }
+        }
+      },
+      "ReplayedProblem": {
+        "type": "object",
+        "description": "The `409` of a replay on a route that stores no body.",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "code",
+          "resource_id"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Always `idempotency_key_replayed`."
+          },
+          "detail": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `x-request-id` of the request."
+          },
+          "resource_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The id of the resource the first request created."
+          },
+          "status": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "title": {
+            "type": "string"
+          },
+          "trace_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `x-trace-id` of the request."
+          },
+          "type": {
+            "type": "string",
+            "description": "Problem type URI; `about:blank`.",
+            "example": "about:blank"
           }
         }
       },
