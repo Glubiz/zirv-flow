@@ -74,7 +74,7 @@ describe("the trace of the failing send path", () => {
       const record = records[index]!;
       expect(actionLabel(record.action)).toBeTruthy();
       expect(recordLabel(record)).toBeTruthy();
-      expect(row.querySelector(":scope > .strong")?.textContent?.trim()).toBe(recordLabel(record));
+      expect(row.querySelector(":scope > .strong")?.textContent.trim()).toBe(recordLabel(record));
       expect(row.querySelectorAll(":scope > .mono")[0]?.textContent).toBe(record.action);
       expect(row.querySelectorAll(":scope > .mono")[1]?.textContent).toBe(record.outcome);
       expect(row.querySelector(":scope > time")?.getAttribute("datetime")).toBe(record.recorded_at);
