@@ -1851,6 +1851,95 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_removed_paging_name_is_refused_on_every_renamed_list_and_both_search_bodies(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let id = Uuid::nil();
+        let base = format!("/api/v1/workspaces/{ws}");
+        let lists = [
+            "/api/v1/admin/jobs/dead".to_owned(),
+            format!("{base}/assets"),
+            format!("{base}/contacts"),
+            format!("{base}/flows/{id}/enrollments"),
+            format!("{base}/forwarding/dead-letters"),
+            format!("{base}/identity-conflicts"),
+            format!("{base}/imports"),
+            format!("{base}/imports/{id}/rejects"),
+            format!("{base}/ingest-rejects"),
+            format!("{base}/lists/{id}/members"),
+            format!("{base}/people/{id}/consent/history"),
+            format!("{base}/people/{id}/lists/history"),
+            format!("{base}/people/{id}/messages"),
+            format!("{base}/people/{id}/timeline"),
+            format!("{base}/privacy/erasures"),
+            format!("{base}/privacy/exports"),
+            format!("{base}/suppressions"),
+            format!("{base}/test-sends"),
+        ];
+        assert_eq!(lists.len(), 18);
+        for uri in &lists {
+            for old in ["before", "after"] {
+                let reply = call(
+                    &router,
+                    "GET",
+                    &format!("{uri}?limit=2&{old}=x"),
+                    None,
+                    Auth::Session(&owner),
+                )
+                .await;
+                assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{uri} {old}");
+                assert_eq!(
+                    reply.body["code"], "paging_parameter_renamed",
+                    "{uri} {old}"
+                );
+                assert!(reply.body["detail"].as_str().unwrap().contains("cursor"));
+            }
+            let current = call(
+                &router,
+                "GET",
+                &format!("{uri}?cursor=%21"),
+                None,
+                Auth::Session(&owner),
+            )
+            .await;
+            assert_ne!(
+                current.body["code"], "paging_parameter_renamed",
+                "{uri} still takes cursor"
+            );
+        }
+
+        let bodies = [
+            (
+                format!("{base}/people/search"),
+                json!({"identifier": {"kind": "email", "value": "a@example.com"}}),
+            ),
+            (
+                format!("{base}/events/explore/list"),
+                with_range(json!({"name": "order"})),
+            ),
+        ];
+        for (uri, body) in bodies {
+            let mut old = body.clone();
+            old["after"] = json!("x");
+            let reply = call(&router, "POST", &uri, Some(old), Auth::Session(&owner)).await;
+            assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{uri}");
+            assert_eq!(reply.body["code"], "paging_parameter_renamed", "{uri}");
+            let mut current = body.clone();
+            current["cursor"] = json!("!");
+            let reply = call(&router, "POST", &uri, Some(current), Auth::Session(&owner)).await;
+            assert_ne!(reply.body["code"], "paging_parameter_renamed", "{uri}");
+            let mut unknown = body.clone();
+            unknown["page"] = json!("x");
+            let reply = call(&router, "POST", &uri, Some(unknown), Auth::Session(&owner)).await;
+            assert_ne!(reply.body["code"], "paging_parameter_renamed", "{uri}");
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn retrying_a_dead_workspace_job_requeues_it_under_its_trace_and_audits_and_records_it(
         pool: PgPool,
     ) {

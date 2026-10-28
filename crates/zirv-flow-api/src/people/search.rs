@@ -50,6 +50,10 @@ pub(crate) struct SearchRequest {
     limit: Option<u32>,
     /// The `next_cursor` of the previous page.
     cursor: Option<Uuid>,
+    /// Removed: the old name of `cursor`, refused with `paging_parameter_renamed`.
+    #[serde(default)]
+    #[schema(ignore)]
+    after: Option<serde::de::IgnoredAny>,
 }
 
 /// An identifier shown for a person. The value is null when `masked`: only workspace admins,
@@ -105,6 +109,9 @@ pub(crate) struct SearchBody {
 
 /// Turns the request into a store search, refusing a body that does not name exactly one.
 fn parse(body: SearchRequest) -> Result<(PersonSearch, u32, Option<Uuid>), ApiError> {
+    if body.after.is_some() {
+        return Err(ApiError::paging_parameter_renamed());
+    }
     let limit = match body.limit {
         None => DEFAULT_LIMIT,
         Some(limit) if (1..=MAX_LIMIT).contains(&limit) => limit,
@@ -150,6 +157,7 @@ fn parse(body: SearchRequest) -> Result<(PersonSearch, u32, Option<Uuid>), ApiEr
     request_body = SearchRequest,
     responses(
         (status = 200, description = "A page of people", body = SearchBody),
+        (status = 400, description = "The removed after is sent: page with cursor (`paging_parameter_renamed`)", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the read scope, a missing CSRF token, or a prefix or range search on a PII-flagged trait by a caller who may not see values (`code` is `pii_trait_not_searchable`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access", body = Problem, content_type = "application/problem+json"),

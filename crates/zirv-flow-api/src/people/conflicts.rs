@@ -118,6 +118,7 @@ fn parse_page(query: &str) -> Result<PageQuery, ApiError> {
             "limit" => {
                 limit = parse_limit(&value)?;
             }
+            "before" | "after" => return Err(ApiError::paging_parameter_renamed()),
             "cursor" => {
                 before = Some(
                     decode_cursor(&value)
@@ -225,7 +226,7 @@ pub(crate) async fn resolve_identity_conflict(
     ),
     responses(
         (status = 200, description = "A page of conflicts", body = ConflictsBody),
-        (status = 400, description = "status or limit is out of range, or cursor is malformed", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "status or limit is out of range, or cursor is malformed; the removed before and after answer paging_parameter_renamed", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key with neither the read nor the admin scope", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json")

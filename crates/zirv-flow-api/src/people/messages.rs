@@ -251,6 +251,7 @@ fn parse_page(query: &str) -> Result<Page, ApiError> {
     for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
         match key.as_ref() {
             "limit" => limit = parse_limit(&value)?,
+            "before" | "after" => return Err(ApiError::paging_parameter_renamed()),
             "cursor" => {
                 before = Some(
                     decode_cursor(&value)
@@ -309,7 +310,7 @@ fn parse_page(query: &str) -> Result<Page, ApiError> {
     ),
     responses(
         (status = 200, description = "A page of messages", body = MessagesBody),
-        (status = 400, description = "A parameter is out of range or malformed", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "A parameter is out of range or malformed; the removed before and after answer paging_parameter_renamed", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the read scope", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or person (an erased person included), or no access", body = Problem, content_type = "application/problem+json"),

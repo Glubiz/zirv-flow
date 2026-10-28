@@ -358,7 +358,7 @@ pub(crate) async fn quota(
     ),
     responses(
         (status = 200, description = "A page of the log", body = TestSendsBody),
-        (status = 400, description = "limit, template_id or draft_revision is out of range or malformed, or cursor is not a cursor", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "limit, template_id or draft_revision is out of range or malformed, or cursor is malformed; the removed before and after answer paging_parameter_renamed", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the read scope", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json")

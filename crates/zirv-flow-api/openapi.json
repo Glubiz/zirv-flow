@@ -103,7 +103,7 @@
             }
           },
           "400": {
-            "description": "limit is out of range or cursor is malformed",
+            "description": "limit is out of range or cursor is malformed; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2740,7 +2740,7 @@
             }
           },
           "400": {
-            "description": "limit is out of range or cursor is malformed",
+            "description": "limit is out of range or cursor is malformed; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -4877,7 +4877,7 @@
             }
           },
           "400": {
-            "description": "limit is out of range, or cursor is malformed",
+            "description": "limit is out of range, or cursor is malformed; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -8685,7 +8685,7 @@
             }
           },
           "400": {
-            "description": "limit is out of range or cursor is malformed",
+            "description": "limit is out of range or cursor is malformed; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -9475,7 +9475,7 @@
             }
           },
           "400": {
-            "description": "A parameter is out of range or malformed",
+            "description": "A parameter is out of range or malformed; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -11001,7 +11001,7 @@
             }
           },
           "400": {
-            "description": "A malformed limit, cursor or destination id",
+            "description": "A malformed limit, cursor or destination id; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -11708,7 +11708,7 @@
             }
           },
           "400": {
-            "description": "status or limit is out of range, or cursor is malformed",
+            "description": "status or limit is out of range, or cursor is malformed; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -12001,7 +12001,7 @@
             }
           },
           "400": {
-            "description": "limit is out of range or cursor is malformed",
+            "description": "limit is out of range or cursor is malformed; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -12680,7 +12680,7 @@
             }
           },
           "400": {
-            "description": "A malformed phase, limit or cursor",
+            "description": "A malformed phase, limit or cursor; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -12990,7 +12990,7 @@
             }
           },
           "400": {
-            "description": "limit is out of range or cursor is malformed",
+            "description": "limit is out of range or cursor is malformed; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -13647,7 +13647,7 @@
             }
           },
           "400": {
-            "description": "limit is out of range, or cursor is malformed",
+            "description": "limit is out of range, or cursor is malformed; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -14375,6 +14375,16 @@
               }
             }
           },
+          "400": {
+            "description": "The removed after is sent: page with cursor (`paging_parameter_renamed`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
           "401": {
             "description": "Not authenticated",
             "content": {
@@ -14886,7 +14896,7 @@
             }
           },
           "400": {
-            "description": "limit is out of range, or cursor is malformed",
+            "description": "limit is out of range, or cursor is malformed; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -15222,7 +15232,7 @@
             }
           },
           "400": {
-            "description": "limit is out of range, or cursor is malformed",
+            "description": "limit is out of range, or cursor is malformed; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -15352,7 +15362,7 @@
             }
           },
           "400": {
-            "description": "A parameter is out of range or malformed",
+            "description": "A parameter is out of range or malformed; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -15492,7 +15502,7 @@
             }
           },
           "400": {
-            "description": "limit is out of range, or cursor, kinds or all_decisions is malformed",
+            "description": "limit is out of range, or cursor, kinds or all_decisions is malformed; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -15603,7 +15613,7 @@
             }
           },
           "400": {
-            "description": "limit is out of range or cursor is malformed",
+            "description": "limit is out of range or cursor is malformed; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -15803,7 +15813,7 @@
             }
           },
           "400": {
-            "description": "limit is out of range or cursor is malformed",
+            "description": "limit is out of range or cursor is malformed; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -21694,7 +21704,7 @@
             }
           },
           "400": {
-            "description": "limit or reason is out of range, or cursor is malformed",
+            "description": "limit or reason is out of range, or cursor is malformed; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -24494,7 +24504,7 @@
             }
           },
           "400": {
-            "description": "limit, template_id or draft_revision is out of range or malformed, or cursor is not a cursor",
+            "description": "limit, template_id or draft_revision is out of range or malformed, or cursor is malformed; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {

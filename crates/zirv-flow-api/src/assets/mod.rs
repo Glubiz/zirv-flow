@@ -180,6 +180,7 @@ pub(crate) fn parse_page(query: &str) -> Result<(u32, Option<Uuid>), ApiError> {
                     .filter(|limit| (1..=MAX_LIMIT).contains(limit))
                     .ok_or_else(|| ApiError::bad_request("limit must be 1 to 200"))?;
             }
+            "before" | "after" => return Err(ApiError::paging_parameter_renamed()),
             "cursor" => {
                 before = Some(
                     value

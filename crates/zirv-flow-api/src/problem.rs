@@ -244,6 +244,12 @@ impl ApiError {
         Self::new(StatusCode::NOT_FOUND, "no such resource")
     }
 
+    /// A client still pages with the removed `before` or `after`; the detail names `cursor`.
+    pub(crate) fn paging_parameter_renamed() -> Self {
+        Self::bad_request("before and after were renamed: page with cursor, and pass the next_cursor of the previous page")
+            .with_code("paging_parameter_renamed")
+    }
+
     /// A validation failure. The detail names the field and the rule, never the value.
     pub(crate) fn unprocessable(detail: impl Into<String>) -> Self {
         Self::new(StatusCode::UNPROCESSABLE_ENTITY, detail)
@@ -1370,6 +1376,14 @@ mod tests {
             ApiError::unprocessable("x").response_code(),
             Some("validation_failed")
         );
+    }
+
+    #[test]
+    fn a_removed_paging_name_is_a_400_that_names_cursor() {
+        let error = ApiError::paging_parameter_renamed();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.response_code(), Some("paging_parameter_renamed"));
+        assert!(error.detail.contains("cursor"));
     }
 
     #[test]

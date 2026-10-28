@@ -72,6 +72,8 @@ Two kinds of list are not paged, and are named here so the difference is on reco
   providers and their models), `list_audit_actions` (the audit areas and actions) and
   `list_test_send_allowlist` (the allowlist entries of a workspace).
 
+The paging names of the earlier spellings, `before` and `after` (and `next_before` and `next_after`), no longer exist. A request that still sends `before` or `after` as a query key of a paged list, or `after` in the body of `search_people` or `explore_event_list`, is refused with `400` and the code `paging_parameter_renamed`, not read as the first page, so a client that still pages the old way stops instead of looping. Every other unknown query key stays ignored.
+
 Streams (`stream_event_debugger`) and file exports are not lists.
 
 ## Names and types
@@ -173,6 +175,7 @@ A test reads the sources and fails when a code used there is missing from this l
 | Code | Meaning |
 |------|---------|
 | `invalid_request` | A query parameter, path value or body is malformed (generic 400) |
+| `paging_parameter_renamed` | A removed paging name (`before`, `after`) was sent; page with `cursor` |
 | `conflict` | The state of the resource does not allow the change (generic 409) |
 | `body_too_large` | The request body is over the limit (generic 413) |
 | `unsupported_media_type` | The content type is not accepted (generic 415) |

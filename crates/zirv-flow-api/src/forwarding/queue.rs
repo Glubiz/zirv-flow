@@ -115,6 +115,7 @@ fn parse_query(query: &str) -> Result<Page, ApiError> {
     for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
         match key.as_ref() {
             "limit" => limit = parse_limit(&value)?,
+            "before" | "after" => return Err(ApiError::paging_parameter_renamed()),
             "cursor" => {
                 before = Some(
                     decode_cursor(&value)
@@ -148,7 +149,7 @@ fn parse_query(query: &str) -> Result<Page, ApiError> {
     ),
     responses(
         (status = 200, description = "A page of dead letters", body = DeadLettersBody),
-        (status = 400, description = "A malformed limit, cursor or destination id", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "A malformed limit, cursor or destination id; the removed before and after answer paging_parameter_renamed", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, or a missing scope", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json")

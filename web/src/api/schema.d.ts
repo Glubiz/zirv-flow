@@ -11287,7 +11287,7 @@ export interface operations {
                     "application/json": components["schemas"]["DeadJobsBody"];
                 };
             };
-            /** @description limit is out of range or cursor is malformed */
+            /** @description limit is out of range or cursor is malformed; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -13147,7 +13147,7 @@ export interface operations {
                     "application/json": components["schemas"]["AssetsBody"];
                 };
             };
-            /** @description limit is out of range or cursor is malformed */
+            /** @description limit is out of range or cursor is malformed; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -14546,7 +14546,7 @@ export interface operations {
                     "application/json": components["schemas"]["ContactsBody"];
                 };
             };
-            /** @description limit is out of range, or cursor is malformed */
+            /** @description limit is out of range, or cursor is malformed; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -17149,7 +17149,7 @@ export interface operations {
                     "application/json": components["schemas"]["ExploreListBody"];
                 };
             };
-            /** @description limit is out of range or cursor is malformed */
+            /** @description limit is out of range or cursor is malformed; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -17670,7 +17670,7 @@ export interface operations {
                     "application/json": components["schemas"]["EnrollmentsBody"];
                 };
             };
-            /** @description A parameter is out of range or malformed */
+            /** @description A parameter is out of range or malformed; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -18653,7 +18653,7 @@ export interface operations {
                     "application/json": components["schemas"]["DeadLettersBody"];
                 };
             };
-            /** @description A malformed limit, cursor or destination id */
+            /** @description A malformed limit, cursor or destination id; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -19130,7 +19130,7 @@ export interface operations {
                     "application/json": components["schemas"]["ConflictsBody"];
                 };
             };
-            /** @description status or limit is out of range, or cursor is malformed */
+            /** @description status or limit is out of range, or cursor is malformed; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -19320,7 +19320,7 @@ export interface operations {
                     "application/json": components["schemas"]["CsvImportsBody"];
                 };
             };
-            /** @description limit is out of range or cursor is malformed */
+            /** @description limit is out of range or cursor is malformed; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -19750,7 +19750,7 @@ export interface operations {
                     "application/json": components["schemas"]["ImportRejectsBody"];
                 };
             };
-            /** @description A malformed phase, limit or cursor */
+            /** @description A malformed phase, limit or cursor; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -19943,7 +19943,7 @@ export interface operations {
                     "application/json": components["schemas"]["IngestRejectsBody"];
                 };
             };
-            /** @description limit is out of range or cursor is malformed */
+            /** @description limit is out of range or cursor is malformed; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -20388,7 +20388,7 @@ export interface operations {
                     "application/json": components["schemas"]["ListMembersBody"];
                 };
             };
-            /** @description limit is out of range, or cursor is malformed */
+            /** @description limit is out of range, or cursor is malformed; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -20887,6 +20887,15 @@ export interface operations {
                     "application/json": components["schemas"]["SearchBody"];
                 };
             };
+            /** @description The removed after is sent: page with cursor (`paging_parameter_renamed`) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -21208,7 +21217,7 @@ export interface operations {
                     "application/json": components["schemas"]["HistoryBody"];
                 };
             };
-            /** @description limit is out of range, or cursor is malformed */
+            /** @description limit is out of range, or cursor is malformed; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -21419,7 +21428,7 @@ export interface operations {
                     "application/json": components["schemas"]["MembershipHistoryBody"];
                 };
             };
-            /** @description limit is out of range, or cursor is malformed */
+            /** @description limit is out of range, or cursor is malformed; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -21489,7 +21498,7 @@ export interface operations {
                     "application/json": components["schemas"]["MessagesBody"];
                 };
             };
-            /** @description A parameter is out of range or malformed */
+            /** @description A parameter is out of range or malformed; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -21568,7 +21577,7 @@ export interface operations {
                     "application/json": components["schemas"]["TimelineBody"];
                 };
             };
-            /** @description limit is out of range, or cursor, kinds or all_decisions is malformed */
+            /** @description limit is out of range, or cursor, kinds or all_decisions is malformed; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -21641,7 +21650,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErasuresBody"];
                 };
             };
-            /** @description limit is out of range or cursor is malformed */
+            /** @description limit is out of range or cursor is malformed; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -21777,7 +21786,7 @@ export interface operations {
                     "application/json": components["schemas"]["ExportsBody"];
                 };
             };
-            /** @description limit is out of range or cursor is malformed */
+            /** @description limit is out of range or cursor is malformed; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -25740,7 +25749,7 @@ export interface operations {
                     "application/json": components["schemas"]["SuppressionsBody"];
                 };
             };
-            /** @description limit or reason is out of range, or cursor is malformed */
+            /** @description limit or reason is out of range, or cursor is malformed; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -27595,7 +27604,7 @@ export interface operations {
                     "application/json": components["schemas"]["TestSendsBody"];
                 };
             };
-            /** @description limit, template_id or draft_revision is out of range or malformed, or cursor is not a cursor */
+            /** @description limit, template_id or draft_revision is out of range or malformed, or cursor is malformed; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;

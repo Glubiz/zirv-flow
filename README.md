@@ -963,7 +963,7 @@ suppression endpoints answer 503.
   take `{"kind": "email", "value": "..."}`; they are POSTs so a value never sits in a URL. Checking
   is open to anyone who can read the workspace, changing needs an admin. Notes are at most
   500 characters and must not contain the address.
-- `GET .../suppressions?limit&before&reason` lists newest first as the first 8 hex characters
+- `GET .../suppressions?limit&cursor&reason` lists newest first as the first 8 hex characters
   of the hash, never the full hash or the value.
 - `POST .../suppressions/import` takes `text/csv` (at most 10 MiB and 100,000 rows) with the
   header `kind,value` or `kind,value,note`. Add `?dry_run=true` to preview. The answer is
@@ -1449,7 +1449,7 @@ merged into this one. An id that was merged into another returns the survivor wi
 `merged_from` set to the id you asked for. The web UI shows the same on the profile page,
 where a member can also record a consent choice for the person.
 
-**Timeline.** `GET .../people/{id}/timeline?limit&before&kinds&all_decisions` returns the
+**Timeline.** `GET .../people/{id}/timeline?limit&cursor&kinds&all_decisions` returns the
 person's events and the decisions the system made about them, newest first, as entries with
 `"type": "event"` or `"type": "decision"`, paged with an opaque `cursor`. Decisions
 cover trait changes, merges, consent changes, list membership and identity conflicts. The

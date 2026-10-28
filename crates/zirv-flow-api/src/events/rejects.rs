@@ -121,7 +121,7 @@ fn parse_filters(query: &str) -> (Option<String>, Option<String>) {
     ),
     responses(
         (status = 200, description = "A page of rejects", body = IngestRejectsBody),
-        (status = 400, description = "limit is out of range or cursor is malformed", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "limit is out of range or cursor is malformed; the removed before and after answer paging_parameter_renamed", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the read scope", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json")

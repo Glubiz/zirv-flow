@@ -134,7 +134,7 @@ pub(crate) async fn depth(
     ),
     responses(
         (status = 200, description = "A page of dead jobs", body = DeadJobsBody),
-        (status = 400, description = "limit is out of range or cursor is malformed", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "limit is out of range or cursor is malformed; the removed before and after answer paging_parameter_renamed", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not the instance owner, or an API key", body = Problem, content_type = "application/problem+json")
     ),
@@ -247,6 +247,7 @@ pub(crate) fn parse_page(query: &str) -> Result<(u32, Option<DeadCursor>), ApiEr
             "limit" => {
                 limit = parse_limit(&value)?;
             }
+            "before" | "after" => return Err(ApiError::paging_parameter_renamed()),
             "cursor" => {
                 before = Some(
                     decode_cursor(&value)
