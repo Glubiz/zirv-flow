@@ -2597,7 +2597,23 @@ webhooks have no bucket (10.1).
 REST under `/api/v1`, JSON, OpenAPI 3.1 (utoipa, committed). Workspace resources
 live under `/api/v1/workspaces/{ws}/...`. Cursor pagination,
 `application/problem+json` errors (RFC 9457), `Idempotency-Key` on creating
-POSTs. After 1.0, `/api/v1` changes only additively.
+POSTs that nothing else makes safe to retry. After 1.0, `/api/v1` changes only
+additively.
+
+**Idempotency keys.** A creating POST guarded by a unique name or a draft
+revision (users, workspaces, flows, segments, templates, sources, destinations,
+credentials, webhooks, the publishes) answers `409` on a retry and takes no key.
+The other creating POSTs take an optional `Idempotency-Key` header of 1 to 255
+characters, remembered for 24 hours: API keys, assistant drafts, asset and CSV
+import uploads, and erasure and export requests. The same key with the same
+request replays the first answer; the same key with another request is `422`
+`idempotency_key_reused`. The rows live in `api_idempotency`, keyed by workspace,
+route and the hash of the key, with the request hash, the status and the id of
+the created resource, and no person column. A route whose response holds a
+secret or a person's value (API key, assistant draft, import, erasure, export)
+stores no body, and a replay answers `409` `idempotency_key_replayed` with the
+created resource's `resource_id`. The contacts API keeps its own
+`contact_idempotency` table (7.6).
 
 **Authentication:** local accounts (argon2id), server-side sessions in
 HttpOnly SameSite cookies with CSRF tokens on mutations; API keys random, stored
