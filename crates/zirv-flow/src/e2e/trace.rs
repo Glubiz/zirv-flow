@@ -307,7 +307,11 @@ pub(super) fn fixture_path() -> PathBuf {
 
 /// The fixture as committed.
 pub(super) fn committed() -> Value {
-    let text = std::fs::read_to_string(fixture_path())
+    committed_at(fixture_path())
+}
+
+fn committed_at(path: PathBuf) -> Value {
+    let text = std::fs::read_to_string(path)
         .expect("the trace fixture exists; regenerate it with ZIRV_FLOW_BLESS=1");
     serde_json::from_str(&text).expect("the trace fixture is JSON")
 }
@@ -335,10 +339,9 @@ fn bless_or_compare_at(trace: &Value, path: PathBuf) {
         std::fs::write(&path, text).expect("the fixture is written");
         return;
     }
-    let text = std::fs::read_to_string(path).expect("the trace fixture exists");
-    let committed: Value = serde_json::from_str(&text).expect("the trace fixture is JSON");
     assert_eq!(
-        &committed, trace,
+        &committed_at(path),
+        trace,
         "the trace differs from the committed fixture; regenerate it with ZIRV_FLOW_BLESS=1 \
          cargo nextest run -p zirv-flow e2e and review the diff"
     );
@@ -350,9 +353,7 @@ mod tests {
 
     #[test]
     fn the_failing_tree_requires_every_attempt_the_failed_send_and_the_feedback() {
-        let fixture: Value =
-            serde_json::from_str(&std::fs::read_to_string(failing_fixture_path()).unwrap())
-                .unwrap();
+        let fixture = committed_at(failing_fixture_path());
         let records = records_of(&fixture);
         assert_eq!(failing_complete(&records), Ok(()));
         for index in 0..records.len() {
