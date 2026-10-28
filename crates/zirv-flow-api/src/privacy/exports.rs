@@ -198,13 +198,18 @@ pub(crate) async fn create(
     let trace = trace::current().ok_or_else(ApiError::internal)?;
     let request_hash = RequestHash::of_json(&method, &uri, &body)?;
     let keyed = Keyed::of(&headers, "request_export", &principal)?;
-    let reservation =
-        match idempotency::reserve(&state.pool, workspace.id, keyed, request_hash, lease::QUICK)
-            .await?
-        {
-            Entry::Go(reservation) => reservation,
-            Entry::Answer(response) => return Ok(response),
-        };
+    let reservation = match idempotency::reserve(
+        &state,
+        workspace.id,
+        keyed,
+        request_hash,
+        lease::QUICK,
+    )
+    .await?
+    {
+        Entry::Go(reservation) => reservation,
+        Entry::Answer(response) => return Ok(response),
+    };
     let (export, mut tx) = request(
         &state.pool,
         &principal.context(),

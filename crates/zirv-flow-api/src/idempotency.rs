@@ -16,13 +16,13 @@ use serde::Serialize;
 
 use utoipa::ToSchema;
 use uuid::Uuid;
-use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::token::{Sha256Stream, sha256_bytes};
+use zirv_flow_core::{HmacKey, WorkspaceId};
 use zirv_flow_store::{ApiIdempotencyKey, PgConnection, PgPool, Reserved};
 
 use crate::auth::Principal;
 use crate::problem::{ApiError, Problem};
-use crate::{request_id, trace};
+use crate::{AppState, request_id, trace};
 
 const MAX_KEY_CHARS: usize = 255;
 const REPLAYED: HeaderName = HeaderName::from_static("idempotent-replayed");
@@ -158,7 +158,7 @@ impl Keyed {
     }
 }
 
-/// The hash of a request: its method, path and query, and its body.
+/// A request's method, path, query and body, streamed into SHA-256 then keyed with HMAC-SHA256.
 pub(crate) struct RequestHash(Sha256Stream);
 
 impl RequestHash {
@@ -180,19 +180,22 @@ impl RequestHash {
         method: &Method,
         uri: &Uri,
         body: &impl Serialize,
-    ) -> Result<[u8; 32], ApiError> {
+    ) -> Result<Self, ApiError> {
         let mut hash = Self::new(method, uri);
         let body = serde_json::to_vec(body).map_err(|_| ApiError::internal())?;
         hash.update(&body);
-        Ok(hash.finish())
+        Ok(hash)
     }
 
     pub(crate) fn update(&mut self, piece: &[u8]) {
         self.0.update(piece);
     }
 
-    pub(crate) fn finish(self) -> [u8; 32] {
-        self.0.finish()
+    pub(crate) fn finish(self, key: Option<&HmacKey>) -> Result<[u8; 32], ApiError> {
+        let key = key.ok_or_else(ApiError::internal)?;
+        let mut message = b"zirv-flow/api-idempotency/request/v1\0".to_vec();
+        message.extend_from_slice(&self.0.finish());
+        Ok(key.digest(&message))
     }
 }
 
@@ -344,14 +347,26 @@ pub(crate) enum Entry {
 /// Reserves the key of a request whose hash is known up front. Without a key the request runs
 /// as it always did.
 pub(crate) async fn reserve(
-    pool: &PgPool,
+    state: &AppState,
     workspace: WorkspaceId,
     keyed: Option<Keyed>,
-    request_hash: [u8; 32],
+    request_hash: RequestHash,
     lease_seconds: i64,
 ) -> Result<Entry, ApiError> {
+    if keyed.is_none() {
+        return Ok(Entry::Go(None));
+    }
+    let request_hash = request_hash.finish(state.identifier_key.as_deref())?;
     Ok(
-        match open(pool, workspace, keyed, Some(request_hash), lease_seconds).await? {
+        match open(
+            &state.pool,
+            workspace,
+            keyed,
+            Some(request_hash),
+            lease_seconds,
+        )
+        .await?
+        {
             Opened::Go(reservation) => Entry::Go(reservation),
             Opened::Answer(response) => Entry::Answer(response),
             Opened::Done(done) => Entry::Answer(done.answer(request_hash)),
@@ -512,22 +527,70 @@ mod tests {
 
     #[test]
     fn the_hash_covers_the_method_path_query_and_body() {
+        let key = zirv_flow_core::HmacRoot::bootstrap_from(&zirv_flow_core::MasterKey::generate())
+            .hmac_key(zirv_flow_core::HmacPurpose::Identifier);
+        let hash = |method: &Method, uri: &Uri, body: &Value| {
+            RequestHash::of_json(method, uri, body)
+                .unwrap()
+                .finish(Some(&key))
+                .unwrap()
+        };
         let uri: Uri = "/a/b?x=1".parse().unwrap();
         let other: Uri = "/a/b?x=2".parse().unwrap();
-        let same = RequestHash::of_json(&Method::POST, &uri, &json!({"n": 1})).unwrap();
+        let same = hash(&Method::POST, &uri, &json!({"n": 1}));
+
+        assert_eq!(same, hash(&Method::POST, &uri, &json!({"n": 1})));
+        assert_ne!(same, hash(&Method::POST, &uri, &json!({"n": 2})));
+        assert_ne!(same, hash(&Method::POST, &other, &json!({"n": 1})));
+        assert_ne!(same, hash(&Method::PUT, &uri, &json!({"n": 1})));
+        assert_ne!(
+            same,
+            hash(
+                &Method::POST,
+                &"/a/c?x=1".parse().unwrap(),
+                &json!({"n": 1})
+            )
+        );
+    }
+
+    #[test]
+    fn the_request_hash_requires_a_key_and_does_not_depend_on_chunk_boundaries() {
+        let key = || {
+            zirv_flow_core::HmacRoot::bootstrap_from(&zirv_flow_core::MasterKey::generate())
+                .hmac_key(zirv_flow_core::HmacPurpose::Identifier)
+        };
+        let one = key();
+        let two = key();
+        let uri = "/import?name=people".parse().unwrap();
+        let hash = || RequestHash::of_json(&Method::POST, &uri, &json!({"n": 1})).unwrap();
+        let mut streamed = RequestHash::new(&Method::POST, &uri);
+        streamed.update(b"{\"n\":");
+        streamed.update(b"1}");
 
         assert_eq!(
-            same,
-            RequestHash::of_json(&Method::POST, &uri, &json!({"n": 1})).unwrap()
+            streamed.finish(Some(&one)).unwrap(),
+            hash().finish(Some(&one)).unwrap()
         );
         assert_ne!(
-            same,
-            RequestHash::of_json(&Method::POST, &uri, &json!({"n": 2})).unwrap()
+            hash().finish(Some(&one)).unwrap(),
+            hash().finish(Some(&two)).unwrap()
         );
-        assert_ne!(
-            same,
-            RequestHash::of_json(&Method::POST, &other, &json!({"n": 1})).unwrap()
-        );
+        assert!(hash().finish(None).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_request_without_an_idempotency_key_needs_no_hmac_key() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://postgres@127.0.0.1:1/zirv_flow")
+            .unwrap();
+        let state = AppState::new(pool, std::sync::Arc::new(String::new));
+        let hash = RequestHash::new(&Method::POST, &"/a".parse().unwrap());
+
+        let entry = reserve(&state, WorkspaceId::new(), None, hash, lease::QUICK)
+            .await
+            .unwrap();
+
+        assert!(matches!(entry, Entry::Go(None)));
     }
 
     #[test]
@@ -613,6 +676,7 @@ mod acceptance {
     struct Fixture {
         pool: PgPool,
         router: Router,
+        identifier_key: Arc<HmacKey>,
         ws: WorkspaceId,
         admin: String,
         admin_id: ApiKeyId,
@@ -642,15 +706,14 @@ mod acceptance {
             }
         };
         let admin = key(Scope::Admin).await;
+        let state = AppState::new(serving.clone(), Arc::new(String::new)).with_hmac_root(
+            &zirv_flow_core::HmacRoot::bootstrap_from(&zirv_flow_core::MasterKey::generate()),
+        );
+        let identifier_key = Arc::clone(state.identifier_key.as_ref().unwrap());
         Fixture {
             pool: pool.clone(),
-            router: router(
-                AppState::new(serving.clone(), Arc::new(String::new)).with_hmac_root(
-                    &zirv_flow_core::HmacRoot::bootstrap_from(
-                        &zirv_flow_core::MasterKey::generate(),
-                    ),
-                ),
-            ),
+            router: router(state),
+            identifier_key,
             ws,
             admin_id: admin.key.id,
             admin: admin.plaintext,
@@ -744,6 +807,10 @@ mod acceptance {
 
         /// A person the privacy requests can name.
         async fn person(&self) -> Uuid {
+            self.person_with_identifier("external:crm", "p-1-ext").await
+        }
+
+        async fn person_with_identifier(&self, kind: &str, value: &str) -> Uuid {
             let outcome = zirv_flow_store::apply_profile_batch(
                 &self.pool,
                 self.ws,
@@ -751,7 +818,7 @@ mod acceptance {
                     source: "crm".into(),
                     stream: "contacts".into(),
                     record_key: "p-1".into(),
-                    identifiers: vec![("external:crm".into(), "p-1-ext".into())],
+                    identifiers: vec![(kind.into(), value.into())],
                     traits: serde_json::Map::new(),
                     observed_at: time::macros::datetime!(2026-01-01 00:00 UTC),
                     trace: zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("test")),
@@ -799,6 +866,8 @@ mod acceptance {
                 &uri,
                 &json!({"name": name, "scopes": ["read"]}),
             )
+            .unwrap()
+            .finish(Some(&self.identifier_key))
             .unwrap();
             let keyed = Keyed::scoped(
                 "create_api_key",
@@ -1123,6 +1192,62 @@ mod acceptance {
         assert_eq!(other.status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(other.json()["code"], "idempotency_key_reused");
         assert_eq!(f.count("SELECT count(*) FROM imports").await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_erasure_request_hash_is_keyed_and_still_distinguishes_replay_from_reuse(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        f.person_with_identifier("email", "erase@example.com").await;
+        let body = |email: &str| {
+            serde_json::to_vec(
+                &serde_json::from_value::<crate::privacy::PersonTarget>(json!({
+                    "identifier": { "kind": "email", "value": email }
+                }))
+                .unwrap(),
+            )
+            .unwrap()
+        };
+        let request = |bytes: Vec<u8>| {
+            f.request(
+                &f.admin,
+                "privacy/erasures",
+                "application/json",
+                Some("k-1"),
+                Body::from(bytes),
+            )
+        };
+        let bytes = body("erase@example.com");
+        let first_request = request(bytes.clone());
+        let mut plain = format!("POST\n{}\n\n", first_request.uri().path()).into_bytes();
+        plain.extend_from_slice(&bytes);
+
+        let first = f.send(first_request).await;
+        assert_eq!(first.status, StatusCode::ACCEPTED, "{}", first.text);
+        let stored: Vec<u8> = sqlx::query_scalar(
+            "SELECT request_hash FROM api_idempotency WHERE route = 'request_erasure'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_ne!(stored, sha256_bytes(&plain));
+
+        let again = f.send(request(bytes)).await;
+        let other = f.send(request(body("other@example.com"))).await;
+
+        assert_eq!(again.status, StatusCode::CONFLICT, "{}", again.text);
+        assert_eq!(again.json()["code"], "idempotency_key_replayed");
+        assert_eq!(again.json()["resource_id"], first.json()["id"]);
+        assert_eq!(
+            other.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            other.text
+        );
+        assert_eq!(other.json()["code"], "idempotency_key_reused");
+        assert_eq!(f.count("SELECT count(*) FROM erasure_requests").await, 1);
     }
 
     #[sqlx::test]

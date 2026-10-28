@@ -807,7 +807,7 @@ pub(crate) async fn create(
     let request_hash = RequestHash::of_json(&method, &uri, &request)?;
     let keyed = Keyed::of(&headers, "create_ai_draft", &principal)?;
     let reservation = match idempotency::reserve(
-        &state.pool,
+        &state,
         workspace.id,
         keyed,
         request_hash,

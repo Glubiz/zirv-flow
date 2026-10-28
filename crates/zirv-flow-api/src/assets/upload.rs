@@ -185,14 +185,18 @@ pub(crate) async fn upload(
     let bytes = receive(request.into_body(), limits, length).await?;
     let (width, height) = check(&bytes, declared)?;
     request_hash.update(&bytes);
-    let request_hash = request_hash.finish();
-    let reservation =
-        match idempotency::reserve(&state.pool, workspace.id, keyed, request_hash, lease::ASSET)
-            .await?
-        {
-            Entry::Go(reservation) => reservation,
-            Entry::Answer(response) => return Ok(response),
-        };
+    let reservation = match idempotency::reserve(
+        &state,
+        workspace.id,
+        keyed,
+        request_hash,
+        lease::ASSET,
+    )
+    .await?
+    {
+        Entry::Go(reservation) => reservation,
+        Entry::Answer(response) => return Ok(response),
+    };
 
     let mut tx = begin(&state.pool).await?;
     let stored = store_asset(

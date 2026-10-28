@@ -2,9 +2,10 @@
 -- revision already guards (architecture section 15). A request first reserves its key as
 -- `pending`, with a lease; the create marks it `done` in its own transaction, so a create commits
 -- only while it owns the key. The key is stored as the hash of the caller and the key, the
--- request and response as hashes, and the created resource by id, so the table holds no person
--- column, no client-chosen text and no response body. A pending row whose lease has run out may be taken
--- over; rows expire after 24 hours, in the leader's upkeep.
+-- request as a hash keyed with the server's stable identifier HMAC key, the response as a hash,
+-- and the created resource by id. Request identifiers cannot be confirmed without that secret.
+-- The table holds no person column, no client-chosen text and no response body. A pending row
+-- whose lease has run out may be taken over; rows expire after 24 hours, in the leader's upkeep.
 CREATE TABLE api_idempotency (
     workspace_id  uuid NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
     route         text NOT NULL,

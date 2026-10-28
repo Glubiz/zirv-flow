@@ -166,13 +166,18 @@ pub(crate) async fn create(
         .collect::<Result<Vec<_>, _>>()?;
     let request_hash = RequestHash::of_json(&method, &uri, &body)?;
     let keyed = Keyed::of(&headers, "create_api_key", &principal)?;
-    let reservation =
-        match idempotency::reserve(&state.pool, workspace.id, keyed, request_hash, lease::QUICK)
-            .await?
-        {
-            Entry::Go(reservation) => reservation,
-            Entry::Answer(response) => return Ok(response),
-        };
+    let reservation = match idempotency::reserve(
+        &state,
+        workspace.id,
+        keyed,
+        request_hash,
+        lease::QUICK,
+    )
+    .await?
+    {
+        Entry::Go(reservation) => reservation,
+        Entry::Answer(response) => return Ok(response),
+    };
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
     let created = admin::create_api_key_in(
         &mut tx,

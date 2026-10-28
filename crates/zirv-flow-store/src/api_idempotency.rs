@@ -74,48 +74,53 @@ pub async fn reserve_api_idempotency(
     .await
     .map_err(StoreError::query)?;
     let reservation = Uuid::now_v7();
-    let inserted = sqlx::query(
-        "INSERT INTO api_idempotency \
+    for _ in 0..3 {
+        let inserted = sqlx::query(
+            "INSERT INTO api_idempotency \
            (workspace_id, route, key_hash, state, reservation, lease_until, request_hash) \
          VALUES ($1, $2, $3, 'pending', $4, now() + make_interval(secs => $5), $6) \
          ON CONFLICT DO NOTHING",
-    )
-    .bind(key.workspace.as_uuid())
-    .bind(key.route)
-    .bind(key.key_hash)
-    .bind(reservation)
-    .bind(lease_seconds as f64)
-    .bind(request_hash)
-    .execute(&mut *tx)
-    .await
-    .map_err(StoreError::query)?
-    .rows_affected();
-    if inserted == 1 {
-        crate::commit(tx).await?;
-        return Ok(Reserved::Fresh(reservation));
-    }
-    let row: Row = sqlx::query_as(
-        "SELECT state, request_hash, resource_id, lease_until <= now() AS expired, \
+        )
+        .bind(key.workspace.as_uuid())
+        .bind(key.route)
+        .bind(key.key_hash)
+        .bind(reservation)
+        .bind(lease_seconds as f64)
+        .bind(request_hash)
+        .execute(&mut *tx)
+        .await
+        .map_err(StoreError::query)?
+        .rows_affected();
+        if inserted == 1 {
+            crate::commit(tx).await?;
+            return Ok(Reserved::Fresh(reservation));
+        }
+        let row: Option<Row> = sqlx::query_as(
+            "SELECT state, request_hash, resource_id, lease_until <= now() AS expired, \
                 ceil(extract(epoch FROM lease_until - now()))::bigint AS seconds_left \
          FROM api_idempotency WHERE workspace_id = $1 AND route = $2 AND key_hash = $3 FOR UPDATE",
-    )
-    .bind(key.workspace.as_uuid())
-    .bind(key.route)
-    .bind(key.key_hash)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(StoreError::query)?;
-    let pending = row.state == "pending";
-    // A pending row whose lease ran out never created anything, so a retry may differ from it.
-    let takeover = pending && row.expired;
-    if !takeover
-        && let (Some(first), Some(now)) = (&row.request_hash, request_hash)
-        && first.as_slice() != now
-    {
-        return Ok(Reserved::Reused);
-    }
-    if takeover {
-        sqlx::query(
+        )
+        .bind(key.workspace.as_uuid())
+        .bind(key.route)
+        .bind(key.key_hash)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(StoreError::query)?;
+        // A release or expiry sweep can delete the conflict before this statement sees it.
+        let Some(row) = row else {
+            continue;
+        };
+        let pending = row.state == "pending";
+        // A pending row whose lease ran out never created anything, so a retry may differ from it.
+        let takeover = pending && row.expired;
+        if !takeover
+            && let (Some(first), Some(now)) = (&row.request_hash, request_hash)
+            && first.as_slice() != now
+        {
+            return Ok(Reserved::Reused);
+        }
+        if takeover {
+            sqlx::query(
             "UPDATE api_idempotency SET reservation = $4, request_hash = $5, created_at = now(), \
                lease_until = now() + make_interval(secs => $6) \
              WHERE workspace_id = $1 AND route = $2 AND key_hash = $3",
@@ -129,21 +134,23 @@ pub async fn reserve_api_idempotency(
         .execute(&mut *tx)
         .await
         .map_err(StoreError::query)?;
-        crate::commit(tx).await?;
-        return Ok(Reserved::Fresh(reservation));
+            crate::commit(tx).await?;
+            return Ok(Reserved::Fresh(reservation));
+        }
+        if pending {
+            return Ok(Reserved::InFlight {
+                retry_after: u64::try_from(row.seconds_left).unwrap_or(1).max(1),
+            });
+        }
+        return match (row.request_hash, row.resource_id) {
+            (Some(request_hash), Some(resource_id)) => Ok(Reserved::Done {
+                request_hash,
+                resource_id,
+            }),
+            _ => Err(StoreError::poison()),
+        };
     }
-    if pending {
-        return Ok(Reserved::InFlight {
-            retry_after: u64::try_from(row.seconds_left).unwrap_or(1).max(1),
-        });
-    }
-    match (row.request_hash, row.resource_id) {
-        (Some(request_hash), Some(resource_id)) => Ok(Reserved::Done {
-            request_hash,
-            resource_id,
-        }),
-        _ => Err(StoreError::poison()),
-    }
+    Ok(Reserved::InFlight { retry_after: 1 })
 }
 
 /// Sets the request hash of a reservation made without one. `false` when the reservation is no
@@ -342,6 +349,73 @@ mod tests {
             Reserved::InFlight { retry_after } => assert!((1..=60).contains(&retry_after)),
             other => panic!("expected in flight, got {other:?}"),
         }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_conflicting_row_deleted_before_the_read_is_reserved_again(pool: PgPool) {
+        let ws = workspace(&pool, "Acme").await;
+        let first = fresh(&pool, key(ws, b"k"), b"one").await;
+        // A statement trigger runs even when ON CONFLICT inserts nothing: delete the first
+        // reservation after that conflict and before the read, without scheduling a race.
+        sqlx::query(
+            "CREATE FUNCTION release_conflict() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+             DELETE FROM api_idempotency WHERE request_hash = convert_to('one', 'UTF8'); \
+             RETURN NULL; END $$",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER release_conflict AFTER INSERT ON api_idempotency \
+             FOR EACH STATEMENT EXECUTE FUNCTION release_conflict()",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let second = fresh(&pool, key(ws, b"k"), b"two").await;
+        let overlap = reserve_api_idempotency(&pool, key(ws, b"k"), Some(b"two"), 60)
+            .await
+            .unwrap();
+
+        assert_ne!(first, second);
+        assert!(matches!(overlap, Reserved::InFlight { .. }));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn three_missing_rows_answer_in_flight(pool: PgPool) {
+        let ws = workspace(&pool, "Acme").await;
+        sqlx::query("CREATE SEQUENCE reservation_attempts")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE FUNCTION skip_reservation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+             PERFORM nextval('reservation_attempts'); RETURN NULL; END $$",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER skip_reservation BEFORE INSERT ON api_idempotency \
+             FOR EACH ROW EXECUTE FUNCTION skip_reservation()",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let reserved = reserve_api_idempotency(&pool, key(ws, b"k"), Some(b"request"), 60)
+            .await
+            .unwrap();
+        let attempts: i64 = sqlx::query_scalar("SELECT last_value FROM reservation_attempts")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(reserved, Reserved::InFlight { retry_after: 1 });
+        assert_eq!(attempts, 3);
     }
 
     #[sqlx::test]

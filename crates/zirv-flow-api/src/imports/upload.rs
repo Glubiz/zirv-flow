@@ -410,7 +410,7 @@ pub(crate) async fn upload(
             UnhashedEntry::Answer(response) => return Ok(response),
             UnhashedEntry::Done(done) => {
                 drain(request.into_body(), limits, &mut request_hash).await?;
-                return Ok(done.answer(request_hash.finish()));
+                return Ok(done.answer(request_hash.finish(state.identifier_key.as_deref())?));
             }
         };
 
@@ -444,7 +444,12 @@ pub(crate) async fn upload(
         }
     };
     if let Some(reservation) = &reservation
-        && let Err(error) = reservation.bind_hash(request_hash.finish()).await
+        && let Err(error) = async {
+            reservation
+                .bind_hash(request_hash.finish(state.identifier_key.as_deref())?)
+                .await
+        }
+        .await
     {
         upload.abort().await;
         return Err(error);

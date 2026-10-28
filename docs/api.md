@@ -151,7 +151,9 @@ A completed key is remembered for 24 hours. The same key and request answer
 `Idempotent-Replayed: true`. The original response is never stored or returned: it can contain
 a secret or a person's values. Read the resource through its normal authorized endpoint.
 The same key with another request answers `422 idempotency_key_reused`. The request hash covers
-the method, path, query and body; changing upload metadata changes the request too.
+the method, path, query and body; changing upload metadata changes the request too. It is keyed
+with the server's stable identifier HMAC key, so stored hashes cannot confirm guesses of person
+identifiers without that secret. Keyed requests require the server's HMAC root to be configured.
 
 While the first request runs, a matching retry answers `409 idempotency_key_in_flight` with
 `Retry-After`. A failed request releases its reservation; a retry can take over an expired
@@ -186,10 +188,10 @@ status with `Idempotent-Replayed: true` and the contact as it is now, without wr
 another request under the key is `422 idempotency_key_reused`. Its key is workspace-scoped.
 
 **Erasure and merge, per table.** `api_idempotency` stores the hash of the caller with the key,
-the request and response hashes, reservation state and lease, status and resource id. It stores no
-response body, person column or client-chosen text. Erasure and merge leave it alone: a replay
-exposes only the created asset, key, import, draft, erasure request or export id, never the person's
-id or values.
+the keyed request hash and response hash, reservation state and lease, status and resource id.
+It stores no response body, person column or client-chosen text. Erasure and merge leave it alone:
+a replay exposes only the created asset, key, import, draft, erasure request or export id, never
+the person's id or values.
 `contact_idempotency` stores the key, request hash and status, with no response body or person
 column. Erasure removes keys containing a person's values; a replay reads the contact's current
 state, including after a merge. Both tables expire after 24 hours.
