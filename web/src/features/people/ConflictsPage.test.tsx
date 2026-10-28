@@ -59,7 +59,7 @@ function mountAsAdmin(extra: Parameters<typeof mockApi>[0] = {}) {
   return mockApi({
     "GET /api/v1/session": () => json(session(OWNER, "csrf-conflicts")),
     "GET /api/v1/workspaces/ws1/members": () => json(members("admin", OWNER.id)),
-    [LIST]: () => json({ conflicts: [CONFLICT], next_before: null }),
+    [LIST]: () => json({ conflicts: [CONFLICT], next_cursor: null }),
     [DETAIL_ROUTE]: () => json(DETAIL),
     ...extra,
   });
@@ -106,8 +106,8 @@ describe("identity conflicts", () => {
     const calls = mountAsAdmin({
       [LIST]: (request) =>
         new URL(request.url).searchParams.get("status") === "resolved"
-          ? json({ conflicts: [resolved], next_before: null })
-          : json({ conflicts: [CONFLICT], next_before: null }),
+          ? json({ conflicts: [resolved], next_cursor: null })
+          : json({ conflicts: [CONFLICT], next_cursor: null }),
     });
     const user = userEvent.setup();
     mount();
@@ -124,7 +124,7 @@ describe("identity conflicts", () => {
   });
 
   it("shows an empty state for each filter, and a retry when loading fails", async () => {
-    mountAsAdmin({ [LIST]: () => json({ conflicts: [], next_before: null }) });
+    mountAsAdmin({ [LIST]: () => json({ conflicts: [], next_cursor: null }) });
     const user = userEvent.setup();
     const first = mount();
     expect(await screen.findByText("No open conflicts")).toBeInTheDocument();
@@ -148,9 +148,9 @@ describe("identity conflicts", () => {
     const second = { ...CONFLICT, id: "c0000000-0000-4000-8000-000000000002", kind: "phone" };
     const calls = mountAsAdmin({
       [LIST]: (request) =>
-        new URL(request.url).searchParams.get("before") === "cursor-1"
-          ? json({ conflicts: [second], next_before: null })
-          : json({ conflicts: [CONFLICT], next_before: "cursor-1" }),
+        new URL(request.url).searchParams.get("cursor") === "cursor-1"
+          ? json({ conflicts: [second], next_cursor: null })
+          : json({ conflicts: [CONFLICT], next_cursor: "cursor-1" }),
     });
     const user = userEvent.setup();
     mount();
@@ -160,7 +160,7 @@ describe("identity conflicts", () => {
     expect(await screen.findByText("Phone number")).toBeInTheDocument();
     expect(screen.getByText("Email address")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Show more" })).not.toBeInTheDocument();
-    expect(calls.some((call) => call.search.includes("before=cursor-1"))).toBe(true);
+    expect(calls.some((call) => call.search.includes("cursor=cursor-1"))).toBe(true);
   });
 
   it("shows the two people side by side with the shared identifier marked", async () => {
@@ -183,7 +183,7 @@ describe("identity conflicts", () => {
   it("keeps the two people separate with the CSRF token and reloads the list", async () => {
     let open = true;
     const calls = mountAsAdmin({
-      [LIST]: () => json({ conflicts: open ? [CONFLICT] : [], next_before: null }),
+      [LIST]: () => json({ conflicts: open ? [CONFLICT] : [], next_cursor: null }),
       [RESOLVE_ROUTE]: () => {
         open = false;
         return json({ ...CONFLICT, resolved_at: "2026-10-02T09:00:00Z", resolution: "kept_separate" });
@@ -317,7 +317,7 @@ describe("identity conflicts", () => {
     mockApi({
       "GET /api/v1/session": () => json(session(MEMBER)),
       "GET /api/v1/workspaces/ws1/members": () => json(members("editor", MEMBER.id)),
-      [LIST]: () => json({ conflicts: [CONFLICT], next_before: null }),
+      [LIST]: () => json({ conflicts: [CONFLICT], next_cursor: null }),
       [DETAIL_ROUTE]: () => json(MASKED_DETAIL),
     });
     const user = userEvent.setup();
@@ -337,7 +337,7 @@ describe("identity conflicts", () => {
   it("shows a closed conflict's outcome without actions", async () => {
     const resolved = { ...CONFLICT, resolved_at: "2026-10-02T09:00:00Z", resolution: "kept_separate" };
     mountAsAdmin({
-      [LIST]: () => json({ conflicts: [resolved], next_before: null }),
+      [LIST]: () => json({ conflicts: [resolved], next_cursor: null }),
       [DETAIL_ROUTE]: () => json({ ...DETAIL, conflict: resolved }),
     });
     const user = userEvent.setup();

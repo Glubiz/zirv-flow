@@ -125,7 +125,8 @@ fn identity_error(error: IdentityError) -> ApiError {
         IdentityError::Taken => ApiError::new(
             StatusCode::CONFLICT,
             "a sender identity with that address already exists",
-        ),
+        )
+        .with_code("sender_identity_exists"),
         IdentityError::Store(error) => error.into(),
     }
 }

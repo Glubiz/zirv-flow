@@ -54,8 +54,8 @@ pub(crate) struct TestSendRequest {
 pub(crate) struct TestSendsBody {
     /// Newest first.
     test_sends: Vec<TestSendBody>,
-    /// Pass as `before` for the next page; null when there is none.
-    next_before: Option<String>,
+    /// Pass as `cursor` for the next page; null when there is none.
+    next_cursor: Option<String>,
 }
 
 fn unavailable() -> ApiError {
@@ -354,11 +354,11 @@ pub(crate) async fn quota(
         ("template_id" = Option<Uuid>, Query, description = "Only the tests of this template"),
         ("draft_revision" = Option<i32>, Query, description = "Only the tests that rendered this draft revision"),
         ("limit" = Option<u32>, Query, description = "Rows per page, 1 to 200; default 50"),
-        ("before" = Option<String>, Query, description = "The next_before of the previous page")
+        ("cursor" = Option<String>, Query, description = "The next_cursor of the previous page")
     ),
     responses(
         (status = 200, description = "A page of the log", body = TestSendsBody),
-        (status = 400, description = "limit, template_id or draft_revision is out of range or malformed, or before is not a cursor", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "limit, template_id or draft_revision is out of range or malformed, or cursor is malformed; the removed before and after answer paging_parameter_renamed", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the read scope", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json")
@@ -400,13 +400,13 @@ pub(crate) async fn list(
         before,
     )
     .await?;
-    let next_before = match rows.last() {
+    let next_cursor = match rows.last() {
         Some(last) if more => Some(encode_cursor((last.send.created_at, last.send.id))),
         _ => None,
     };
     Ok(Json(TestSendsBody {
         test_sends: rows.into_iter().map(TestSendBody::from).collect(),
-        next_before,
+        next_cursor,
     }))
 }
 

@@ -9,6 +9,7 @@ mod consent;
 mod contacts;
 mod cookies;
 mod credentials;
+pub mod deprecation;
 mod destinations;
 mod events;
 mod feedback;

@@ -183,6 +183,7 @@ pub(crate) fn name_taken(error: StoreError) -> ApiError {
             StatusCode::CONFLICT,
             "a source with that name already exists",
         )
+        .with_code("name_taken")
     } else {
         error.into()
     }

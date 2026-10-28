@@ -735,11 +735,11 @@ mod tests {
         let first = f
             .call("GET", "/test-sends?limit=2", None, Auth::Key(&f.read))
             .await;
-        let cursor = first.body["next_before"].as_str().unwrap().to_owned();
+        let cursor = first.body["next_cursor"].as_str().unwrap().to_owned();
         let second = f
             .call(
                 "GET",
-                &format!("/test-sends?limit=2&before={cursor}"),
+                &format!("/test-sends?limit=2&cursor={cursor}"),
                 None,
                 Auth::Key(&f.read),
             )
@@ -774,7 +774,7 @@ mod tests {
         };
         assert_eq!(listed(&first), [ids[2].clone(), ids[1].clone()]);
         assert_eq!(listed(&second), [ids[0].clone()]);
-        assert_eq!(second.body["next_before"], Value::Null);
+        assert_eq!(second.body["next_cursor"], Value::Null);
         assert!(listed(&other_template).is_empty());
         assert_eq!(listed(&same_template).len(), 3);
         assert_eq!(bad.status, StatusCode::BAD_REQUEST);

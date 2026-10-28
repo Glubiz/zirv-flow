@@ -389,10 +389,10 @@ pub(crate) async fn cancel(
     let run = match cancel_run(&mut tx, workspace.id, source_id, run_id).await? {
         CancelOutcome::Cancelled(run) => run,
         CancelOutcome::NotActive => {
-            return Err(ApiError::new(
-                StatusCode::CONFLICT,
-                "the run is not queued or running",
-            ));
+            return Err(
+                ApiError::new(StatusCode::CONFLICT, "the run is not queued or running")
+                    .with_code("sync_run_not_active"),
+            );
         }
         CancelOutcome::NotFound => return Err(ApiError::not_found()),
     };
@@ -418,7 +418,7 @@ fn parse_query(query: &str) -> Result<(Option<String>, Option<RunCursor>, u32), 
             "limit" => limit = parse_limit(&value)?,
             "cursor" => {
                 let (created_at, id) = decode_cursor(&value)
-                    .ok_or_else(|| ApiError::bad_request("cursor is not a valid cursor"))?;
+                    .ok_or_else(|| ApiError::bad_request("cursor is malformed"))?;
                 cursor = Some(RunCursor { created_at, id });
             }
             _ => {}

@@ -36,11 +36,11 @@ function Imports({ workspaceId }: { workspaceId: string }) {
     try {
       const page = await unwrap(
         client.GET("/api/v1/workspaces/{ws}/imports", {
-          params: { path: { ws: workspaceId }, query: { before } },
+          params: { path: { ws: workspaceId }, query: { cursor: before } },
         }),
       );
       setOlder((current) => [...current, ...page.imports]);
-      setCursor(page.next_before ?? null);
+      setCursor(page.next_cursor ?? null);
     } catch (error) {
       setFailure(describeError(error));
     } finally {
@@ -68,7 +68,7 @@ function Imports({ workspaceId }: { workspaceId: string }) {
         >
           {(data) => {
             const imports = [...data.imports, ...older];
-            const next = cursor === undefined ? data.next_before : cursor;
+            const next = cursor === undefined ? data.next_cursor : cursor;
             return (
               <>
                 <div className="table-scroll">

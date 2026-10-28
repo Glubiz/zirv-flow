@@ -31,8 +31,8 @@ use crate::trace::request_trace;
 pub(crate) struct CsvImportsBody {
     /// Newest first.
     imports: Vec<CsvImportBody>,
-    /// Pass as `before` for the next page; null when there is none.
-    next_before: Option<String>,
+    /// Pass as `cursor` for the next page; null when there is none.
+    next_cursor: Option<String>,
 }
 
 /// The workspace's imports, newest first: the run history.
@@ -44,11 +44,11 @@ pub(crate) struct CsvImportsBody {
     params(
         ("ws" = Uuid, Path, description = "Workspace id"),
         ("limit" = Option<u32>, Query, description = "Imports per page, 1 to 200; default 50"),
-        ("before" = Option<String>, Query, description = "The next_before of the previous page")
+        ("cursor" = Option<String>, Query, description = "The next_cursor of the previous page")
     ),
     responses(
         (status = 200, description = "A page of imports", body = CsvImportsBody),
-        (status = 400, description = "limit is out of range or before is malformed", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "limit is out of range or cursor is malformed; the removed before and after answer paging_parameter_renamed", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the read scope", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json")
@@ -65,13 +65,13 @@ pub(crate) async fn list(
     let (limit, before) = parse_page(&query.unwrap_or_default())?;
     let (imports, more) =
         list_imports(&state.pool, workspace.id, before.map(|(_, id)| id), limit).await?;
-    let next_before = match imports.last() {
+    let next_cursor = match imports.last() {
         Some(last) if more => Some(encode_cursor((last.created_at, last.id))),
         _ => None,
     };
     Ok(Json(CsvImportsBody {
         imports: imports.iter().map(CsvImportBody::from).collect(),
-        next_before,
+        next_cursor,
     }))
 }
 
@@ -151,7 +151,7 @@ fn mapping_problem(error: &MappingError) -> ApiError {
         Some(column) => format!("mapping: {} (column \"{column}\")", error.code()),
         None => format!("mapping: {}", error.code()),
     };
-    ApiError::unprocessable(detail)
+    ApiError::unprocessable(detail).with_code(error.code())
 }
 
 /// Saves the mapping and moves the import to `mapped`. The mapping needs at least one
@@ -247,7 +247,8 @@ async fn enqueue_pass(
         Err(ApiError::new(
             StatusCode::CONFLICT,
             "a job for this import is still queued or dead; retry it from the jobs page",
-        ))
+        )
+        .with_code("import_job_pending"))
     }
 }
 

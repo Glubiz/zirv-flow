@@ -96,7 +96,7 @@ export function snippetRoutes({ role = "admin", detail, preview, uses = usedBy()
     },
     [`GET ${BASE}/versions`]: () => json(versions),
     [`GET ${BASE}/where-used`]: () => json(uses),
-    [`GET ${WS}/assets`]: () => json({ assets: [], next_before: null, used_bytes: 0, limit_bytes: 1000, max_file_bytes: 1000 }),
+    [`GET ${WS}/assets`]: () => json({ assets: [], next_cursor: null, used_bytes: 0, limit_bytes: 1000, max_file_bytes: 1000 }),
   };
 }
 

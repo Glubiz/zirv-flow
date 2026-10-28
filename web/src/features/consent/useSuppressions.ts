@@ -41,7 +41,7 @@ export function useSuppressions(workspaceId: string, reason: string): Suppressio
   const base = first.status === "ready" ? first.data : null;
   const more = extra !== null && extra.base === base ? extra : null;
   const suppressions = base ? [...base.suppressions, ...(more?.suppressions ?? [])] : [];
-  const nextBefore = base ? (more ? more.nextBefore : (base.next_before ?? null)) : null;
+  const nextBefore = base ? (more ? more.nextBefore : (base.next_cursor ?? null)) : null;
 
   const loadMore = useCallback(() => {
     if (base === null || nextBefore === null) return;
@@ -49,14 +49,14 @@ export function useSuppressions(workspaceId: string, reason: string): Suppressio
     setMoreError(null);
     unwrap(
       client.GET("/api/v1/workspaces/{ws}/suppressions", {
-        params: { path: { ws: workspaceId }, query: { limit: PAGE_SIZE, before: nextBefore, reason: filter } },
+        params: { path: { ws: workspaceId }, query: { limit: PAGE_SIZE, cursor: nextBefore, reason: filter } },
       }),
     ).then(
       (page) => {
         setExtra((current) => ({
           base,
           suppressions: [...(current?.base === base ? current.suppressions : []), ...page.suppressions],
-          nextBefore: page.next_before ?? null,
+          nextBefore: page.next_cursor ?? null,
         }));
         setLoadingMore(false);
       },

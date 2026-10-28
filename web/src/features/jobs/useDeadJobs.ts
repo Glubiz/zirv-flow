@@ -36,18 +36,18 @@ export function useDeadJobs(): DeadJobsState {
   const base = first.status === "ready" ? first.data : null;
   const more = extra !== null && extra.base === base ? extra : null;
   const jobs = base ? [...base.jobs, ...(more?.jobs ?? [])] : [];
-  const nextBefore = base ? (more ? more.nextBefore : (base.next_before ?? null)) : null;
+  const nextBefore = base ? (more ? more.nextBefore : (base.next_cursor ?? null)) : null;
 
   const loadMore = useCallback(() => {
     if (base === null || nextBefore === null) return;
     setLoadingMore(true);
     setMoreError(null);
-    unwrap(client.GET("/api/v1/admin/jobs/dead", { params: { query: { limit: PAGE_SIZE, before: nextBefore } } })).then(
+    unwrap(client.GET("/api/v1/admin/jobs/dead", { params: { query: { limit: PAGE_SIZE, cursor: nextBefore } } })).then(
       (page) => {
         setExtra((current) => ({
           base,
           jobs: [...(current?.base === base ? current.jobs : []), ...page.jobs],
-          nextBefore: page.next_before ?? null,
+          nextBefore: page.next_cursor ?? null,
         }));
         setLoadingMore(false);
       },

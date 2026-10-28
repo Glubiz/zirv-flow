@@ -29,8 +29,8 @@ function routes(role: "admin" | "editor", extra: Parameters<typeof mockApi>[0] =
   return {
     "GET /api/v1/session": () => json(session(role === "admin" ? OWNER : MEMBER)),
     "GET /api/v1/workspaces/ws1/members": () => json([{ user_id: (role === "admin" ? OWNER : MEMBER).id, email: "x@example.test", role, added_at: "2026-10-01T09:00:00Z" }]),
-    "GET /api/v1/workspaces/ws1/privacy/erasures": () => json({ erasures: [], next_before: null }),
-    "GET /api/v1/workspaces/ws1/privacy/exports": () => json({ exports: [], next_before: null }),
+    "GET /api/v1/workspaces/ws1/privacy/erasures": () => json({ erasures: [], next_cursor: null }),
+    "GET /api/v1/workspaces/ws1/privacy/exports": () => json({ exports: [], next_cursor: null }),
     "GET /api/v1/workspaces/ws1/privacy/settings": () => json({ orphan_policy: "keep" }),
     [`GET ${RETENTION}`]: () => json({ windows: windows() }),
     ...extra,

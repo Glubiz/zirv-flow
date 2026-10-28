@@ -320,8 +320,12 @@ pub(crate) struct ExploreListRequest {
     scope: ExploreScopeRequest,
     /// Rows per page, 1 to 200; default 50.
     limit: Option<u32>,
-    /// The `next_after` of the previous page.
-    after: Option<String>,
+    /// The `next_cursor` of the previous page.
+    cursor: Option<String>,
+    /// Removed: the old name of `cursor`, refused with `paging_parameter_renamed`.
+    #[serde(default, deserialize_with = "crate::problem::sent")]
+    #[schema(ignore)]
+    after: bool,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -372,8 +376,8 @@ fn event_body(row: ExploreRow, reveal: bool) -> ExploredEventBody {
 pub(crate) struct ExploreListBody {
     /// Newest first.
     events: Vec<ExploredEventBody>,
-    /// Pass as `after` for the next page; null when there is none.
-    next_after: Option<String>,
+    /// Pass as `cursor` for the next page; null when there is none.
+    next_cursor: Option<String>,
 }
 
 /// Opaque to callers: base64url of the microseconds since the epoch and the id.
@@ -403,7 +407,7 @@ fn decode_cursor(text: &str) -> Option<RowCursor> {
     request_body = ExploreListRequest,
     responses(
         (status = 200, description = "A page of events", body = ExploreListBody),
-        (status = 400, description = "limit is out of range or after is malformed", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "limit is out of range or cursor is malformed; the removed after answers paging_parameter_renamed", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the read scope, a missing CSRF token, or a probe of a PII property by a caller who may not see values (`code` is `pii_property_not_explorable`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
@@ -428,12 +432,14 @@ pub(crate) async fn list(
             )));
         }
     };
-    let after = match &request.after {
+    if request.after {
+        return Err(ApiError::paging_parameter_renamed());
+    }
+    let after = match &request.cursor {
         None => None,
-        Some(text) => Some(
-            decode_cursor(text)
-                .ok_or_else(|| ApiError::bad_request("after is not a valid cursor"))?,
-        ),
+        Some(text) => {
+            Some(decode_cursor(text).ok_or_else(|| ApiError::bad_request("cursor is malformed"))?)
+        }
     };
     let filters = request.scope.filters()?;
     let reveal = may_view_pii(&state, &principal, workspace.id).await;
@@ -456,7 +462,7 @@ pub(crate) async fn list(
             .into_iter()
             .map(|row| event_body(row, reveal))
             .collect(),
-        next_after: page.next.map(encode_cursor),
+        next_cursor: page.next.map(encode_cursor),
     }))
 }
 

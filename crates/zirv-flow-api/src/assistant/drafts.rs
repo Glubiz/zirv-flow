@@ -812,7 +812,8 @@ pub(crate) async fn create(
                 return Err(ApiError::new(
                     StatusCode::CONFLICT,
                     "this source does not use a manifest",
-                ));
+                )
+                .with_code("source_not_manifest"));
             }
             (Some(source), None)
         }

@@ -39,7 +39,7 @@ export function useListMembers(workspaceId: string, listId: string): ListMembers
   const base = first.status === "ready" ? first.data : null;
   const more = extra !== null && extra.base === base ? extra : null;
   const members = base ? [...base.members, ...(more?.members ?? [])] : [];
-  const nextBefore = base ? (more ? more.nextBefore : (base.next_before ?? null)) : null;
+  const nextBefore = base ? (more ? more.nextBefore : (base.next_cursor ?? null)) : null;
 
   const loadMore = useCallback(() => {
     if (base === null || nextBefore === null) return;
@@ -47,14 +47,14 @@ export function useListMembers(workspaceId: string, listId: string): ListMembers
     setMoreError(null);
     unwrap(
       client.GET("/api/v1/workspaces/{ws}/lists/{id}/members", {
-        params: { path: { ws: workspaceId, id: listId }, query: { limit: PAGE_SIZE, before: nextBefore } },
+        params: { path: { ws: workspaceId, id: listId }, query: { limit: PAGE_SIZE, cursor: nextBefore } },
       }),
     ).then(
       (page) => {
         setExtra((current) => ({
           base,
           members: [...(current?.base === base ? current.members : []), ...page.members],
-          nextBefore: page.next_before ?? null,
+          nextBefore: page.next_cursor ?? null,
         }));
         setLoadingMore(false);
       },

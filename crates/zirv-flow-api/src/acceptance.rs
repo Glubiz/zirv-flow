@@ -1778,7 +1778,7 @@ mod tests {
 
         let all = get("/api/v1/admin/jobs/dead".into()).await;
         assert_eq!(all.status, StatusCode::OK);
-        assert!(all.body["next_before"].is_null());
+        assert!(all.body["next_cursor"].is_null());
         let jobs = all.body["jobs"].as_array().unwrap();
         let ids: Vec<&str> = jobs.iter().map(|job| job["id"].as_str().unwrap()).collect();
         assert_eq!(
@@ -1825,8 +1825,8 @@ mod tests {
                     .map(|job| job["id"].as_str().unwrap().to_owned()),
             );
             pages += 1;
-            match page.body["next_before"].as_str() {
-                Some(cursor) => uri = format!("/api/v1/admin/jobs/dead?limit=2&before={cursor}"),
+            match page.body["next_cursor"].as_str() {
+                Some(cursor) => uri = format!("/api/v1/admin/jobs/dead?limit=2&cursor={cursor}"),
                 None => break,
             }
         }
@@ -1839,7 +1839,7 @@ mod tests {
                 .collect::<Vec<_>>()
         );
 
-        for bad in ["limit=0", "limit=201", "limit=x", "before=garbage"] {
+        for bad in ["limit=0", "limit=201", "limit=x", "cursor=garbage"] {
             let reply = get(format!("/api/v1/admin/jobs/dead?{bad}")).await;
             assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{bad}");
         }
@@ -1847,6 +1847,97 @@ mod tests {
             get("/api/v1/admin/jobs/dead?limit=200".into()).await.status,
             StatusCode::OK
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_removed_paging_name_is_refused_on_every_renamed_list_and_both_search_bodies(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let id = Uuid::nil();
+        let base = format!("/api/v1/workspaces/{ws}");
+        let lists = [
+            "/api/v1/admin/jobs/dead".to_owned(),
+            format!("{base}/assets"),
+            format!("{base}/contacts"),
+            format!("{base}/flows/{id}/enrollments"),
+            format!("{base}/forwarding/dead-letters"),
+            format!("{base}/identity-conflicts"),
+            format!("{base}/imports"),
+            format!("{base}/imports/{id}/rejects"),
+            format!("{base}/ingest-rejects"),
+            format!("{base}/lists/{id}/members"),
+            format!("{base}/people/{id}/consent/history"),
+            format!("{base}/people/{id}/lists/history"),
+            format!("{base}/people/{id}/messages"),
+            format!("{base}/people/{id}/timeline"),
+            format!("{base}/privacy/erasures"),
+            format!("{base}/privacy/exports"),
+            format!("{base}/suppressions"),
+            format!("{base}/test-sends"),
+        ];
+        assert_eq!(lists.len(), 18);
+        for uri in &lists {
+            for old in ["before", "after"] {
+                let reply = call(
+                    &router,
+                    "GET",
+                    &format!("{uri}?limit=2&{old}=x"),
+                    None,
+                    Auth::Session(&owner),
+                )
+                .await;
+                assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{uri} {old}");
+                assert_eq!(
+                    reply.body["code"], "paging_parameter_renamed",
+                    "{uri} {old}"
+                );
+                assert!(reply.body["detail"].as_str().unwrap().contains("cursor"));
+            }
+            let current = call(
+                &router,
+                "GET",
+                &format!("{uri}?cursor=%21"),
+                None,
+                Auth::Session(&owner),
+            )
+            .await;
+            assert_ne!(
+                current.body["code"], "paging_parameter_renamed",
+                "{uri} still takes cursor"
+            );
+        }
+
+        let bodies = [
+            (
+                format!("{base}/people/search"),
+                json!({"identifier": {"kind": "email", "value": "a@example.com"}}),
+            ),
+            (
+                format!("{base}/events/explore/list"),
+                with_range(json!({"name": "order"})),
+            ),
+        ];
+        for (uri, body) in bodies {
+            for value in [json!("x"), Value::Null] {
+                let mut old = body.clone();
+                old["after"] = value;
+                let reply = call(&router, "POST", &uri, Some(old), Auth::Session(&owner)).await;
+                assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{uri}");
+                assert_eq!(reply.body["code"], "paging_parameter_renamed", "{uri}");
+            }
+            let mut current = body.clone();
+            current["cursor"] = json!("!");
+            let reply = call(&router, "POST", &uri, Some(current), Auth::Session(&owner)).await;
+            assert_ne!(reply.body["code"], "paging_parameter_renamed", "{uri}");
+            let mut unknown = body.clone();
+            unknown["page"] = json!("x");
+            let reply = call(&router, "POST", &uri, Some(unknown), Auth::Session(&owner)).await;
+            assert_ne!(reply.body["code"], "paging_parameter_renamed", "{uri}");
+        }
     }
 
     #[sqlx::test]
@@ -2699,7 +2790,7 @@ mod tests {
         assert_eq!(listed["person_id"], holder);
         assert_eq!(listed["other_person_id"], other);
         assert!(listed["resolved_at"].is_null() && listed["resolution"].is_null());
-        assert!(open.body["next_before"].is_null());
+        assert!(open.body["next_cursor"].is_null());
         assert_eq!(resolved.body["conflicts"], json!([]));
         assert_eq!(bad.status, StatusCode::BAD_REQUEST);
         assert_eq!(detail.status, StatusCode::OK, "{:?}", detail.body);
@@ -2769,11 +2860,11 @@ mod tests {
             Auth::Session(&owner),
         )
         .await;
-        let cursor = first.body["next_before"].as_str().unwrap().to_owned();
+        let cursor = first.body["next_cursor"].as_str().unwrap().to_owned();
         let second = call(
             &router,
             "GET",
-            &format!("{}?limit=2&before={cursor}", conflicts_uri(&ws)),
+            &format!("{}?limit=2&cursor={cursor}", conflicts_uri(&ws)),
             None,
             Auth::Session(&owner),
         )
@@ -2781,7 +2872,7 @@ mod tests {
 
         assert_eq!(first.body["conflicts"].as_array().unwrap().len(), 2);
         assert_eq!(second.body["conflicts"].as_array().unwrap().len(), 1);
-        assert!(second.body["next_before"].is_null());
+        assert!(second.body["next_cursor"].is_null());
     }
 
     #[sqlx::test]
@@ -3560,11 +3651,11 @@ mod tests {
             Auth::Session(&owner),
         )
         .await;
-        let cursor = first.body["next_before"].as_str().unwrap().to_owned();
+        let cursor = first.body["next_cursor"].as_str().unwrap().to_owned();
         let second = call(
             &router,
             "GET",
-            &format!("{uri}?limit=2&before={cursor}"),
+            &format!("{uri}?limit=2&cursor={cursor}"),
             None,
             Auth::Session(&owner),
         )
@@ -3605,7 +3696,7 @@ mod tests {
                    {"property": "card", "reason": "unplanned_property"}])
         );
         assert_eq!(second.body["rejects"].as_array().unwrap().len(), 1);
-        assert_eq!(second.body["next_before"], Value::Null);
+        assert_eq!(second.body["next_cursor"], Value::Null);
         assert_eq!(named.body["rejects"].as_array().unwrap().len(), 2);
         assert_eq!(unplanned.body["rejects"].as_array().unwrap().len(), 1);
         assert_eq!(bad_limit.status, StatusCode::BAD_REQUEST);
@@ -4006,11 +4097,11 @@ mod tests {
             Auth::Session(&owner),
         )
         .await;
-        let cursor = first.body["next_before"].as_str().unwrap().to_owned();
+        let cursor = first.body["next_cursor"].as_str().unwrap().to_owned();
         let second = call(
             &router,
             "GET",
-            &format!("{members}?limit=2&before={cursor}"),
+            &format!("{members}?limit=2&cursor={cursor}"),
             None,
             Auth::Session(&owner),
         )
@@ -4038,7 +4129,7 @@ mod tests {
         let mut paged = ids(&first);
         paged.extend(ids(&second));
         assert_eq!(paged, [visitor.clone(), bob.clone(), ada.clone()]);
-        assert!(second.body["next_before"].is_null());
+        assert!(second.body["next_cursor"].is_null());
         assert_eq!(first.body["members"][0]["source"], "ui");
         assert_eq!(
             first.body["members"][0]["identifier"]["kind"],
@@ -4381,9 +4472,9 @@ mod tests {
             &router,
             "GET",
             &format!(
-                "{}/history?limit=3&before={}",
+                "{}/history?limit=3&cursor={}",
                 person_lists(&ada),
-                history.body["next_before"].as_str().unwrap()
+                history.body["next_cursor"].as_str().unwrap()
             ),
             None,
             Auth::Session(&owner),
@@ -4410,11 +4501,11 @@ mod tests {
         assert_eq!(lists.body[1]["source"], "merge");
         assert_eq!(through_loser.body, lists.body);
         assert_eq!(history.body["changes"].as_array().unwrap().len(), 3);
-        assert!(history.body["next_before"].is_string());
+        assert!(history.body["next_cursor"].is_string());
         assert_eq!(history.body["changes"][0]["action"], "added");
         assert_eq!(history.body["changes"][0]["list_name"], "First");
         assert_eq!(rest.body["changes"].as_array().unwrap().len(), 1);
-        assert!(rest.body["next_before"].is_null());
+        assert!(rest.body["next_cursor"].is_null());
         assert_eq!(unknown.status, StatusCode::NOT_FOUND);
         let membership_audit: Vec<String> =
             sqlx::query_scalar("SELECT action FROM audit_log WHERE action LIKE 'list.m%'")
@@ -5465,7 +5556,7 @@ mod tests {
         assert_eq!(entries[1]["topic_key"], "news");
         assert_eq!(entries[1]["evidence"], evidence);
         assert_eq!(entries[1]["masked"], false);
-        assert_eq!(history.body["next_before"], serde_json::Value::Null);
+        assert_eq!(history.body["next_cursor"], serde_json::Value::Null);
 
         let first_page = call(
             &router,
@@ -5475,12 +5566,12 @@ mod tests {
             Auth::Session(&owner),
         )
         .await;
-        let cursor = first_page.body["next_before"].as_str().unwrap();
+        let cursor = first_page.body["next_cursor"].as_str().unwrap();
         let second_page = call(
             &router,
             "GET",
             &format!(
-                "{}/history?limit=1&before={cursor}",
+                "{}/history?limit=1&cursor={cursor}",
                 consent_uri(&ws, &person)
             ),
             None,
@@ -5489,7 +5580,7 @@ mod tests {
         .await;
         assert_eq!(first_page.body["entries"][0]["source"], "api");
         assert_eq!(second_page.body["entries"][0]["source"], "ui");
-        assert_eq!(second_page.body["next_before"], serde_json::Value::Null);
+        assert_eq!(second_page.body["next_cursor"], serde_json::Value::Null);
         let bad_limit = call(
             &router,
             "GET",
@@ -6291,7 +6382,7 @@ email,b@example.com,
             Auth::Session(&owner),
         )
         .await;
-        let cursor = page.body["next_before"].as_str().unwrap();
+        let cursor = page.body["next_cursor"].as_str().unwrap();
         let decoded = {
             use base64::Engine;
             String::from_utf8(
@@ -6313,13 +6404,13 @@ email,b@example.com,
         let next = call(
             &router,
             "GET",
-            &suppressions_uri(&ws, &format!("?limit=1&before={cursor}")),
+            &suppressions_uri(&ws, &format!("?limit=1&cursor={cursor}")),
             None,
             Auth::Session(&owner),
         )
         .await;
         assert_eq!(next.body["suppressions"].as_array().unwrap().len(), 1);
-        assert_eq!(next.body["next_before"], serde_json::Value::Null);
+        assert_eq!(next.body["next_cursor"], serde_json::Value::Null);
     }
 
     fn people_uri(ws: &str, rest: &str) -> String {
@@ -6786,7 +6877,7 @@ email,b@example.com,
             found.body["people"][0]["display"]["value"],
             "ada@example.com"
         );
-        assert!(found.body["next_after"].is_null());
+        assert!(found.body["next_cursor"].is_null());
         assert_eq!(traits.body["people"][0]["id"], survivor.as_str());
         for masked in [&masked_member, &masked_key] {
             assert_eq!(masked.status, StatusCode::OK, "{:?}", masked.body);
@@ -6933,7 +7024,7 @@ email,b@example.com,
         )
         .await;
         let total = all.body["entries"].as_array().unwrap().len();
-        assert!(total >= 4 && all.body["next_before"].is_null());
+        assert!(total >= 4 && all.body["next_cursor"].is_null());
 
         let mut seen = Vec::new();
         let mut query = "?limit=2".to_owned();
@@ -6950,8 +7041,8 @@ email,b@example.com,
             let entries = page.body["entries"].as_array().unwrap();
             assert!(entries.len() <= 2);
             seen.extend(entries.iter().map(|e| e["id"].as_str().unwrap().to_owned()));
-            match page.body["next_before"].as_str() {
-                Some(next) => query = format!("?limit=2&before={next}"),
+            match page.body["next_cursor"].as_str() {
+                Some(next) => query = format!("?limit=2&cursor={next}"),
                 None => break,
             }
         }
@@ -6995,7 +7086,7 @@ email,b@example.com,
         for bad in [
             "?limit=0",
             "?limit=201",
-            "?before=%21",
+            "?cursor=%21",
             "?kinds=flow",
             "?all_decisions=maybe",
         ] {
@@ -8364,8 +8455,8 @@ email,b@example.com,
             &imports_uri(
                 &ws,
                 &format!(
-                    "/{id}/rejects?limit=1&after={}",
-                    json_page.body["next_after"]
+                    "/{id}/rejects?limit=1&cursor={}",
+                    json_page.body["next_cursor"]
                 ),
             ),
             None,
@@ -8398,9 +8489,9 @@ email,b@example.com,
                 {"column": "Email", "reason": "invalid_identifier"},
                 {"column": "Plan", "reason": "wrong_type"}]}])
         );
-        assert_eq!(json_page.body["next_after"], 4);
+        assert_eq!(json_page.body["next_cursor"], 4);
         assert_eq!(next.body["rejects"][0]["row_number"], 6);
-        assert_eq!(next.body["next_after"], Value::Null);
+        assert_eq!(next.body["next_cursor"], Value::Null);
         assert!(!json_page.body.to_string().contains("not-an-email"));
         assert_eq!(admin_csv.status, StatusCode::OK);
         assert_eq!(
@@ -8609,11 +8700,11 @@ email,b@example.com,
             Auth::Session(&owner),
         )
         .await;
-        let cursor = first.body["next_before"].as_str().unwrap().to_owned();
+        let cursor = first.body["next_cursor"].as_str().unwrap().to_owned();
         let second = call(
             &router,
             "GET",
-            &imports_uri(&ws, &format!("?limit=2&before={cursor}")),
+            &imports_uri(&ws, &format!("?limit=2&cursor={cursor}")),
             None,
             Auth::Session(&owner),
         )
@@ -8627,7 +8718,7 @@ email,b@example.com,
             .map(|import| import["id"].as_str().unwrap())
             .collect();
         assert_eq!(listed, ids.iter().map(String::as_str).collect::<Vec<_>>());
-        assert_eq!(second.body["next_before"], Value::Null);
+        assert_eq!(second.body["next_cursor"], Value::Null);
         assert!(!first.body.to_string().contains("a@example.com"));
     }
 
@@ -8722,10 +8813,8 @@ email,b@example.com,
 
         assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
         let body: Value = serde_json::from_str(&reply.text).unwrap();
-        assert_eq!(
-            body["detail"],
-            "body: a quoted field is never closed (unterminated_quote)"
-        );
+        assert_eq!(body["detail"], "body: a quoted field is never closed");
+        assert_eq!(body["code"], "unterminated_quote");
         let imports: i64 = sqlx::query_scalar("SELECT count(*) FROM imports")
             .fetch_one(&pool)
             .await
@@ -9419,17 +9508,17 @@ email,b@example.com,
             3
         );
         assert_eq!(list.body["events"].as_array().unwrap().len(), 2);
-        let cursor = list.body["next_after"].as_str().unwrap();
+        let cursor = list.body["next_cursor"].as_str().unwrap();
         let rest = call(
             &router,
             "POST",
             &explore_uri(&ws, "list"),
-            Some(with(json!({"limit": 2, "after": cursor}))),
+            Some(with(json!({"limit": 2, "cursor": cursor}))),
             Auth::Session(&owner),
         )
         .await;
         assert_eq!(rest.body["events"].as_array().unwrap().len(), 1);
-        assert!(rest.body["next_after"].is_null());
+        assert!(rest.body["next_cursor"].is_null());
         assert_eq!(exported.status, StatusCode::OK);
         assert_eq!(
             exported.headers[header::CONTENT_TYPE],
@@ -14387,27 +14476,27 @@ email,b@example.com,
             Auth::Session(&owner),
         )
         .await;
-        let cursor = first.body["next_before"].as_str().unwrap().to_owned();
+        let cursor = first.body["next_cursor"].as_str().unwrap().to_owned();
         let next = call(
             &router,
             "GET",
-            &uri(&format!("?limit=2&before={cursor}")),
+            &uri(&format!("?limit=2&cursor={cursor}")),
             None,
             Auth::Session(&owner),
         )
         .await;
-        let cursor = next.body["next_before"].as_str().unwrap().to_owned();
+        let cursor = next.body["next_cursor"].as_str().unwrap().to_owned();
         let last = call(
             &router,
             "GET",
-            &uri(&format!("?limit=2&before={cursor}")),
+            &uri(&format!("?limit=2&cursor={cursor}")),
             None,
             Auth::Session(&owner),
         )
         .await;
         let paged: Vec<String> = [&first, &next, &last].into_iter().flat_map(ids).collect();
         assert_eq!(paged, expected, "three pages, no overlap and no gap");
-        assert!(last.body["next_before"].is_null());
+        assert!(last.body["next_cursor"].is_null());
 
         let get = |query: String| {
             let router = router.clone();
@@ -14423,7 +14512,7 @@ email,b@example.com,
         assert_eq!(ids(&only_waiting), [waiting.to_string()]);
         assert_eq!(ids(&only_receipts), [second.to_string()]);
         assert_eq!(none.body["messages"], json!([]));
-        for bad in ["?limit=0", "?result=maybe", "?template_id=x", "?before=%21"] {
+        for bad in ["?limit=0", "?result=maybe", "?template_id=x", "?cursor=%21"] {
             let reply = get(bad.into()).await;
             assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{bad}");
         }
@@ -14485,8 +14574,8 @@ email,b@example.com,
         let deferred = get("?result=deferred").await;
         let progress = get("?result=in_progress").await;
         let paged = get("?result=in_progress&limit=1").await;
-        let cursor = paged.body["next_before"].as_str().unwrap().to_owned();
-        let rest = get(&format!("?result=in_progress&limit=1&before={cursor}")).await;
+        let cursor = paged.body["next_cursor"].as_str().unwrap().to_owned();
+        let rest = get(&format!("?result=in_progress&limit=1&cursor={cursor}")).await;
 
         assert_eq!(ids(&deferred), [waiting.to_string()]);
         assert_eq!(ids(&progress), [sending.to_string(), idle.to_string()]);

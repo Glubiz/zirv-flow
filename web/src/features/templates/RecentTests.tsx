@@ -49,10 +49,10 @@ export function RecentTests({ workspaceId, templateId, log, resetKey }: Props) {
     try {
       const page = await unwrap(
         client.GET("/api/v1/workspaces/{ws}/test-sends", {
-          params: { path: { ws: workspaceId }, query: { template_id: templateId, limit: LOG_PAGE, before: cursor } },
+          params: { path: { ws: workspaceId }, query: { template_id: templateId, limit: LOG_PAGE, cursor } },
         }),
       );
-      setPaged({ key: resetKey, rows: [...older, ...page.test_sends], next: page.next_before });
+      setPaged({ key: resetKey, rows: [...older, ...page.test_sends], next: page.next_cursor });
     } catch (error) {
       setFailure(describeError(error));
     } finally {
@@ -71,7 +71,7 @@ export function RecentTests({ workspaceId, templateId, log, resetKey }: Props) {
       {log.status === "loading" ? <LoadingState label="Loading the recent tests" /> : null}
       {log.status === "error" ? <ErrorState {...describeError(log.error)} onRetry={log.reload} /> : null}
       {log.status === "ready" ? (
-        <Rows rows={[...log.data.test_sends, ...older]} more={next === undefined ? log.data.next_before : next} loading={loading} onMore={(cursor) => void showOlder(cursor)} />
+        <Rows rows={[...log.data.test_sends, ...older]} more={next === undefined ? log.data.next_cursor : next} loading={loading} onMore={(cursor) => void showOlder(cursor)} />
       ) : null}
       {failure ? <InlineError {...failure} /> : null}
     </section>

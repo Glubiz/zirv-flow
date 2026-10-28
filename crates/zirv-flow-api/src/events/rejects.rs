@@ -88,8 +88,8 @@ impl From<IngestReject> for IngestRejectBody {
 pub(crate) struct IngestRejectsBody {
     /// Newest first.
     rejects: Vec<IngestRejectBody>,
-    /// Pass as `before` for the next page; null when there is none.
-    next_before: Option<String>,
+    /// Pass as `cursor` for the next page; null when there is none.
+    next_cursor: Option<String>,
 }
 
 /// The `name` and `reason` filters of the query string.
@@ -115,13 +115,13 @@ fn parse_filters(query: &str) -> (Option<String>, Option<String>) {
     params(
         ("ws" = Uuid, Path, description = "Workspace id"),
         ("limit" = Option<u32>, Query, description = "Rejects per page, 1 to 200; default 50"),
-        ("before" = Option<String>, Query, description = "The next_before of the previous page"),
+        ("cursor" = Option<String>, Query, description = "The next_cursor of the previous page"),
         ("name" = Option<String>, Query, description = "Only rejects of this event name"),
         ("reason" = Option<String>, Query, description = "Only rejects with this reason code")
     ),
     responses(
         (status = 200, description = "A page of rejects", body = IngestRejectsBody),
-        (status = 400, description = "limit is out of range or before is malformed", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "limit is out of range or cursor is malformed; the removed before and after answer paging_parameter_renamed", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the read scope", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json")
@@ -146,13 +146,13 @@ pub(crate) async fn list(
     let (rejects, more) =
         zirv_flow_store::list_ingest_rejects(&state.pool, workspace.id, filter, cursor, limit)
             .await?;
-    let next_before = match rejects.last() {
+    let next_cursor = match rejects.last() {
         Some(last) if more => Some(encode_cursor((last.received_at, last.id))),
         _ => None,
     };
     Ok(Json(IngestRejectsBody {
         rejects: rejects.into_iter().map(IngestRejectBody::from).collect(),
-        next_before,
+        next_cursor,
     }))
 }
 

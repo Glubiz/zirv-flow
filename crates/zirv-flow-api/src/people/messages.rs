@@ -102,7 +102,8 @@ pub(crate) struct GateResultBody {
     reason: Option<String>,
     /// A code that adds to the reason.
     note: Option<String>,
-    /// For a deferral, when the message runs again.
+    /// For a deferral, when the message runs again (RFC 3339).
+    #[schema(value_type = Option<String>, format = DateTime)]
     run_at: Option<String>,
     /// The consent policy rule that decided, by id.
     rule_id: Option<Uuid>,
@@ -153,8 +154,8 @@ pub(crate) struct MessageBody {
 pub(crate) struct MessagesBody {
     /// Newest first.
     messages: Vec<MessageBody>,
-    /// Pass as `before` for the next page; null when there is none.
-    next_before: Option<String>,
+    /// Pass as `cursor` for the next page; null when there is none.
+    next_cursor: Option<String>,
 }
 
 fn gate_body(entry: &Value) -> Option<GateResultBody> {
@@ -164,7 +165,9 @@ fn gate_body(entry: &Value) -> Option<GateResultBody> {
         result: text("result")?,
         reason: text("reason"),
         note: text("note"),
-        run_at: text("run_at"),
+        run_at: text("run_at").filter(|at| {
+            OffsetDateTime::parse(at, &time::format_description::well_known::Rfc3339).is_ok()
+        }),
         rule_id: entry
             .get("rule")
             .and_then(Value::as_str)
@@ -248,10 +251,11 @@ fn parse_page(query: &str) -> Result<Page, ApiError> {
     for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
         match key.as_ref() {
             "limit" => limit = parse_limit(&value)?,
-            "before" => {
+            "before" | "after" => return Err(ApiError::paging_parameter_renamed()),
+            "cursor" => {
                 before = Some(
                     decode_cursor(&value)
-                        .ok_or_else(|| ApiError::bad_request("before is not a valid cursor"))?,
+                        .ok_or_else(|| ApiError::bad_request("cursor is malformed"))?,
                 );
             }
             "result" => {
@@ -300,13 +304,13 @@ fn parse_page(query: &str) -> Result<Page, ApiError> {
         ("ws" = Uuid, Path, description = "Workspace id"),
         ("id" = Uuid, Path, description = "Person id"),
         ("limit" = Option<u32>, Query, description = "Messages per page, 1 to 200; default 50"),
-        ("before" = Option<String>, Query, description = "The next_before of the previous page"),
+        ("cursor" = Option<String>, Query, description = "The next_cursor of the previous page"),
         ("result" = Option<String>, Query, description = "`sent`, `skipped`, `deferred`, `in_progress` or `failed`"),
         ("template_id" = Option<Uuid>, Query, description = "Only messages of this template")
     ),
     responses(
         (status = 200, description = "A page of messages", body = MessagesBody),
-        (status = 400, description = "A parameter is out of range or malformed", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "A parameter is out of range or malformed; the removed before and after answer paging_parameter_renamed", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the read scope", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or person (an erased person included), or no access", body = Problem, content_type = "application/problem+json"),
@@ -335,7 +339,7 @@ pub(crate) async fn list(
     .ok_or_else(ApiError::not_found)?;
     Ok(Json(MessagesBody {
         messages: page.messages.into_iter().map(Into::into).collect(),
-        next_before: page.next.map(encode_cursor),
+        next_cursor: page.next.map(encode_cursor),
     }))
 }
 
@@ -388,7 +392,7 @@ mod tests {
         for bad in [
             "limit=0",
             "limit=201",
-            "before=%21",
+            "cursor=%21",
             "result=delivered",
             "template_id=nope",
         ] {
@@ -431,5 +435,15 @@ mod tests {
         assert_eq!(body["rule_id"], rule.to_string());
         assert!(!body.to_string().contains("never@example.test"));
         assert!(gate_body(&json!({"result": "passed"})).is_none());
+    }
+
+    #[test]
+    fn a_gate_run_at_is_shown_only_when_it_is_rfc_3339() {
+        let at = |run_at: &str| {
+            let entry = json!({"gate": "quiet_hours", "result": "deferred", "run_at": run_at});
+            serde_json::to_value(gate_body(&entry).unwrap()).unwrap()["run_at"].clone()
+        };
+        assert_eq!(at("2031-05-06T08:00:00Z"), "2031-05-06T08:00:00Z");
+        assert!(at("tomorrow morning").is_null());
     }
 }

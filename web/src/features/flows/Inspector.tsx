@@ -522,10 +522,10 @@ function EnrollmentList({
     try {
       const page = await unwrap(
         client.GET("/api/v1/workspaces/{ws}/flows/{id}/enrollments", {
-          params: { path: { ws: workspaceId, id: flowId }, query: { ...query, before } },
+          params: { path: { ws: workspaceId, id: flowId }, query: { ...query, cursor: before } },
         }),
       );
-      setMore((value) => ({ items: [...(value?.items ?? []), ...page.enrollments], next: page.next_before ?? null }));
+      setMore((value) => ({ items: [...(value?.items ?? []), ...page.enrollments], next: page.next_cursor ?? null }));
     } catch (error) {
       setMoreError(error);
     } finally {
@@ -578,7 +578,7 @@ function EnrollmentList({
       >
         {(page) => {
           const items = [...page.enrollments, ...(more?.items ?? [])];
-          const next = more ? more.next : (page.next_before ?? null);
+          const next = more ? more.next : (page.next_cursor ?? null);
           return (
             <>
               <ul className="fl-versions" aria-label="Enrollments">

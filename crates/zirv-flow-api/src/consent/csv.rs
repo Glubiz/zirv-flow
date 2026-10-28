@@ -109,11 +109,15 @@ pub(super) async fn read_body(headers: &HeaderMap, body: Body) -> Result<String,
         return Err(ApiError::new(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "expected a CSV body (content-type: text/csv)",
-        ));
+        )
+        .with_code("csv_content_type_required"));
     }
     let bytes = axum::body::to_bytes(body, MAX_IMPORT_BYTES)
         .await
-        .map_err(|_| ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "the CSV is over 10 MiB"))?;
+        .map_err(|_| {
+            ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "the CSV is over 10 MiB")
+                .with_code("csv_too_large")
+        })?;
     String::from_utf8(bytes.into()).map_err(|_| ApiError::bad_request("the CSV must be UTF-8"))
 }
 

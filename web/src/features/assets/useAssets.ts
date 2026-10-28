@@ -47,20 +47,20 @@ export function useAssets(workspaceId: string): UseAssets {
 
   const firstData = first.status === "ready" ? first.data : null;
   const pages = later && later.after === firstData ? later : null;
-  const next = pages ? pages.next : (firstData?.next_before ?? null);
+  const next = pages ? pages.next : (firstData?.next_cursor ?? null);
 
   const loadMore = useCallback(() => {
     if (!next || loadingMore) return;
     setLoadingMore(true);
     setLoadMoreFailed(false);
     unwrap(
-      client.GET("/api/v1/workspaces/{ws}/assets", { params: { path: { ws: workspaceId }, query: { limit: PAGE, before: next } } }),
+      client.GET("/api/v1/workspaces/{ws}/assets", { params: { path: { ws: workspaceId }, query: { limit: PAGE, cursor: next } } }),
     ).then(
       (page) => {
         setLater((current) => ({
           after: firstData,
           assets: [...(current && current.after === firstData ? current.assets : []), ...page.assets],
-          next: page.next_before ?? null,
+          next: page.next_cursor ?? null,
         }));
         setLoadingMore(false);
       },
