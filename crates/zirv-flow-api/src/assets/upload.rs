@@ -16,7 +16,7 @@ use super::{AssetBody, AssetLimits, MAX_PIXELS, MAX_SIDE_PIXELS};
 use crate::AppState;
 use crate::admin;
 use crate::auth::{Need, Principal, authorize, path_id};
-use crate::idempotency::{self, ConflictProblem, Entry, Keyed, RequestHash, lease};
+use crate::idempotency::{self, Entry, Keyed, RequestHash, lease};
 use crate::problem::{ApiError, Problem};
 
 const MAX_NAME_CHARS: usize = 200;
@@ -153,7 +153,7 @@ fn check(bytes: &[u8], declared: ImageKind) -> Result<(u32, u32), ApiError> {
         (status = 403, description = "A key without the write scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
         (status = 408, description = "No byte arrived for 60 seconds", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "The Idempotency-Key is in use: `idempotency_key_in_flight` while the first request runs (see Retry-After), or `idempotency_key_replayed` once it stored the image, with resource_id as the asset's id; the response is not kept", body = ConflictProblem, content_type = "application/problem+json"),
+        (status = 409, description = "The Idempotency-Key is in use: `idempotency_key_in_flight` while the first request runs (see Retry-After), or `idempotency_key_replayed` once it stored the image, with resource_id as the asset's id; the response is not kept", body = Problem, content_type = "application/problem+json"),
         (status = 413, description = "asset_too_large: over assets.max_file_bytes; asset_quota_exceeded: the workspace is over assets.max_workspace_bytes", body = Problem, content_type = "application/problem+json"),
         (status = 415, description = "asset_type_unsupported: not a PNG, JPEG, GIF or WebP content type; asset_type_mismatch: the file is not the declared type", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "A bad name, or asset_dimensions_exceeded", body = Problem, content_type = "application/problem+json")

@@ -13,8 +13,6 @@
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
-
-use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_core::token::{Sha256Stream, sha256_bytes};
 use zirv_flow_core::{HmacKey, WorkspaceId};
@@ -64,69 +62,6 @@ pub(crate) fn key_header(headers: &HeaderMap) -> Result<Option<&str>, ApiError> 
                 "Idempotency-Key: must be 1 to 255 characters without control characters",
             )
         })
-}
-
-/// The `409` of a replay: the key already created a resource. The response is not kept.
-#[derive(Serialize, ToSchema)]
-pub struct ReplayedProblem {
-    /// Problem type URI; `about:blank`.
-    #[serde(rename = "type")]
-    #[schema(rename = "type", example = "about:blank")]
-    pub kind: String,
-    pub title: String,
-    pub status: u16,
-    pub detail: String,
-    /// The `x-request-id` of the request.
-    pub request_id: Option<String>,
-    /// The `x-trace-id` of the request.
-    pub trace_id: Option<String>,
-    /// Always `idempotency_key_replayed`.
-    pub code: String,
-    /// The id of the resource the first request created.
-    pub resource_id: Uuid,
-}
-
-/// The two shapes a `409` of an idempotent create may have: a problem of the route, or the
-/// replay of its key.
-#[derive(Serialize, ToSchema)]
-#[serde(untagged)]
-pub enum ConflictProblem {
-    Problem(Box<Problem>),
-    Replayed(ReplayedProblem),
-}
-
-impl From<Problem> for ConflictProblem {
-    fn from(problem: Problem) -> Self {
-        Self::Problem(Box::new(problem))
-    }
-}
-
-impl From<ReplayedProblem> for ConflictProblem {
-    fn from(problem: ReplayedProblem) -> Self {
-        Self::Replayed(problem)
-    }
-}
-
-/// Declares `ConflictProblem` as `anyOf` its two shapes. A replay body is a problem with one
-/// more field, and a problem allows extra properties, so it matches both: `oneOf` would reject it.
-pub(crate) struct ConflictSchema;
-
-impl utoipa::Modify for ConflictSchema {
-    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
-        use utoipa::openapi::schema::{AnyOfBuilder, Schema};
-        use utoipa::openapi::{Ref, RefOr};
-        let components = openapi.components.get_or_insert_with(Default::default);
-        let any_of = AnyOfBuilder::new()
-            .description(Some(
-                "The two shapes a `409` of an idempotent create may have: a problem of the route, or the replay of its key, which is a problem with `resource_id`.",
-            ))
-            .item(Ref::from_schema_name("Problem"))
-            .item(Ref::from_schema_name("ReplayedProblem"))
-            .build();
-        components
-            .schemas
-            .insert("ConflictProblem".into(), RefOr::T(Schema::AnyOf(any_of)));
-    }
 }
 
 /// The key a request sent, for one route and one caller.
@@ -311,16 +246,27 @@ fn in_flight(retry_after: u64) -> ApiError {
 }
 
 fn replayed(resource_id: Uuid) -> Response {
-    let body = ConflictProblem::from(ReplayedProblem {
+    let body = Problem {
         kind: "about:blank".into(),
         title: "Conflict".into(),
         status: 409,
         detail: "this Idempotency-Key already created a resource; its response is not kept".into(),
         request_id: request_id::current(),
         trace_id: trace::current().map(|trace| trace.trace_id.to_string()),
-        code: "idempotency_key_replayed".into(),
-        resource_id,
-    });
+        errors: None,
+        code: Some("idempotency_key_replayed".into()),
+        resource_id: Some(resource_id),
+        issues: None,
+        cycle: None,
+        flow_issues: None,
+        template_issues: None,
+        snippet_templates: None,
+        snippet_themes: None,
+        templates: None,
+        total: None,
+        flows: None,
+        current_revision: None,
+    };
     let mut response = (
         StatusCode::CONFLICT,
         [(
@@ -600,7 +546,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_replay_is_409_with_the_resource_id_and_no_other_body() {
+    async fn a_replay_is_a_409_problem_with_the_code_and_resource_id() {
         let id = Uuid::now_v7();
         let done = Done {
             request_hash: vec![1; 32],
@@ -611,10 +557,20 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::CONFLICT);
         assert_eq!(response.headers()["idempotent-replayed"], "true");
-        let body = body_of(response).await;
-        assert_eq!(body["code"], "idempotency_key_replayed");
-        assert_eq!(body["resource_id"], id.to_string());
-        assert_eq!(body["status"], 409);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "application/problem+json"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(
+            body.as_ref(),
+            format!(
+                "{{\"type\":\"about:blank\",\"title\":\"Conflict\",\"status\":409,\"detail\":\"this Idempotency-Key already created a resource; its response is not kept\",\"request_id\":null,\"trace_id\":null,\"code\":\"idempotency_key_replayed\",\"resource_id\":\"{id}\"}}"
+            )
+            .as_bytes()
+        );
     }
 
     #[test]
@@ -636,7 +592,9 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::CONFLICT);
         assert_eq!(response.headers()[header::RETRY_AFTER], "7");
-        assert_eq!(body_of(response).await["code"], "idempotency_key_in_flight");
+        let body = body_of(response).await;
+        assert_eq!(body["code"], "idempotency_key_in_flight");
+        assert!(body.get("resource_id").is_none());
     }
 }
 

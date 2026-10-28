@@ -14,7 +14,7 @@ use zirv_flow_store::ApiKey;
 use crate::AppState;
 use crate::admin;
 use crate::auth::{Need, Principal, authorize, path_id};
-use crate::idempotency::{self, ConflictProblem, Entry, Keyed, RequestHash, lease};
+use crate::idempotency::{self, Entry, Keyed, RequestHash, lease};
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
 
@@ -144,7 +144,7 @@ pub(crate) async fn list(
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a missing scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "The Idempotency-Key is in use: `idempotency_key_in_flight` while the first request runs (see Retry-After), or `idempotency_key_replayed` once it created a key, with resource_id as its id and no secret", body = ConflictProblem, content_type = "application/problem+json"),
+        (status = 409, description = "The Idempotency-Key is in use: `idempotency_key_in_flight` while the first request runs (see Retry-After), or `idempotency_key_replayed` once it created a key, with resource_id as its id and no secret", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "Invalid name or scopes", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))

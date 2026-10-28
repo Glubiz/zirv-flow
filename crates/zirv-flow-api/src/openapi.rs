@@ -16,7 +16,6 @@ use crate::feedback;
 use crate::flows::{self, FlowSchemas};
 use crate::forwarding;
 use crate::health::{self, StatusBody};
-use crate::idempotency::ConflictSchema;
 use crate::imports;
 use crate::ingest::{
     self, AcceptedBody, BatchItemRequest, BatchRequest, IdentifyRequest, TrackRequest,
@@ -806,8 +805,7 @@ use crate::workspaces::{
         &SecuritySchemes,
         &PreviewTag,
         &SegmentSchemas,
-        &FlowSchemas,
-        &ConflictSchema
+        &FlowSchemas
     )
 )]
 struct ApiDoc;
@@ -1733,7 +1731,7 @@ mod tests {
                     assert_eq!(
                         operation["responses"]["409"]["content"]["application/problem+json"]["schema"]
                             ["$ref"],
-                        "#/components/schemas/ConflictProblem",
+                        "#/components/schemas/Problem",
                         "{id} does not document the in-flight and replay 409"
                     );
                 }
@@ -1748,21 +1746,27 @@ mod tests {
     }
 
     #[test]
-    fn the_conflict_schema_is_any_of_the_problem_and_the_replay() {
+    fn the_problem_schema_documents_replays_without_changing_required_fields() {
         let document = serde_json::to_value(openapi()).unwrap();
 
-        let schema = &document["components"]["schemas"]["ConflictProblem"];
+        let schema = &document["components"]["schemas"]["Problem"];
 
-        assert!(
-            schema.get("oneOf").is_none(),
-            "a replay matches both shapes"
+        assert_eq!(schema["type"], "object");
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["type", "title", "status", "detail"])
         );
         assert_eq!(
-            &schema["anyOf"],
-            &serde_json::json!([
-                {"$ref": "#/components/schemas/Problem"},
-                {"$ref": "#/components/schemas/ReplayedProblem"}
-            ])
+            schema["properties"]["code"]["type"],
+            serde_json::json!(["string", "null"])
+        );
+        assert_eq!(
+            schema["properties"]["resource_id"],
+            serde_json::json!({
+                "type": ["string", "null"],
+                "format": "uuid",
+                "description": "The id of the resource the first request created, sent with `idempotency_key_replayed`."
+            })
         );
     }
 }

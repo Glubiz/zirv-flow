@@ -66,7 +66,7 @@ use crate::auth::{Need, Principal, authorize, path_id};
 use crate::flows::crud::{FlowDetailBody, check_document};
 use crate::flows::test_mode::simulation::{SimulationBody, simulate};
 use crate::flows::{flow_error, issue_problems, parse_graph, parse_settings};
-use crate::idempotency::{self, ConflictProblem, Entry, Keyed, RequestHash, lease};
+use crate::idempotency::{self, Entry, Keyed, RequestHash, lease};
 use crate::imports::MappingBody;
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem, SegmentIssueProblem};
@@ -775,7 +775,7 @@ async fn dry_run_manifest(
         (status = 402, description = "The workspace's monthly AI budget is spent (`ai_budget_exceeded`); nothing was sent", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not an editor, not an admin for a mapping or manifest draft, or an API key (`ai_user_required`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, source or stream, or no access", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "The assistant is off (`ai_disabled`), the source does not use a manifest, or the template is archived (`template_archived`)", body = ConflictProblem, content_type = "application/problem+json"),
+        (status = 409, description = "The assistant is off (`ai_disabled`), the source does not use a manifest, or the template is archived (`template_archived`)", body = Problem, content_type = "application/problem+json"),
         (status = 413, description = "The body is over 160 KiB", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "A request that breaks a rule, naming the field, such as a missing prompt, `sample_required` or `sample_not_supported`; for a template `ai_template_too_large` (the document is over 96 KiB) or `ai_template_unsupported` (not an email template, a block layout of a code email, or, without the personal-data opt-in, a `visible_if` too deep or too large to mask)", body = Problem, content_type = "application/problem+json"),
         (status = 429, description = "Too many AI calls (`ai_rate_limited`); try again in a minute", body = Problem, content_type = "application/problem+json"),

@@ -5116,8 +5116,6 @@ export interface components {
              */
             people: components["schemas"]["PersonIdentitiesBody"][];
         };
-        /** @description The two shapes a `409` of an idempotent create may have: a problem of the route, or the replay of its key, which is a problem with `resource_id`. */
-        ConflictProblem: components["schemas"]["Problem"] | components["schemas"]["ReplayedProblem"];
         ConflictsBody: {
             /** @description Newest first. */
             conflicts: components["schemas"]["ConflictBody"][];
@@ -8410,6 +8408,11 @@ export interface components {
             issues?: components["schemas"]["SegmentIssueProblem"][] | null;
             /** @description The `x-request-id` of the failed request. */
             request_id?: string | null;
+            /**
+             * Format: uuid
+             * @description The id of the resource the first request created, sent with `idempotency_key_replayed`.
+             */
+            resource_id?: string | null;
             /** @description The templates whose drafts hold a block for a snippet (`snippet_in_use`). */
             snippet_templates?: components["schemas"]["SegmentRefProblem"][] | null;
             /** @description The themes whose published version uses a snippet as its footer (`snippet_in_use`). */
@@ -8832,29 +8835,6 @@ export interface components {
             emit_triggers?: boolean;
             filter?: null | components["schemas"]["ReplayFilter"];
             ids?: string[] | null;
-        };
-        /** @description The `409` of a replay: the key already created a resource. The response is not kept. */
-        ReplayedProblem: {
-            /** @description Always `idempotency_key_replayed`. */
-            code: string;
-            detail: string;
-            /** @description The `x-request-id` of the request. */
-            request_id?: string | null;
-            /**
-             * Format: uuid
-             * @description The id of the resource the first request created.
-             */
-            resource_id: string;
-            /** Format: int32 */
-            status: number;
-            title: string;
-            /** @description The `x-trace-id` of the request. */
-            trace_id?: string | null;
-            /**
-             * @description Problem type URI; `about:blank`.
-             * @example about:blank
-             */
-            type: string;
         };
         /** @description How to close a conflict. */
         ResolveRequest: {
@@ -12674,7 +12654,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/problem+json": components["schemas"]["ConflictProblem"];
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description The body is over 160 KiB */
@@ -13136,7 +13116,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/problem+json": components["schemas"]["ConflictProblem"];
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description Invalid name or scopes */
@@ -13356,7 +13336,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/problem+json": components["schemas"]["ConflictProblem"];
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description asset_too_large: over assets.max_file_bytes; asset_quota_exceeded: the workspace is over assets.max_workspace_bytes */
@@ -19540,7 +19520,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/problem+json": components["schemas"]["ConflictProblem"];
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description The file is over imports.max_file_bytes */
@@ -21852,7 +21832,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/problem+json": components["schemas"]["ConflictProblem"];
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description The body names both or neither of person_id and identifier, or the identifier is malformed */
@@ -22000,7 +21980,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/problem+json": components["schemas"]["ConflictProblem"];
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description The body names both or neither of person_id and identifier, or the identifier is malformed */
