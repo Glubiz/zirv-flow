@@ -1,13 +1,11 @@
 //! Idempotency keys of the creating requests that nothing else guards (architecture section 15).
-//! A row is keyed by workspace, route and the hash of the client's key, and remembers the hash of
-//! the request, the status, the id of what was created and, for a route whose response holds no
-//! secret and no person's value, the response body.
 //!
-//! The caller takes the key's advisory lock in a transaction it keeps for the whole request, so
-//! two requests with one key run one after the other and the second sees the first one's row.
+//! A request reserves its key in a short transaction of its own and then holds nothing: the row is
+//! `pending` with a lease. The create marks the row `done` inside its own transaction, with
+//! `UPDATE ... WHERE reservation = mine`; when no row matches, the reservation was taken over and
+//! the create rolls back. A pending row whose lease ran out may be taken over by a retry. The row
+//! is identified by workspace, route and the hash of the caller and the key.
 
-use serde_json::Value;
-use sqlx::types::Json;
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
@@ -17,105 +15,205 @@ use crate::StoreError;
 /// Keys are remembered for 24 hours, like a contact's.
 const KEY_HOURS: i32 = 24;
 
-/// What a remembered key answers.
-#[derive(Debug, PartialEq)]
-pub struct RememberedRequest {
-    /// The hash of the request the key was first used for.
-    pub request_hash: Vec<u8>,
-    /// The status the first request answered with.
-    pub status: u16,
-    /// The id of the resource it created.
-    pub resource_id: Uuid,
-    /// The first response's body, for a route that stores one.
-    pub response: Option<Value>,
-}
-
-#[derive(sqlx::FromRow)]
-struct StoredRow {
-    request_hash: Vec<u8>,
-    status: i16,
-    resource_id: Uuid,
-    response: Option<Json<Value>>,
-}
-
-/// A key to remember, with what it answers.
-pub struct NewRememberedRequest<'a> {
+/// The identity of a remembered key.
+#[derive(Clone, Copy)]
+pub struct ApiIdempotencyKey<'a> {
     pub workspace: WorkspaceId,
     pub route: &'a str,
     pub key_hash: &'a [u8],
-    pub request_hash: &'a [u8],
-    pub status: u16,
-    pub resource_id: Uuid,
-    pub response: Option<&'a Value>,
 }
 
-/// Takes the key's advisory lock until the transaction ends, forgets the key if it has expired,
-/// and returns what it remembers.
-pub async fn lock_api_idempotency(
-    connection: &mut PgConnection,
-    workspace: WorkspaceId,
-    route: &str,
-    key_hash: &[u8],
-) -> Result<Option<RememberedRequest>, StoreError> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(format!(
-            "api-idem:{}:{route}:{}",
-            workspace.as_uuid(),
-            key_hash
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>()
-        ))
-        .execute(&mut *connection)
-        .await
-        .map_err(StoreError::query)?;
+/// What reserving a key found.
+#[derive(Debug, PartialEq)]
+pub enum Reserved {
+    /// The key is free, or its lease had run out: the request owns this reservation.
+    Fresh(Uuid),
+    /// An earlier request created the resource.
+    Done {
+        /// The earlier request's hash.
+        request_hash: Vec<u8>,
+        resource_id: Uuid,
+    },
+    /// Another request holds the key and its lease has not run out.
+    InFlight {
+        /// Whole seconds until the lease runs out, at least 1.
+        retry_after: u64,
+    },
+    /// The key was first used for another request.
+    Reused,
+}
+
+#[derive(sqlx::FromRow)]
+struct Row {
+    state: String,
+    request_hash: Option<Vec<u8>>,
+    resource_id: Option<Uuid>,
+    expired: bool,
+    seconds_left: i64,
+}
+
+/// Reserves the key for a request, in a transaction of its own that ends before this returns.
+/// `request_hash` is `None` for an upload that is hashed while it streams; the caller then binds
+/// the hash with [`bind_api_idempotency_hash`] and compares a [`Reserved::Done`] itself.
+pub async fn reserve_api_idempotency(
+    pool: &PgPool,
+    key: ApiIdempotencyKey<'_>,
+    request_hash: Option<&[u8]>,
+    lease_seconds: i64,
+) -> Result<Reserved, StoreError> {
+    let mut tx = crate::begin(pool).await?;
     sqlx::query(
         "DELETE FROM api_idempotency WHERE workspace_id = $1 AND route = $2 AND key_hash = $3 \
            AND created_at <= now() - make_interval(hours => $4)",
     )
-    .bind(workspace.as_uuid())
-    .bind(route)
-    .bind(key_hash)
+    .bind(key.workspace.as_uuid())
+    .bind(key.route)
+    .bind(key.key_hash)
     .bind(KEY_HOURS)
-    .execute(&mut *connection)
+    .execute(&mut *tx)
     .await
     .map_err(StoreError::query)?;
-    let row: Option<StoredRow> = sqlx::query_as(
-        "SELECT request_hash, status, resource_id, response FROM api_idempotency \
-         WHERE workspace_id = $1 AND route = $2 AND key_hash = $3",
+    let reservation = Uuid::now_v7();
+    let inserted = sqlx::query(
+        "INSERT INTO api_idempotency \
+           (workspace_id, route, key_hash, state, reservation, lease_until, request_hash) \
+         VALUES ($1, $2, $3, 'pending', $4, now() + make_interval(secs => $5), $6) \
+         ON CONFLICT DO NOTHING",
     )
-    .bind(workspace.as_uuid())
-    .bind(route)
-    .bind(key_hash)
-    .fetch_optional(connection)
+    .bind(key.workspace.as_uuid())
+    .bind(key.route)
+    .bind(key.key_hash)
+    .bind(reservation)
+    .bind(lease_seconds as f64)
+    .bind(request_hash)
+    .execute(&mut *tx)
+    .await
+    .map_err(StoreError::query)?
+    .rows_affected();
+    if inserted == 1 {
+        crate::commit(tx).await?;
+        return Ok(Reserved::Fresh(reservation));
+    }
+    let row: Row = sqlx::query_as(
+        "SELECT state, request_hash, resource_id, lease_until <= now() AS expired, \
+                ceil(extract(epoch FROM lease_until - now()))::bigint AS seconds_left \
+         FROM api_idempotency WHERE workspace_id = $1 AND route = $2 AND key_hash = $3 FOR UPDATE",
+    )
+    .bind(key.workspace.as_uuid())
+    .bind(key.route)
+    .bind(key.key_hash)
+    .fetch_one(&mut *tx)
     .await
     .map_err(StoreError::query)?;
-    Ok(row.map(|row| RememberedRequest {
-        request_hash: row.request_hash,
-        status: u16::try_from(row.status).unwrap_or(200),
-        resource_id: row.resource_id,
-        response: row.response.map(|Json(value)| value),
-    }))
+    let pending = row.state == "pending";
+    // A pending row whose lease ran out never created anything, so a retry may differ from it.
+    let takeover = pending && row.expired;
+    if !takeover
+        && let (Some(first), Some(now)) = (&row.request_hash, request_hash)
+        && first.as_slice() != now
+    {
+        return Ok(Reserved::Reused);
+    }
+    if takeover {
+        sqlx::query(
+            "UPDATE api_idempotency SET reservation = $4, request_hash = $5, created_at = now(), \
+               lease_until = now() + make_interval(secs => $6) \
+             WHERE workspace_id = $1 AND route = $2 AND key_hash = $3",
+        )
+        .bind(key.workspace.as_uuid())
+        .bind(key.route)
+        .bind(key.key_hash)
+        .bind(reservation)
+        .bind(request_hash)
+        .bind(lease_seconds as f64)
+        .execute(&mut *tx)
+        .await
+        .map_err(StoreError::query)?;
+        crate::commit(tx).await?;
+        return Ok(Reserved::Fresh(reservation));
+    }
+    if pending {
+        return Ok(Reserved::InFlight {
+            retry_after: u64::try_from(row.seconds_left).unwrap_or(1).max(1),
+        });
+    }
+    match (row.request_hash, row.resource_id) {
+        (Some(request_hash), Some(resource_id)) => Ok(Reserved::Done {
+            request_hash,
+            resource_id,
+        }),
+        _ => Err(StoreError::poison()),
+    }
 }
 
-/// Remembers a key that [`lock_api_idempotency`] found free.
-pub async fn remember_api_idempotency(
+/// Sets the request hash of a reservation made without one. `false` when the reservation is no
+/// longer the request's.
+pub async fn bind_api_idempotency_hash(
+    pool: &PgPool,
+    key: ApiIdempotencyKey<'_>,
+    reservation: Uuid,
+    request_hash: &[u8],
+) -> Result<bool, StoreError> {
+    let done = sqlx::query(
+        "UPDATE api_idempotency SET request_hash = $5 \
+         WHERE workspace_id = $1 AND route = $2 AND key_hash = $3 AND reservation = $4 \
+           AND state = 'pending'",
+    )
+    .bind(key.workspace.as_uuid())
+    .bind(key.route)
+    .bind(key.key_hash)
+    .bind(reservation)
+    .bind(request_hash)
+    .execute(pool)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(done.rows_affected() == 1)
+}
+
+/// Marks the reservation done, inside the create's own transaction. `false` when the reservation
+/// is no longer the request's: the caller rolls the create back.
+pub async fn complete_api_idempotency(
     connection: &mut PgConnection,
-    request: &NewRememberedRequest<'_>,
+    key: ApiIdempotencyKey<'_>,
+    reservation: Uuid,
+    status: u16,
+    resource_id: Uuid,
+) -> Result<bool, StoreError> {
+    let done = sqlx::query(
+        "UPDATE api_idempotency SET state = 'done', status = $5, resource_id = $6, \
+           created_at = now() \
+         WHERE workspace_id = $1 AND route = $2 AND key_hash = $3 AND reservation = $4 \
+           AND state = 'pending' AND request_hash IS NOT NULL",
+    )
+    .bind(key.workspace.as_uuid())
+    .bind(key.route)
+    .bind(key.key_hash)
+    .bind(reservation)
+    .bind(i16::try_from(status).unwrap_or(200))
+    .bind(resource_id)
+    .execute(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(done.rows_affected() == 1)
+}
+
+/// Deletes a reservation that did not end in a create. Another request's reservation, and a done
+/// row, are left alone.
+pub async fn release_api_idempotency(
+    pool: &PgPool,
+    key: ApiIdempotencyKey<'_>,
+    reservation: Uuid,
 ) -> Result<(), StoreError> {
     sqlx::query(
-        "INSERT INTO api_idempotency \
-           (workspace_id, route, key_hash, request_hash, status, resource_id, response) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        "DELETE FROM api_idempotency \
+         WHERE workspace_id = $1 AND route = $2 AND key_hash = $3 AND reservation = $4 \
+           AND state = 'pending'",
     )
-    .bind(request.workspace.as_uuid())
-    .bind(request.route)
-    .bind(request.key_hash)
-    .bind(request.request_hash)
-    .bind(i16::try_from(request.status).unwrap_or(200))
-    .bind(request.resource_id)
-    .bind(request.response.map(Json))
-    .execute(connection)
+    .bind(key.workspace.as_uuid())
+    .bind(key.route)
+    .bind(key.key_hash)
+    .bind(reservation)
+    .execute(pool)
     .await
     .map_err(StoreError::query)?;
     Ok(())
@@ -135,7 +233,6 @@ pub async fn expire_api_idempotency(pool: &PgPool) -> Result<u64, StoreError> {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
     use zirv_flow_core::{Slug, WorkspaceName};
 
     use super::*;
@@ -149,112 +246,210 @@ mod tests {
             .id
     }
 
-    async fn remember(
-        pool: &PgPool,
-        workspace: WorkspaceId,
-        key: &[u8],
-        resource: Uuid,
-        response: Option<&Value>,
-    ) {
+    fn key(workspace: WorkspaceId, hash: &[u8]) -> ApiIdempotencyKey<'_> {
+        ApiIdempotencyKey {
+            workspace,
+            route: "create_x",
+            key_hash: hash,
+        }
+    }
+
+    async fn fresh(pool: &PgPool, key: ApiIdempotencyKey<'_>, hash: &[u8]) -> Uuid {
+        match reserve_api_idempotency(pool, key, Some(hash), 60)
+            .await
+            .unwrap()
+        {
+            Reserved::Fresh(reservation) => reservation,
+            other => panic!("expected a fresh reservation, got {other:?}"),
+        }
+    }
+
+    async fn complete(pool: &PgPool, key: ApiIdempotencyKey<'_>, reservation: Uuid) -> Uuid {
+        let resource = Uuid::now_v7();
         let mut tx = begin(pool).await.unwrap();
-        assert_eq!(
-            lock_api_idempotency(&mut tx, workspace, "create_x", key)
+        assert!(
+            complete_api_idempotency(&mut tx, key, reservation, 201, resource)
                 .await
-                .unwrap(),
-            None
+                .unwrap()
         );
-        remember_api_idempotency(
-            &mut tx,
-            &NewRememberedRequest {
-                workspace,
-                route: "create_x",
-                key_hash: key,
-                request_hash: b"request",
-                status: 201,
-                resource_id: resource,
-                response,
+        commit(tx).await.unwrap();
+        resource
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_done_key_answers_with_its_resource_and_another_route_is_another_key(pool: PgPool) {
+        let ws = workspace(&pool, "Acme").await;
+        let reservation = fresh(&pool, key(ws, b"k"), b"request").await;
+        let resource = complete(&pool, key(ws, b"k"), reservation).await;
+
+        let again = reserve_api_idempotency(&pool, key(ws, b"k"), Some(b"request"), 60)
+            .await
+            .unwrap();
+        let other_route = reserve_api_idempotency(
+            &pool,
+            ApiIdempotencyKey {
+                route: "create_y",
+                ..key(ws, b"k")
             },
+            Some(b"request"),
+            60,
         )
         .await
         .unwrap();
-        commit(tx).await.unwrap();
-    }
-
-    #[sqlx::test]
-    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_remembered_key_answers_with_its_status_resource_and_body(pool: PgPool) {
-        let ws = workspace(&pool, "Acme").await;
-        let resource = Uuid::now_v7();
-        let body = json!({"id": resource});
-        remember(&pool, ws, b"key", resource, Some(&body)).await;
-
-        let mut connection = pool.acquire().await.unwrap();
-        let found = lock_api_idempotency(&mut connection, ws, "create_x", b"key")
-            .await
-            .unwrap()
-            .unwrap();
 
         assert_eq!(
-            found,
-            RememberedRequest {
+            again,
+            Reserved::Done {
                 request_hash: b"request".to_vec(),
-                status: 201,
-                resource_id: resource,
-                response: Some(body),
+                resource_id: resource
             }
         );
-        assert_eq!(
-            lock_api_idempotency(&mut connection, ws, "create_y", b"key")
-                .await
-                .unwrap(),
-            None,
-            "another route is another key"
-        );
+        assert!(matches!(other_route, Reserved::Fresh(_)));
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_key_without_a_body_remembers_none(pool: PgPool) {
+    async fn another_request_under_a_pending_or_done_key_is_reused(pool: PgPool) {
         let ws = workspace(&pool, "Acme").await;
-        remember(&pool, ws, b"key", Uuid::now_v7(), None).await;
+        let reservation = fresh(&pool, key(ws, b"k"), b"one").await;
 
-        let mut connection = pool.acquire().await.unwrap();
-        let found = lock_api_idempotency(&mut connection, ws, "create_x", b"key")
+        let pending = reserve_api_idempotency(&pool, key(ws, b"k"), Some(b"two"), 60)
             .await
-            .unwrap()
+            .unwrap();
+        complete(&pool, key(ws, b"k"), reservation).await;
+        let done = reserve_api_idempotency(&pool, key(ws, b"k"), Some(b"two"), 60)
+            .await
             .unwrap();
 
-        assert_eq!(found.response, None);
+        assert_eq!(pending, Reserved::Reused);
+        assert_eq!(done, Reserved::Reused);
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn an_expired_key_is_forgotten_on_lookup_and_by_the_sweep(pool: PgPool) {
+    async fn a_live_pending_key_is_in_flight_with_the_seconds_left(pool: PgPool) {
         let ws = workspace(&pool, "Acme").await;
-        remember(&pool, ws, b"old", Uuid::now_v7(), None).await;
-        sqlx::query("UPDATE api_idempotency SET created_at = now() - interval '25 hours'")
+        fresh(&pool, key(ws, b"k"), b"one").await;
+
+        let overlap = reserve_api_idempotency(&pool, key(ws, b"k"), Some(b"one"), 60)
+            .await
+            .unwrap();
+
+        match overlap {
+            Reserved::InFlight { retry_after } => assert!((1..=60).contains(&retry_after)),
+            other => panic!("expected in flight, got {other:?}"),
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_expired_pending_key_is_taken_over_and_the_old_owner_cannot_complete(pool: PgPool) {
+        let ws = workspace(&pool, "Acme").await;
+        let first = fresh(&pool, key(ws, b"k"), b"one").await;
+        sqlx::query("UPDATE api_idempotency SET lease_until = now() - interval '1 second'")
             .execute(&pool)
             .await
             .unwrap();
-        let mut connection = pool.acquire().await.unwrap();
 
-        let lookup = lock_api_idempotency(&mut connection, ws, "create_x", b"old")
+        let second = fresh(&pool, key(ws, b"k"), b"one").await;
+        let mut tx = begin(&pool).await.unwrap();
+        let stale = complete_api_idempotency(&mut tx, key(ws, b"k"), first, 201, Uuid::now_v7())
+            .await
+            .unwrap();
+        let current = complete_api_idempotency(&mut tx, key(ws, b"k"), second, 201, Uuid::now_v7())
             .await
             .unwrap();
 
-        assert_eq!(lookup, None);
-        drop(connection);
-        remember(&pool, ws, b"older", Uuid::now_v7(), None).await;
-        remember(&pool, ws, b"new", Uuid::now_v7(), None).await;
+        assert_ne!(first, second);
+        assert!(!stale);
+        assert!(current);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_released_key_is_free_and_release_leaves_done_rows_and_other_owners_alone(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "Acme").await;
+        let first = fresh(&pool, key(ws, b"k"), b"one").await;
+        release_api_idempotency(&pool, key(ws, b"k"), Uuid::now_v7())
+            .await
+            .unwrap();
+        let still_held = reserve_api_idempotency(&pool, key(ws, b"k"), Some(b"one"), 60)
+            .await
+            .unwrap();
+        release_api_idempotency(&pool, key(ws, b"k"), first)
+            .await
+            .unwrap();
+        let second = fresh(&pool, key(ws, b"k"), b"one").await;
+        complete(&pool, key(ws, b"k"), second).await;
+        release_api_idempotency(&pool, key(ws, b"k"), second)
+            .await
+            .unwrap();
+
+        let done = reserve_api_idempotency(&pool, key(ws, b"k"), Some(b"one"), 60)
+            .await
+            .unwrap();
+
+        assert!(matches!(still_held, Reserved::InFlight { .. }));
+        assert!(matches!(done, Reserved::Done { .. }));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_reservation_without_a_hash_binds_it_before_it_can_complete(pool: PgPool) {
+        let ws = workspace(&pool, "Acme").await;
+        let Reserved::Fresh(reservation) = reserve_api_idempotency(&pool, key(ws, b"k"), None, 60)
+            .await
+            .unwrap()
+        else {
+            panic!("expected a fresh reservation");
+        };
+        let mut tx = begin(&pool).await.unwrap();
+        let early =
+            complete_api_idempotency(&mut tx, key(ws, b"k"), reservation, 201, Uuid::now_v7())
+                .await
+                .unwrap();
+        drop(tx);
+
+        let bound = bind_api_idempotency_hash(&pool, key(ws, b"k"), reservation, b"file")
+            .await
+            .unwrap();
+        let stranger = bind_api_idempotency_hash(&pool, key(ws, b"k"), Uuid::now_v7(), b"x")
+            .await
+            .unwrap();
+        let mut tx = begin(&pool).await.unwrap();
+        let late =
+            complete_api_idempotency(&mut tx, key(ws, b"k"), reservation, 201, Uuid::now_v7())
+                .await
+                .unwrap();
+
+        assert!(!early);
+        assert!(bound);
+        assert!(!stranger);
+        assert!(late);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_sweep_forgets_keys_older_than_a_day(pool: PgPool) {
+        let ws = workspace(&pool, "Acme").await;
+        let old = fresh(&pool, key(ws, b"old"), b"one").await;
+        complete(&pool, key(ws, b"old"), old).await;
+        let new = fresh(&pool, key(ws, b"new"), b"one").await;
+        complete(&pool, key(ws, b"new"), new).await;
         sqlx::query(
             "UPDATE api_idempotency SET created_at = now() - interval '25 hours' \
              WHERE key_hash = $1",
         )
-        .bind(b"older".as_slice())
+        .bind(b"old".as_slice())
         .execute(&pool)
         .await
         .unwrap();
+
         assert_eq!(expire_api_idempotency(&pool).await.unwrap(), 1);
+
         let left: i64 = sqlx::query_scalar("SELECT count(*) FROM api_idempotency")
             .fetch_one(&pool)
             .await
