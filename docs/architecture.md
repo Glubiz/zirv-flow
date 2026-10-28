@@ -2118,6 +2118,11 @@ enrollment therefore belong to that later trace, including when the cause is `sy
 The older trace retains the decisions its writer already appended; it has no causal link
 to the eventual entry. This is a limit of the coalesced dirty set, not a multi-parent trace.
 
+Operator retries and skips record a `manual` decision on the enrollment's trace but their
+jobs and subsequent steps retain its original cause, so they do not form one tree rooted
+at the operator; bulk exit instead records `manual` exit decisions on its own trace and
+executes no further steps.
+
 The `trace_id` and cause cross transactional job enqueue, retries and external
 effects. Retries add attempts under the same logical record rather than hiding
 failures. `GET /api/v1/workspaces/{ws}/traces/{trace_id}` and the trace UI return

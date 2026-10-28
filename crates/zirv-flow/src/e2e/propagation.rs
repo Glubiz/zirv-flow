@@ -126,6 +126,61 @@ mod tests {
         json!({"trigger": trigger, "reentry": {"mode": "once"}})
     }
 
+    async fn operator(world: &World) -> (String, Reply) {
+        let user = admin::create_user(
+            &world.pool,
+            &Context::system(),
+            "operator@example.com",
+            "correct horse battery",
+        )
+        .await
+        .unwrap();
+        admin::set_member(
+            &world.pool,
+            &Context::system(),
+            world.ws,
+            user.id,
+            Role::Admin,
+        )
+        .await
+        .unwrap();
+        let login = call(
+            &world.router,
+            "POST",
+            "/api/v1/session",
+            Some(json!({"email": "operator@example.com", "password": "correct horse battery"})),
+            None,
+        )
+        .await;
+        assert_eq!(login.status, StatusCode::OK, "{}", login.text);
+        (user.id.as_uuid().to_string(), login)
+    }
+
+    async fn operator_post(world: &World, login: &Reply, tail: &str, body: Option<Value>) -> Value {
+        let cookie = header_of(login, "set-cookie")
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let response = world
+            .router
+            .clone()
+            .oneshot(
+                Request::post(world.path(tail))
+                    .header(header::COOKIE, cookie)
+                    .header("x-csrf-token", login.body["csrf_token"].as_str().unwrap())
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(body.map_or_else(Body::empty, |body| Body::from(body.to_string())))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(status, StatusCode::ACCEPTED, "{tail}: {bytes:?}");
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
     async fn email(world: &World) -> (String, String) {
         let (sender, _) = world
             .verified_sender("example.com", "news@example.com")
@@ -328,54 +383,14 @@ mod tests {
                 )
                 .await;
             world.settle().await;
-            let user = admin::create_user(
-                &world.pool,
-                &Context::system(),
-                "operator@example.com",
-                "correct horse battery",
-            )
-            .await
-            .unwrap();
-            admin::set_member(
-                &world.pool,
-                &Context::system(),
-                world.ws,
-                user.id,
-                Role::Admin,
-            )
-            .await
-            .unwrap();
-            let login = call(
-                &world.router,
-                "POST",
-                "/api/v1/session",
-                Some(json!({"email": "operator@example.com", "password": "correct horse battery"})),
-                None,
+            let (operator, login) = operator(&world).await;
+            let body = operator_post(
+                &world,
+                &login,
+                &format!("/flows/{flow}/start"),
+                Some(json!({"segment_id": segment})),
             )
             .await;
-            assert_eq!(login.status, StatusCode::OK, "{}", login.text);
-            let cookie = header_of(&login, "set-cookie")
-                .split(';')
-                .next()
-                .unwrap()
-                .to_owned();
-            let response = world
-                .router
-                .clone()
-                .oneshot(
-                    Request::post(world.path(&format!("/flows/{flow}/start")))
-                        .header(header::COOKIE, cookie)
-                        .header("x-csrf-token", login.body["csrf_token"].as_str().unwrap())
-                        .header(header::CONTENT_TYPE, "application/json")
-                        .body(Body::from(json!({"segment_id": segment}).to_string()))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::ACCEPTED);
-            let body: Value =
-                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
-                    .unwrap();
             world.settle().await;
             // Audience fan-out gives each enrollment its own trace. The occurrence in the
             // response identifies the enrollment independently of the request and job traces.
@@ -389,7 +404,6 @@ mod tests {
             .unwrap();
             let trace = trace.simple().to_string();
             let records = records(&world, &trace).await;
-            let operator = user.id.as_uuid().to_string();
             rooted_tree(&records, &operator);
             let enrolled = cause_at(&records, "flow.enroll", "enrolled", "manual", &operator);
             assert_eq!(enrolled["subject_ids"]["person"], person.to_string());
@@ -407,6 +421,188 @@ mod tests {
             world.finish().await;
         })
         .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn manual_retry_and_skip_keep_the_operator_decisions_but_resume_the_enrollment_cause(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let (captured, _logging) = capture();
+            let world = World::start(pool, PUBLIC_URL).await;
+            let person = world.subscribed_person(PERSONAL_DATA.email).await;
+            let (operator, login) = operator(&world).await;
+            // Persist an invalid wait through the store, as the engine failure fixture does:
+            // publish validation rejects it, but retry and skip must handle a stored failure.
+            let flow = Uuid::now_v7();
+            let mut tx = zirv_flow_store::begin(&world.pool).await.unwrap();
+            zirv_flow_store::create_flow(
+                &mut tx,
+                world.ws,
+                &zirv_flow_store::NewFlow {
+                    id: flow,
+                    name: "Failed operator entry".into(),
+                    graph: json!({"v": 1, "nodes": [
+                        {"id": "wait", "type": "wait.until_time", "when": {"kind": "date_time", "at": "soon"}},
+                        {"id": "end", "type": "exit"}
+                    ], "edges": [{"id": "next", "from": "wait", "port": "next", "to": "end"}]}),
+                    settings: settings(json!({"type": "api"})),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+            let locked = zirv_flow_store::lock_flow(&mut tx, world.ws, flow).await.unwrap();
+            zirv_flow_store::publish_flow(
+                &mut tx,
+                &zirv_flow_store::Clock::Manual(world.clock.clone()),
+                world.ws,
+                &locked,
+                None,
+                &TraceContext::root(Cause::api("failure-fixture")),
+            )
+            .await
+            .unwrap();
+            zirv_flow_store::commit(tx).await.unwrap();
+            let enrolled = world.api("POST", &format!("/flows/{flow}/enrollments"),
+                Some(json!({"person_id": person}))).await;
+            assert_eq!(enrolled.status, StatusCode::ACCEPTED, "{}", enrolled.text);
+            world.settle().await;
+            let trace = header_of(&enrolled, "x-trace-id");
+            let request = header_of(&enrolled, "x-request-id");
+            let (enrollment, held_trace, state): (Uuid, Uuid, String) = sqlx::query_as(
+                "SELECT id, trace_id, state FROM enrollments WHERE flow_id = $1 AND person_id = $2")
+                .bind(flow).bind(person).fetch_one(&world.pool).await.unwrap();
+            assert_eq!(held_trace, Uuid::parse_str(&trace).unwrap());
+            assert_eq!(state, "failed");
+            let mut before = records(&world, &trace).await;
+            rooted_tree(&before, &request);
+            cause_at(&before, "flow.enroll", "enrolled", "api", &request);
+            cause_at(&before, "flow.step", "failed", "api", &request);
+            cause_at(&before, "flow.enrollment", "failed", "api", &request);
+
+            for (action, outcome, step_outcome, state, node) in [
+                ("retry", "retried", "failed", "failed", "wait"),
+                ("skip", "skipped", "done", "completed", "end"),
+            ] {
+                let response = operator_post(&world, &login,
+                    &format!("/flows/{flow}/enrollments/{enrollment}/{action}"), None).await;
+                assert_eq!(response["action"], action);
+                assert_eq!(response["enrollment_id"], enrollment.to_string());
+                assert_eq!(Uuid::parse_str(response["trace_id"].as_str().unwrap()).unwrap(), held_trace);
+                world.settle().await;
+                let after = records(&world, &trace).await;
+                let added: Vec<_> = after.iter()
+                    .filter(|record| !before.iter().any(|old| old["id"] == record["id"]))
+                    .cloned().collect();
+                assert_eq!(added.len(), 3, "{action}: {added:#?}");
+                let decision = cause_at(&added, "flow.enrollment", outcome, "manual", &operator);
+                assert_eq!(decision["reason"], "operator");
+                assert_eq!(decision["subject_ids"]["enrollment"], enrollment.to_string());
+                rooted_tree(std::slice::from_ref(decision), &operator);
+
+                // The operator decision is a separate root on the same trace: the resumed job
+                // and its steps still name the original API request, not the signed-in user.
+                let resumed: Vec<_> = added.iter().filter(|record| record["id"] != decision["id"])
+                    .cloned().collect();
+                rooted_tree(&resumed, &request);
+                let step = cause_at(&resumed, "flow.step", step_outcome, "api", &request);
+                assert_eq!(step["subject_ids"]["node"], node);
+                cause_at(&resumed, "flow.enrollment", state, "api", &request);
+                let mut operator_tree = vec![json!({"id": operator, "subject_ids": {}})];
+                operator_tree.extend_from_slice(&added);
+                assert!(one_tree(&operator_tree).is_err(), "{action} unexpectedly connects to the operator");
+                let jobs = completed_jobs(&captured, &trace, "api", &request);
+                assert!(jobs.iter().any(|job| job["kind"] == "flow.step" && job["job_id"] == step["job_id"]));
+                let stored: String = sqlx::query_scalar("SELECT state FROM enrollments WHERE id = $1")
+                    .bind(enrollment).fetch_one(&world.pool).await.unwrap();
+                assert_eq!(stored, state);
+                before = after;
+            }
+            world.finish().await;
+        }).await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_manual_bulk_exit_keeps_the_operator_cause_through_the_lifecycle_job(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let (captured, _logging) = capture();
+            let world = World::start(pool, PUBLIC_URL).await;
+            let (operator, login) = operator(&world).await;
+            let profiles: Vec<_> = [PERSONAL_DATA.email, "other@example.com"].into_iter()
+                .enumerate().map(|(index, address)| ProfileRecord {
+                    source: "bulk-exit".into(),
+                    stream: "people".into(),
+                    record_key: index.to_string(),
+                    identifiers: vec![("email".into(), address.into())],
+                    traits: PERSONAL_DATA.traits(),
+                    observed_at: world.clock.now(),
+                    trace: TraceContext::root(Cause::api("bulk-exit-fixture")),
+                }).collect();
+            zirv_flow_store::apply_profile_batch(&world.pool, world.ws, &profiles).await.unwrap();
+            world.settle().await;
+            let people: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM people ORDER BY id")
+                .fetch_all(&world.pool).await.unwrap();
+            assert_eq!(people.len(), 2);
+            let flow = world.flow("Bulk exit", json!({"v": 1, "nodes": [
+                {"id": "wait", "type": "wait.duration", "seconds": 3600},
+                {"id": "end", "type": "exit"}
+            ], "edges": [{"id": "next", "from": "wait", "port": "next", "to": "end"}]}),
+                settings(json!({"type": "api"}))).await;
+            let mut originals = Vec::new();
+            for person in &people {
+                let response = world.api("POST", &format!("/flows/{flow}/enrollments"),
+                    Some(json!({"person_id": person}))).await;
+                assert_eq!(response.status, StatusCode::ACCEPTED, "{}", response.text);
+                world.settle().await;
+                let trace = header_of(&response, "x-trace-id");
+                let request = header_of(&response, "x-request-id");
+                let records = records(&world, &trace).await;
+                rooted_tree(&records, &request);
+                cause_at(&records, "flow.step", "waiting", "api", &request);
+                originals.push((trace, records));
+            }
+            let published = world.api_ok("POST", &format!("/flows/{flow}/publish"), None,
+                StatusCode::CREATED).await;
+            assert_eq!(published["version"]["version"], 2);
+            let response = operator_post(&world, &login,
+                &format!("/flows/{flow}/versions/1/exit-enrollments"), None).await;
+            assert_eq!(response["version"], 1);
+            let trace = Uuid::parse_str(response["trace_id"].as_str().unwrap()).unwrap()
+                .simple().to_string();
+            world.settle().await;
+            let exited = records(&world, &trace).await;
+            rooted_tree(&exited, &operator);
+            cause_at(&exited, "flow.enrollment", "exited", "manual", &operator);
+            assert_eq!(exited.len(), people.len(), "one exit decision per enrollment");
+            for person in people {
+                let decision = exited.iter().find(|record| record["subject_ids"]["person"] == person.to_string()).unwrap();
+                assert_eq!(decision["action"], "flow.enrollment");
+                assert_eq!(decision["outcome"], "exited");
+                assert_eq!(decision["reason"], "manual");
+                assert_eq!(decision["subject_ids"]["version"], 1);
+                assert_eq!(decision["subject_ids"]["node"], "wait");
+                let (enrollment, state, reason): (Uuid, String, String) = sqlx::query_as(
+                    "SELECT id, state, exit_reason FROM enrollments WHERE flow_id = $1 AND person_id = $2")
+                    .bind(Uuid::parse_str(&flow).unwrap()).bind(person).fetch_one(&world.pool).await.unwrap();
+                assert_eq!(decision["subject_ids"]["enrollment"], enrollment.to_string());
+                assert_eq!(state, "exited");
+                assert_eq!(reason, "manual");
+            }
+            let jobs = completed_jobs(&captured, &trace, "manual", &operator);
+            assert_eq!(jobs.len(), 1);
+            assert_eq!(jobs[0]["kind"], "flow.lifecycle");
+            // Bulk exit ends the waits directly; it does not run the exit node or append steps
+            // to either enrollment's original trace.
+            for (original_trace, before) in originals {
+                assert_ne!(original_trace, trace);
+                assert_eq!(records(&world, &original_trace).await, before);
+            }
+            assert_eq!(world.count("SELECT count(*) FROM step_executions WHERE node_id = 'end'").await, 0);
+            world.finish().await;
+        }).await;
     }
 
     #[sqlx::test]
