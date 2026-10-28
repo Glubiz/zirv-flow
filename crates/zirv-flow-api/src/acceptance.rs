@@ -7637,7 +7637,8 @@ email,b@example.com,
         let missing =
             admin::replay_erasures(&pool, &Context::system(), Some("nope"), &key, None).await;
 
-        assert_eq!(none, zirv_flow_store::ReplayReport::default());
+        assert_eq!(none.report, zirv_flow_store::ReplayReport::default());
+        assert!(none.bad_files.is_empty());
         assert!(matches!(missing, Err(admin::AdminError::NotFound(_))));
         let entry = zirv_flow_store::list_audit(&pool, 100)
             .await
@@ -7650,7 +7651,7 @@ email,b@example.com,
             entry.summary,
             json!({
                 "requests": 0, "suppressions": 0, "people": 0, "inbox_rows": 0,
-                "merged": 0, "skipped_workspaces": 0
+                "merged": 0, "skipped_workspaces": 0, "bad_files": 0
             })
         );
     }

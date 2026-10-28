@@ -35,8 +35,8 @@ pub use export::{
 pub use ledger_files::{
     ExportError, ExportReport, LEDGER_FORMAT, LedgerEntry, LedgerFileError, LedgerWrite,
     MergeError, MergeReport, check_ledger_dir, export_ledger, find_ledger_entry,
-    merge_ledger_entries, read_ledger_dir, reconcile_ledger_file, update_ledger_lists,
-    write_ledger_file,
+    merge_ledger_entries, read_ledger_dir, read_ledger_dir_each, reconcile_ledger_file,
+    update_ledger_lists, write_ledger_file,
 };
 
 pub(crate) use handled_markers::{delete_and_mark, event_columns, mark_partition};
