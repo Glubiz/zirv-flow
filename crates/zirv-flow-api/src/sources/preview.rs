@@ -68,6 +68,7 @@ pub(crate) struct PreviewError {
 pub(crate) struct PreviewEvent {
     name: String,
     /// When the event happened, when the mapping says; otherwise the run's start decides.
+    #[schema(format = DateTime)]
     occurred_at: Option<String>,
     #[schema(value_type = Object)]
     properties: Map<String, Value>,

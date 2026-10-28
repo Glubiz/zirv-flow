@@ -43,6 +43,7 @@ pub(crate) fn name_taken(error: StoreError) -> ApiError {
             axum::http::StatusCode::CONFLICT,
             "a theme with that name already exists",
         )
+        .with_code("name_taken")
     } else {
         error.into()
     }

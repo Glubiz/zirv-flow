@@ -82,8 +82,8 @@ pub(crate) enum TimelineEntryBody {
 pub(crate) struct TimelineBody {
     /// Newest first.
     entries: Vec<TimelineEntryBody>,
-    /// Pass as `before` for the next page; null when there is none.
-    next_before: Option<String>,
+    /// Pass as `cursor` for the next page; null when there is none.
+    next_cursor: Option<String>,
 }
 
 fn trace_text(trace: Uuid) -> String {
@@ -159,10 +159,10 @@ fn parse_page(query: &str) -> Result<Page, ApiError> {
             "limit" => {
                 limit = parse_limit(&value)?;
             }
-            "before" => {
+            "cursor" => {
                 before = Some(
                     decode_cursor(&value)
-                        .ok_or_else(|| ApiError::bad_request("before is not a valid cursor"))?,
+                        .ok_or_else(|| ApiError::bad_request("cursor is malformed"))?,
                 );
             }
             "kinds" => {
@@ -203,13 +203,13 @@ fn parse_page(query: &str) -> Result<Page, ApiError> {
         ("ws" = Uuid, Path, description = "Workspace id"),
         ("id" = Uuid, Path, description = "Person id"),
         ("limit" = Option<u32>, Query, description = "Entries per page, 1 to 200; default 50"),
-        ("before" = Option<String>, Query, description = "The next_before of the previous page"),
+        ("cursor" = Option<String>, Query, description = "The next_cursor of the previous page"),
         ("kinds" = Option<String>, Query, description = "`event`, `decision` or both separated by a comma; default both"),
         ("all_decisions" = Option<bool>, Query, description = "Include the `event.accepted` decisions; default false")
     ),
     responses(
         (status = 200, description = "A page of entries", body = TimelineBody),
-        (status = 400, description = "limit is out of range, or before, kinds or all_decisions is malformed", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "limit is out of range, or cursor, kinds or all_decisions is malformed", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the read scope", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or person, or no access", body = Problem, content_type = "application/problem+json"),
@@ -237,7 +237,7 @@ pub(crate) async fn get(
             .into_iter()
             .map(|entry| entry_body(entry, reveal))
             .collect(),
-        next_before: page.next.map(encode_cursor),
+        next_cursor: page.next.map(encode_cursor),
     }))
 }
 
@@ -320,7 +320,7 @@ mod tests {
             "limit=0",
             "limit=201",
             "limit=x",
-            "before=%21",
+            "cursor=%21",
             "kinds=",
             "kinds=event,flow",
             "kinds=trace",

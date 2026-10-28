@@ -546,7 +546,7 @@ mod tests {
         assert_eq!(body["used_bytes"], used);
         assert_eq!(body["limit_bytes"], 10_000);
         assert_eq!(body["max_file_bytes"], 5 * 1024 * 1024);
-        assert_eq!(body["next_before"], Value::Null);
+        assert_eq!(body["next_cursor"], Value::Null);
         let url = body["assets"][0]["url"].as_str().unwrap();
         assert!(url.starts_with("https://flow.example.com/a/"), "{url}");
 
@@ -555,13 +555,13 @@ mod tests {
             .await
             .json();
         assert_eq!(first["assets"].as_array().unwrap().len(), 2);
-        assert_eq!(first["next_before"], b["id"]);
+        assert_eq!(first["next_cursor"], b["id"]);
         let rest = f
             .call(
                 "GET",
                 &f.assets(
                     f.ws,
-                    &format!("?limit=2&before={}", first["next_before"].as_str().unwrap()),
+                    &format!("?limit=2&cursor={}", first["next_cursor"].as_str().unwrap()),
                 ),
                 Some(&f.read),
             )

@@ -88,8 +88,8 @@ impl From<EnrollmentSummary> for EnrollmentItemBody {
 pub(crate) struct EnrollmentsBody {
     /// Newest first.
     enrollments: Vec<EnrollmentItemBody>,
-    /// Pass as `before` for the next page; null when there is none.
-    next_before: Option<String>,
+    /// Pass as `cursor` for the next page; null when there is none.
+    next_cursor: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -207,10 +207,10 @@ fn parse_page(query: &str) -> Result<Page, ApiError> {
     for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
         match key.as_ref() {
             "limit" => limit = parse_limit(&value)?,
-            "before" => {
+            "cursor" => {
                 before = Some(
                     decode_cursor(&value)
-                        .ok_or_else(|| ApiError::bad_request("before is not a valid cursor"))?,
+                        .ok_or_else(|| ApiError::bad_request("cursor is malformed"))?,
                 );
             }
             "state" => {
@@ -256,7 +256,7 @@ fn parse_page(query: &str) -> Result<Page, ApiError> {
         ("ws" = Uuid, Path, description = "Workspace id"),
         ("id" = Uuid, Path, description = "Flow id"),
         ("limit" = Option<u32>, Query, description = "Enrollments per page, 1 to 200; default 50"),
-        ("before" = Option<String>, Query, description = "The next_before of the previous page"),
+        ("cursor" = Option<String>, Query, description = "The next_cursor of the previous page"),
         ("state" = Option<String>, Query, description = "`active`, `waiting`, `held`, `completed`, `exited` or `failed`"),
         ("version" = Option<i32>, Query, description = "Only enrollments pinned to this version"),
         ("node" = Option<String>, Query, description = "Only enrollments at this node or failed at it")
@@ -292,7 +292,7 @@ pub(crate) async fn list(
     .ok_or_else(ApiError::not_found)?;
     Ok(Json(EnrollmentsBody {
         enrollments: page.enrollments.into_iter().map(Into::into).collect(),
-        next_before: page.next.map(encode_cursor),
+        next_cursor: page.next.map(encode_cursor),
     }))
 }
 
@@ -538,7 +538,7 @@ mod tests {
             "limit=0",
             "limit=201",
             "limit=x",
-            "before=%21",
+            "cursor=%21",
             "state=asleep",
             "state=",
             "version=0",

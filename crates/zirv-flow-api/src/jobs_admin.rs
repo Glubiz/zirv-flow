@@ -94,8 +94,8 @@ impl From<JobSummary> for JobBody {
 pub(crate) struct DeadJobsBody {
     /// Newest first.
     jobs: Vec<JobBody>,
-    /// Pass as `before` for the next page; null when there is none.
-    next_before: Option<String>,
+    /// Pass as `cursor` for the next page; null when there is none.
+    next_cursor: Option<String>,
 }
 
 /// Job counts by kind and state, and how long the oldest runnable job has waited.
@@ -130,11 +130,11 @@ pub(crate) async fn depth(
     tag = "jobs-admin",
     params(
         ("limit" = Option<u32>, Query, description = "Jobs per page, 1 to 200; default 50"),
-        ("before" = Option<String>, Query, description = "The next_before of the previous page")
+        ("cursor" = Option<String>, Query, description = "The next_cursor of the previous page")
     ),
     responses(
         (status = 200, description = "A page of dead jobs", body = DeadJobsBody),
-        (status = 400, description = "limit is out of range or before is malformed", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "limit is out of range or cursor is malformed", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not the instance owner, or an API key", body = Problem, content_type = "application/problem+json")
     ),
@@ -148,7 +148,7 @@ pub(crate) async fn dead(
     principal.require_owner()?;
     let (limit, before) = parse_page(query.as_deref().unwrap_or_default())?;
     let (jobs, more) = zirv_flow_store::list_dead_jobs(&state.pool, limit, before).await?;
-    let next_before = match jobs.last() {
+    let next_cursor = match jobs.last() {
         Some(last) if more => last
             .dead_at
             .map(|dead_at| encode_cursor((dead_at, last.id))),
@@ -156,7 +156,7 @@ pub(crate) async fn dead(
     };
     Ok(Json(DeadJobsBody {
         jobs: jobs.into_iter().map(JobBody::from).collect(),
-        next_before,
+        next_cursor,
     }))
 }
 
@@ -191,10 +191,10 @@ pub(crate) async fn retry(
         Ok(Some(job)) => job,
         Ok(None) => return Err(ApiError::not_found()),
         Err(error) if error.is_conflict() => {
-            return Err(ApiError::new(
-                StatusCode::CONFLICT,
-                "an equivalent job is already queued",
-            ));
+            return Err(
+                ApiError::new(StatusCode::CONFLICT, "an equivalent job is already queued")
+                    .with_code("job_already_queued"),
+            );
         }
         Err(error) => return Err(error.into()),
     };
@@ -247,10 +247,10 @@ pub(crate) fn parse_page(query: &str) -> Result<(u32, Option<DeadCursor>), ApiEr
             "limit" => {
                 limit = parse_limit(&value)?;
             }
-            "before" => {
+            "cursor" => {
                 before = Some(
                     decode_cursor(&value)
-                        .ok_or_else(|| ApiError::bad_request("before is not a valid cursor"))?,
+                        .ok_or_else(|| ApiError::bad_request("cursor is malformed"))?,
                 );
             }
             _ => {}
@@ -316,7 +316,7 @@ mod tests {
             assert_eq!(error.status(), StatusCode::BAD_REQUEST, "{bad}");
         }
         assert_eq!(
-            parse_page("before=%21").unwrap_err().status(),
+            parse_page("cursor=%21").unwrap_err().status(),
             StatusCode::BAD_REQUEST
         );
     }

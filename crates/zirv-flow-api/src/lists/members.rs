@@ -60,8 +60,8 @@ impl ListMemberBody {
 pub(crate) struct ListMembersBody {
     /// Newest first.
     members: Vec<ListMemberBody>,
-    /// Pass as `before` for the next page; null when there is none.
-    next_before: Option<String>,
+    /// Pass as `cursor` for the next page; null when there is none.
+    next_cursor: Option<String>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -158,11 +158,11 @@ fn parse_identifiers(inputs: &[IdentifierInput]) -> Result<Vec<Identifier>, ApiE
         ("ws" = Uuid, Path, description = "Workspace id"),
         ("id" = Uuid, Path, description = "List id"),
         ("limit" = Option<u32>, Query, description = "Members per page, 1 to 200; default 50"),
-        ("before" = Option<String>, Query, description = "The next_before of the previous page")
+        ("cursor" = Option<String>, Query, description = "The next_cursor of the previous page")
     ),
     responses(
         (status = 200, description = "A page of members", body = ListMembersBody),
-        (status = 400, description = "limit is out of range, or before is malformed", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "limit is out of range, or cursor is malformed", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the read scope", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or list, or no access", body = Problem, content_type = "application/problem+json")
@@ -183,7 +183,7 @@ pub(crate) async fn page(
         .ok_or_else(ApiError::not_found)?;
     let (members, more) =
         zirv_flow_store::members(&state.pool, workspace.id, list, limit, before).await?;
-    let next_before = match members.last() {
+    let next_cursor = match members.last() {
         Some(last) if more => Some(encode_cursor((last.added_at, last.person_id))),
         _ => None,
     };
@@ -193,7 +193,7 @@ pub(crate) async fn page(
             .into_iter()
             .map(|member| ListMemberBody::new(member, reveal))
             .collect(),
-        next_before,
+        next_cursor,
     }))
 }
 

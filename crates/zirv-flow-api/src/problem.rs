@@ -1268,8 +1268,32 @@ impl From<crate::admin::AdminError> for ApiError {
     }
 }
 
+/// The code a problem carries when its raiser named none: one per status the policy
+/// (docs/api.md, "Problem codes") says always has a code. A specific code always wins.
+pub(crate) const FALLBACK_CODES: [(StatusCode, &str); 6] = [
+    (StatusCode::BAD_REQUEST, "invalid_request"),
+    (StatusCode::CONFLICT, "conflict"),
+    (StatusCode::PAYLOAD_TOO_LARGE, "body_too_large"),
+    (StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type"),
+    (StatusCode::UNPROCESSABLE_ENTITY, "validation_failed"),
+    (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
+];
+
+impl ApiError {
+    /// The code the response carries: the one set, else the fallback of its status.
+    fn response_code(&self) -> Option<&'static str> {
+        self.code.or_else(|| {
+            FALLBACK_CODES
+                .iter()
+                .find(|(status, _)| *status == self.status)
+                .map(|(_, code)| *code)
+        })
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(mut self) -> Response {
+        let code = self.response_code();
         let templates = self
             .segment
             .as_mut()
@@ -1282,7 +1306,7 @@ impl IntoResponse for ApiError {
             request_id: request_id::current(),
             trace_id: trace::current().map(|trace| trace.trace_id.to_string()),
             errors: self.errors,
-            code: self.code.map(str::to_owned),
+            code: code.map(str::to_owned),
             issues: self.segment.as_mut().and_then(|extra| extra.issues.take()),
             cycle: self.segment.as_mut().and_then(|extra| extra.cycle.take()),
             flow_issues: self
@@ -1332,6 +1356,35 @@ pub(crate) async fn method_not_allowed() -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_client_error_without_a_code_carries_the_generic_code_of_its_status() {
+        for (status, code) in FALLBACK_CODES {
+            assert_eq!(ApiError::new(status, "x").response_code(), Some(code));
+        }
+        assert_eq!(
+            ApiError::bad_request("x").response_code(),
+            Some("invalid_request")
+        );
+        assert_eq!(
+            ApiError::unprocessable("x").response_code(),
+            Some("validation_failed")
+        );
+    }
+
+    #[test]
+    fn a_specific_code_wins_and_the_other_statuses_stay_without_one() {
+        let named = ApiError::new(StatusCode::CONFLICT, "x").with_code("name_taken");
+        assert_eq!(named.response_code(), Some("name_taken"));
+        for status in [
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::NOT_FOUND,
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ] {
+            assert_eq!(ApiError::new(status, "x").response_code(), None);
+        }
+    }
 
     #[test]
     fn a_breaks_templates_problem_lists_twenty_and_counts_all() {

@@ -48,8 +48,8 @@ pub(crate) struct ContactFieldsRequest {
 pub(crate) struct ContactsBody {
     /// In key order.
     contacts: Vec<ContactBody>,
-    /// Pass as `after` for the next page; null on the last page.
-    next_after: Option<String>,
+    /// Pass as `cursor` for the next page; null on the last page.
+    next_cursor: Option<String>,
 }
 
 const REPLAYED: HeaderName = HeaderName::from_static("idempotent-replayed");
@@ -263,10 +263,10 @@ fn parse_list_query(query: &str) -> Result<(u32, Option<String>), ApiError> {
     for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
         match key.as_ref() {
             "limit" => limit = parse_limit(&value)?,
-            "after" => {
+            "cursor" => {
                 after = Some(
                     decode_after(&value)
-                        .ok_or_else(|| ApiError::bad_request("after is not a valid cursor"))?,
+                        .ok_or_else(|| ApiError::bad_request("cursor is malformed"))?,
                 );
             }
             _ => {}
@@ -285,11 +285,11 @@ fn parse_list_query(query: &str) -> Result<(u32, Option<String>), ApiError> {
     params(
         ("ws" = Uuid, Path, description = "Workspace id"),
         ("limit" = Option<u32>, Query, description = "Contacts per page, 1 to 200; default 50"),
-        ("after" = Option<String>, Query, description = "The next_after of the previous page")
+        ("cursor" = Option<String>, Query, description = "The next_cursor of the previous page")
     ),
     responses(
         (status = 200, description = "A page of contacts", body = ContactsBody),
-        (status = 400, description = "limit is out of range, or after is malformed", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "limit is out of range, or cursor is malformed", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the read scope", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json")
@@ -315,7 +315,7 @@ pub(crate) async fn list(
     drop(connection);
     let masking = Masking::of(&state, &principal, workspace.id).await?;
     Ok(Json(ContactsBody {
-        next_after: page.next_after.as_deref().map(encode_after),
+        next_cursor: page.next_after.as_deref().map(encode_after),
         contacts: page
             .contacts
             .into_iter()
@@ -480,11 +480,11 @@ mod tests {
     fn the_list_query_takes_a_limit_and_an_opaque_after() {
         let after = encode_after("c-9");
 
-        let parsed = parse_list_query(&format!("limit=5&after={after}")).unwrap();
+        let parsed = parse_list_query(&format!("limit=5&cursor={after}")).unwrap();
 
         assert_eq!(parsed, (5, Some("c-9".to_owned())));
         assert_eq!(parse_list_query("").unwrap(), (DEFAULT_LIMIT, None));
-        for bad in ["limit=0", "limit=201", "after=%21%21"] {
+        for bad in ["limit=0", "limit=201", "cursor=%21%21"] {
             assert_eq!(
                 parse_list_query(bad).unwrap_err().status(),
                 StatusCode::BAD_REQUEST,

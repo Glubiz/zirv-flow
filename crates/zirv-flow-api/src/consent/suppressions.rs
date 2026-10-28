@@ -80,8 +80,8 @@ impl From<&Suppression> for SuppressionBody {
 pub(crate) struct SuppressionsBody {
     /// Newest first.
     suppressions: Vec<SuppressionBody>,
-    /// Pass as `before` for the next page; null when there is none.
-    next_before: Option<String>,
+    /// Pass as `cursor` for the next page; null when there is none.
+    next_cursor: Option<String>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -423,10 +423,10 @@ fn parse_list_query(query: &str) -> Result<ListQuery, ApiError> {
             "limit" => {
                 limit = parse_limit(&value)?;
             }
-            "before" => {
+            "cursor" => {
                 before = Some(
                     decode_cursor(&value)
-                        .ok_or_else(|| ApiError::bad_request("before is not a valid cursor"))?,
+                        .ok_or_else(|| ApiError::bad_request("cursor is malformed"))?,
                 );
             }
             "reason" => {
@@ -450,12 +450,12 @@ fn parse_list_query(query: &str) -> Result<ListQuery, ApiError> {
     params(
         ("ws" = Uuid, Path, description = "Workspace id"),
         ("limit" = Option<u32>, Query, description = "Suppressions per page, 1 to 200; default 50"),
-        ("before" = Option<String>, Query, description = "The next_before of the previous page"),
+        ("cursor" = Option<String>, Query, description = "The next_cursor of the previous page"),
         ("reason" = Option<String>, Query, description = "Only this reason: hard_bounce, complaint, manual or erased")
     ),
     responses(
         (status = 200, description = "A page of suppressions", body = SuppressionsBody),
-        (status = 400, description = "limit or reason is out of range, or before is malformed", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "limit or reason is out of range, or cursor is malformed", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the read scope", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json")
@@ -473,13 +473,13 @@ pub(crate) async fn list(
     let (page, more) =
         zirv_flow_store::list_suppressions(&state.pool, workspace.id, limit, before, reason)
             .await?;
-    let next_before = match page.last() {
+    let next_cursor = match page.last() {
         Some(last) if more => Some(encode_cursor((last.created_at, last.id))),
         _ => None,
     };
     Ok(Json(SuppressionsBody {
         suppressions: page.iter().map(SuppressionBody::from).collect(),
-        next_before,
+        next_cursor,
     }))
 }
 
@@ -931,7 +931,7 @@ fax,1
             parse_list_query("reason=erased&limit=7").unwrap(),
             (7, None, Some(SuppressionReason::Erased))
         );
-        for bad in ["limit=0", "limit=201", "reason=rude", "before=%21"] {
+        for bad in ["limit=0", "limit=201", "reason=rude", "cursor=%21"] {
             assert_eq!(
                 parse_list_query(bad).unwrap_err().status(),
                 StatusCode::BAD_REQUEST,

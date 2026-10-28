@@ -137,8 +137,8 @@ impl AssetDetailBody {
 pub(crate) struct AssetsBody {
     /// Newest first.
     assets: Vec<AssetBody>,
-    /// Pass as `before` for the next page; null when there is none.
-    next_before: Option<Uuid>,
+    /// Pass as `cursor` for the next page; null when there is none.
+    next_cursor: Option<Uuid>,
     /// The bytes the workspace's live assets take.
     used_bytes: i64,
     /// The most bytes they may take (`assets.max_workspace_bytes`).
@@ -150,13 +150,13 @@ pub(crate) struct AssetsBody {
 impl AssetsBody {
     pub(crate) fn new(
         assets: Vec<AssetBody>,
-        next_before: Option<Uuid>,
+        next_cursor: Option<Uuid>,
         used_bytes: i64,
         limits: AssetLimits,
     ) -> Self {
         Self {
             assets,
-            next_before,
+            next_cursor,
             used_bytes,
             limit_bytes: limits.max_workspace_bytes,
             max_file_bytes: limits.max_file_bytes,
@@ -167,7 +167,7 @@ impl AssetsBody {
 const DEFAULT_LIMIT: u32 = 50;
 const MAX_LIMIT: u32 = 200;
 
-/// The `limit` and `before` of a list request.
+/// The `limit` and `cursor` of a list request.
 pub(crate) fn parse_page(query: &str) -> Result<(u32, Option<Uuid>), ApiError> {
     let mut limit = DEFAULT_LIMIT;
     let mut before = None;
@@ -180,11 +180,11 @@ pub(crate) fn parse_page(query: &str) -> Result<(u32, Option<Uuid>), ApiError> {
                     .filter(|limit| (1..=MAX_LIMIT).contains(limit))
                     .ok_or_else(|| ApiError::bad_request("limit must be 1 to 200"))?;
             }
-            "before" => {
+            "cursor" => {
                 before = Some(
                     value
                         .parse::<Uuid>()
-                        .map_err(|_| ApiError::bad_request("before is not a valid cursor"))?,
+                        .map_err(|_| ApiError::bad_request("cursor is malformed"))?,
                 );
             }
             _ => {}
@@ -211,11 +211,11 @@ mod tests {
 
         assert_eq!(parse_page("").unwrap(), (50, None));
         assert_eq!(
-            parse_page(&format!("limit=7&before={id}")).unwrap(),
+            parse_page(&format!("limit=7&cursor={id}")).unwrap(),
             (7, Some(id))
         );
         assert!(parse_page("limit=0").is_err());
         assert!(parse_page("limit=201").is_err());
-        assert!(parse_page("before=nope").is_err());
+        assert!(parse_page("cursor=nope").is_err());
     }
 }

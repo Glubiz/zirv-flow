@@ -801,7 +801,7 @@ use crate::workspaces::{
         retention::LastRunBody,
         retention::PutRetentionRequest,
     )),
-    modifiers(&SecuritySchemes, &SegmentSchemas, &FlowSchemas)
+    modifiers(&SecuritySchemes, &PreviewTag, &SegmentSchemas, &FlowSchemas)
 )]
 struct ApiDoc;
 
@@ -822,6 +822,56 @@ impl Modify for SecuritySchemes {
                 .into(),
         );
         components.add_security_scheme("api_key", SecurityScheme::Http(bearer));
+    }
+}
+
+/// The tag of every operation the policy leaves unfrozen (docs/api.md, "Unfrozen surface").
+const PREVIEW_TAG: &str = "preview";
+
+/// Whether the policy lists an operation at this path as preview: the job queue tooling, the
+/// inbound webhook, the assistant and the event explorer.
+fn is_preview(path: &str) -> bool {
+    path.starts_with("/api/v1/admin/jobs")
+        || path == "/hooks/{id}"
+        || path.contains("/ai/")
+        || path.contains("/events/explore/")
+}
+
+/// Adds the `preview` tag to the operations the policy lists as unfrozen, so a client can tell
+/// them apart in the document.
+struct PreviewTag;
+
+impl Modify for PreviewTag {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        for (path, item) in openapi.paths.paths.iter_mut() {
+            if !is_preview(path) {
+                continue;
+            }
+            for operation in [
+                &mut item.get,
+                &mut item.put,
+                &mut item.post,
+                &mut item.delete,
+                &mut item.patch,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let tags = operation.tags.get_or_insert_with(Vec::new);
+                if !tags.iter().any(|tag| tag == PREVIEW_TAG) {
+                    tags.push(PREVIEW_TAG.to_owned());
+                }
+            }
+        }
+        let tags = openapi.tags.get_or_insert_with(Vec::new);
+        tags.push(
+            utoipa::openapi::tag::TagBuilder::new()
+                .name(PREVIEW_TAG)
+                .description(Some(
+                    "Not frozen: may change in any release, 1.x included (the API contract policy lists them).",
+                ))
+                .build(),
+        );
     }
 }
 
@@ -974,6 +1024,368 @@ mod tests {
         check::<sources::preview::PreviewRequest>(&document);
         check::<sources::preview::PreviewBody>(&document);
         check::<sources::manifest::SampleBody>(&document);
+    }
+
+    const POLICY: &str = include_str!("../../../docs/api.md");
+
+    fn policy() -> String {
+        POLICY.replace("\r\n", "\n")
+    }
+
+    /// The text of a `##` section of the policy, without its heading.
+    fn section(policy: &str, heading: &str) -> String {
+        let start = policy
+            .find(&format!("\n## {heading}\n"))
+            .unwrap_or_else(|| panic!("the policy has no section {heading}"));
+        let rest = &policy[start + 1..];
+        let body = &rest[rest.find('\n').unwrap()..];
+        body.split("\n## ").next().unwrap().to_owned()
+    }
+
+    fn operations(document: &serde_json::Value) -> Vec<(String, String, &serde_json::Value)> {
+        let mut found = Vec::new();
+        for (path, item) in document["paths"].as_object().unwrap() {
+            for (method, operation) in item.as_object().unwrap() {
+                found.push((method.clone(), path.clone(), operation));
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn every_operation_has_a_security_entry() {
+        let document = serde_json::to_value(openapi()).unwrap();
+        let all = operations(&document);
+        assert!(all.len() > 250, "the document was not read");
+        for (method, path, operation) in all {
+            assert!(
+                operation["security"].is_array(),
+                "{method} {path} has no security entry; a public operation says security(())"
+            );
+        }
+    }
+
+    /// The list operations whose body is a bare array, by design (docs/api.md, "Lists and
+    /// pagination").
+    const BOUNDED_COLLECTIONS: &[&str] = &[
+        "list_destination_kinds",
+        "list_source_kinds",
+        "list_users",
+        "list_workspaces",
+        "list_api_keys",
+        "list_consent_dimensions",
+        "list_consent_policy_versions",
+        "list_credential_kinds",
+        "list_credentials",
+        "list_destinations",
+        "list_destination_options",
+        "list_event_schemas",
+        "list_flows",
+        "list_flow_versions",
+        "list_forwarding_rules",
+        "list_lists",
+        "list_members",
+        "list_person_lists",
+        "list_segments",
+        "list_segment_versions",
+        "list_sender_identities",
+        "list_sender_identity_options",
+        "list_sending_domains",
+        "list_snippets",
+        "list_snippet_versions",
+        "list_sources",
+        "list_source_streams",
+        "list_templates",
+        "list_template_preview_people",
+        "list_template_versions",
+        "list_test_send_allowlist_options",
+        "list_themes",
+        "list_theme_versions",
+        "list_topics",
+        "list_traits",
+        "list_webhooks",
+    ];
+    /// The list operations that answer reference data, not rows.
+    const EXEMPT_SHAPES: &[&str] = &[
+        "list_ai_models",
+        "list_audit_actions",
+        "list_test_send_allowlist",
+    ];
+
+    fn resolve<'a>(
+        document: &'a serde_json::Value,
+        schema: &'a serde_json::Value,
+    ) -> &'a serde_json::Value {
+        match schema["$ref"].as_str() {
+            Some(reference) => {
+                &document["components"]["schemas"][reference.rsplit('/').next().unwrap()]
+            }
+            None => schema,
+        }
+    }
+
+    #[test]
+    fn every_list_operation_is_paged_the_shared_way_or_documented_as_not() {
+        let document = serde_json::to_value(openapi()).unwrap();
+        let policy = section(&policy(), "Lists and pagination");
+        let mut paged = 0;
+        let mut seen = Vec::new();
+        for (method, path, operation) in operations(&document) {
+            let Some(id) = operation["operationId"].as_str() else {
+                continue;
+            };
+            if method != "get" || !id.starts_with("list_") {
+                continue;
+            }
+            seen.push(id.to_owned());
+            let schema = &operation["responses"]["200"]["content"]["application/json"]["schema"];
+            let body = resolve(&document, schema);
+            if body["type"] == "array" {
+                assert!(
+                    BOUNDED_COLLECTIONS.contains(&id),
+                    "{id} ({path}) is an unpaged array but not a documented bounded collection"
+                );
+            } else if body["properties"]["next_cursor"].is_object() {
+                let query: Vec<&str> = operation["parameters"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|parameter| parameter["in"] == "query")
+                    .filter_map(|parameter| parameter["name"].as_str())
+                    .collect();
+                assert!(
+                    query.contains(&"limit") && query.contains(&"cursor"),
+                    "{id} must declare limit and cursor"
+                );
+                paged += 1;
+            } else {
+                assert!(
+                    EXEMPT_SHAPES.contains(&id),
+                    "{id} ({path}) is neither paged nor a documented exempt shape"
+                );
+            }
+        }
+        assert!(paged >= 20, "the paged lists were not found");
+        for id in BOUNDED_COLLECTIONS.iter().chain(EXEMPT_SHAPES) {
+            assert!(
+                seen.iter().any(|seen| seen == id),
+                "{id} is listed but is not a list operation"
+            );
+            assert!(
+                policy.contains(&format!("`{id}`")),
+                "{id} is missing from the policy"
+            );
+        }
+    }
+
+    #[test]
+    fn no_operation_still_pages_with_before_or_after() {
+        let document = serde_json::to_value(openapi()).unwrap();
+        let text = document.to_string();
+        for old in ["next_before", "next_after"] {
+            assert!(!text.contains(old), "{old} is still in the document");
+        }
+        for (method, path, operation) in operations(&document) {
+            for parameter in operation["parameters"].as_array().into_iter().flatten() {
+                let name = parameter["name"].as_str().unwrap_or_default();
+                assert!(
+                    name != "before" && name != "after",
+                    "{method} {path} takes {name}"
+                );
+            }
+        }
+    }
+
+    /// Every string literal that follows one of the markers, in the non-test source of the crate.
+    fn coded_literals() -> std::collections::BTreeSet<String> {
+        const MARKERS: [&str; 4] = [
+            "with_code(",
+            "code: Some(",
+            "source_fields_invalid(",
+            "flow_test_refused(",
+        ];
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|extension| extension == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        let mut codes = std::collections::BTreeSet::new();
+        for file in files {
+            let name = file.file_name().unwrap().to_string_lossy().into_owned();
+            if name.contains("acceptance") || name == "test_support.rs" {
+                continue;
+            }
+            let source = std::fs::read_to_string(&file)
+                .unwrap()
+                .replace("\r\n", "\n");
+            let source = source.split("\n#[cfg(test)]\nmod tests").next().unwrap();
+            for marker in MARKERS {
+                for (at, _) in source.match_indices(marker) {
+                    let rest = source[at + marker.len()..].trim_start();
+                    let Some(rest) = rest.strip_prefix('"') else {
+                        continue;
+                    };
+                    let code = rest.split('"').next().unwrap();
+                    if !code.is_empty()
+                        && code
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                    {
+                        codes.insert(code.to_owned());
+                    }
+                }
+            }
+        }
+        codes
+    }
+
+    /// The codes whose literal is not next to a marker: set from a value of another crate, or
+    /// by the generic fallback of a status.
+    fn computed_codes() -> Vec<&'static str> {
+        use zirv_flow_core::csv_file::CsvError;
+        use zirv_flow_core::mapping::MappingError;
+        let column = || "c".to_owned();
+        let mut codes = vec![
+            CsvError::NotUtf8.code(),
+            CsvError::RecordTooLarge.code(),
+            CsvError::TooManyFields.code(),
+            CsvError::UnterminatedQuote.code(),
+            MappingError::NoIdentifier.code(),
+            MappingError::TooManyRules.code(),
+            MappingError::UnknownColumn(column()).code(),
+            MappingError::InvalidIdentifierKind(column()).code(),
+            MappingError::InvalidTraitKey(column()).code(),
+            MappingError::UnknownTrait(column()).code(),
+            MappingError::ArchivedTrait(column()).code(),
+            MappingError::DuplicateTrait(column()).code(),
+            MappingError::InvalidTransform(column()).code(),
+            MappingError::InvalidEventName.code(),
+            MappingError::ReservedEventName.code(),
+            MappingError::InvalidEventProperty(column()).code(),
+            MappingError::DuplicateEventProperty(column()).code(),
+            MappingError::TooManyEventProperties.code(),
+        ];
+        codes.extend([
+            "utm_pattern_invalid",
+            "utm_domain_invalid",
+            "utm_domains_required",
+        ]);
+        codes.extend(crate::problem::FALLBACK_CODES.iter().map(|(_, code)| *code));
+        codes
+    }
+
+    fn listed_codes(policy: &str) -> Vec<String> {
+        section(policy, "Problem codes")
+            .lines()
+            .filter_map(|line| line.strip_prefix("| `"))
+            .filter_map(|rest| rest.split('`').next())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn every_problem_code_in_the_sources_is_in_the_policy_list() {
+        let listed = listed_codes(&policy());
+        assert!(listed.len() > 100, "the code list was not read");
+        let mut missing: Vec<String> = coded_literals()
+            .into_iter()
+            .filter(|code| !listed.contains(code))
+            .collect();
+        missing.extend(
+            computed_codes()
+                .into_iter()
+                .filter(|code| !listed.iter().any(|listed| listed == code))
+                .map(str::to_owned),
+        );
+        assert!(
+            missing.is_empty(),
+            "codes missing from docs/api.md: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn every_policy_code_is_snake_case_and_listed_once() {
+        let mut seen = std::collections::BTreeSet::new();
+        for code in listed_codes(&policy()) {
+            assert!(
+                code.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+                "{code}"
+            );
+            assert!(seen.insert(code.clone()), "{code} is listed twice");
+        }
+    }
+
+    #[test]
+    fn the_preview_tag_is_on_exactly_the_operations_the_policy_leaves_unfrozen() {
+        let document = serde_json::to_value(openapi()).unwrap();
+        let unfrozen = section(&policy(), "Unfrozen surface");
+        for needle in [
+            "/hooks/{id}",
+            "/api/v1/admin/jobs",
+            "/ai/",
+            "/events/explore/",
+            "preview",
+        ] {
+            assert!(
+                unfrozen.contains(needle),
+                "{needle} is missing from the unfrozen list"
+            );
+        }
+        let mut tagged = 0;
+        for (method, path, operation) in operations(&document) {
+            let has_tag = operation["tags"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tag| tag == "preview");
+            assert_eq!(has_tag, is_preview(&path), "{method} {path}");
+            tagged += usize::from(has_tag);
+        }
+        assert!(tagged >= 15, "the preview operations were not found");
+        assert!(
+            document["tags"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tag| tag["name"] == "preview")
+        );
+    }
+
+    #[test]
+    fn timestamps_the_policy_promises_are_date_time_strings() {
+        let document = serde_json::to_value(openapi()).unwrap();
+        let schemas = &document["components"]["schemas"];
+        assert_eq!(
+            schemas["GateResultBody"]["properties"]["run_at"]["format"],
+            "date-time"
+        );
+        assert_eq!(
+            schemas["PreviewEvent"]["properties"]["occurred_at"]["format"],
+            "date-time"
+        );
+    }
+
+    #[test]
+    fn the_probes_and_the_version_are_public_operations_with_an_empty_security_entry() {
+        let document = serde_json::to_value(openapi()).unwrap();
+        for path in ["/api/v1/version", "/healthz", "/readyz"] {
+            assert_eq!(
+                document["paths"][path]["get"]["security"],
+                serde_json::json!([{}]),
+                "{path}"
+            );
+        }
     }
 
     #[test]

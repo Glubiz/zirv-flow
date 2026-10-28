@@ -242,6 +242,7 @@ fn name_taken(error: zirv_flow_store::StoreError) -> ApiError {
             StatusCode::CONFLICT,
             "a forwarding rule with that name already exists",
         )
+        .with_code("name_taken")
     } else {
         error.into()
     }

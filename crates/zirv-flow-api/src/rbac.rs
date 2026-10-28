@@ -363,7 +363,7 @@ pub(crate) const ROUTES: &[Route] = table! {
     Post   "/api/v1/workspaces/{ws}/destinations/{id}/check" => ADMIN @ audited("destination.checked");
     Get    "/api/v1/workspaces/{ws}/destinations/{id}/domain-status" => ADMIN;
     Get    "/api/v1/workspaces/{ws}/destinations/{id}/stats" => ADMIN;
-    Get    "/api/v1/destination-kinds" => INSTANCE;
+    Get    "/api/v1/destination-kinds" => INSTANCE, "any authenticated principal: a session or an API key of any scope";
     // forwarding
     Get    "/api/v1/workspaces/{ws}/forwarding/rules" => ADMIN;
     Post   "/api/v1/workspaces/{ws}/forwarding/rules" => ADMIN @ audited("forwarding.rule_created");
@@ -397,7 +397,7 @@ pub(crate) const ROUTES: &[Route] = table! {
     Get    "/api/v1/workspaces/{ws}/sending/settings" => READ;
     Put    "/api/v1/workspaces/{ws}/sending/settings" => ADMIN @ audited("send_settings.updated");
     // sources
-    Get    "/api/v1/source-kinds" => INSTANCE;
+    Get    "/api/v1/source-kinds" => INSTANCE, "any authenticated principal: a session or an API key of any scope";
     Get    "/api/v1/workspaces/{ws}/sources" => READ;
     Post   "/api/v1/workspaces/{ws}/sources" => ADMIN @ audited("source.created");
     Get    "/api/v1/workspaces/{ws}/sources/{id}" => READ;
@@ -406,7 +406,7 @@ pub(crate) const ROUTES: &[Route] = table! {
     Post   "/api/v1/workspaces/{ws}/sources/{id}/test" => ADMIN @ audited("source.tested");
     Post   "/api/v1/workspaces/{ws}/sources/{id}/discover" => ADMIN @ audited("source.discovered");
     Post   "/api/v1/workspaces/{ws}/sources/{id}/oauth/start" => ADMIN @ audited("source.oauth_started");
-    Get    "/api/v1/oauth/callback" => ADMIN, "outside /workspaces/{ws}: needs the signed-in session of the user who started the consent, Admin on the consent's workspace, and the state token";
+    Get    "/api/v1/oauth/callback" => INSTANCE, "outside /workspaces/{ws}: the handler checks the session of the user who started the consent, the state token and Admin on the consent's workspace itself, and answers every refusal with a 303 to the source page";
     Post   "/api/v1/workspaces/{ws}/source-manifests/validate" => ADMIN @ not_audited("read-only check");
     Post   "/api/v1/workspaces/{ws}/sources/{id}/manifest/sample" => ADMIN @ not_audited("read-only sample");
     Get    "/api/v1/workspaces/{ws}/sources/{id}/streams" => READ, "values masked unless view_pii";
@@ -858,6 +858,80 @@ mod tests {
             assert_eq!(unlisted_mounts(source), vec![source.trim().to_owned()]);
         }
         assert!(unlisted_mounts("    // .merge(other_routes())").is_empty());
+    }
+
+    const POLICY: &str = include_str!("../../../docs/api.md");
+    const MATRIX_BEGIN: &str = "<!-- scope-matrix:begin -->";
+    const MATRIX_END: &str = "<!-- scope-matrix:end -->";
+
+    /// The session role and the API key scope a class asks for, as the policy prints them.
+    fn who(row: &Route) -> (&'static str, &'static str) {
+        if row.class == Class::Instance && row.note.starts_with("any authenticated principal") {
+            return ("any signed-in user", "any scope");
+        }
+        if row.class == Class::Instance && row.note.starts_with("outside /workspaces") {
+            return ("the user who started the consent", "none");
+        }
+        match row.class {
+            Class::Public => ("none", "none"),
+            Class::Instance => ("none or any signed-in user", "none"),
+            Class::Owner => ("owner", "none"),
+            Class::Ingest => ("none", "ingest"),
+            Class::Need(Need::Read) => ("member", "read"),
+            Class::Need(Need::ReadMembers) => ("member", "read or admin"),
+            Class::Need(Need::Edit) => ("editor", "write"),
+            Class::Need(Need::Publish) => ("publisher", "publish"),
+            Class::Need(Need::Admin) => ("admin", "admin"),
+            Class::Need(Need::Ingest) => ("none", "ingest"),
+            Class::Unchecked => ("unchecked", "unchecked"),
+        }
+    }
+
+    /// The scope matrix of the policy: one row per route of the table, in table order.
+    fn scope_matrix() -> String {
+        let mut text = String::from(
+            "| Method | Path | Session | API key |\n|--------|------|---------|---------|\n",
+        );
+        for row in ROUTES {
+            let (session, key) = who(row);
+            text.push_str(&format!(
+                "| {} | `{}` | {session} | {key} |\n",
+                row.method.name().to_uppercase(),
+                row.path
+            ));
+        }
+        text
+    }
+
+    fn with_matrix(policy: &str, matrix: &str) -> String {
+        let begin =
+            policy.find(MATRIX_BEGIN).expect("the matrix start marker") + MATRIX_BEGIN.len();
+        let end = policy.find(MATRIX_END).expect("the matrix end marker");
+        format!("{}\n\n{matrix}\n{}", &policy[..begin], &policy[end..])
+    }
+
+    #[test]
+    fn the_policy_scope_matrix_matches_the_route_table() {
+        let policy = POLICY.replace("\r\n", "\n");
+        let expected = with_matrix(&policy, &scope_matrix());
+        if std::env::var_os("ZIRV_FLOW_BLESS").is_some() {
+            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/api.md");
+            std::fs::write(path, &expected).unwrap();
+            return;
+        }
+        assert!(
+            policy == expected,
+            "the scope matrix in docs/api.md is stale; regenerate with ZIRV_FLOW_BLESS=1 cargo nextest run -p zirv-flow-api scope_matrix"
+        );
+    }
+
+    #[test]
+    fn a_changed_route_class_makes_the_matrix_differ() {
+        let policy = POLICY.replace("\r\n", "\n");
+        let current = with_matrix(&policy, &scope_matrix());
+        let edited = scope_matrix().replacen("| editor | write |", "| admin | admin |", 1);
+        assert_ne!(with_matrix(&policy, &edited), current);
+        assert!(scope_matrix().contains("| POST | `/api/v1/ingest/track` | none | ingest |"));
     }
 }
 

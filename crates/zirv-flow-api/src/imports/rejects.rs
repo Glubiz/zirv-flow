@@ -50,8 +50,8 @@ pub(crate) struct ImportRejectBody {
 pub(crate) struct ImportRejectsBody {
     /// In row order.
     rejects: Vec<ImportRejectBody>,
-    /// Pass as `after` for the next page; null when there is none.
-    next_after: Option<i64>,
+    /// Pass as `cursor` for the next page; null when there is none.
+    next_cursor: Option<i64>,
 }
 
 impl From<&ImportReject> for ImportRejectBody {
@@ -93,13 +93,13 @@ fn parse_page(query: &str) -> Result<Page, ApiError> {
             "limit" => {
                 page.limit = parse_limit(&value)?;
             }
-            "after" => {
+            "cursor" => {
                 page.after = Some(
                     value
                         .parse::<i64>()
                         .ok()
                         .filter(|row| *row >= 0)
-                        .ok_or_else(|| ApiError::bad_request("after must be a row number"))?,
+                        .ok_or_else(|| ApiError::bad_request("cursor must be a row number"))?,
                 );
             }
             _ => {}
@@ -120,11 +120,11 @@ fn parse_page(query: &str) -> Result<Page, ApiError> {
         ("id" = Uuid, Path, description = "Import id"),
         ("phase" = Option<String>, Query, description = "dry_run or run"),
         ("limit" = Option<u32>, Query, description = "Rejects per page, 1 to 200; default 100"),
-        ("after" = Option<i64>, Query, description = "The next_after of the previous page")
+        ("cursor" = Option<i64>, Query, description = "The next_cursor of the previous page")
     ),
     responses(
         (status = 200, description = "A page of rejects", body = ImportRejectsBody),
-        (status = 400, description = "A malformed phase, limit or after", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "A malformed phase, limit or cursor", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the read scope", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or import, or no access", body = Problem, content_type = "application/problem+json")
@@ -153,13 +153,13 @@ pub(crate) async fn list(
         false,
     )
     .await?;
-    let next_after = match rejects.last() {
+    let next_cursor = match rejects.last() {
         Some(last) if more => Some(last.row_number),
         _ => None,
     };
     Ok(Json(ImportRejectsBody {
         rejects: rejects.iter().map(ImportRejectBody::from).collect(),
-        next_after,
+        next_cursor,
     }))
 }
 
@@ -353,7 +353,7 @@ mod tests {
 
     #[test]
     fn the_page_is_read_from_the_query_string() {
-        let page = parse_page("phase=dry_run&limit=5&after=12").unwrap();
+        let page = parse_page("phase=dry_run&limit=5&cursor=12").unwrap();
 
         assert_eq!(
             (page.phase, page.limit, page.after),
@@ -373,8 +373,8 @@ mod tests {
             "limit=0",
             "limit=201",
             "limit=x",
-            "after=-1",
-            "after=x",
+            "cursor=-1",
+            "cursor=x",
         ] {
             assert_eq!(
                 parse_page(bad).err().unwrap().status(),

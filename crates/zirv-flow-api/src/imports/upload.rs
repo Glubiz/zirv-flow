@@ -226,7 +226,7 @@ impl FileScan {
 }
 
 fn csv_problem(error: CsvError) -> ApiError {
-    ApiError::unprocessable(format!("body: {error} ({})", error.code()))
+    ApiError::unprocessable(format!("body: {error}")).with_code(error.code())
 }
 
 fn header_problem(error: HeaderError) -> ApiError {
@@ -238,6 +238,7 @@ fn header_problem(error: HeaderError) -> ApiError {
 
 fn too_large() -> ApiError {
     ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "the file is too large")
+        .with_code("import_file_too_large")
 }
 
 fn is_csv(headers: &HeaderMap) -> bool {
@@ -280,6 +281,7 @@ async fn receive(
                     StatusCode::CONFLICT,
                     "the import was erased while it was being uploaded",
                 )
+                .with_code("import_erased")
             } else {
                 error.into()
             }
@@ -343,7 +345,8 @@ pub(crate) async fn upload(
         return Err(ApiError::new(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "expected a CSV body (content-type: text/csv)",
-        ));
+        )
+        .with_code("csv_content_type_required"));
     }
     let limits = state.imports;
     let declared = request

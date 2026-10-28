@@ -94,7 +94,7 @@ fn parse_page(query: &str) -> Result<(u32, Option<String>), ApiError> {
 }
 
 fn bad_cursor() -> ApiError {
-    ApiError::bad_request("cursor is not a valid cursor")
+    ApiError::bad_request("cursor is malformed")
 }
 
 fn encode_history_cursor(cursor: HistoryCursor) -> String {

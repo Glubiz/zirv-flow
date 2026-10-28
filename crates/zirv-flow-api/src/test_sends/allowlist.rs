@@ -188,6 +188,7 @@ pub(crate) async fn allowlist_add(
             StatusCode::CONFLICT,
             "the address is on the allowlist already",
         )
+        .with_code("allowlist_entry_exists")
     })?;
     admin::audit(
         &mut tx,

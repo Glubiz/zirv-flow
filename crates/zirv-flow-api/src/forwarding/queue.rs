@@ -60,8 +60,8 @@ impl From<DeadLetter> for DeadLetterBody {
 pub(crate) struct DeadLettersBody {
     /// Newest first.
     letters: Vec<DeadLetterBody>,
-    /// Pass as `before` for the next page; null when there is none.
-    next_before: Option<String>,
+    /// Pass as `cursor` for the next page; null when there is none.
+    next_cursor: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -115,10 +115,10 @@ fn parse_query(query: &str) -> Result<Page, ApiError> {
     for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
         match key.as_ref() {
             "limit" => limit = parse_limit(&value)?,
-            "before" => {
+            "cursor" => {
                 before = Some(
                     decode_cursor(&value)
-                        .ok_or_else(|| ApiError::bad_request("before is not a valid cursor"))?,
+                        .ok_or_else(|| ApiError::bad_request("cursor is malformed"))?,
                 );
             }
             "destination_id" => {
@@ -143,7 +143,7 @@ fn parse_query(query: &str) -> Result<Page, ApiError> {
     params(
         ("ws" = Uuid, Path, description = "Workspace id"),
         ("limit" = Option<u32>, Query, description = "Letters per page, 1 to 200; default 50"),
-        ("before" = Option<String>, Query, description = "The next_before of the previous page"),
+        ("cursor" = Option<String>, Query, description = "The next_cursor of the previous page"),
         ("destination_id" = Option<Uuid>, Query, description = "Only this destination's letters")
     ),
     responses(
@@ -178,13 +178,13 @@ pub(crate) async fn dead_letters(
     .await?;
     let more = letters.len() > limit as usize;
     letters.truncate(limit as usize);
-    let next_before = letters
+    let next_cursor = letters
         .last()
         .filter(|_| more)
         .map(|last| encode_cursor((last.died_at, last.id)));
     Ok(Json(DeadLettersBody {
         letters: letters.into_iter().map(DeadLetterBody::from).collect(),
-        next_before,
+        next_cursor,
     }))
 }
 
@@ -284,7 +284,7 @@ mod tests {
             parse_query(&format!("limit=2&destination_id={id}")).unwrap(),
             (2, None, Some(id))
         );
-        for bad in ["limit=0", "limit=201", "before=%21", "destination_id=x"] {
+        for bad in ["limit=0", "limit=201", "cursor=%21", "destination_id=x"] {
             assert_eq!(
                 parse_query(bad).unwrap_err().status(),
                 axum::http::StatusCode::BAD_REQUEST,

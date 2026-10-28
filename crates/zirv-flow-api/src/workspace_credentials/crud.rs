@@ -215,6 +215,7 @@ fn conflict(error: StoreError) -> ApiError {
             StatusCode::CONFLICT,
             "a credential with that name or key already exists",
         )
+        .with_code("name_taken")
     } else {
         error.into()
     }

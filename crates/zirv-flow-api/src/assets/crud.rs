@@ -37,11 +37,11 @@ fn in_use(owners: &[AssetOwner]) -> ApiError {
     params(
         ("ws" = Uuid, Path, description = "Workspace id"),
         ("limit" = Option<u32>, Query, description = "Assets per page, 1 to 200; default 50"),
-        ("before" = Option<Uuid>, Query, description = "The next_before of the previous page")
+        ("cursor" = Option<Uuid>, Query, description = "The next_cursor of the previous page")
     ),
     responses(
         (status = 200, description = "A page of assets and the quota", body = AssetsBody),
-        (status = 400, description = "limit is out of range or before is malformed", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "limit is out of range or cursor is malformed", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the read scope", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json")
@@ -58,7 +58,7 @@ pub(crate) async fn list(
     let (limit, before) = parse_page(&query.unwrap_or_default())?;
     let (listed, more) = list_assets(&state.pool, workspace.id, before, limit).await?;
     let used = workspace_asset_bytes(&state.pool, workspace.id).await?;
-    let next_before = match listed.last() {
+    let next_cursor = match listed.last() {
         Some(last) if more => Some(last.asset.id),
         _ => None,
     };
@@ -68,7 +68,7 @@ pub(crate) async fn list(
             .iter()
             .map(|item| AssetBody::new(&item.asset, item.references, public_url))
             .collect(),
-        next_before,
+        next_cursor,
         used,
         state.assets,
     )))
