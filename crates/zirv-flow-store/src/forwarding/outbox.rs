@@ -175,6 +175,8 @@ pub struct ClaimedRow {
     pub id: Uuid,
     pub workspace_id: Uuid,
     pub event_id: Uuid,
+    /// The originating event's trace; absent on rows written before migration 0084.
+    pub trace_id: Option<Uuid>,
     pub rule_id: Uuid,
     pub idempotency_key: String,
     pub payload: Value,
@@ -212,7 +214,7 @@ pub async fn claim_due(
                  AND next_attempt_at <= clock_timestamp() \
                ORDER BY next_attempt_at, id LIMIT $3 FOR UPDATE SKIP LOCKED) c \
          WHERE o.id = c.id \
-         RETURNING c.due, o.id, o.workspace_id, o.event_id, o.rule_id, o.idempotency_key, o.payload, o.attempts, \
+         RETURNING c.due, o.id, o.workspace_id, o.event_id, o.trace_id, o.rule_id, o.idempotency_key, o.payload, o.attempts, \
                    o.attempt_offset, o.claim_token",
     )
     .bind(workspace.as_uuid())
