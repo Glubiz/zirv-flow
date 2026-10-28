@@ -533,6 +533,11 @@ fn sections(text: &str) -> Vec<Section> {
     found
 }
 
+/// The backticked spans of `page`.
+fn code_spans(page: &str) -> impl Iterator<Item = &str> {
+    page.split('`').skip(1).step_by(2)
+}
+
 /// The backticked dotted names in `page` that start with a configuration section but are neither
 /// a configuration key nor a job kind.
 fn unknown_config_keys(page: &str, keys: &[&str], job_kinds: &BTreeSet<&str>) -> Vec<String> {
@@ -541,9 +546,8 @@ fn unknown_config_keys(page: &str, keys: &[&str], job_kinds: &BTreeSet<&str>) ->
         .filter_map(|key| key.split('.').next())
         .collect();
     let mut unknown = BTreeSet::new();
-    for (index, span) in page.split('`').enumerate() {
-        let dotted = index % 2 == 1
-            && span.contains('.')
+    for span in code_spans(page) {
+        let dotted = span.contains('.')
             && span.split('.').all(|part| {
                 !part.is_empty() && part.chars().all(|c| c.is_ascii_lowercase() || c == '_')
             });
@@ -602,10 +606,7 @@ fn route_rows(source: &str) -> BTreeSet<(String, String)> {
 /// starts with `/api/` or `/u/`.
 fn routes_named(page: &str) -> Vec<(Option<String>, String)> {
     let mut found = Vec::new();
-    for (index, span) in page.split('`').enumerate() {
-        if index % 2 == 0 {
-            continue;
-        }
+    for span in code_spans(page) {
         let (method, path) = match span.split_once(' ') {
             Some((method, path)) if ["GET", "POST", "PUT", "PATCH", "DELETE"].contains(&method) => {
                 (Some(method.to_owned()), path)
@@ -672,12 +673,12 @@ fn test_rows(page: &str) -> Vec<TestRow> {
             let [_, id, _, test, file, _] = cells.as_slice() else {
                 return None;
             };
-            let unquote = |cell: &str| cell.strip_prefix('`')?.strip_suffix('`').map(str::to_owned);
+            let code = |cell: &str| cell.strip_prefix('`')?.strip_suffix('`').map(str::to_owned);
             Some(TestRow {
                 id: (claim_ids(id) == BTreeSet::from([(*id).to_owned()]))
                     .then(|| (*id).to_owned())?,
-                test: unquote(test)?,
-                file: unquote(file)?,
+                test: code(test)?,
+                file: code(file)?,
             })
         })
         .collect()
