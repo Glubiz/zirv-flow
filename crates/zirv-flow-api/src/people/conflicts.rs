@@ -62,8 +62,8 @@ impl From<&IdentityConflict> for ConflictBody {
 pub(crate) struct ConflictsBody {
     /// Newest first.
     conflicts: Vec<ConflictBody>,
-    /// Pass as `before` for the next page; null when there is none.
-    next_before: Option<String>,
+    /// Pass as `cursor` for the next page; null when there is none.
+    next_cursor: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -118,10 +118,11 @@ fn parse_page(query: &str) -> Result<PageQuery, ApiError> {
             "limit" => {
                 limit = parse_limit(&value)?;
             }
-            "before" => {
+            "before" | "after" => return Err(ApiError::paging_parameter_renamed()),
+            "cursor" => {
                 before = Some(
                     decode_cursor(&value)
-                        .ok_or_else(|| ApiError::bad_request("before is not a valid cursor"))?,
+                        .ok_or_else(|| ApiError::bad_request("cursor is malformed"))?,
                 );
             }
             _ => {}
@@ -221,11 +222,11 @@ pub(crate) async fn resolve_identity_conflict(
         ("ws" = Uuid, Path, description = "Workspace id"),
         ("status" = Option<String>, Query, description = "`open` (default) or `resolved`"),
         ("limit" = Option<u32>, Query, description = "Conflicts per page, 1 to 200; default 50"),
-        ("before" = Option<String>, Query, description = "The next_before of the previous page")
+        ("cursor" = Option<String>, Query, description = "The next_cursor of the previous page")
     ),
     responses(
         (status = 200, description = "A page of conflicts", body = ConflictsBody),
-        (status = 400, description = "status or limit is out of range, or before is malformed", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "status or limit is out of range, or cursor is malformed; the removed before and after answer paging_parameter_renamed", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key with neither the read nor the admin scope", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json")
@@ -242,13 +243,13 @@ pub(crate) async fn list(
     let (resolved, limit, before) = parse_page(query.as_deref().unwrap_or_default())?;
     let (conflicts, more) =
         zirv_flow_store::list_conflicts(&state.pool, workspace.id, resolved, limit, before).await?;
-    let next_before = match conflicts.last() {
+    let next_cursor = match conflicts.last() {
         Some(last) if more => Some(encode_cursor((last.created_at, last.id))),
         _ => None,
     };
     Ok(Json(ConflictsBody {
         conflicts: conflicts.iter().map(ConflictBody::from).collect(),
-        next_before,
+        next_cursor,
     }))
 }
 
@@ -365,7 +366,7 @@ mod tests {
             "limit=0",
             "limit=201",
             "limit=x",
-            "before=%21",
+            "cursor=%21",
         ] {
             assert_eq!(
                 parse_page(bad).unwrap_err().status(),
@@ -380,7 +381,7 @@ mod tests {
         let at = OffsetDateTime::from_unix_timestamp_nanos(1_700_000_000_000_001_000).unwrap();
         let id = Uuid::now_v7();
 
-        let (_, _, before) = parse_page(&format!("before={}", encode_cursor((at, id)))).unwrap();
+        let (_, _, before) = parse_page(&format!("cursor={}", encode_cursor((at, id)))).unwrap();
 
         assert_eq!(before, Some((at, id)));
     }

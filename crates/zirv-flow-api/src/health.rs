@@ -25,7 +25,8 @@ pub(crate) struct StatusBody {
     operation_id = "get_healthz",
     path = "/healthz",
     tag = "health",
-    responses((status = 200, description = "The process is alive", body = StatusBody))
+    responses((status = 200, description = "The process is alive", body = StatusBody)),
+    security(())
 )]
 pub(crate) async fn healthz() -> Json<StatusBody> {
     Json(StatusBody { status: "ok" })
@@ -45,7 +46,8 @@ pub(crate) async fn healthz() -> Json<StatusBody> {
             body = Problem,
             content_type = "application/problem+json"
         )
-    )
+    ),
+    security(())
 )]
 pub(crate) async fn readyz(State(state): State<AppState>) -> Result<Json<StatusBody>, ApiError> {
     check_database(state.pool.clone(), &state.schema_check).await?;

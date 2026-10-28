@@ -26,7 +26,7 @@ export function assetBody(n: number, overrides: Record<string, unknown> = {}) {
 export function listBody(assets: unknown[], overrides: Record<string, unknown> = {}) {
   return {
     assets,
-    next_before: null,
+    next_cursor: null,
     used_bytes: 212 * 1024 * 1024,
     limit_bytes: 1024 * 1024 * 1024,
     max_file_bytes: 5 * 1024 * 1024,

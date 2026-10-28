@@ -76,8 +76,8 @@ impl From<PrivacyExport> for ExportBody {
 pub(crate) struct ExportsBody {
     /// Newest first.
     exports: Vec<ExportBody>,
-    /// Pass as `before` for the next page; null when there is none.
-    next_before: Option<String>,
+    /// Pass as `cursor` for the next page; null when there is none.
+    next_cursor: Option<String>,
 }
 
 /// Records an export request for the person the target names and enqueues the job, in one
@@ -203,11 +203,11 @@ pub(crate) async fn create(
     params(
         ("ws" = Uuid, Path, description = "Workspace id"),
         ("limit" = Option<u32>, Query, description = "Exports per page, 1 to 200; default 50"),
-        ("before" = Option<String>, Query, description = "The next_before of the previous page")
+        ("cursor" = Option<String>, Query, description = "The next_cursor of the previous page")
     ),
     responses(
         (status = 200, description = "A page of exports", body = ExportsBody),
-        (status = 400, description = "limit is out of range or before is malformed", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "limit is out of range or cursor is malformed; the removed before and after answer paging_parameter_renamed", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, or a key without the admin scope", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json")
@@ -224,13 +224,13 @@ pub(crate) async fn list(
     let (limit, before) = parse_page(&query.unwrap_or_default())?;
     let (exports, more) =
         zirv_flow_store::list_privacy_exports(&state.pool, workspace.id, limit, before).await?;
-    let next_before = match exports.last() {
+    let next_cursor = match exports.last() {
         Some(last) if more => Some(encode_cursor((last.requested_at, last.id))),
         _ => None,
     };
     Ok(Json(ExportsBody {
         exports: exports.into_iter().map(ExportBody::from).collect(),
-        next_before,
+        next_cursor,
     }))
 }
 
@@ -280,10 +280,10 @@ pub(crate) async fn download_handler(
             Ok(response)
         }
         Download::Expired => Err(ApiError::new(StatusCode::GONE, "the export has expired")),
-        Download::NotReady => Err(ApiError::new(
-            StatusCode::CONFLICT,
-            "the export is not ready",
-        )),
+        Download::NotReady => Err(
+            ApiError::new(StatusCode::CONFLICT, "the export is not ready")
+                .with_code("export_not_ready"),
+        ),
     }
 }
 

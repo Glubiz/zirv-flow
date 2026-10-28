@@ -335,7 +335,7 @@ describe("the recent tests", () => {
               row({ id: "f", outcome: "render_failed", reason: "person_unavailable" }),
               row({ id: "g", outcome: "sender_unverified", reason: "sender_unverified" }),
             ],
-            next_before: null,
+            next_cursor: null,
           }),
       }),
     );
@@ -362,7 +362,7 @@ describe("the recent tests", () => {
               row({ id: "a", recipient_display: "q***@example.com", sent_by_email: null, template_version: 4, render_context: "person" }),
               row({ id: "b", recipient_display: "removed address" }),
             ],
-            next_before: null,
+            next_cursor: null,
           }),
       }),
     );
@@ -378,14 +378,14 @@ describe("the recent tests", () => {
     expect(within(table).getByText("as the sample person")).toBeInTheDocument();
   });
 
-  it("pages older tests with the before cursor", async () => {
+  it("pages older tests with the cursor", async () => {
     const calls = mockApi(
       routes({
         [LOG]: (request) => {
-          const before = new URL(request.url).searchParams.get("before");
+          const before = new URL(request.url).searchParams.get("cursor");
           return before === null
-            ? json({ test_sends: [row({ id: "new", recipient_display: "newest@example.test" })], next_before: "CURSOR" })
-            : json({ test_sends: [row({ id: "old", recipient_display: "oldest@example.test" })], next_before: null });
+            ? json({ test_sends: [row({ id: "new", recipient_display: "newest@example.test" })], next_cursor: "CURSOR" })
+            : json({ test_sends: [row({ id: "old", recipient_display: "oldest@example.test" })], next_cursor: null });
         },
       }),
     );
@@ -396,7 +396,7 @@ describe("the recent tests", () => {
 
     expect(await screen.findByText("oldest@example.test")).toBeInTheDocument();
     expect(screen.getByText("newest@example.test")).toBeInTheDocument();
-    expect(calls.some((call) => call.search.includes("before=CURSOR"))).toBe(true);
+    expect(calls.some((call) => call.search.includes("cursor=CURSOR"))).toBe(true);
     expect(screen.queryByRole("button", { name: "Show older tests" })).not.toBeInTheDocument();
   });
 
@@ -413,7 +413,7 @@ describe("the recent tests", () => {
       routes({
         [LOG]: () => {
           attempts += 1;
-          return attempts === 1 ? problem(500, "Internal Server Error", "internal error") : json({ test_sends: [], next_before: null });
+          return attempts === 1 ? problem(500, "Internal Server Error", "internal error") : json({ test_sends: [], next_cursor: null });
         },
       }),
     );

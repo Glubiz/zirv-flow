@@ -33,7 +33,7 @@ describe("the import history", () => {
     mockApi({
       "GET /api/v1/session": () => json(session(OWNER)),
       "GET /api/v1/workspaces/ws1/members": () => json(members("admin", OWNER.id)),
-      "GET /api/v1/workspaces/ws1/imports": () => json({ imports: [RUNNING, DONE], next_before: null }),
+      "GET /api/v1/workspaces/ws1/imports": () => json({ imports: [RUNNING, DONE], next_cursor: null }),
     });
     mount();
 
@@ -68,7 +68,7 @@ describe("the import history", () => {
     mockApi({
       "GET /api/v1/session": () => json(session(OWNER)),
       "GET /api/v1/workspaces/ws1/members": () => json(members("admin", OWNER.id)),
-      "GET /api/v1/workspaces/ws1/imports": () => json({ imports: [], next_before: null }),
+      "GET /api/v1/workspaces/ws1/imports": () => json({ imports: [], next_cursor: null }),
     });
     mount();
 
@@ -85,7 +85,7 @@ describe("the import history", () => {
         attempts += 1;
         return attempts === 1
           ? problem(500, "Internal Server Error", "internal error")
-          : json({ imports: [DONE], next_before: null });
+          : json({ imports: [DONE], next_cursor: null });
       },
     });
     const user = userEvent.setup();
@@ -101,7 +101,7 @@ describe("the import history", () => {
     mockApi({
       "GET /api/v1/session": () => json(session(MEMBER)),
       "GET /api/v1/workspaces/ws1/members": () => json(members("admin", "someone-else")),
-      "GET /api/v1/workspaces/ws1/imports": () => json({ imports: [DONE], next_before: null }),
+      "GET /api/v1/workspaces/ws1/imports": () => json({ imports: [DONE], next_cursor: null }),
     });
     mount();
 
@@ -114,7 +114,7 @@ describe("the import history", () => {
     mockApi({
       "GET /api/v1/session": () => json(session(MEMBER)),
       "GET /api/v1/workspaces/ws1/members": () => json(members("editor", MEMBER.id)),
-      "GET /api/v1/workspaces/ws1/imports": () => json({ imports: [DONE], next_before: null }),
+      "GET /api/v1/workspaces/ws1/imports": () => json({ imports: [DONE], next_cursor: null }),
     });
     mount();
 
@@ -126,9 +126,9 @@ describe("the import history", () => {
       "GET /api/v1/session": () => json(session(OWNER)),
       "GET /api/v1/workspaces/ws1/members": () => json(members("admin", OWNER.id)),
       "GET /api/v1/workspaces/ws1/imports": (request) =>
-        new URL(request.url).searchParams.get("before") === "cursor-1"
-          ? json({ imports: [DONE], next_before: null })
-          : json({ imports: [RUNNING], next_before: "cursor-1" }),
+        new URL(request.url).searchParams.get("cursor") === "cursor-1"
+          ? json({ imports: [DONE], next_cursor: null })
+          : json({ imports: [RUNNING], next_cursor: "cursor-1" }),
     });
     const user = userEvent.setup();
     mount();
@@ -138,6 +138,6 @@ describe("the import history", () => {
     expect(await screen.findByText("Customers April")).toBeInTheDocument();
     expect(screen.getByText("Leads")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Show older imports" })).not.toBeInTheDocument();
-    expect(calls.filter((call) => call.path.endsWith("/imports")).map((call) => call.search)).toEqual(["", "?before=cursor-1"]);
+    expect(calls.filter((call) => call.path.endsWith("/imports")).map((call) => call.search)).toEqual(["", "?cursor=cursor-1"]);
   });
 });

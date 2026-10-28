@@ -69,7 +69,7 @@ function routes(extra: Record<string, Handler> = {}, enabled = true): Record<str
     [`GET ${WS}/ai/settings`]: () => json(aiSettings(enabled)),
     [`GET ${FLOW}/versions`]: () => json([versionBody(1), versionBody(2)]),
     [`GET ${FLOW}/versions/2/counts`]: () => json({ version: 2, nodes: [] }),
-    [`GET ${FLOW}/enrollments`]: () => json({ enrollments: [PATH.enrollment], next_before: null }),
+    [`GET ${FLOW}/enrollments`]: () => json({ enrollments: [PATH.enrollment], next_cursor: null }),
     [`GET ${FLOW}/enrollments/${E1}`]: () => json(PATH),
     [EXPLAIN]: () => json(EXPLAINED),
     ...extra,
@@ -152,7 +152,7 @@ describe("explaining a trace after switching enrollments", () => {
     mockApi(
       routes({
         [`GET ${FLOW}/enrollments`]: () =>
-          json({ enrollments: [PATH.enrollment, { ...PATH.enrollment, id: E2, state: "waiting", trace_id: "f".repeat(32) }], next_before: null }),
+          json({ enrollments: [PATH.enrollment, { ...PATH.enrollment, id: E2, state: "waiting", trace_id: "f".repeat(32) }], next_cursor: null }),
         [`GET ${FLOW}/enrollments/${E2}`]: () => json({ ...PATH, enrollment: { ...PATH.enrollment, id: E2, state: "waiting", trace_id: "f".repeat(32) } }),
         [EXPLAIN]: async () => {
           await opened;

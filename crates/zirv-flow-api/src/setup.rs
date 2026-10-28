@@ -104,10 +104,10 @@ pub(crate) async fn complete(
     ApiJson(body): ApiJson<SetupRequest>,
 ) -> Result<Response, ApiError> {
     if zirv_flow_store::count_owners(&state.pool).await? > 0 {
-        return Err(ApiError::new(
-            StatusCode::CONFLICT,
-            "an owner already exists",
-        ));
+        return Err(
+            ApiError::new(StatusCode::CONFLICT, "an owner already exists")
+                .with_code("owner_exists"),
+        );
     }
     if !state.setup_token_matches(&body.token) {
         return Err(ApiError::forbidden(REFUSED));

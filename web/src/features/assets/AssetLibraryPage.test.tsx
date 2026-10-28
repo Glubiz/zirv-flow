@@ -79,9 +79,9 @@ describe("the image library", () => {
   });
 
   it("pages with before when there is more", async () => {
-    const calls = asRole("admin", listBody([A], { next_before: A.id }), {
+    const calls = asRole("admin", listBody([A], { next_cursor: A.id }), {
       [`GET ${WS}/assets`]: (request) =>
-        json(new URL(request.url).searchParams.has("before") ? listBody([B]) : listBody([A], { next_before: A.id })),
+        json(new URL(request.url).searchParams.has("cursor") ? listBody([B]) : listBody([A], { next_cursor: A.id })),
     });
     const user = userEvent.setup();
     mount();
@@ -89,7 +89,7 @@ describe("the image library", () => {
     await user.click(await screen.findByRole("button", { name: "Show more" }));
 
     expect(await screen.findByRole("button", { name: /banner\.jpg/ })).toBeInTheDocument();
-    expect(calls.some((call) => call.search.includes(`before=${A.id}`))).toBe(true);
+    expect(calls.some((call) => call.search.includes(`cursor=${A.id}`))).toBe(true);
     expect(screen.queryByRole("button", { name: "Show more" })).not.toBeInTheDocument();
   });
 

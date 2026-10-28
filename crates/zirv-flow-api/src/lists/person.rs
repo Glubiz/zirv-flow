@@ -73,8 +73,8 @@ impl From<MembershipChange> for MembershipChangeBody {
 pub(crate) struct MembershipHistoryBody {
     /// Newest first.
     changes: Vec<MembershipChangeBody>,
-    /// Pass as `before` for the next page; null when there is none.
-    next_before: Option<String>,
+    /// Pass as `cursor` for the next page; null when there is none.
+    next_cursor: Option<String>,
 }
 
 /// The lists a person is in, ordered by name. A person merged into another is read as the
@@ -121,11 +121,11 @@ pub(crate) async fn lists(
         ("ws" = Uuid, Path, description = "Workspace id"),
         ("id" = Uuid, Path, description = "Person id"),
         ("limit" = Option<u32>, Query, description = "Changes per page, 1 to 200; default 50"),
-        ("before" = Option<String>, Query, description = "The next_before of the previous page")
+        ("cursor" = Option<String>, Query, description = "The next_cursor of the previous page")
     ),
     responses(
         (status = 200, description = "A page of changes", body = MembershipHistoryBody),
-        (status = 400, description = "limit is out of range, or before is malformed", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "limit is out of range, or cursor is malformed; the removed before and after answer paging_parameter_renamed", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the read scope", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or person, or no access", body = Problem, content_type = "application/problem+json")
@@ -147,7 +147,7 @@ pub(crate) async fn history(
     let (changes, more) =
         zirv_flow_store::membership_history(&state.pool, workspace.id, person, limit, before)
             .await?;
-    let next_before = match changes.last() {
+    let next_cursor = match changes.last() {
         Some(last) if more => Some(encode_cursor((last.occurred_at, last.id))),
         _ => None,
     };
@@ -156,7 +156,7 @@ pub(crate) async fn history(
             .into_iter()
             .map(MembershipChangeBody::from)
             .collect(),
-        next_before,
+        next_cursor,
     }))
 }
 

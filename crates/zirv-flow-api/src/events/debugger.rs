@@ -870,6 +870,7 @@ pub(crate) async fn stream(
             "this workspace already has the most debugger streams open on this server",
         )
         .with_retry_after(RETRY_AFTER)
+        .with_code("debugger_streams_busy")
     })?;
     // Watch first, so every event decided from now on is fed; then start at the head.
     touch_debugger_watch(&state.pool, workspace.id).await?;

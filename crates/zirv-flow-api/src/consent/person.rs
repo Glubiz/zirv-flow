@@ -160,8 +160,8 @@ impl HistoryEntryBody {
 pub(crate) struct HistoryBody {
     /// Newest first.
     entries: Vec<HistoryEntryBody>,
-    /// Pass as `before` for the next page; null when there is none.
-    next_before: Option<String>,
+    /// Pass as `cursor` for the next page; null when there is none.
+    next_cursor: Option<String>,
 }
 
 /// A request dimension values, with every key and value checked for form. Whether they name
@@ -476,12 +476,12 @@ pub(crate) async fn set(
         ("ws" = Uuid, Path, description = "Workspace id"),
         ("id" = Uuid, Path, description = "Person id"),
         ("limit" = Option<u32>, Query, description = "Entries per page, 1 to 200; default 50"),
-        ("before" = Option<String>, Query, description = "The next_before of the previous page"),
+        ("cursor" = Option<String>, Query, description = "The next_cursor of the previous page"),
         ("dimension.{key}" = Option<String>, Query, description = "Only changes scoped to at least this value of the dimension `key`; repeat for several dimensions")
     ),
     responses(
         (status = 200, description = "A page of changes", body = HistoryBody),
-        (status = 400, description = "limit is out of range, or before is malformed", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "limit is out of range, or cursor is malformed; the removed before and after answer paging_parameter_renamed", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the read scope", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or person, or no access", body = Problem, content_type = "application/problem+json"),
@@ -509,7 +509,7 @@ pub(crate) async fn history(
     .await?
     .ok_or_else(ApiError::not_found)?;
     let reveal = may_view_pii(&state, &principal, workspace.id).await;
-    let next_before = match entries.last() {
+    let next_cursor = match entries.last() {
         Some(last) if more => Some(encode_cursor((last.occurred_at, last.id))),
         _ => None,
     };
@@ -518,7 +518,7 @@ pub(crate) async fn history(
             .into_iter()
             .map(|entry| HistoryEntryBody::new(entry, reveal))
             .collect(),
-        next_before,
+        next_cursor,
     }))
 }
 
@@ -599,7 +599,7 @@ mod tests {
 
     #[test]
     fn a_message_is_named_by_channel_topic_and_dimension_parameters() {
-        let none = message_query("limit=5&before=x").unwrap();
+        let none = message_query("limit=5&cursor=x").unwrap();
         let some =
             message_query("topic_key=news&dimension.vertical=retail&dimension.brand=acme").unwrap();
 
@@ -627,7 +627,7 @@ mod tests {
     fn the_history_page_defaults_to_fifty_and_refuses_bad_values() {
         assert_eq!(parse_page("").unwrap(), (50, None));
         assert_eq!(parse_page("limit=200").unwrap().0, 200);
-        for bad in ["limit=0", "limit=201", "limit=x", "before=%21"] {
+        for bad in ["limit=0", "limit=201", "limit=x", "cursor=%21"] {
             assert_eq!(
                 parse_page(bad).unwrap_err().status(),
                 StatusCode::BAD_REQUEST,
@@ -641,7 +641,7 @@ mod tests {
         let at = OffsetDateTime::from_unix_timestamp_nanos(1_700_000_000_000_001_000).unwrap();
         let id = Uuid::now_v7();
 
-        let (_, before) = parse_page(&format!("before={}", encode_cursor((at, id)))).unwrap();
+        let (_, before) = parse_page(&format!("cursor={}", encode_cursor((at, id)))).unwrap();
 
         assert_eq!(before, Some((at, id)));
     }

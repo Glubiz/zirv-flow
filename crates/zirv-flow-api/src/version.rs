@@ -14,7 +14,8 @@ pub(crate) struct VersionBody {
     operation_id = "get_version",
     path = "/api/v1/version",
     tag = "meta",
-    responses((status = 200, description = "The running version", body = VersionBody))
+    responses((status = 200, description = "The running version", body = VersionBody)),
+    security(())
 )]
 pub(crate) async fn version() -> Json<VersionBody> {
     Json(VersionBody {

@@ -128,7 +128,7 @@ pub(crate) fn parse_query(
             "cursor" => {
                 parsed.cursor = Some(
                     decode_cursor(&value)
-                        .ok_or_else(|| ApiError::bad_request("cursor is not a valid cursor"))?,
+                        .ok_or_else(|| ApiError::bad_request("cursor is malformed"))?,
                 );
             }
             "format" => parsed.format = Some(value.into_owned()),

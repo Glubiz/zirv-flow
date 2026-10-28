@@ -287,13 +287,13 @@ function DeadLettersPanel({ workspaceId, known, onRedriven }: { workspaceId: str
         client.GET("/api/v1/workspaces/{ws}/forwarding/dead-letters", {
           params: {
             path: { ws: workspaceId },
-            query: { limit: PAGE, before: cursor, ...(destinationId !== "" ? { destination_id: destinationId } : {}) },
+            query: { limit: PAGE, cursor, ...(destinationId !== "" ? { destination_id: destinationId } : {}) },
           },
         }),
       );
       setExtra((current) => [...current, ...page.letters]);
       setPagedOn(true);
-      setBefore(page.next_before ?? null);
+      setBefore(page.next_cursor ?? null);
     } catch (error) {
       setMore(describeError(error));
     } finally {
@@ -309,7 +309,7 @@ function DeadLettersPanel({ workspaceId, known, onRedriven }: { workspaceId: str
     setResult(null);
   }
 
-  const cursor = pagedOn ? before : first.status === "ready" ? (first.data.next_before ?? null) : null;
+  const cursor = pagedOn ? before : first.status === "ready" ? (first.data.next_cursor ?? null) : null;
 
   return (
     <Panel title="Dead letters" flush>

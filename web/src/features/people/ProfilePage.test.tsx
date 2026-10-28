@@ -89,7 +89,7 @@ const NOW_PAGE = {
     eventEntry("e1", "2026-10-02T09:00:00Z"),
     decisionEntry("d2", "2026-10-01T09:00:00Z", { action: "trait.change", outcome: "changed", reason: "definition_changed" }),
   ],
-  next_before: null,
+  next_cursor: null,
 };
 
 function members(role: "admin" | "editor", userId: string) {
@@ -361,7 +361,7 @@ describe("a person's timeline", () => {
       [TIMELINE_ROUTE]: () =>
         json({
           entries: [eventEntry("e1", "2026-10-02T09:00:00Z", { properties: { total: 42, coupon: null }, masked: ["coupon"], flags: ["late"] })],
-          next_before: null,
+          next_cursor: null,
         }),
     });
     const user = userEvent.setup();
@@ -380,7 +380,7 @@ describe("a person's timeline", () => {
   it("marks an event that is not valid", async () => {
     asOwner({
       [TIMELINE_ROUTE]: () =>
-        json({ entries: [eventEntry("e1", "2026-10-02T09:00:00Z", { validation_state: "flagged", properties: {} })], next_before: null }),
+        json({ entries: [eventEntry("e1", "2026-10-02T09:00:00Z", { validation_state: "flagged", properties: {} })], next_cursor: null }),
     });
     mount();
 
@@ -391,9 +391,9 @@ describe("a person's timeline", () => {
   it("loads older entries when asked", async () => {
     const calls = asOwner({
       [TIMELINE_ROUTE]: (request) =>
-        new URL(request.url).searchParams.get("before") === "cursor-1"
-          ? json({ entries: [decisionEntry("d9", "2026-09-01T09:00:00Z", { action: "consent.change", outcome: "changed" })], next_before: null })
-          : json({ entries: [eventEntry("e1", "2026-10-02T09:00:00Z")], next_before: "cursor-1" }),
+        new URL(request.url).searchParams.get("cursor") === "cursor-1"
+          ? json({ entries: [decisionEntry("d9", "2026-09-01T09:00:00Z", { action: "consent.change", outcome: "changed" })], next_cursor: null })
+          : json({ entries: [eventEntry("e1", "2026-10-02T09:00:00Z")], next_cursor: "cursor-1" }),
     });
     const user = userEvent.setup();
     mount();
@@ -404,7 +404,7 @@ describe("a person's timeline", () => {
     expect(screen.getByText("order_completed")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Load older" })).not.toBeInTheDocument();
     const queries = calls.filter((call) => call.path.endsWith("/timeline")).map((call) => call.search);
-    expect(queries).toEqual(["?limit=25&kinds=event%2Cdecision", "?limit=25&kinds=event%2Cdecision&before=cursor-1"]);
+    expect(queries).toEqual(["?limit=25&kinds=event%2Cdecision", "?limit=25&kinds=event%2Cdecision&cursor=cursor-1"]);
   });
 
   it("asks for one kind only when the other is switched off, and never both off", async () => {
@@ -423,7 +423,7 @@ describe("a person's timeline", () => {
   });
 
   it("says nothing has happened for a person with an empty timeline", async () => {
-    asOwner({ [TIMELINE_ROUTE]: () => json({ entries: [], next_before: null }) });
+    asOwner({ [TIMELINE_ROUTE]: () => json({ entries: [], next_cursor: null }) });
     mount();
 
     expect(await screen.findByText("Nothing has happened yet")).toBeInTheDocument();
@@ -449,7 +449,7 @@ describe("a person's timeline", () => {
 
   it("has a Profile and a Messages tab, and the Messages tab loads the message log", async () => {
     asOwner({
-      [`GET /api/v1/workspaces/ws1/people/${PERSON}/messages`]: () => json({ messages: [], next_before: null }),
+      [`GET /api/v1/workspaces/ws1/people/${PERSON}/messages`]: () => json({ messages: [], next_cursor: null }),
       "GET /api/v1/workspaces/ws1/templates": () => json([]),
     });
     const user = userEvent.setup();

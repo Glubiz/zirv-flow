@@ -7,7 +7,7 @@ const PAGE_SIZE = 50;
 
 interface Page {
   contacts: Contact[];
-  next_after: string | null;
+  next_cursor: string | null;
 }
 
 /** What was searched for, and when: running the same search again reads it again. */
@@ -48,14 +48,14 @@ export function useContacts(workspaceId: string, query: ContactQuery): ContactLi
             body: { q: query.text, limit: PAGE_SIZE },
           }),
         );
-        return { contacts: found.contacts, next_after: null };
+        return { contacts: found.contacts, next_cursor: null };
       }
       const page = await unwrap(
         client.GET("/api/v1/workspaces/{ws}/contacts", {
           params: { path: { ws: workspaceId }, query: { limit: PAGE_SIZE } },
         }),
       );
-      return { contacts: page.contacts, next_after: page.next_after ?? null };
+      return { contacts: page.contacts, next_cursor: page.next_cursor ?? null };
     },
     [workspaceId, searching ? `search:${query.run}:${query.text}` : "list"],
   );
@@ -65,7 +65,7 @@ export function useContacts(workspaceId: string, query: ContactQuery): ContactLi
 
   const base = first.status === "ready" ? first.data : null;
   const extra = more !== null && more.base === base ? more : null;
-  const nextAfter = base ? (extra ? extra.nextAfter : base.next_after) : null;
+  const nextAfter = base ? (extra ? extra.nextAfter : base.next_cursor) : null;
 
   const loadMore = useCallback(() => {
     if (base === null || nextAfter === null) return;
@@ -73,14 +73,14 @@ export function useContacts(workspaceId: string, query: ContactQuery): ContactLi
     setMoreError(null);
     unwrap(
       client.GET("/api/v1/workspaces/{ws}/contacts", {
-        params: { path: { ws: workspaceId }, query: { limit: PAGE_SIZE, after: nextAfter } },
+        params: { path: { ws: workspaceId }, query: { limit: PAGE_SIZE, cursor: nextAfter } },
       }),
     )
       .then((page) =>
         setMore({
           base,
           contacts: [...(extra?.contacts ?? []), ...page.contacts],
-          nextAfter: page.next_after ?? null,
+          nextAfter: page.next_cursor ?? null,
         }),
       )
       .catch((error: unknown) => setMoreError(error))

@@ -260,10 +260,10 @@ pub(crate) async fn sample_manifest(
     }
     let call = prepare(state, workspace, id).await?;
     if call.driver.spec().kind != "http" {
-        return Err(ApiError::new(
-            StatusCode::CONFLICT,
-            "this source does not use a manifest",
-        ));
+        return Err(
+            ApiError::new(StatusCode::CONFLICT, "this source does not use a manifest")
+                .with_code("source_not_manifest"),
+        );
     }
     // A draft is checked exactly as a save is; the saved settings were checked when saved.
     let config = match draft {

@@ -50,7 +50,7 @@ export function useTimeline(workspaceId: string, personId: string, kinds: Timeli
   const base = first.status === "ready" ? first.data : null;
   const more = extra !== null && extra.base === base ? extra : null;
   const entries = base ? [...base.entries, ...(more?.entries ?? [])] : [];
-  const nextBefore = base ? (more ? more.nextBefore : (base.next_before ?? null)) : null;
+  const nextBefore = base ? (more ? more.nextBefore : (base.next_cursor ?? null)) : null;
 
   const loadOlder = useCallback(() => {
     if (base === null || nextBefore === null) return;
@@ -60,7 +60,7 @@ export function useTimeline(workspaceId: string, personId: string, kinds: Timeli
       client.GET("/api/v1/workspaces/{ws}/people/{id}/timeline", {
         params: {
           path: { ws: workspaceId, id: personId },
-          query: { limit: PAGE_SIZE, kinds: filter, before: nextBefore },
+          query: { limit: PAGE_SIZE, kinds: filter, cursor: nextBefore },
         },
       }),
     ).then(
@@ -68,7 +68,7 @@ export function useTimeline(workspaceId: string, personId: string, kinds: Timeli
         setExtra((current) => ({
           base,
           entries: [...(current?.base === base ? current.entries : []), ...page.entries],
-          nextBefore: page.next_before ?? null,
+          nextBefore: page.next_cursor ?? null,
         }));
         setLoadingMore(false);
       },

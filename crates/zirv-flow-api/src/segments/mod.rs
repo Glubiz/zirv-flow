@@ -78,6 +78,7 @@ pub(crate) fn name_taken(error: zirv_flow_store::StoreError) -> ApiError {
             axum::http::StatusCode::CONFLICT,
             "a segment with that name already exists",
         )
+        .with_code("name_taken")
     } else {
         error.into()
     }

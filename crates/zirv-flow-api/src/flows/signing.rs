@@ -73,8 +73,8 @@ fn no_store<T: IntoResponse>(status: StatusCode, body: T) -> Response {
     (status, [(header::CACHE_CONTROL, "no-store")], body).into_response()
 }
 
-fn conflict(detail: &'static str) -> ApiError {
-    ApiError::new(StatusCode::CONFLICT, detail)
+fn conflict(code: &'static str, detail: &'static str) -> ApiError {
+    ApiError::new(StatusCode::CONFLICT, detail).with_code(code)
 }
 
 /// Seals a new secret and makes it current, or rotates to it. Returns the plaintext once.
@@ -102,7 +102,12 @@ async fn issue(
         // the sealed secret.
         let rotation = zirv_flow_store::rotate_signing_key(&mut tx, workspace, id, now)
             .await?
-            .ok_or_else(|| conflict("there is no signing secret to rotate; create one first"))?;
+            .ok_or_else(|| {
+                conflict(
+                    "signing_secret_missing",
+                    "there is no signing secret to rotate; create one first",
+                )
+            })?;
         admin::audit(
             &mut tx,
             context,
@@ -119,6 +124,7 @@ async fn issue(
     } else {
         if !zirv_flow_store::create_signing_key(&mut tx, workspace, id, now).await? {
             return Err(conflict(
+                "signing_secret_exists",
                 "the workspace already has a signing secret; rotate it instead",
             ));
         }

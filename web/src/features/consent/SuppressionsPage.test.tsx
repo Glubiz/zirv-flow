@@ -35,7 +35,7 @@ describe("suppressions", () => {
   it("lists hash prefixes with reason, source and note, and no address", async () => {
     mockApi(
       adminRoutes({
-        [`GET ${BASE}`]: () => json({ suppressions: [MANUAL, ERASED], next_before: null }),
+        [`GET ${BASE}`]: () => json({ suppressions: [MANUAL, ERASED], next_cursor: null }),
       }),
     );
     renderRoute("/w/ws1/suppressions", ROUTE, <SuppressionsPage />);
@@ -49,7 +49,7 @@ describe("suppressions", () => {
   });
 
   it("shows an empty state, and a retry when loading fails", async () => {
-    mockApi(adminRoutes({ [`GET ${BASE}`]: () => json({ suppressions: [], next_before: null }) }));
+    mockApi(adminRoutes({ [`GET ${BASE}`]: () => json({ suppressions: [], next_cursor: null }) }));
     const first = renderRoute("/w/ws1/suppressions", ROUTE, <SuppressionsPage />);
     expect(await screen.findByText("Nothing is suppressed")).toBeInTheDocument();
     first.unmount();
@@ -65,12 +65,12 @@ describe("suppressions", () => {
         [`GET ${BASE}`]: (request) => {
           const query = new URL(request.url).searchParams;
           if (query.get("reason") === "erased") {
-            return json({ suppressions: [ERASED], next_before: null });
+            return json({ suppressions: [ERASED], next_cursor: null });
           }
-          if (query.get("before") === "cursor-1") {
-            return json({ suppressions: [ERASED], next_before: null });
+          if (query.get("cursor") === "cursor-1") {
+            return json({ suppressions: [ERASED], next_cursor: null });
           }
-          return json({ suppressions: [MANUAL], next_before: "cursor-1" });
+          return json({ suppressions: [MANUAL], next_cursor: "cursor-1" });
         },
       }),
     );
@@ -92,7 +92,7 @@ describe("suppressions", () => {
     const calls = mockApi({
       "GET /api/v1/session": () => json(session(MEMBER)),
       "GET /api/v1/workspaces/ws1/members": () => json(members("editor", MEMBER.id)),
-      [`GET ${BASE}`]: () => json({ suppressions: [MANUAL], next_before: null }),
+      [`GET ${BASE}`]: () => json({ suppressions: [MANUAL], next_cursor: null }),
       [`POST ${BASE}/check`]: () => json({ suppressed: true, reason: "manual" }),
     });
     const user = userEvent.setup();
@@ -116,7 +116,7 @@ describe("suppressions", () => {
     let suppressed = true;
     const calls = mockApi(
       adminRoutes({
-        [`GET ${BASE}`]: () => json({ suppressions: suppressed ? [MANUAL] : [], next_before: null }),
+        [`GET ${BASE}`]: () => json({ suppressions: suppressed ? [MANUAL] : [], next_cursor: null }),
         [`POST ${BASE}/check`]: () => json({ suppressed, reason: suppressed ? "manual" : null }),
         [`POST ${BASE}/remove`]: () => {
           suppressed = false;
@@ -143,7 +143,7 @@ describe("suppressions", () => {
   it("offers no removal for an erased suppression", async () => {
     mockApi(
       adminRoutes({
-        [`GET ${BASE}`]: () => json({ suppressions: [], next_before: null }),
+        [`GET ${BASE}`]: () => json({ suppressions: [], next_cursor: null }),
         [`POST ${BASE}/check`]: () => json({ suppressed: true, reason: "erased" }),
       }),
     );
@@ -161,7 +161,7 @@ describe("suppressions", () => {
   it("says so when an address is not suppressed and drops the answer when the input changes", async () => {
     mockApi(
       adminRoutes({
-        [`GET ${BASE}`]: () => json({ suppressions: [], next_before: null }),
+        [`GET ${BASE}`]: () => json({ suppressions: [], next_cursor: null }),
         [`POST ${BASE}/check`]: () => json({ suppressed: false, reason: null }),
       }),
     );
@@ -180,7 +180,7 @@ describe("suppressions", () => {
     let attempts = 0;
     const calls = mockApi(
       adminRoutes({
-        [`GET ${BASE}`]: () => json({ suppressions: [], next_before: null }),
+        [`GET ${BASE}`]: () => json({ suppressions: [], next_cursor: null }),
         [`POST ${BASE}`]: () => {
           attempts += 1;
           return attempts === 1 ? problem(422, "Unprocessable Entity", "value: invalid_email") : json({ added: true });
@@ -212,7 +212,7 @@ describe("suppressions", () => {
     const csv = "kind,value\nemail,a@example.com\nemail,oops\n";
     const calls = mockApi(
       adminRoutes({
-        [`GET ${BASE}`]: () => json({ suppressions: [], next_before: null }),
+        [`GET ${BASE}`]: () => json({ suppressions: [], next_cursor: null }),
         [`POST ${BASE}/import`]: (request) => {
           const dryRun = new URL(request.url).searchParams.get("dry_run") === "true";
           return json({ dry_run: dryRun, added: 1, existing: 2, invalid: [{ row: 3, reason: "invalid_email" }] });
@@ -247,7 +247,7 @@ describe("suppressions", () => {
   it("asks for a new preview when the text changes after one", async () => {
     mockApi(
       adminRoutes({
-        [`GET ${BASE}`]: () => json({ suppressions: [], next_before: null }),
+        [`GET ${BASE}`]: () => json({ suppressions: [], next_cursor: null }),
         [`POST ${BASE}/import`]: () => json({ dry_run: true, added: 1, existing: 0, invalid: [] }),
       }),
     );
@@ -270,7 +270,7 @@ describe("suppressions", () => {
   it("shows why an import was refused", async () => {
     mockApi(
       adminRoutes({
-        [`GET ${BASE}`]: () => json({ suppressions: [], next_before: null }),
+        [`GET ${BASE}`]: () => json({ suppressions: [], next_cursor: null }),
         [`POST ${BASE}/import`]: () => problem(422, "Unprocessable Entity", "header: must be kind,value or kind,value,note"),
       }),
     );
@@ -288,7 +288,7 @@ describe("suppressions", () => {
   });
 
   it("links the export to the server's CSV", async () => {
-    mockApi(adminRoutes({ [`GET ${BASE}`]: () => json({ suppressions: [], next_before: null }) }));
+    mockApi(adminRoutes({ [`GET ${BASE}`]: () => json({ suppressions: [], next_cursor: null }) }));
     renderRoute("/w/ws1/suppressions", ROUTE, <SuppressionsPage />);
 
     const link = await screen.findByRole("link", { name: "Export CSV" });

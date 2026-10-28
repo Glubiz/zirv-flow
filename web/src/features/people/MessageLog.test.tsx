@@ -82,7 +82,7 @@ function mount(routes: Parameters<typeof mockApi>[0] = {}) {
 
 describe("the message log of a person", () => {
   it("says why a skipped message was not sent, naming the rule, and a failed one its reason", async () => {
-    mount({ [MESSAGES]: () => json({ messages: [SKIPPED, FAILED, SENT], next_before: null }) });
+    mount({ [MESSAGES]: () => json({ messages: [SKIPPED, FAILED, SENT], next_cursor: null }) });
 
     const table = await screen.findByRole("table", { name: /Messages to this person/ });
     const skipped = within(table).getByRole("row", { name: /Product news, October.*Skipped/ });
@@ -94,7 +94,7 @@ describe("the message log of a person", () => {
   });
 
   it("shows when a deferred message runs again and why", async () => {
-    mount({ [MESSAGES]: () => json({ messages: [DEFERRED], next_before: null }) });
+    mount({ [MESSAGES]: () => json({ messages: [DEFERRED], next_cursor: null }) });
 
     const row = await screen.findByRole("row", { name: /Trial day 3 nudge/ });
     expect(row).toHaveTextContent(/Deferred until .*\(quiet hours\)/);
@@ -103,7 +103,7 @@ describe("the message log of a person", () => {
 
   it("expands a row to the checks in order, stops at the consent check and links the trace", async () => {
     const user = userEvent.setup();
-    mount({ [MESSAGES]: () => json({ messages: [SKIPPED], next_before: null }) });
+    mount({ [MESSAGES]: () => json({ messages: [SKIPPED], next_cursor: null }) });
 
     const toggle = await screen.findByRole("button", { name: "Show the checks for Product news, October" });
     expect(toggle).toHaveAttribute("aria-expanded", "false");
@@ -147,8 +147,8 @@ describe("the message log of a person", () => {
     const calls = mount({
       [MESSAGES]: (request) => {
         const query = new URL(request.url).searchParams;
-        if (query.get("before") === "cursor-1") return json({ messages: [SENT], next_before: null });
-        return json({ messages: [SKIPPED], next_before: "cursor-1" });
+        if (query.get("cursor") === "cursor-1") return json({ messages: [SENT], next_cursor: null });
+        return json({ messages: [SKIPPED], next_cursor: "cursor-1" });
       },
     });
 
@@ -170,11 +170,11 @@ describe("the message log of a person", () => {
   it("sends one request and adds one page when Load older is activated twice at once", async () => {
     const calls = mount({
       [MESSAGES]: async (request) => {
-        if (new URL(request.url).searchParams.get("before") === "cursor-1") {
+        if (new URL(request.url).searchParams.get("cursor") === "cursor-1") {
           await new Promise((resolve) => setTimeout(resolve, 30));
-          return json({ messages: [SENT], next_before: null });
+          return json({ messages: [SENT], next_cursor: null });
         }
-        return json({ messages: [SKIPPED], next_before: "cursor-1" });
+        return json({ messages: [SKIPPED], next_cursor: "cursor-1" });
       },
     });
 
@@ -188,11 +188,11 @@ describe("the message log of a person", () => {
     await waitFor(() => expect(screen.getAllByRole("row")).toHaveLength(3));
     await new Promise((resolve) => setTimeout(resolve, 60));
     expect(screen.getAllByRole("row")).toHaveLength(3);
-    expect(calls.filter((call) => call.search.includes("before=cursor-1"))).toHaveLength(1);
+    expect(calls.filter((call) => call.search.includes("cursor=cursor-1"))).toHaveLength(1);
   });
 
   it("gives every expand button a details region that exists, hidden, while the row is collapsed", async () => {
-    mount({ [MESSAGES]: () => json({ messages: [SKIPPED, SENT], next_before: null }) });
+    mount({ [MESSAGES]: () => json({ messages: [SKIPPED, SENT], next_cursor: null }) });
 
     const toggles = await screen.findAllByRole("button", { name: /Show the checks for/ });
     expect(toggles).toHaveLength(2);
@@ -209,8 +209,8 @@ describe("the message log of a person", () => {
     const user = userEvent.setup();
     mount({
       [MESSAGES]: (request) => {
-        if (new URL(request.url).searchParams.get("before") === "cursor-1") return json({ messages: [SENT], next_before: null });
-        return json({ messages: [SKIPPED], next_before: "cursor-1" });
+        if (new URL(request.url).searchParams.get("cursor") === "cursor-1") return json({ messages: [SENT], next_cursor: null });
+        return json({ messages: [SKIPPED], next_cursor: "cursor-1" });
       },
     });
 
@@ -226,8 +226,8 @@ describe("the message log of a person", () => {
     const user = userEvent.setup();
     mount({
       [MESSAGES]: (request) => {
-        if (new URL(request.url).searchParams.get("before") === "cursor-1") return json({ messages: [], next_before: "cursor-2" });
-        return json({ messages: [SKIPPED], next_before: "cursor-1" });
+        if (new URL(request.url).searchParams.get("cursor") === "cursor-1") return json({ messages: [], next_cursor: "cursor-2" });
+        return json({ messages: [SKIPPED], next_cursor: "cursor-1" });
       },
     });
 
@@ -239,7 +239,7 @@ describe("the message log of a person", () => {
 
   it("offers In progress in the Result filter and asks for it", async () => {
     const user = userEvent.setup();
-    const calls = mount({ [MESSAGES]: () => json({ messages: [SENT], next_before: null }) });
+    const calls = mount({ [MESSAGES]: () => json({ messages: [SENT], next_cursor: null }) });
 
     await screen.findByRole("row", { name: /Sent/ });
     await user.selectOptions(screen.getByLabelText("Result"), "In progress");
@@ -248,7 +248,7 @@ describe("the message log of a person", () => {
   });
 
   it("says so when there are no messages", async () => {
-    mount({ [MESSAGES]: () => json({ messages: [], next_before: null }) });
+    mount({ [MESSAGES]: () => json({ messages: [], next_cursor: null }) });
 
     expect(await screen.findByText("No messages to this person yet.")).toBeInTheDocument();
   });
@@ -263,7 +263,7 @@ describe("the message log of a person", () => {
     mount({
       [MESSAGES]: async () => {
         attempts += 1;
-        if (attempts > 1) return json({ messages: [SENT], next_before: null });
+        if (attempts > 1) return json({ messages: [SENT], next_cursor: null });
         await held;
         return problem(503, "Search timed out", "Try a narrower filter.");
       },
@@ -298,7 +298,7 @@ describe("the words of a message", () => {
       deferred_until: "2026-10-23T06:00:00Z",
       deferred_why: "rate_limit",
     });
-    mount({ [MESSAGES]: () => json({ messages: [rateLimited], next_before: null }) });
+    mount({ [MESSAGES]: () => json({ messages: [rateLimited], next_cursor: null }) });
 
     await user.click(await screen.findByRole("button", { name: /Show the checks for/ }));
 
