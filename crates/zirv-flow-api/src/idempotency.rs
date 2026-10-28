@@ -269,16 +269,19 @@ pub(crate) async fn complete(
     connection: &mut PgConnection,
     status: StatusCode,
     resource_id: Uuid,
+    body: &impl Serialize,
 ) -> Result<(), ApiError> {
     let Some(reservation) = reservation else {
         return Ok(());
     };
+    let response_hash = sha256_bytes(&serde_json::to_vec(body).map_err(|_| ApiError::internal())?);
     if zirv_flow_store::complete_api_idempotency(
         connection,
         reservation.key(),
         reservation.id,
         status.as_u16(),
         resource_id,
+        &response_hash,
     )
     .await?
     {
@@ -1054,6 +1057,7 @@ mod acceptance {
             &mut tx,
             StatusCode::CREATED,
             created.key.id.as_uuid(),
+            &json!({ "id": created.key.id.as_uuid() }),
         )
         .await;
         drop(tx);
@@ -1061,6 +1065,11 @@ mod acceptance {
         let error = outcome.unwrap_err();
         assert_eq!(error.status(), StatusCode::CONFLICT);
         assert_eq!(error.code(), Some("idempotency_key_in_flight"));
+        assert_eq!(
+            f.count("SELECT count(*) FROM api_idempotency WHERE response_hash IS NOT NULL")
+                .await,
+            0
+        );
         assert_eq!(
             f.count("SELECT count(*) FROM api_keys WHERE name = 'taken'")
                 .await,
@@ -1213,9 +1222,10 @@ mod acceptance {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn the_table_holds_the_key_only_as_a_hash(pool: PgPool) {
+    async fn the_table_holds_key_and_response_hashes_without_their_values(pool: PgPool) {
         let f = fixture(&pool).await;
-        f.api_key("ci", Some("zed@example.com")).await;
+        let response = f.api_key("zed@example.com", Some("zed@example.com")).await;
+        assert_eq!(response.status, StatusCode::CREATED, "{}", response.text);
 
         let rows: Vec<String> =
             sqlx::query_scalar("SELECT to_jsonb(t)::text FROM api_idempotency t")
@@ -1225,6 +1235,12 @@ mod acceptance {
 
         assert_eq!(rows.len(), 1);
         assert!(!rows[0].contains("zed@example.com"));
+        assert!(!rows[0].contains(response.json()["key"].as_str().unwrap()));
+        let hash: Vec<u8> = sqlx::query_scalar("SELECT response_hash FROM api_idempotency")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(hash, sha256_bytes(response.text.as_bytes()));
     }
 
     #[sqlx::test]

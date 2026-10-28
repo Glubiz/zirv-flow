@@ -178,9 +178,10 @@ pub async fn complete_api_idempotency(
     reservation: Uuid,
     status: u16,
     resource_id: Uuid,
+    response_hash: &[u8],
 ) -> Result<bool, StoreError> {
     let done = sqlx::query(
-        "UPDATE api_idempotency SET state = 'done', status = $5, resource_id = $6, \
+        "UPDATE api_idempotency SET state = 'done', status = $5, resource_id = $6, response_hash = $7, \
            created_at = now() \
          WHERE workspace_id = $1 AND route = $2 AND key_hash = $3 AND reservation = $4 \
            AND state = 'pending' AND request_hash IS NOT NULL",
@@ -191,6 +192,7 @@ pub async fn complete_api_idempotency(
     .bind(reservation)
     .bind(i16::try_from(status).unwrap_or(200))
     .bind(resource_id)
+    .bind(response_hash)
     .execute(connection)
     .await
     .map_err(StoreError::query)?;
@@ -268,7 +270,7 @@ mod tests {
         let resource = Uuid::now_v7();
         let mut tx = begin(pool).await.unwrap();
         assert!(
-            complete_api_idempotency(&mut tx, key, reservation, 201, resource)
+            complete_api_idempotency(&mut tx, key, reservation, 201, resource, b"response")
                 .await
                 .unwrap()
         );
@@ -354,12 +356,26 @@ mod tests {
 
         let second = fresh(&pool, key(ws, b"k"), b"one").await;
         let mut tx = begin(&pool).await.unwrap();
-        let stale = complete_api_idempotency(&mut tx, key(ws, b"k"), first, 201, Uuid::now_v7())
-            .await
-            .unwrap();
-        let current = complete_api_idempotency(&mut tx, key(ws, b"k"), second, 201, Uuid::now_v7())
-            .await
-            .unwrap();
+        let stale = complete_api_idempotency(
+            &mut tx,
+            key(ws, b"k"),
+            first,
+            201,
+            Uuid::now_v7(),
+            b"response",
+        )
+        .await
+        .unwrap();
+        let current = complete_api_idempotency(
+            &mut tx,
+            key(ws, b"k"),
+            second,
+            201,
+            Uuid::now_v7(),
+            b"response",
+        )
+        .await
+        .unwrap();
 
         assert_ne!(first, second);
         assert!(!stale);
@@ -407,10 +423,16 @@ mod tests {
             panic!("expected a fresh reservation");
         };
         let mut tx = begin(&pool).await.unwrap();
-        let early =
-            complete_api_idempotency(&mut tx, key(ws, b"k"), reservation, 201, Uuid::now_v7())
-                .await
-                .unwrap();
+        let early = complete_api_idempotency(
+            &mut tx,
+            key(ws, b"k"),
+            reservation,
+            201,
+            Uuid::now_v7(),
+            b"response",
+        )
+        .await
+        .unwrap();
         drop(tx);
 
         let bound = bind_api_idempotency_hash(&pool, key(ws, b"k"), reservation, b"file")
@@ -420,10 +442,16 @@ mod tests {
             .await
             .unwrap();
         let mut tx = begin(&pool).await.unwrap();
-        let late =
-            complete_api_idempotency(&mut tx, key(ws, b"k"), reservation, 201, Uuid::now_v7())
-                .await
-                .unwrap();
+        let late = complete_api_idempotency(
+            &mut tx,
+            key(ws, b"k"),
+            reservation,
+            201,
+            Uuid::now_v7(),
+            b"response",
+        )
+        .await
+        .unwrap();
 
         assert!(!early);
         assert!(bound);

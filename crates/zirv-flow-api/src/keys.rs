@@ -182,11 +182,16 @@ pub(crate) async fn create(
         &scopes,
     )
     .await?;
+    let response = CreatedApiKeyBody {
+        metadata: ApiKeyBody::from(&created.key),
+        key: created.plaintext,
+    };
     idempotency::complete(
         reservation.as_ref(),
         &mut tx,
         StatusCode::CREATED,
         created.key.id.as_uuid(),
+        &response,
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -194,10 +199,7 @@ pub(crate) async fn create(
     Ok((
         StatusCode::CREATED,
         [(header::CACHE_CONTROL, "no-store")],
-        Json(CreatedApiKeyBody {
-            metadata: ApiKeyBody::from(&created.key),
-            key: created.plaintext,
-        }),
+        Json(response),
     )
         .into_response())
 }

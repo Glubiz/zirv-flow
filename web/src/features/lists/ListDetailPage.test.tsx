@@ -29,7 +29,7 @@ function member(person: string, kind: string, value: string | null, source = "ui
   };
 }
 
-const PAGE = { members: [member(ADA, "email", "ada@example.test"), member(BOB, "external:crm", "42", "import")], next_before: null };
+const PAGE = { members: [member(ADA, "email", "ada@example.test"), member(BOB, "external:crm", "42", "import")], next_cursor: null };
 
 const LIST_ROUTE = `GET /api/v1/workspaces/ws1/lists/${LIST_ID}`;
 const MEMBERS_ROUTE = `GET /api/v1/workspaces/ws1/lists/${LIST_ID}/members`;
@@ -76,7 +76,7 @@ describe("a list", () => {
       "GET /api/v1/session": () => json(session(MEMBER)),
       "GET /api/v1/workspaces/ws1/members": () => json(roles("editor", MEMBER.id)),
       [LIST_ROUTE]: () => json(LIST),
-      [MEMBERS_ROUTE]: () => json({ members: [member(ADA, "email", null)], next_before: null }),
+      [MEMBERS_ROUTE]: () => json({ members: [member(ADA, "email", null)], next_cursor: null }),
     });
     mount();
 
@@ -103,7 +103,7 @@ describe("a list", () => {
   });
 
   it("shows an empty state for a list with no one in it", async () => {
-    asAdmin({ [MEMBERS_ROUTE]: () => json({ members: [], next_before: null }) });
+    asAdmin({ [MEMBERS_ROUTE]: () => json({ members: [], next_cursor: null }) });
     mount();
 
     expect(await screen.findByText("No one is in this list yet")).toBeInTheDocument();
@@ -142,9 +142,9 @@ describe("a list", () => {
   it("loads the next page of members when asked", async () => {
     const calls = asAdmin({
       [MEMBERS_ROUTE]: (request) =>
-        new URL(request.url).searchParams.get("before") === "cursor-1"
-          ? json({ members: [member(BOB, "phone", "+4512345678")], next_before: null })
-          : json({ members: [member(ADA, "email", "ada@example.test")], next_before: "cursor-1" }),
+        new URL(request.url).searchParams.get("cursor") === "cursor-1"
+          ? json({ members: [member(BOB, "phone", "+4512345678")], next_cursor: null })
+          : json({ members: [member(ADA, "email", "ada@example.test")], next_cursor: "cursor-1" }),
     });
     const user = userEvent.setup();
     mount();
@@ -155,7 +155,7 @@ describe("a list", () => {
     expect(screen.getByText("ada@example.test")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Show more" })).not.toBeInTheDocument();
     const queries = calls.filter((call) => call.path.endsWith(`/lists/${LIST_ID}/members`)).map((call) => call.search);
-    expect(queries).toEqual(["?limit=50", "?limit=50&before=cursor-1"]);
+    expect(queries).toEqual(["?limit=50", "?limit=50&cursor=cursor-1"]);
   });
 
   it("adds a person by identifier and says when no one has it", async () => {

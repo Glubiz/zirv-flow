@@ -2145,8 +2145,8 @@ mod tests {
                     .iter()
                     .map(|item| item["id"].as_str().unwrap().to_owned()),
             );
-            match reply.body["next_before"].as_str() {
-                Some(next) => query = format!("?limit=2&before={next}"),
+            match reply.body["next_cursor"].as_str() {
+                Some(next) => query = format!("?limit=2&cursor={next}"),
                 None => {
                     assert_eq!(page, 2, "three pages of 2, 2 and 1");
                     break;
@@ -2191,7 +2191,7 @@ mod tests {
         for bad in [
             "?limit=0",
             "?limit=201",
-            "?before=nonsense",
+            "?cursor=nonsense",
             "?state=asleep",
             "?version=0",
             "?version=x",

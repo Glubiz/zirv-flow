@@ -163,7 +163,7 @@ describe("the Review and publish page", () => {
     mockApi({
       ...templateRoutes({ detail: templateDetail({}, blocksDoc(heading("Hi"))) }),
       [PREVIEW]: () => rendered(),
-      [`GET ${WS}/test-sends`]: () => json({ test_sends: [row], next_before: null }),
+      [`GET ${WS}/test-sends`]: () => json({ test_sends: [row], next_cursor: null }),
       [`POST ${BASE}/publish`]: () => problem(422, "Unprocessable", "The draft has blocking issues."),
     });
     const user = userEvent.setup();

@@ -17,7 +17,8 @@
     "/api/v1/admin/jobs": {
       "get": {
         "tags": [
-          "jobs-admin"
+          "jobs-admin",
+          "preview"
         ],
         "summary": "Job counts by kind and state, and how long the oldest runnable job has waited.",
         "operationId": "get_job_depth",
@@ -63,7 +64,8 @@
     "/api/v1/admin/jobs/dead": {
       "get": {
         "tags": [
-          "jobs-admin"
+          "jobs-admin",
+          "preview"
         ],
         "summary": "Dead jobs, newest first, without their payloads.",
         "operationId": "list_dead_jobs",
@@ -80,9 +82,9 @@
             }
           },
           {
-            "name": "before",
+            "name": "cursor",
             "in": "query",
-            "description": "The next_before of the previous page",
+            "description": "The next_cursor of the previous page",
             "required": false,
             "schema": {
               "type": "string"
@@ -101,7 +103,7 @@
             }
           },
           "400": {
-            "description": "limit is out of range or before is malformed",
+            "description": "limit is out of range or cursor is malformed; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -141,7 +143,8 @@
     "/api/v1/admin/jobs/{id}/retry": {
       "post": {
         "tags": [
-          "jobs-admin"
+          "jobs-admin",
+          "preview"
         ],
         "summary": "Puts a dead job back in the queue, to run again now under its original trace.",
         "description": "Resets its attempts and clears its error. Audited as `job.retried`; a workspace job also\ngets a `job.retry` decision record in its trace.",
@@ -1579,7 +1582,10 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {}
+        ]
       }
     },
     "/api/v1/workspaces": {
@@ -1868,7 +1874,8 @@
     "/api/v1/workspaces/{ws}/ai/drafts": {
       "post": {
         "tags": [
-          "ai"
+          "ai",
+          "preview"
         ],
         "summary": "Drafts a mapping, a manifest, a segment, a flow or a template (`kind`: `mapping`, `manifest`,\n`segment`, `flow` or `template`; a flow draft names its flow in `flow_id` and also returns a\n`simulation` of a few synthetic people; a template draft names its template in `template_id`\nand its `task` (`copy`, `subject_variants`, `block_layout` or `translation`) and also returns\n`renders`, the template's draft and the result rendered for the sample person) with the\nassistant: the model is asked, its answer validated\nwith the rules a save applies, and problems are fed back for at most `ai.max_repair_attempts`\nrepairs. The answer is the validated draft with its diff against the saved version and a dry\nrun, or the last problems. Only a validated draft can be accepted. Editors and above who are\nsigned in (a mapping or manifest draft reads a source, so it takes an admin); an API key is\nrefused. Every attempt is a gated model call: it counts against the\nbudget and the rate limit, and with the assistant off, nothing is read or sent. A reverse\nproxy in front needs a read timeout of at least (1 + `ai.max_repair_attempts`) x 60 s + 30 s.",
         "description": "Send an `Idempotency-Key` header (1 to 255 characters) to make a retry safe for 24 hours, so a\nretry after a timeout does not spend the budget twice. While the first request runs, the same\nkey answers `409 idempotency_key_in_flight` with `Retry-After`; once it has stored a draft\n(valid or not), the same key and body answer `409 idempotency_key_replayed` with the draft's id\nand no body, as the draft may hold values from the workspace; the same key with another body\nis `422 idempotency_key_reused`. The key belongs to the caller that sent it. A failed run\nstores nothing and leaves the key free.",
@@ -2032,7 +2039,8 @@
     "/api/v1/workspaces/{ws}/ai/drafts/{id}/accept": {
       "post": {
         "tags": [
-          "ai"
+          "ai",
+          "preview"
         ],
         "summary": "Accepts a draft of the signed-in user: checks that it is valid, that the saved version has not\nchanged since and that it still passes the rules a save applies, then returns it for the\neditor to load as its unsaved draft. Nothing is written to the stream or the source; saving\nstays a separate action. Audited as `ai.draft.accepted`. Editors and above who are signed in.",
         "operationId": "accept_ai_draft",
@@ -2133,7 +2141,8 @@
     "/api/v1/workspaces/{ws}/ai/models": {
       "get": {
         "tags": [
-          "ai"
+          "ai",
+          "preview"
         ],
         "summary": "The providers and models this deployment offers, with context windows and prices.",
         "operationId": "list_ai_models",
@@ -2204,7 +2213,8 @@
     "/api/v1/workspaces/{ws}/ai/settings": {
       "get": {
         "tags": [
-          "ai"
+          "ai",
+          "preview"
         ],
         "summary": "The workspace's AI settings. Admins, the owner and `admin` keys only.",
         "operationId": "get_ai_settings",
@@ -2273,7 +2283,8 @@
       },
       "put": {
         "tags": [
-          "ai"
+          "ai",
+          "preview"
         ],
         "summary": "Replaces the workspace's AI settings. Enabling the assistant, or changing its provider, model\nor key while it is on, first runs a capability probe: the model must call a tool with valid\narguments and report token usage, and its configured context window must be at least 32768\ntokens. A model that fails is refused with 422 and the missing capabilities. Audited as\n`ai.settings.updated`, with the changed field names and values, never the key.",
         "operationId": "put_ai_settings",
@@ -2384,7 +2395,8 @@
     "/api/v1/workspaces/{ws}/ai/usage": {
       "get": {
         "tags": [
-          "ai"
+          "ai",
+          "preview"
         ],
         "summary": "The month's AI spend against the budget, by feature and by user, with the latest calls.",
         "operationId": "get_ai_usage",
@@ -2742,9 +2754,9 @@
             }
           },
           {
-            "name": "before",
+            "name": "cursor",
             "in": "query",
-            "description": "The next_before of the previous page",
+            "description": "The next_cursor of the previous page",
             "required": false,
             "schema": {
               "type": "string",
@@ -2764,7 +2776,7 @@
             }
           },
           "400": {
-            "description": "limit is out of range or before is malformed",
+            "description": "limit is out of range or cursor is malformed; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -4903,9 +4915,9 @@
             }
           },
           {
-            "name": "after",
+            "name": "cursor",
             "in": "query",
-            "description": "The next_after of the previous page",
+            "description": "The next_cursor of the previous page",
             "required": false,
             "schema": {
               "type": "string"
@@ -4924,7 +4936,7 @@
             }
           },
           "400": {
-            "description": "limit is out of range, or after is malformed",
+            "description": "limit is out of range, or cursor is malformed; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -8387,7 +8399,8 @@
     "/api/v1/workspaces/{ws}/events/explore/breakdown": {
       "post": {
         "tags": [
-          "events"
+          "events",
+          "preview"
         ],
         "summary": "The most common values of one property over the same events a count covers.",
         "operationId": "explore_event_breakdown",
@@ -8488,7 +8501,8 @@
     "/api/v1/workspaces/{ws}/events/explore/count": {
       "post": {
         "tags": [
-          "events"
+          "events",
+          "preview"
         ],
         "summary": "Events per bucket over the range, for the filters given. The sum of the buckets is the\nnumber of matching events, and equals what the breakdown and the list cover.",
         "operationId": "explore_event_count",
@@ -8589,7 +8603,8 @@
     "/api/v1/workspaces/{ws}/events/explore/export": {
       "post": {
         "tags": [
-          "events"
+          "events",
+          "preview"
         ],
         "summary": "The matching events as CSV with the list's columns and masking, streamed a page at a\ntime (`id,occurred_at,name,source,person_id,validation_state,flags,trace_id,properties,masked`;\n`flags` and `masked` are joined by `|`). At most the export row limit is written; when\nmore matched, the last line is a `#` comment saying so. The export is audited as\n`events.exported` with the shape of the filters and the row count, no values.",
         "operationId": "export_events",
@@ -8690,7 +8705,8 @@
     "/api/v1/workspaces/{ws}/events/explore/list": {
       "post": {
         "tags": [
-          "events"
+          "events",
+          "preview"
         ],
         "summary": "The events of the range that match, newest first in keyset pages, masked for the caller.",
         "operationId": "explore_event_list",
@@ -8728,7 +8744,7 @@
             }
           },
           "400": {
-            "description": "limit is out of range or after is malformed",
+            "description": "limit is out of range or cursor is malformed; the removed after answers paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -9183,7 +9199,8 @@
     "/api/v1/workspaces/{ws}/flows/{id}/ai/explain": {
       "post": {
         "tags": [
-          "ai"
+          "ai",
+          "preview"
         ],
         "summary": "Explains a flow in plain language: its current draft, or a published version when `version` is\ngiven. The model gets a summary to write and a sentence for every node but the exit nodes,\neach named by its node id; its answer is checked (every id a node of the graph, every node\ncited once, plain text with a length cap) and, when it fails, asked again at most\n`ai.max_repair_attempts` times. Nothing is stored. Workspace admins who are signed in; an API\nkey is refused. Every attempt is a gated model call that counts against the budget and the\nrate limit, and with the assistant off nothing is read or sent. The model is not told any\ntrait or event value, count, sample or member.",
         "operationId": "explain_flow_with_ai",
@@ -9468,9 +9485,9 @@
             }
           },
           {
-            "name": "before",
+            "name": "cursor",
             "in": "query",
-            "description": "The next_before of the previous page",
+            "description": "The next_cursor of the previous page",
             "required": false,
             "schema": {
               "type": "string"
@@ -9517,7 +9534,7 @@
             }
           },
           "400": {
-            "description": "A parameter is out of range or malformed",
+            "description": "A parameter is out of range or malformed; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -11012,9 +11029,9 @@
             }
           },
           {
-            "name": "before",
+            "name": "cursor",
             "in": "query",
-            "description": "The next_before of the previous page",
+            "description": "The next_cursor of the previous page",
             "required": false,
             "schema": {
               "type": "string"
@@ -11043,7 +11060,7 @@
             }
           },
           "400": {
-            "description": "A malformed limit, cursor or destination id",
+            "description": "A malformed limit, cursor or destination id; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -11729,9 +11746,9 @@
             }
           },
           {
-            "name": "before",
+            "name": "cursor",
             "in": "query",
-            "description": "The next_before of the previous page",
+            "description": "The next_cursor of the previous page",
             "required": false,
             "schema": {
               "type": "string"
@@ -11750,7 +11767,7 @@
             }
           },
           "400": {
-            "description": "status or limit is out of range, or before is malformed",
+            "description": "status or limit is out of range, or cursor is malformed; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -12022,9 +12039,9 @@
             }
           },
           {
-            "name": "before",
+            "name": "cursor",
             "in": "query",
-            "description": "The next_before of the previous page",
+            "description": "The next_cursor of the previous page",
             "required": false,
             "schema": {
               "type": "string"
@@ -12043,7 +12060,7 @@
             }
           },
           "400": {
-            "description": "limit is out of range or before is malformed",
+            "description": "limit is out of range or cursor is malformed; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -12723,9 +12740,9 @@
             }
           },
           {
-            "name": "after",
+            "name": "cursor",
             "in": "query",
-            "description": "The next_after of the previous page",
+            "description": "The next_cursor of the previous page",
             "required": false,
             "schema": {
               "type": "integer",
@@ -12745,7 +12762,7 @@
             }
           },
           "400": {
-            "description": "A malformed phase, limit or after",
+            "description": "A malformed phase, limit or cursor; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -13016,9 +13033,9 @@
             }
           },
           {
-            "name": "before",
+            "name": "cursor",
             "in": "query",
-            "description": "The next_before of the previous page",
+            "description": "The next_cursor of the previous page",
             "required": false,
             "schema": {
               "type": "string"
@@ -13055,7 +13072,7 @@
             }
           },
           "400": {
-            "description": "limit is out of range or before is malformed",
+            "description": "limit is out of range or cursor is malformed; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -13691,9 +13708,9 @@
             }
           },
           {
-            "name": "before",
+            "name": "cursor",
             "in": "query",
-            "description": "The next_before of the previous page",
+            "description": "The next_cursor of the previous page",
             "required": false,
             "schema": {
               "type": "string"
@@ -13712,7 +13729,7 @@
             }
           },
           "400": {
-            "description": "limit is out of range, or before is malformed",
+            "description": "limit is out of range, or cursor is malformed; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -14440,6 +14457,16 @@
               }
             }
           },
+          "400": {
+            "description": "The removed after is sent: page with cursor (`paging_parameter_renamed`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
           "401": {
             "description": "Not authenticated",
             "content": {
@@ -14921,9 +14948,9 @@
             }
           },
           {
-            "name": "before",
+            "name": "cursor",
             "in": "query",
-            "description": "The next_before of the previous page",
+            "description": "The next_cursor of the previous page",
             "required": false,
             "schema": {
               "type": "string"
@@ -14951,7 +14978,7 @@
             }
           },
           "400": {
-            "description": "limit is out of range, or before is malformed",
+            "description": "limit is out of range, or cursor is malformed; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -15266,9 +15293,9 @@
             }
           },
           {
-            "name": "before",
+            "name": "cursor",
             "in": "query",
-            "description": "The next_before of the previous page",
+            "description": "The next_cursor of the previous page",
             "required": false,
             "schema": {
               "type": "string"
@@ -15287,7 +15314,7 @@
             }
           },
           "400": {
-            "description": "limit is out of range, or before is malformed",
+            "description": "limit is out of range, or cursor is malformed; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -15377,9 +15404,9 @@
             }
           },
           {
-            "name": "before",
+            "name": "cursor",
             "in": "query",
-            "description": "The next_before of the previous page",
+            "description": "The next_cursor of the previous page",
             "required": false,
             "schema": {
               "type": "string"
@@ -15417,7 +15444,7 @@
             }
           },
           "400": {
-            "description": "A parameter is out of range or malformed",
+            "description": "A parameter is out of range or malformed; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -15518,9 +15545,9 @@
             }
           },
           {
-            "name": "before",
+            "name": "cursor",
             "in": "query",
-            "description": "The next_before of the previous page",
+            "description": "The next_cursor of the previous page",
             "required": false,
             "schema": {
               "type": "string"
@@ -15557,7 +15584,7 @@
             }
           },
           "400": {
-            "description": "limit is out of range, or before, kinds or all_decisions is malformed",
+            "description": "limit is out of range, or cursor, kinds or all_decisions is malformed; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -15647,9 +15674,9 @@
             }
           },
           {
-            "name": "before",
+            "name": "cursor",
             "in": "query",
-            "description": "The next_before of the previous page",
+            "description": "The next_cursor of the previous page",
             "required": false,
             "schema": {
               "type": "string"
@@ -15668,7 +15695,7 @@
             }
           },
           "400": {
-            "description": "limit is out of range or before is malformed",
+            "description": "limit is out of range or cursor is malformed; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -15870,9 +15897,9 @@
             }
           },
           {
-            "name": "before",
+            "name": "cursor",
             "in": "query",
-            "description": "The next_before of the previous page",
+            "description": "The next_cursor of the previous page",
             "required": false,
             "schema": {
               "type": "string"
@@ -15891,7 +15918,7 @@
             }
           },
           "400": {
-            "description": "limit is out of range or before is malformed",
+            "description": "limit is out of range or cursor is malformed; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -16965,7 +16992,8 @@
     "/api/v1/workspaces/{ws}/segments/{id}/ai/explain": {
       "post": {
         "tags": [
-          "ai"
+          "ai",
+          "preview"
         ],
         "summary": "Explains a saved version of a segment in plain language: a summary and a sentence for every\ncondition, each named by its JSON pointer. The model's answer is checked (every pointer must\nbe a node, every condition cited once, plain text with a length cap) and, when it fails,\nasked again at most `ai.max_repair_attempts` times. Nothing is stored. Workspace admins who\nare signed in; an API key is refused. Every attempt is a gated model call that counts against\nthe budget and the rate limit, and with the assistant off nothing is read or sent. The model\nis not told any trait or event value, count, sample or member.",
         "operationId": "explain_segment_with_ai",
@@ -21774,9 +21802,9 @@
             }
           },
           {
-            "name": "before",
+            "name": "cursor",
             "in": "query",
-            "description": "The next_before of the previous page",
+            "description": "The next_cursor of the previous page",
             "required": false,
             "schema": {
               "type": "string"
@@ -21804,7 +21832,7 @@
             }
           },
           "400": {
-            "description": "limit or reason is out of range, or before is malformed",
+            "description": "limit or reason is out of range, or cursor is malformed; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -24583,9 +24611,9 @@
             }
           },
           {
-            "name": "before",
+            "name": "cursor",
             "in": "query",
-            "description": "The next_before of the previous page",
+            "description": "The next_cursor of the previous page",
             "required": false,
             "schema": {
               "type": "string"
@@ -24604,7 +24632,7 @@
             }
           },
           "400": {
-            "description": "limit, template_id or draft_revision is out of range or malformed, or before is not a cursor",
+            "description": "limit, template_id or draft_revision is out of range or malformed, or cursor is malformed; the removed before and after answer paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -26272,7 +26300,8 @@
     "/api/v1/workspaces/{ws}/traces/{trace_id}/ai/explain": {
       "post": {
         "tags": [
-          "ai"
+          "ai",
+          "preview"
         ],
         "summary": "Explains what happened under one trace in plain language: the first read-only consumer of the\ntrace API. The model is shown the decision records of the trace (at most 60, oldest first) by\nlabel, with the action, outcome, attempt, job, cause and the ids each concerns, but no person's\nid and no value of any person; a recorded reason is fenced as data. It writes a summary and a\nsentence for every record shown, each citing the record, and the answer names the records by\ntheir decision-record ids. It is checked (every record a record of the trace, cited once, plain\ntext with a length cap) and, when it fails, asked again at most `ai.max_repair_attempts`\ntimes. Nothing is stored. Workspace admins who are signed in; an API key is refused. Every\nattempt is a gated model call that counts against the budget and the rate limit, and with the\nassistant off nothing is read or sent.",
         "operationId": "explain_trace_with_ai",
@@ -27715,13 +27744,17 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {}
+        ]
       }
     },
     "/hooks/{id}": {
       "post": {
         "tags": [
-          "webhooks"
+          "webhooks",
+          "preview"
         ],
         "summary": "Receives one JSON document for a webhook. The request carries the hook's signature header\n(and timestamp header, unless the hook signs the body alone); the names, the prefix and the\ntolerance are the hook's, shown in the sources UI. The signed message is `\"{timestamp}.{body}\"`\nfor a timestamped hook and the raw body otherwise, signed with HMAC-SHA256 under the hook's\nsecret and sent as the prefix followed by 64 hex digits.",
         "operationId": "receive_webhook",
@@ -27871,7 +27904,10 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {}
+        ]
       }
     }
   },
@@ -28720,13 +28756,13 @@
             "description": "The largest single image (`assets.max_file_bytes`).",
             "minimum": 0
           },
-          "next_before": {
+          "next_cursor": {
             "type": [
               "string",
               "null"
             ],
             "format": "uuid",
-            "description": "Pass as `before` for the next page; null when there is none."
+            "description": "Pass as `cursor` for the next page; null when there is none."
           },
           "used_bytes": {
             "type": "integer",
@@ -29330,12 +29366,12 @@
             },
             "description": "Newest first."
           },
-          "next_before": {
+          "next_cursor": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Pass as `before` for the next page; null when there is none."
+            "description": "Pass as `cursor` for the next page; null when there is none."
           }
         }
       },
@@ -29783,12 +29819,12 @@
             },
             "description": "In key order."
           },
-          "next_after": {
+          "next_cursor": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Pass as `after` for the next page; null on the last page."
+            "description": "Pass as `cursor` for the next page; null on the last page."
           }
         }
       },
@@ -30877,12 +30913,12 @@
             },
             "description": "Newest first."
           },
-          "next_before": {
+          "next_cursor": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Pass as `before` for the next page; null when there is none."
+            "description": "Pass as `cursor` for the next page; null when there is none."
           }
         }
       },
@@ -30951,12 +30987,12 @@
             },
             "description": "Newest first."
           },
-          "next_before": {
+          "next_cursor": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Pass as `before` for the next page; null when there is none."
+            "description": "Pass as `cursor` for the next page; null when there is none."
           }
         }
       },
@@ -31025,12 +31061,12 @@
             },
             "description": "Newest first."
           },
-          "next_before": {
+          "next_cursor": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Pass as `before` for the next page; null when there is none."
+            "description": "Pass as `cursor` for the next page; null when there is none."
           }
         }
       },
@@ -32363,12 +32399,12 @@
             },
             "description": "Newest first."
           },
-          "next_before": {
+          "next_cursor": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Pass as `before` for the next page; null when there is none."
+            "description": "Pass as `cursor` for the next page; null when there is none."
           }
         }
       },
@@ -32484,12 +32520,12 @@
             },
             "description": "Newest first."
           },
-          "next_before": {
+          "next_cursor": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Pass as `before` for the next page; null when there is none."
+            "description": "Pass as `cursor` for the next page; null when there is none."
           }
         }
       },
@@ -32991,12 +33027,12 @@
             },
             "description": "Newest first."
           },
-          "next_after": {
+          "next_cursor": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Pass as `after` for the next page; null when there is none."
+            "description": "Pass as `cursor` for the next page; null when there is none."
           }
         }
       },
@@ -33008,12 +33044,12 @@
           {
             "type": "object",
             "properties": {
-              "after": {
+              "cursor": {
                 "type": [
                   "string",
                   "null"
                 ],
-                "description": "The `next_after` of the previous page."
+                "description": "The `next_cursor` of the previous page."
               },
               "limit": {
                 "type": [
@@ -33214,12 +33250,12 @@
             },
             "description": "Newest first."
           },
-          "next_before": {
+          "next_cursor": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Pass as `before` for the next page; null when there is none."
+            "description": "Pass as `cursor` for the next page; null when there is none."
           }
         }
       },
@@ -35018,7 +35054,8 @@
               "string",
               "null"
             ],
-            "description": "For a deferral, when the message runs again."
+            "format": "date-time",
+            "description": "For a deferral, when the message runs again (RFC 3339)."
           }
         }
       },
@@ -35107,12 +35144,12 @@
             },
             "description": "Newest first."
           },
-          "next_before": {
+          "next_cursor": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Pass as `before` for the next page; null when there is none."
+            "description": "Pass as `cursor` for the next page; null when there is none."
           }
         }
       },
@@ -35484,13 +35521,13 @@
           "rejects"
         ],
         "properties": {
-          "next_after": {
+          "next_cursor": {
             "type": [
               "integer",
               "null"
             ],
             "format": "int64",
-            "description": "Pass as `after` for the next page; null when there is none."
+            "description": "Pass as `cursor` for the next page; null when there is none."
           },
           "rejects": {
             "type": "array",
@@ -35600,12 +35637,12 @@
           "rejects"
         ],
         "properties": {
-          "next_before": {
+          "next_cursor": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Pass as `before` for the next page; null when there is none."
+            "description": "Pass as `cursor` for the next page; null when there is none."
           },
           "rejects": {
             "type": "array",
@@ -35983,12 +36020,12 @@
             },
             "description": "Newest first."
           },
-          "next_before": {
+          "next_cursor": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Pass as `before` for the next page; null when there is none."
+            "description": "Pass as `cursor` for the next page; null when there is none."
           }
         }
       },
@@ -36197,12 +36234,12 @@
             },
             "description": "Newest first."
           },
-          "next_before": {
+          "next_cursor": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Pass as `before` for the next page; null when there is none."
+            "description": "Pass as `cursor` for the next page; null when there is none."
           }
         }
       },
@@ -36455,12 +36492,12 @@
             },
             "description": "Newest first."
           },
-          "next_before": {
+          "next_cursor": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Pass as `before` for the next page; null when there is none."
+            "description": "Pass as `cursor` for the next page; null when there is none."
           }
         }
       },
@@ -37065,6 +37102,7 @@
               "string",
               "null"
             ],
+            "format": "date-time",
             "description": "When the event happened, when the mapping says; otherwise the run's start decides."
           },
           "properties": {
@@ -39060,13 +39098,13 @@
           "people"
         ],
         "properties": {
-          "next_after": {
+          "next_cursor": {
             "type": [
               "string",
               "null"
             ],
             "format": "uuid",
-            "description": "Pass as `after` for the next page; null when there is none."
+            "description": "Pass as `cursor` for the next page; null when there is none."
           },
           "people": {
             "type": "array",
@@ -39128,13 +39166,13 @@
         "type": "object",
         "description": "Exactly one of `identifier` and `trait`. It is a POST so the values stay out of URLs and\naccess logs.",
         "properties": {
-          "after": {
+          "cursor": {
             "type": [
               "string",
               "null"
             ],
             "format": "uuid",
-            "description": "The `next_after` of the previous page."
+            "description": "The `next_cursor` of the previous page."
           },
           "identifier": {
             "oneOf": [
@@ -41723,12 +41761,12 @@
           "suppressions"
         ],
         "properties": {
-          "next_before": {
+          "next_cursor": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Pass as `before` for the next page; null when there is none."
+            "description": "Pass as `cursor` for the next page; null when there is none."
           },
           "suppressions": {
             "type": "array",
@@ -42743,12 +42781,12 @@
           "test_sends"
         ],
         "properties": {
-          "next_before": {
+          "next_cursor": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Pass as `before` for the next page; null when there is none."
+            "description": "Pass as `cursor` for the next page; null when there is none."
           },
           "test_sends": {
             "type": "array",
@@ -43143,12 +43181,12 @@
             },
             "description": "Newest first."
           },
-          "next_before": {
+          "next_cursor": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Pass as `before` for the next page; null when there is none."
+            "description": "Pass as `cursor` for the next page; null when there is none."
           }
         }
       },
@@ -44728,5 +44766,11 @@
         "description": "Session cookie set by POST /api/v1/session. Every POST, PUT, PATCH and DELETE              made with it must also send the CSRF token in the x-csrf-token header."
       }
     }
-  }
+  },
+  "tags": [
+    {
+      "name": "preview",
+      "description": "Not frozen: may change in any release, 1.x included (the API contract policy lists them)."
+    }
+  ]
 }

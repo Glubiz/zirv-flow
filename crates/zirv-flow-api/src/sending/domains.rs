@@ -123,6 +123,7 @@ fn domain_exists() -> ApiError {
         StatusCode::CONFLICT,
         "the workspace already has that sending domain",
     )
+    .with_code("sending_domain_exists")
 }
 
 async fn records_of(

@@ -48,8 +48,12 @@ pub(crate) struct SearchRequest {
     trait_query: Option<TraitQuery>,
     /// People per page, 1 to 200; default 50.
     limit: Option<u32>,
-    /// The `next_after` of the previous page.
-    after: Option<Uuid>,
+    /// The `next_cursor` of the previous page.
+    cursor: Option<Uuid>,
+    /// Removed: the old name of `cursor`, refused with `paging_parameter_renamed`.
+    #[serde(default, deserialize_with = "crate::problem::sent")]
+    #[schema(ignore)]
+    after: bool,
 }
 
 /// An identifier shown for a person. The value is null when `masked`: only workspace admins,
@@ -99,12 +103,15 @@ impl PersonHitBody {
 pub(crate) struct SearchBody {
     /// By person id.
     people: Vec<PersonHitBody>,
-    /// Pass as `after` for the next page; null when there is none.
-    next_after: Option<Uuid>,
+    /// Pass as `cursor` for the next page; null when there is none.
+    next_cursor: Option<Uuid>,
 }
 
 /// Turns the request into a store search, refusing a body that does not name exactly one.
 fn parse(body: SearchRequest) -> Result<(PersonSearch, u32, Option<Uuid>), ApiError> {
+    if body.after {
+        return Err(ApiError::paging_parameter_renamed());
+    }
     let limit = match body.limit {
         None => DEFAULT_LIMIT,
         Some(limit) if (1..=MAX_LIMIT).contains(&limit) => limit,
@@ -133,7 +140,7 @@ fn parse(body: SearchRequest) -> Result<(PersonSearch, u32, Option<Uuid>), ApiEr
             ));
         }
     };
-    Ok((search, limit, body.after))
+    Ok((search, limit, body.cursor))
 }
 
 /// Finds people by an identifier, matched exactly after normalization and following merges to
@@ -150,6 +157,7 @@ fn parse(body: SearchRequest) -> Result<(PersonSearch, u32, Option<Uuid>), ApiEr
     request_body = SearchRequest,
     responses(
         (status = 200, description = "A page of people", body = SearchBody),
+        (status = 400, description = "The removed after is sent: page with cursor (`paging_parameter_renamed`)", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the read scope, a missing CSRF token, or a prefix or range search on a PII-flagged trait by a caller who may not see values (`code` is `pii_trait_not_searchable`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access", body = Problem, content_type = "application/problem+json"),
@@ -183,7 +191,7 @@ pub(crate) async fn search(
             .into_iter()
             .map(|hit| PersonHitBody::new(hit, reveal))
             .collect(),
-        next_after: page.next_after,
+        next_cursor: page.next_after,
     }))
 }
 

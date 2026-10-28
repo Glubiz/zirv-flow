@@ -1307,9 +1307,9 @@ mod tests {
             sqlx::query(
                 "INSERT INTO api_idempotency \
                     (workspace_id, route, key_hash, state, reservation, lease_until, \
-                     request_hash, status, resource_id, created_at) \
+                     request_hash, response_hash, status, resource_id, created_at) \
                  VALUES ($1, 'create_x', $2, 'done', gen_random_uuid(), now(), \
-                         '\\x00'::bytea, 201, gen_random_uuid(), \
+                         '\\x00'::bytea, '\\x00'::bytea, 201, gen_random_uuid(), \
                          now() - make_interval(hours => $3))",
             )
             .bind(ws.as_uuid())

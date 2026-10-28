@@ -1647,7 +1647,7 @@ the snippet block, and blocks are never removed.
   - `asset_references` are written at publish (template, theme and snippet versions). An asset with a published reference cannot be deleted, because sent emails keep pointing at it.
 
 As built (#306): the store keeps `assets` (the bytes in `bytea`, the SHA-256, extension, type, size, width, height, name; unique per workspace over the live hash) and `asset_references` (workspace, asset, owner kind `template`, `theme` or `snippet`, owner id, version; migration 0060). Neither table has a person column, so the erasure scan and merge skip them. `record_references(conn, workspace, owner_kind, owner_id, version, &[AssetId])` is what the publish paths of templates, themes and snippets call inside their publish transaction; it share-locks each live asset row of that workspace, and an asset of another workspace is refused as missing.
-- **Routes:** `POST /api/v1/workspaces/{ws}/assets?name=` (Write; the raw image as the body, its own `Content-Type`; 201, or 200 with the existing row when the workspace already has the same bytes; audit `asset.uploaded` with id, name and size), `GET .../assets` (Read; newest first with `limit` and `before`, the reference count per asset, `used_bytes`, `limit_bytes` and `max_file_bytes` for a quota bar), `GET .../assets/{id}` (Read; adds `used_by`), `DELETE .../assets/{id}` (Admin; audit `asset.deleted`). A delete sets `deleted_at` and empties `bytes` in one statement.
+- **Routes:** `POST /api/v1/workspaces/{ws}/assets?name=` (Write; the raw image as the body, its own `Content-Type`; 201, or 200 with the existing row when the workspace already has the same bytes; audit `asset.uploaded` with id, name and size), `GET .../assets` (Read; newest first with `limit` and `cursor`, the reference count per asset, `used_bytes`, `limit_bytes` and `max_file_bytes` for a quota bar), `GET .../assets/{id}` (Read; adds `used_by`), `DELETE .../assets/{id}` (Admin; audit `asset.deleted`). A delete sets `deleted_at` and empties `bytes` in one statement.
 - **Codes:** `asset_type_unsupported` (415, the declared type is not PNG, JPEG, GIF or WebP, judged before the body is read; SVG included), `asset_type_mismatch` (415, the magic bytes are another type, no image, or a cut-off header), `asset_too_large` (413, by `Content-Length` first, then while streaming), `asset_quota_exceeded` (413, checked with the insert under a per-workspace advisory lock), `asset_dimensions_exceeded` (422, over 8192 px a side or 40 megapixels, read from the header only), `asset_in_use` (409, the owners in the detail).
 - **Limits:** `assets.max_file_bytes` (5 MiB) and `assets.max_workspace_bytes` (1 GiB). Large senders should put a CDN or caching proxy in front of `/a/`.
 - **Serving:** `GET /a/{sha256}.{ext}` without authentication, from any live row with that hash and the extension of its type (`png`, `jpg`, `gif`, `webp`). Headers: the row's `Content-Type`, `Cache-Control: public, max-age=31536000, immutable`, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'; sandbox`, `Content-Disposition: inline`. Anything else under `/a/` is a plain 404, never the web app. `asset_url(public_url, sha256, ext)` in the store builds the URL; without `server.public_url` it is the relative path.
@@ -2171,7 +2171,7 @@ As built (M1 skeleton):
   never saying whether it exists elsewhere.
 
 As built (message log, #231): `GET /api/v1/workspaces/{ws}/people/{id}/messages` (`read`) pages
-a person's `messages` newest first by `(created_at, id)` (`limit`, `before`, and the filters
+a person's `messages` newest first by `(created_at, id)` (`limit`, `cursor`, and the filters
 `result` = `sent`, `skipped`, `deferred` (pending with a rate-limit wait or a gate hold in force), `in_progress` (sending, or pending and not waiting) or `failed`, and `template_id`). It
 reads through `people.merged_into` and `person_merges`, so a merged-away id reads as its
 survivor; an unknown or erased person is 404. Each message carries the template (name, version,
@@ -2602,8 +2602,13 @@ additively.
 
 **Idempotency keys.** A creating POST guarded by a unique name or a draft
 revision (users, workspaces, flows, segments, templates, sources, destinations,
-credentials, webhooks, the publishes) answers `409` on a retry and takes no key.
-The other creating POSTs take an optional `Idempotency-Key` header of 1 to 255
+credentials, webhooks) answers `409` on a retry and takes no key. Set additions
+and ingestion retain their existing de-duplication. Publishing actions are
+excluded from the keyed-create set: flow, snippet, template and theme publishes
+can create another version on a retry; revision checks protect edits, not retries.
+An event-schema publish consumes its draft, so a repeat is `409` until a new draft
+is saved. The complete classification is in `docs/api.md` and `docs/api-audit.md`.
+The six unguarded resource creates take an optional `Idempotency-Key` header of 1 to 255
 characters, remembered for 24 hours: API keys, assistant drafts, asset and CSV
 import uploads, and erasure and export requests.
 
@@ -2633,9 +2638,10 @@ import uploads, and erasure and export requests.
 - **Scope and content.** The row is identified by workspace, route and the hash
   of the caller (the user, or the API key) together with the key, so another
   member's identical key is another key and cannot replay or block it. The table
-  holds hashes, a state, a lease, a status and the created resource's id; it has no
-  person column, no client-chosen text and **no response body**, because the
-  responses hold a secret, a person's value or a name that may be one.
+  holds the key, request and response hashes, a state, a lease, a status and the
+  created resource's id; it has no person column, no client-chosen text and **no
+  response body**, because the responses hold a secret, a person's value or a name
+  that may be one.
 - The contacts API keeps its own `contact_idempotency` table (7.6).
 
 **Authentication:** local accounts (argon2id), server-side sessions in

@@ -313,7 +313,7 @@ describe("test mode", () => {
     const calls = mockApi({
       ...flowRoutes(),
       [`POST ${WS}/people/search`]: () =>
-        json({ next_after: null, people: [{ id: "88888888-0000-4000-8000-000000000001", updated_at: START, display: { kind: "email", masked: false, value: "dana@example.com" } }] }),
+        json({ next_cursor: null, people: [{ id: "88888888-0000-4000-8000-000000000001", updated_at: START, display: { kind: "email", masked: false, value: "dana@example.com" } }] }),
       [TEST]: () => json(walk({ person_id: "88888888-0000-4000-8000-000000000001" })),
     });
     const user = userEvent.setup();

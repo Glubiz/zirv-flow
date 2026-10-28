@@ -337,6 +337,7 @@ pub(crate) fn transition_error(error: TransitionError) -> ApiError {
         TransitionError::NotFound => ApiError::not_found(),
         TransitionError::WrongState(status) => {
             ApiError::new(StatusCode::CONFLICT, format!("the import is {status}"))
+                .with_code("import_state")
         }
         TransitionError::Store(error) => error.into(),
     }

@@ -237,18 +237,18 @@ pub(crate) async fn upload(
     } else {
         StatusCode::OK
     };
-    idempotency::complete(reservation.as_ref(), &mut tx, status, stored.asset.id).await?;
+    let body = AssetBody::new(&stored.asset, stored.references, state.public_url());
+    idempotency::complete(
+        reservation.as_ref(),
+        &mut tx,
+        status,
+        stored.asset.id,
+        &body,
+    )
+    .await?;
     commit(tx).await?;
     idempotency::finish(reservation);
-    Ok((
-        status,
-        Json(AssetBody::new(
-            &stored.asset,
-            stored.references,
-            state.public_url(),
-        )),
-    )
-        .into_response())
+    Ok((status, Json(body)).into_response())
 }
 
 #[cfg(test)]

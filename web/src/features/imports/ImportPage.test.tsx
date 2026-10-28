@@ -23,7 +23,7 @@ const REJECTS = {
       ],
     },
   ],
-  next_after: null,
+  next_cursor: null,
 };
 
 interface Server {

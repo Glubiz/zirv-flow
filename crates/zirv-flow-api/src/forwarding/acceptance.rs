@@ -719,19 +719,19 @@ mod tests {
         assert_eq!(letters[0]["attempts"], 3);
         assert_eq!(letters[0]["destination_id"], fx.destination.to_string());
         assert!(letters[0].get("payload").is_none());
-        let before = page.body["next_before"].as_str().unwrap().to_owned();
+        let before = page.body["next_cursor"].as_str().unwrap().to_owned();
 
         let rest = fx
             .as_admin(
                 "GET",
-                &format!("/forwarding/dead-letters?limit=2&before={before}"),
+                &format!("/forwarding/dead-letters?limit=2&cursor={before}"),
                 None,
             )
             .await;
         let letters = rest.body["letters"].as_array().unwrap();
         assert_eq!(letters.len(), 1);
         assert_eq!(letters[0]["id"], oldest.to_string());
-        assert!(rest.body["next_before"].is_null());
+        assert!(rest.body["next_cursor"].is_null());
         let bad = fx
             .as_admin("GET", "/forwarding/dead-letters?limit=0", None)
             .await;

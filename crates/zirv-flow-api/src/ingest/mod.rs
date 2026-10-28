@@ -111,6 +111,7 @@ impl IngestState {
                     "the API key is over its rate limit",
                 )
                 .with_retry_after(seconds)
+                .with_code("rate_limited")
             })
     }
 
@@ -126,6 +127,7 @@ impl IngestState {
                     "the webhook is over its rate limit",
                 )
                 .with_retry_after(seconds)
+                .with_code("rate_limited")
             })
     }
 
@@ -468,6 +470,7 @@ async fn accept(
 
 pub(crate) fn too_large() -> ApiError {
     ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "request body is too large")
+        .with_code("body_too_large")
 }
 
 /// Reads the JSON body of an ingestion request: `413` over `max_bytes`, declared or not, or

@@ -11,7 +11,7 @@ const PAGE_SIZE = 50;
 /** What was searched for, and when: running the same search again reads it again. */
 export interface SearchQuery {
   run: number;
-  request: Omit<SearchRequest, "limit" | "after">;
+  request: Omit<SearchRequest, "limit" | "cursor">;
 }
 
 interface Extra {
@@ -50,7 +50,7 @@ export function useSearch(workspaceId: string, query: SearchQuery | null): Searc
   const base = first.status === "ready" ? first.data : null;
   const more = extra !== null && extra.base === base ? extra : null;
   const people = base ? [...base.people, ...(more?.people ?? [])] : [];
-  const nextAfter = base ? (more ? more.nextAfter : (base.next_after ?? null)) : null;
+  const nextAfter = base ? (more ? more.nextAfter : (base.next_cursor ?? null)) : null;
 
   const loadMore = useCallback(() => {
     if (query === null || base === null || nextAfter === null) return;
@@ -59,14 +59,14 @@ export function useSearch(workspaceId: string, query: SearchQuery | null): Searc
     unwrap(
       client.POST("/api/v1/workspaces/{ws}/people/search", {
         params: { path: { ws: workspaceId } },
-        body: { ...query.request, limit: PAGE_SIZE, after: nextAfter },
+        body: { ...query.request, limit: PAGE_SIZE, cursor: nextAfter },
       }),
     ).then(
       (page) => {
         setExtra((current) => ({
           base,
           people: [...(current?.base === base ? current.people : []), ...page.people],
-          nextAfter: page.next_after ?? null,
+          nextAfter: page.next_cursor ?? null,
         }));
         setLoadingMore(false);
       },

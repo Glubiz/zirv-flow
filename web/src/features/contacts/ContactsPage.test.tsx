@@ -74,7 +74,7 @@ describe("contacts list", () => {
             contact("c-1", { email: "ada@example.test", age: 36, newsletter: true }),
             contact("c-2", { email: "bob@example.test" }),
           ],
-          next_after: null,
+          next_cursor: null,
         }),
     });
 
@@ -95,7 +95,7 @@ describe("contacts list", () => {
 
   it("shows hidden values as hidden, never as the value", async () => {
     mount({
-      [LIST]: () => json({ contacts: [contact("c-1", { email: null, age: 36 }, ["email"])], next_after: null }),
+      [LIST]: () => json({ contacts: [contact("c-1", { email: null, age: 36 }, ["email"])], next_cursor: null }),
     });
 
     const table = await screen.findByRole("table");
@@ -110,7 +110,7 @@ describe("contacts list", () => {
   });
 
   it("shows an empty state that offers a first contact", async () => {
-    mount({ [LIST]: () => json({ contacts: [], next_after: null }) });
+    mount({ [LIST]: () => json({ contacts: [], next_cursor: null }) });
 
     expect(await screen.findByText("No contacts yet")).toBeInTheDocument();
     expect(await screen.findAllByRole("button", { name: "New contact" })).toHaveLength(2);
@@ -123,7 +123,7 @@ describe("contacts list", () => {
         attempts += 1;
         return attempts === 1
           ? problem(500, "Internal Server Error", "internal error")
-          : json({ contacts: [contact("c-1", {})], next_after: null });
+          : json({ contacts: [contact("c-1", {})], next_cursor: null });
       },
     });
     const user = userEvent.setup();
@@ -137,10 +137,10 @@ describe("contacts list", () => {
   it("pages by key with Load more", async () => {
     const calls = mount({
       [LIST]: (request) => {
-        const after = new URL(request.url).searchParams.get("after");
+        const after = new URL(request.url).searchParams.get("cursor");
         return after === null
-          ? json({ contacts: [contact("a", {})], next_after: "cursor-1" })
-          : json({ contacts: [contact("b", {})], next_after: null });
+          ? json({ contacts: [contact("a", {})], next_cursor: "cursor-1" })
+          : json({ contacts: [contact("b", {})], next_cursor: null });
       },
     });
     const user = userEvent.setup();
@@ -151,13 +151,13 @@ describe("contacts list", () => {
     expect(screen.getByRole("link", { name: "a" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
     expect(calls.filter((call) => call.method === "GET" && call.path.endsWith("/contacts")).at(-1)?.search).toContain(
-      "after=cursor-1",
+      "cursor=cursor-1",
     );
   });
 
   it("searches with a POST so the value stays out of the URL, and can go back to everyone", async () => {
     const calls = mount({
-      [LIST]: () => json({ contacts: [contact("a", {}), contact("b", {})], next_after: null }),
+      [LIST]: () => json({ contacts: [contact("a", {}), contact("b", {})], next_cursor: null }),
       [SEARCH]: () => json({ contacts: [contact("b", {})] }),
     });
     const user = userEvent.setup();
@@ -179,7 +179,7 @@ describe("contacts list", () => {
 
   it("says when a search matches nothing", async () => {
     mount({
-      [LIST]: () => json({ contacts: [contact("a", {})], next_after: null }),
+      [LIST]: () => json({ contacts: [contact("a", {})], next_cursor: null }),
       [SEARCH]: () => json({ contacts: [] }),
     });
     const user = userEvent.setup();
@@ -195,7 +195,7 @@ describe("contacts list", () => {
     mount(
       {
         "GET /api/v1/workspaces/ws1/members": () => json(members("admin", "someone-else")),
-        [LIST]: () => json({ contacts: [contact("a", {})], next_after: null }),
+        [LIST]: () => json({ contacts: [contact("a", {})], next_cursor: null }),
       },
       MEMBER,
     );
@@ -206,7 +206,7 @@ describe("contacts list", () => {
   });
 
   it("offers the definition view to admins only", async () => {
-    mount({ [LIST]: () => json({ contacts: [], next_after: null }) });
+    mount({ [LIST]: () => json({ contacts: [], next_cursor: null }) });
 
     expect(await screen.findByRole("link", { name: "Definition" })).toHaveAttribute("href", "/w/ws1/contact-definition");
   });
@@ -214,7 +214,7 @@ describe("contacts list", () => {
 
 describe("new contact form", () => {
   async function openForm(routes: Parameters<typeof mockApi>[0] = {}) {
-    const calls = mount({ [LIST]: () => json({ contacts: [], next_after: null }), ...routes });
+    const calls = mount({ [LIST]: () => json({ contacts: [], next_cursor: null }), ...routes });
     const user = userEvent.setup();
     await user.click((await screen.findAllByRole("button", { name: "New contact" }))[0]!);
     return { calls, user, dialog: await screen.findByRole("dialog", { name: "New contact" }) };

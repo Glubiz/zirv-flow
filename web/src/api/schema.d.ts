@@ -4881,9 +4881,9 @@ export interface components {
             max_file_bytes: number;
             /**
              * Format: uuid
-             * @description Pass as `before` for the next page; null when there is none.
+             * @description Pass as `cursor` for the next page; null when there is none.
              */
-            next_before?: string | null;
+            next_cursor?: string | null;
             /**
              * Format: int64
              * @description The bytes the workspace's live assets take.
@@ -5121,8 +5121,8 @@ export interface components {
         ConflictsBody: {
             /** @description Newest first. */
             conflicts: components["schemas"]["ConflictBody"][];
-            /** @description Pass as `before` for the next page; null when there is none. */
-            next_before?: string | null;
+            /** @description Pass as `cursor` for the next page; null when there is none. */
+            next_cursor?: string | null;
         };
         ConsentBody: {
             /**
@@ -5329,8 +5329,8 @@ export interface components {
         ContactsBody: {
             /** @description In key order. */
             contacts: components["schemas"]["ContactBody"][];
-            /** @description Pass as `after` for the next page; null on the last page. */
-            next_after?: string | null;
+            /** @description Pass as `cursor` for the next page; null on the last page. */
+            next_cursor?: string | null;
         };
         ConvertTemplateDraftRequest: {
             /**
@@ -5863,8 +5863,8 @@ export interface components {
         CsvImportsBody: {
             /** @description Newest first. */
             imports: components["schemas"]["CsvImportBody"][];
-            /** @description Pass as `before` for the next page; null when there is none. */
-            next_before?: string | null;
+            /** @description Pass as `cursor` for the next page; null when there is none. */
+            next_cursor?: string | null;
         };
         /** @description How current the data behind a preview is. */
         DataAgeBody: {
@@ -5893,8 +5893,8 @@ export interface components {
         DeadJobsBody: {
             /** @description Newest first. */
             jobs: components["schemas"]["JobBody"][];
-            /** @description Pass as `before` for the next page; null when there is none. */
-            next_before?: string | null;
+            /** @description Pass as `cursor` for the next page; null when there is none. */
+            next_cursor?: string | null;
         };
         DeadLetterBody: {
             /**
@@ -5926,8 +5926,8 @@ export interface components {
         DeadLettersBody: {
             /** @description Newest first. */
             letters: components["schemas"]["DeadLetterBody"][];
-            /** @description Pass as `before` for the next page; null when there is none. */
-            next_before?: string | null;
+            /** @description Pass as `cursor` for the next page; null when there is none. */
+            next_cursor?: string | null;
         };
         /** @description The data of an `item` frame. */
         DebuggerItemBody: {
@@ -6474,8 +6474,8 @@ export interface components {
         EnrollmentsBody: {
             /** @description Newest first. */
             enrollments: components["schemas"]["EnrollmentItemBody"][];
-            /** @description Pass as `before` for the next page; null when there is none. */
-            next_before?: string | null;
+            /** @description Pass as `cursor` for the next page; null when there is none. */
+            next_cursor?: string | null;
         };
         ErasureBody: {
             /** Format: date-time */
@@ -6531,8 +6531,8 @@ export interface components {
         ErasuresBody: {
             /** @description Newest first. */
             erasures: components["schemas"]["ErasureBody"][];
-            /** @description Pass as `before` for the next page; null when there is none. */
-            next_before?: string | null;
+            /** @description Pass as `cursor` for the next page; null when there is none. */
+            next_cursor?: string | null;
         };
         /** @description The send to evaluate the policy for, and the person. */
         EvaluateConsentPolicyRequest: {
@@ -6767,12 +6767,12 @@ export interface components {
         ExploreListBody: {
             /** @description Newest first. */
             events: components["schemas"]["ExploredEventBody"][];
-            /** @description Pass as `after` for the next page; null when there is none. */
-            next_after?: string | null;
+            /** @description Pass as `cursor` for the next page; null when there is none. */
+            next_cursor?: string | null;
         };
         ExploreListRequest: components["schemas"]["ExploreScopeRequest"] & {
-            /** @description The `next_after` of the previous page. */
-            after?: string | null;
+            /** @description The `next_cursor` of the previous page. */
+            cursor?: string | null;
             /**
              * Format: int32
              * @description Rows per page, 1 to 200; default 50.
@@ -6866,8 +6866,8 @@ export interface components {
         ExportsBody: {
             /** @description Newest first. */
             exports: components["schemas"]["ExportBody"][];
-            /** @description Pass as `before` for the next page; null when there is none. */
-            next_before?: string | null;
+            /** @description Pass as `cursor` for the next page; null when there is none. */
+            next_cursor?: string | null;
         };
         FeatureUsageBody: {
             /** Format: int64 */
@@ -7463,7 +7463,10 @@ export interface components {
              * @description The consent policy rule that decided, by id.
              */
             rule_id?: string | null;
-            /** @description For a deferral, when the message runs again. */
+            /**
+             * Format: date-time
+             * @description For a deferral, when the message runs again (RFC 3339).
+             */
             run_at?: string | null;
         };
         /** @description Why the walk stopped before the graph or the script ended. */
@@ -7495,8 +7498,8 @@ export interface components {
         HistoryBody: {
             /** @description Newest first. */
             entries: components["schemas"]["HistoryEntryBody"][];
-            /** @description Pass as `before` for the next page; null when there is none. */
-            next_before?: string | null;
+            /** @description Pass as `cursor` for the next page; null when there is none. */
+            next_cursor?: string | null;
         };
         HistoryEntryBody: {
             /** Format: uuid */
@@ -7652,9 +7655,9 @@ export interface components {
         ImportRejectsBody: {
             /**
              * Format: int64
-             * @description Pass as `after` for the next page; null when there is none.
+             * @description Pass as `cursor` for the next page; null when there is none.
              */
-            next_after?: number | null;
+            next_cursor?: number | null;
             /** @description In row order. */
             rejects: components["schemas"]["ImportRejectBody"][];
         };
@@ -7694,8 +7697,8 @@ export interface components {
             trace_id: string;
         };
         IngestRejectsBody: {
-            /** @description Pass as `before` for the next page; null when there is none. */
-            next_before?: string | null;
+            /** @description Pass as `cursor` for the next page; null when there is none. */
+            next_cursor?: string | null;
             /** @description Newest first. */
             rejects: components["schemas"]["IngestRejectBody"][];
         };
@@ -7863,8 +7866,8 @@ export interface components {
         ListMembersBody: {
             /** @description Newest first. */
             members: components["schemas"]["ListMemberBody"][];
-            /** @description Pass as `before` for the next page; null when there is none. */
-            next_before?: string | null;
+            /** @description Pass as `cursor` for the next page; null when there is none. */
+            next_cursor?: string | null;
         };
         ManifestFieldBody: {
             name: string;
@@ -7941,8 +7944,8 @@ export interface components {
         MembershipHistoryBody: {
             /** @description Newest first. */
             changes: components["schemas"]["MembershipChangeBody"][];
-            /** @description Pass as `before` for the next page; null when there is none. */
-            next_before?: string | null;
+            /** @description Pass as `cursor` for the next page; null when there is none. */
+            next_cursor?: string | null;
         };
         MergeBody: {
             /** Format: date-time */
@@ -8035,8 +8038,8 @@ export interface components {
         MessagesBody: {
             /** @description Newest first. */
             messages: components["schemas"]["MessageBody"][];
-            /** @description Pass as `before` for the next page; null when there is none. */
-            next_before?: string | null;
+            /** @description Pass as `cursor` for the next page; null when there is none. */
+            next_cursor?: string | null;
         };
         MethodsBody: {
             /** @description True when e-mail and password sign-in is accepted. */
@@ -8303,7 +8306,10 @@ export interface components {
         /** @description The event a record would yield. */
         PreviewEvent: {
             name: string;
-            /** @description When the event happened, when the mapping says; otherwise the run's start decides. */
+            /**
+             * Format: date-time
+             * @description When the event happened, when the mapping says; otherwise the run's start decides.
+             */
             occurred_at?: string | null;
             properties: Record<string, never>;
         };
@@ -9146,9 +9152,9 @@ export interface components {
         SearchBody: {
             /**
              * Format: uuid
-             * @description Pass as `after` for the next page; null when there is none.
+             * @description Pass as `cursor` for the next page; null when there is none.
              */
-            next_after?: string | null;
+            next_cursor?: string | null;
             /** @description By person id. */
             people: components["schemas"]["PersonHitBody"][];
         };
@@ -9177,9 +9183,9 @@ export interface components {
         SearchRequest: {
             /**
              * Format: uuid
-             * @description The `next_after` of the previous page.
+             * @description The `next_cursor` of the previous page.
              */
-            after?: string | null;
+            cursor?: string | null;
             identifier?: null | components["schemas"]["IdentifierQuery"];
             /**
              * Format: int32
@@ -10140,8 +10146,8 @@ export interface components {
             invalid: components["schemas"]["InvalidRowBody"][];
         };
         SuppressionsBody: {
-            /** @description Pass as `before` for the next page; null when there is none. */
-            next_before?: string | null;
+            /** @description Pass as `cursor` for the next page; null when there is none. */
+            next_cursor?: string | null;
             /** @description Newest first. */
             suppressions: components["schemas"]["SuppressionBody"][];
         };
@@ -10571,8 +10577,8 @@ export interface components {
             version?: number | null;
         };
         TestSendsBody: {
-            /** @description Pass as `before` for the next page; null when there is none. */
-            next_before?: string | null;
+            /** @description Pass as `cursor` for the next page; null when there is none. */
+            next_cursor?: string | null;
             /** @description Newest first. */
             test_sends: components["schemas"]["TestSendBody"][];
         };
@@ -10727,8 +10733,8 @@ export interface components {
         TimelineBody: {
             /** @description Newest first. */
             entries: components["schemas"]["TimelineEntryBody"][];
-            /** @description Pass as `before` for the next page; null when there is none. */
-            next_before?: string | null;
+            /** @description Pass as `cursor` for the next page; null when there is none. */
+            next_cursor?: string | null;
         };
         TimelineEntryBody: (components["schemas"]["EventEntryBody"] & {
             /** @enum {string} */
@@ -11327,8 +11333,8 @@ export interface operations {
             query?: {
                 /** @description Jobs per page, 1 to 200; default 50 */
                 limit?: number;
-                /** @description The next_before of the previous page */
-                before?: string;
+                /** @description The next_cursor of the previous page */
+                cursor?: string;
             };
             header?: never;
             path?: never;
@@ -11345,7 +11351,7 @@ export interface operations {
                     "application/json": components["schemas"]["DeadJobsBody"];
                 };
             };
-            /** @description limit is out of range or before is malformed */
+            /** @description limit is out of range or cursor is malformed; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -13199,8 +13205,8 @@ export interface operations {
             query?: {
                 /** @description Assets per page, 1 to 200; default 50 */
                 limit?: number;
-                /** @description The next_before of the previous page */
-                before?: string;
+                /** @description The next_cursor of the previous page */
+                cursor?: string;
             };
             header?: never;
             path: {
@@ -13220,7 +13226,7 @@ export interface operations {
                     "application/json": components["schemas"]["AssetsBody"];
                 };
             };
-            /** @description limit is out of range or before is malformed */
+            /** @description limit is out of range or cursor is malformed; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -14610,8 +14616,8 @@ export interface operations {
             query?: {
                 /** @description Contacts per page, 1 to 200; default 50 */
                 limit?: number;
-                /** @description The next_after of the previous page */
-                after?: string;
+                /** @description The next_cursor of the previous page */
+                cursor?: string;
             };
             header?: never;
             path: {
@@ -14631,7 +14637,7 @@ export interface operations {
                     "application/json": components["schemas"]["ContactsBody"];
                 };
             };
-            /** @description limit is out of range, or after is malformed */
+            /** @description limit is out of range, or cursor is malformed; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -17234,7 +17240,7 @@ export interface operations {
                     "application/json": components["schemas"]["ExploreListBody"];
                 };
             };
-            /** @description limit is out of range or after is malformed */
+            /** @description limit is out of range or cursor is malformed; the removed after answers paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -17726,8 +17732,8 @@ export interface operations {
             query?: {
                 /** @description Enrollments per page, 1 to 200; default 50 */
                 limit?: number;
-                /** @description The next_before of the previous page */
-                before?: string;
+                /** @description The next_cursor of the previous page */
+                cursor?: string;
                 /** @description `active`, `waiting`, `held`, `completed`, `exited` or `failed` */
                 state?: string;
                 /** @description Only enrollments pinned to this version */
@@ -17755,7 +17761,7 @@ export interface operations {
                     "application/json": components["schemas"]["EnrollmentsBody"];
                 };
             };
-            /** @description A parameter is out of range or malformed */
+            /** @description A parameter is out of range or malformed; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -18715,8 +18721,8 @@ export interface operations {
             query?: {
                 /** @description Letters per page, 1 to 200; default 50 */
                 limit?: number;
-                /** @description The next_before of the previous page */
-                before?: string;
+                /** @description The next_cursor of the previous page */
+                cursor?: string;
                 /** @description Only this destination's letters */
                 destination_id?: string;
             };
@@ -18738,7 +18744,7 @@ export interface operations {
                     "application/json": components["schemas"]["DeadLettersBody"];
                 };
             };
-            /** @description A malformed limit, cursor or destination id */
+            /** @description A malformed limit, cursor or destination id; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -19194,8 +19200,8 @@ export interface operations {
                 status?: string;
                 /** @description Conflicts per page, 1 to 200; default 50 */
                 limit?: number;
-                /** @description The next_before of the previous page */
-                before?: string;
+                /** @description The next_cursor of the previous page */
+                cursor?: string;
             };
             header?: never;
             path: {
@@ -19215,7 +19221,7 @@ export interface operations {
                     "application/json": components["schemas"]["ConflictsBody"];
                 };
             };
-            /** @description status or limit is out of range, or before is malformed */
+            /** @description status or limit is out of range, or cursor is malformed; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -19384,8 +19390,8 @@ export interface operations {
             query?: {
                 /** @description Imports per page, 1 to 200; default 50 */
                 limit?: number;
-                /** @description The next_before of the previous page */
-                before?: string;
+                /** @description The next_cursor of the previous page */
+                cursor?: string;
             };
             header?: never;
             path: {
@@ -19405,7 +19411,7 @@ export interface operations {
                     "application/json": components["schemas"]["CsvImportsBody"];
                 };
             };
-            /** @description limit is out of range or before is malformed */
+            /** @description limit is out of range or cursor is malformed; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -19824,8 +19830,8 @@ export interface operations {
                 phase?: string;
                 /** @description Rejects per page, 1 to 200; default 100 */
                 limit?: number;
-                /** @description The next_after of the previous page */
-                after?: number;
+                /** @description The next_cursor of the previous page */
+                cursor?: number;
             };
             header?: never;
             path: {
@@ -19847,7 +19853,7 @@ export interface operations {
                     "application/json": components["schemas"]["ImportRejectsBody"];
                 };
             };
-            /** @description A malformed phase, limit or after */
+            /** @description A malformed phase, limit or cursor; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -20015,8 +20021,8 @@ export interface operations {
             query?: {
                 /** @description Rejects per page, 1 to 200; default 50 */
                 limit?: number;
-                /** @description The next_before of the previous page */
-                before?: string;
+                /** @description The next_cursor of the previous page */
+                cursor?: string;
                 /** @description Only rejects of this event name */
                 name?: string;
                 /** @description Only rejects with this reason code */
@@ -20040,7 +20046,7 @@ export interface operations {
                     "application/json": components["schemas"]["IngestRejectsBody"];
                 };
             };
-            /** @description limit is out of range or before is malformed */
+            /** @description limit is out of range or cursor is malformed; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -20462,8 +20468,8 @@ export interface operations {
             query?: {
                 /** @description Members per page, 1 to 200; default 50 */
                 limit?: number;
-                /** @description The next_before of the previous page */
-                before?: string;
+                /** @description The next_cursor of the previous page */
+                cursor?: string;
             };
             header?: never;
             path: {
@@ -20485,7 +20491,7 @@ export interface operations {
                     "application/json": components["schemas"]["ListMembersBody"];
                 };
             };
-            /** @description limit is out of range, or before is malformed */
+            /** @description limit is out of range, or cursor is malformed; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -20984,6 +20990,15 @@ export interface operations {
                     "application/json": components["schemas"]["SearchBody"];
                 };
             };
+            /** @description The removed after is sent: page with cursor (`paging_parameter_renamed`) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -21280,8 +21295,8 @@ export interface operations {
             query?: {
                 /** @description Entries per page, 1 to 200; default 50 */
                 limit?: number;
-                /** @description The next_before of the previous page */
-                before?: string;
+                /** @description The next_cursor of the previous page */
+                cursor?: string;
                 /** @description Only changes scoped to at least this value of the dimension `key`; repeat for several dimensions */
                 "dimension.{key}"?: string;
             };
@@ -21305,7 +21320,7 @@ export interface operations {
                     "application/json": components["schemas"]["HistoryBody"];
                 };
             };
-            /** @description limit is out of range, or before is malformed */
+            /** @description limit is out of range, or cursor is malformed; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -21493,8 +21508,8 @@ export interface operations {
             query?: {
                 /** @description Changes per page, 1 to 200; default 50 */
                 limit?: number;
-                /** @description The next_before of the previous page */
-                before?: string;
+                /** @description The next_cursor of the previous page */
+                cursor?: string;
             };
             header?: never;
             path: {
@@ -21516,7 +21531,7 @@ export interface operations {
                     "application/json": components["schemas"]["MembershipHistoryBody"];
                 };
             };
-            /** @description limit is out of range, or before is malformed */
+            /** @description limit is out of range, or cursor is malformed; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -21559,8 +21574,8 @@ export interface operations {
             query?: {
                 /** @description Messages per page, 1 to 200; default 50 */
                 limit?: number;
-                /** @description The next_before of the previous page */
-                before?: string;
+                /** @description The next_cursor of the previous page */
+                cursor?: string;
                 /** @description `sent`, `skipped`, `deferred`, `in_progress` or `failed` */
                 result?: string;
                 /** @description Only messages of this template */
@@ -21586,7 +21601,7 @@ export interface operations {
                     "application/json": components["schemas"]["MessagesBody"];
                 };
             };
-            /** @description A parameter is out of range or malformed */
+            /** @description A parameter is out of range or malformed; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -21638,8 +21653,8 @@ export interface operations {
             query?: {
                 /** @description Entries per page, 1 to 200; default 50 */
                 limit?: number;
-                /** @description The next_before of the previous page */
-                before?: string;
+                /** @description The next_cursor of the previous page */
+                cursor?: string;
                 /** @description `event`, `decision` or both separated by a comma; default both */
                 kinds?: string;
                 /** @description Include the `event.accepted` decisions; default false */
@@ -21665,7 +21680,7 @@ export interface operations {
                     "application/json": components["schemas"]["TimelineBody"];
                 };
             };
-            /** @description limit is out of range, or before, kinds or all_decisions is malformed */
+            /** @description limit is out of range, or cursor, kinds or all_decisions is malformed; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -21717,8 +21732,8 @@ export interface operations {
             query?: {
                 /** @description Requests per page, 1 to 200; default 50 */
                 limit?: number;
-                /** @description The next_before of the previous page */
-                before?: string;
+                /** @description The next_cursor of the previous page */
+                cursor?: string;
             };
             header?: never;
             path: {
@@ -21738,7 +21753,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErasuresBody"];
                 };
             };
-            /** @description limit is out of range or before is malformed */
+            /** @description limit is out of range or cursor is malformed; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -21865,8 +21880,8 @@ export interface operations {
             query?: {
                 /** @description Exports per page, 1 to 200; default 50 */
                 limit?: number;
-                /** @description The next_before of the previous page */
-                before?: string;
+                /** @description The next_cursor of the previous page */
+                cursor?: string;
             };
             header?: never;
             path: {
@@ -21886,7 +21901,7 @@ export interface operations {
                     "application/json": components["schemas"]["ExportsBody"];
                 };
             };
-            /** @description limit is out of range or before is malformed */
+            /** @description limit is out of range or cursor is malformed; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -25838,8 +25853,8 @@ export interface operations {
             query?: {
                 /** @description Suppressions per page, 1 to 200; default 50 */
                 limit?: number;
-                /** @description The next_before of the previous page */
-                before?: string;
+                /** @description The next_cursor of the previous page */
+                cursor?: string;
                 /** @description Only this reason: hard_bounce, complaint, manual or erased */
                 reason?: string;
             };
@@ -25861,7 +25876,7 @@ export interface operations {
                     "application/json": components["schemas"]["SuppressionsBody"];
                 };
             };
-            /** @description limit or reason is out of range, or before is malformed */
+            /** @description limit or reason is out of range, or cursor is malformed; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -27695,8 +27710,8 @@ export interface operations {
                 draft_revision?: number;
                 /** @description Rows per page, 1 to 200; default 50 */
                 limit?: number;
-                /** @description The next_before of the previous page */
-                before?: string;
+                /** @description The next_cursor of the previous page */
+                cursor?: string;
             };
             header?: never;
             path: {
@@ -27716,7 +27731,7 @@ export interface operations {
                     "application/json": components["schemas"]["TestSendsBody"];
                 };
             };
-            /** @description limit, template_id or draft_revision is out of range or malformed, or before is not a cursor */
+            /** @description limit, template_id or draft_revision is out of range or malformed, or cursor is malformed; the removed before and after answer paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;

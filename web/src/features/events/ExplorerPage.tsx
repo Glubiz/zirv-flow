@@ -326,7 +326,7 @@ function Rows({
       unwrap(
         client.POST("/api/v1/workspaces/{ws}/events/explore/list", {
           params: { path: { ws: workspaceId } },
-          body: { ...scopeBody(query), ...(after !== null ? { after } : {}) },
+          body: { ...scopeBody(query), ...(after !== null ? { cursor: after } : {}) },
         }),
       ),
     [workspaceId, JSON.stringify(query), after],
@@ -421,7 +421,7 @@ function Rows({
             </div>
             <div className="panel-pad row">
               {after !== null ? <Button onClick={() => onAfter(null)}>Back to the newest</Button> : null}
-              {data.next_after ? <Button onClick={() => onAfter(data.next_after ?? null)}>Older events</Button> : null}
+              {data.next_cursor ? <Button onClick={() => onAfter(data.next_cursor ?? null)}>Older events</Button> : null}
             </div>
           </>
         )}

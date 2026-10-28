@@ -224,11 +224,13 @@ pub(crate) async fn import(
         return Err(ApiError::new(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "expected a CSV body (content-type: text/csv)",
-        ));
+        )
+        .with_code("csv_content_type_required"));
     }
     let body = body.map_err(|rejection| {
         if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
             ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "request body is too large")
+                .with_code("csv_too_large")
         } else {
             ApiError::bad_request("request body could not be read")
         }

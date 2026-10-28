@@ -890,11 +890,11 @@ mod tests {
         let first = fx
             .send("GET", "/contacts?limit=2", None, &fx.read, &[])
             .await;
-        let cursor = first.body["next_after"].as_str().unwrap().to_owned();
+        let cursor = first.body["next_cursor"].as_str().unwrap().to_owned();
         let second = fx
             .send(
                 "GET",
-                &format!("/contacts?limit=2&after={cursor}"),
+                &format!("/contacts?limit=2&cursor={cursor}"),
                 None,
                 &fx.read,
                 &[],
@@ -962,7 +962,7 @@ mod tests {
         };
         assert_eq!(keys(&first, "contacts"), ["a1", "a2"]);
         assert_eq!(keys(&second, "contacts"), ["b"]);
-        assert_eq!(second.body["next_after"], Value::Null);
+        assert_eq!(second.body["next_cursor"], Value::Null);
         assert_eq!(keys(&by_prefix, "contacts"), ["a1", "a2"]);
         assert_eq!(keys(&by_email_get, "contacts"), ["b"]);
         assert_eq!(keys(&by_identifier, "contacts"), ["a1"]);

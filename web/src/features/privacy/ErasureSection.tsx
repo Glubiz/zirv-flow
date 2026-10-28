@@ -26,10 +26,10 @@ export function ErasureSection({ workspaceId }: { workspaceId: string }) {
     async (before: string | null) => {
       const page = await unwrap(
         client.GET("/api/v1/workspaces/{ws}/privacy/erasures", {
-          params: { path: { ws: workspaceId }, query: { limit: PAGE_SIZE, before: before ?? undefined } },
+          params: { path: { ws: workspaceId }, query: { limit: PAGE_SIZE, cursor: before ?? undefined } },
         }),
       );
-      return { items: page.erasures, next: page.next_before ?? null };
+      return { items: page.erasures, next: page.next_cursor ?? null };
     },
     [workspaceId],
   );

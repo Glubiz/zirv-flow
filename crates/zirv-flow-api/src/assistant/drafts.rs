@@ -843,7 +843,8 @@ pub(crate) async fn create(
                 return Err(ApiError::new(
                     StatusCode::CONFLICT,
                     "this source does not use a manifest",
-                ));
+                )
+                .with_code("source_not_manifest"));
             }
             (Some(source), None)
         }
@@ -1058,6 +1059,14 @@ pub(crate) async fn create(
                 ),
                 _ => None,
             };
+            // A segment has no dry run on the server: the builder shows the live count of the draft.
+            let dry_run = match (kind, &stream, source_id) {
+                (DraftKind::Segment | DraftKind::Flow, _, _) => None,
+                (_, Some(stream), Some(source_id)) => {
+                    Some(dry_run_mapping(&context, source_id, stream, &content).await)
+                }
+                _ => Some(dry_run_manifest(&context, source.as_ref(), &content).await),
+            };
             let mut tx = zirv_flow_store::begin(&state.pool).await?;
             zirv_flow_store::insert_ai_draft(
                 &mut tx,
@@ -1081,23 +1090,12 @@ pub(crate) async fn create(
                 },
             )
             .await?;
-            idempotency::complete(reservation.as_ref(), &mut tx, StatusCode::CREATED, id).await?;
-            zirv_flow_store::commit(tx).await?;
-            // A segment has no dry run on the server: the builder shows the live count of the draft.
-            let dry_run = match (kind, &stream, source_id) {
-                (DraftKind::Segment | DraftKind::Flow, _, _) => None,
-                (_, Some(stream), Some(source_id)) => {
-                    Some(dry_run_mapping(&context, source_id, stream, &content).await)
-                }
-                _ => Some(dry_run_manifest(&context, source.as_ref(), &content).await),
-            };
-            run_outcome(kind, "valid");
             let repaired = if attempts > 1 {
                 places(&earlier)
             } else {
                 Vec::new()
             };
-            DraftBody {
+            let body = DraftBody {
                 id,
                 kind: request.kind,
                 status: "valid",
@@ -1110,7 +1108,18 @@ pub(crate) async fn create(
                 subject_variants,
                 renders,
                 repaired,
-            }
+            };
+            idempotency::complete(
+                reservation.as_ref(),
+                &mut tx,
+                StatusCode::CREATED,
+                id,
+                &body,
+            )
+            .await?;
+            zirv_flow_store::commit(tx).await?;
+            run_outcome(kind, "valid");
+            body
         }
         Ok(RepairOutcome::Exhausted(issues, attempts)) => {
             let mut tx = zirv_flow_store::begin(&state.pool).await?;
@@ -1133,10 +1142,7 @@ pub(crate) async fn create(
                 },
             )
             .await?;
-            idempotency::complete(reservation.as_ref(), &mut tx, StatusCode::CREATED, id).await?;
-            zirv_flow_store::commit(tx).await?;
-            run_outcome(kind, "invalid");
-            DraftBody {
+            let body = DraftBody {
                 id,
                 kind: request.kind,
                 status: "invalid",
@@ -1149,7 +1155,18 @@ pub(crate) async fn create(
                 subject_variants: Vec::new(),
                 renders: None,
                 repaired: Vec::new(),
-            }
+            };
+            idempotency::complete(
+                reservation.as_ref(),
+                &mut tx,
+                StatusCode::CREATED,
+                id,
+                &body,
+            )
+            .await?;
+            zirv_flow_store::commit(tx).await?;
+            run_outcome(kind, "invalid");
+            body
         }
         Err(RepairError::Dispatch(error)) => {
             run_outcome(kind, "failed");

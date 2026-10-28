@@ -169,7 +169,7 @@ const VALUE_FREE: &[(&[&str], &str)] = &[
     ),
     (
         &["api_idempotency"],
-        "Idempotency-Key bookkeeping: hashes of the caller with the key and of the request, a state, a lease, a status and the created resource's id; no response body and no client-chosen text; 24 hour expiry",
+        "Idempotency-Key bookkeeping: hashes of the caller with the key, the request and the response, a state, a lease, a status and the created resource's id; no response body and no client-chosen text; 24 hour expiry",
     ),
     (
         &["ai_calls", "ai_drafts", "ai_settings"],
