@@ -57,8 +57,10 @@ you tell it; it does not check that the person really agreed (duty 2).
 confirmation and changes nothing; the `POST /u/{token}` unsubscribes the scope of that message
 (its topic and verticals), or the whole channel when that scope no longer exists. The page at
 `/u/{token}/preferences` lets the person choose topics. Neither route needs a sign-in; the signed
-token authorizes the one message. A bad token shows a not-found page. After a successful unsubscribe, the next send to that
-person is skipped for lack of consent. *Limit:* `server.public_url` may be `http` or `https`, but the
+token authorizes the one message. A bad token shows a not-found page. After a successful unsubscribe, the next marketing
+send in that consent scope is skipped for lack of consent. Transactional sends skip the consent gate,
+and sends in other topics or verticals can still go out, unless the unsubscribe fell back to the
+whole channel. *Limit:* `server.public_url` may be `http` or `https`, but the
 one-click header is only useful over `https`, so set an `https` URL. The tokens die with the master
 key (see E17).
 
@@ -235,8 +237,10 @@ that a person's data was handled by id, and ids are references, not anonymous da
 **E17. Secrets at rest.** Connector credentials, OAuth tokens, AI provider keys, webhook and signing
 secrets, DKIM private keys and test-send addresses are stored sealed: each has its own data key
 (XChaCha20-Poly1305), wrapped by the master key. A database dump without the key shows ciphertext.
-The API never returns a stored connector, provider or signing secret; the one exception is a new API
-key, whose secret is shown once when you create it. The master key also roots the keyed hashes of suppressions, the
+The API never returns a stored connector, provider or signing secret; the exceptions are secrets
+you must be given once: a new API key (shown once when you create it), an inbound webhook's shared
+secret (shown once on create and on rotate) and a flow's webhook signing secret (shown once on create
+and on rotate). The master key also roots the keyed hashes of suppressions, the
 ledger and the tracking tokens, so losing it kills those too. *Limit:* other application data is not encrypted at rest by the
 application; encrypt the disk and the backups yourself (duty 6). Local passwords are stored as
 one-way Argon2id hashes, which cannot be reversed.
@@ -260,8 +264,8 @@ a saved manifest are never sent, and webhook URLs are masked in both modes. Two 
 out in both modes: the template assistant sends the template's authored copy (html, text and
 blocks), and only the literals in `visible_if` conditions are masked. An admin can turn on *Allow
 personal data in requests*; saved definitions then go out with their literals, and the mapping
-assistant sends up to five sample records of a source (if they are over 8 KiB together, none are sent) that it reads for the
-model, always fenced and labeled as data. With the opt-in off it sends none. The template assistant
+assistant sends up to five sample records of a source that it reads for the model. It adds the records in order and
+stops at the first one that would take the total past 8 KiB, keeping the earlier ones. They are always fenced and labeled as data. With the opt-in off it sends none. The template assistant
 sends no person in either mode. The provider key is sealed (E17). No transcript is stored
 unless an admin opts in to 1 to 30 days; an hourly job deletes expired ones and erasing a person
 deletes the transcripts that name them (E8). The call log never holds a prompt or an answer.

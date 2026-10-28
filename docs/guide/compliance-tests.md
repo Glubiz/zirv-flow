@@ -104,7 +104,8 @@ Each enforced claim (E1 to E20) of the [compliance guide](compliance.md) maps to
 | E19 | Default-level logs hold no identifier | `default_level_logs_hold_no_identifier_value_through_the_whole_privacy_scenario` | `crates/zirv-flow/src/e2e/privacy.rs` |
 | E20 | Personal content is refused without the opt-in | `personal_content_is_refused_everywhere_without_the_opt_in` | `crates/zirv-flow-ai/src/request.rs` |
 | E20 | No person reaches the provider | `the_model_context_and_the_response_hold_no_person_even_with_the_pii_opt_in` | `crates/zirv-flow-api/src/assistant/acceptance.rs` |
-| E20 | At most five sample records go out, only with the opt-in | `sample_records_are_capped_by_count_and_bytes` | `crates/zirv-flow-api/src/assistant/prompt.rs` |
+| E20 | At most five sample records go out, within an 8 KiB total | `sample_records_are_capped_by_count_and_bytes` | `crates/zirv-flow-api/src/assistant/prompt.rs` |
+| E20 | A record that would pass the byte cap ends the list and the earlier ones stay | `sample_records_stop_at_the_first_that_passes_the_byte_cap` | `crates/zirv-flow-api/src/assistant/prompt.rs` |
 | E20 | Without the opt-in the context has no personal part | `schema_only_context_has_no_personal_part` | `crates/zirv-flow-api/src/assistant/prompt.rs` |
 | E20 | With the opt-in the sample values are sent fenced | `with_the_opt_in_the_sample_values_are_sent_fenced` | `crates/zirv-flow-api/src/assistant/acceptance.rs` |
 | E20 | Webhook URLs are masked under the opt-in | `webhook_urls_are_masked_under_the_opt_in_too_and_a_placeholder_stays_with_its_node` | `crates/zirv-flow-api/src/assistant/acceptance.rs` |
