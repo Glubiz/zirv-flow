@@ -102,8 +102,7 @@ SERVER_STARTED=0
 port_in_use() { (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; }
 
 wait_port_free() {
-  local i
-  for i in $(seq 1 40); do
+  for _ in $(seq 1 40); do
     if ! port_in_use; then return 0; fi
     sleep 0.5
   done
@@ -190,8 +189,7 @@ start_server() {
   env "${ENV_ARGS[@]}" "$BIN" all >"$WORK/server.log" 2>&1 &
   SERVER_PID=$!
   SERVER_STARTED=1
-  local i
-  for i in $(seq 1 120); do
+  for _ in $(seq 1 120); do
     if curl -fsS "http://127.0.0.1:$PORT/readyz" >/dev/null 2>&1; then return 0; fi
     sleep 0.5
   done
