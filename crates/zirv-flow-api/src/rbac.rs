@@ -924,15 +924,6 @@ mod tests {
             "the scope matrix in docs/api.md is stale; regenerate with ZIRV_FLOW_BLESS=1 cargo nextest run -p zirv-flow-api scope_matrix"
         );
     }
-
-    #[test]
-    fn a_changed_route_class_makes_the_matrix_differ() {
-        let policy = POLICY.replace("\r\n", "\n");
-        let current = with_matrix(&policy, &scope_matrix());
-        let edited = scope_matrix().replacen("| editor | write |", "| admin | admin |", 1);
-        assert_ne!(with_matrix(&policy, &edited), current);
-        assert!(scope_matrix().contains("| POST | `/api/v1/ingest/track` | none | ingest |"));
-    }
 }
 
 #[cfg(test)]

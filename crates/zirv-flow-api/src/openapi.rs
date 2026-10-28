@@ -1196,14 +1196,133 @@ mod tests {
         }
     }
 
-    /// Every string literal that follows one of the markers, in the non-test source of the crate.
+    /// The places in `text` that page with a removed name: `before` or `after` as a query key
+    /// (`?before`, `&after=`) and the old response fields. `names` is false for a text that
+    /// tells the history of the rename and so mentions the old response fields.
+    fn stale_paging_names(text: &str, names: bool) -> Vec<String> {
+        let mut found = Vec::new();
+        for (number, line) in text.lines().enumerate() {
+            let bytes = line.as_bytes();
+            for word in ["before", "after"] {
+                for (at, _) in line.match_indices(word) {
+                    let keyed = at > 0 && matches!(bytes[at - 1], b'?' | b'&');
+                    let end = at + word.len();
+                    let whole = bytes
+                        .get(end)
+                        .is_none_or(|next| !next.is_ascii_alphanumeric() && *next != b'_');
+                    if keyed && whole {
+                        found.push(format!("line {}: {line}", number + 1));
+                    }
+                }
+            }
+            if names && (line.contains("next_before") || line.contains("next_after")) {
+                found.push(format!("line {}: {line}", number + 1));
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn the_docs_do_not_page_with_the_removed_names() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|extension| extension == "md") {
+                    out.push(path);
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut files = vec![root.join("README.md")];
+        walk(&root.join("docs"), &mut files);
+        assert!(files.len() > 5, "the docs were not found");
+        for file in files {
+            let name = file.file_name().unwrap().to_string_lossy().into_owned();
+            let text = std::fs::read_to_string(&file).unwrap();
+            let stale = stale_paging_names(&text, name != "api.md");
+            assert!(
+                stale.is_empty(),
+                "{name} pages with a removed name: {stale:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_docs_scan_flags_a_removed_paging_name_and_not_prose() {
+        for stale in [
+            "`GET .../suppressions?limit&before&reason` lists",
+            "curl \"$BASE/contacts?limit=50&after=<next>\"",
+            "`?before=x`",
+            "the field next_before is set",
+        ] {
+            assert!(!stale_paging_names(stale, true).is_empty(), "{stale}");
+        }
+        for prose in [
+            "the draft is saved before the segment is counted",
+            "a pause after the first step",
+            "rows after the cursor, `?limit&cursor&kinds`",
+            "an `after_id` field and `&before_x`",
+        ] {
+            assert!(stale_paging_names(prose, true).is_empty(), "{prose}");
+        }
+        assert!(stale_paging_names("they were next_before", false).is_empty());
+    }
+
+    /// The calls that carry a problem code as a string literal: the text of the call and the
+    /// position of the literal among its arguments. Besides `.with_code(..)` they are the local
+    /// helpers that build a problem from a code: `conflict(code, detail)` in `flows/signing.rs`,
+    /// `breaks_templates(code, ..)` in `problem.rs`, `refused(field, code)` in
+    /// `consent/suppressions.rs` and the `AdminError::Utm` variant.
+    const CODE_CALLS: [(&str, usize); 8] = [
+        ("with_code(", 0),
+        ("code: Some(", 0),
+        ("source_fields_invalid(", 0),
+        ("flow_test_refused(", 0),
+        ("breaks_templates(", 0),
+        ("conflict(", 0),
+        ("refused(", 1),
+        ("AdminError::Utm { code: ", 0),
+    ];
+
+    /// The snake_case string literals in the code-carrying position of a call in `source`.
+    fn literals_in(source: &str) -> std::collections::BTreeSet<String> {
+        let source = source.split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut codes = std::collections::BTreeSet::new();
+        for (marker, position) in CODE_CALLS {
+            for (at, _) in source.match_indices(marker) {
+                if source[..at].ends_with("fn ") {
+                    continue;
+                }
+                let mut rest = source[at + marker.len()..].trim_start();
+                if position == 1 {
+                    let Some((first, after)) = rest.split_once(',') else {
+                        continue;
+                    };
+                    if first.contains(['(', ')']) {
+                        continue;
+                    }
+                    rest = after.trim_start();
+                }
+                let Some(rest) = rest.strip_prefix('"') else {
+                    continue;
+                };
+                let code = rest.split('"').next().unwrap();
+                if !code.is_empty()
+                    && code
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                {
+                    codes.insert(code.to_owned());
+                }
+            }
+        }
+        codes
+    }
+
+    /// Every problem code literal in the non-test source of the crate.
     fn coded_literals() -> std::collections::BTreeSet<String> {
-        const MARKERS: [&str; 4] = [
-            "with_code(",
-            "code: Some(",
-            "source_fields_invalid(",
-            "flow_test_refused(",
-        ];
         fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
             for entry in std::fs::read_dir(dir).unwrap() {
                 let path = entry.unwrap().path();
@@ -1229,24 +1348,52 @@ mod tests {
                 .unwrap()
                 .replace("\r\n", "\n");
             let source = source.split("\n#[cfg(test)]\nmod tests").next().unwrap();
-            for marker in MARKERS {
-                for (at, _) in source.match_indices(marker) {
-                    let rest = source[at + marker.len()..].trim_start();
-                    let Some(rest) = rest.strip_prefix('"') else {
-                        continue;
-                    };
-                    let code = rest.split('"').next().unwrap();
-                    if !code.is_empty()
-                        && code
-                            .chars()
-                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-                    {
-                        codes.insert(code.to_owned());
-                    }
-                }
-            }
+            codes.extend(literals_in(source));
         }
         codes
+    }
+
+    #[test]
+    fn a_code_passed_through_a_local_wrapper_is_found_and_missing_from_the_policy_fails() {
+        let source = r#"
+            fn conflict(code: &'static str, detail: &'static str) -> ApiError {
+                ApiError::new(StatusCode::CONFLICT, detail).with_code(code)
+            }
+            Err(conflict(
+                "zz_wrapper_code_not_listed",
+                "detail",
+            ))
+            Err(refused("note", "zz_second_argument_code"))
+            AdminError::Utm {
+                code: "zz_utm_code",
+                detail,
+            }
+        "#;
+        let found = literals_in(source);
+        for code in [
+            "zz_wrapper_code_not_listed",
+            "zz_second_argument_code",
+            "zz_utm_code",
+        ] {
+            assert!(found.contains(code), "{code} was not found");
+        }
+        assert_eq!(found.len(), 3, "{found:?}");
+        let listed = listed_codes(&policy());
+        assert!(found.iter().all(|code| !listed.contains(code)));
+        // The real sources hold the wrapper codes, and the policy lists them.
+        let real = coded_literals();
+        for code in [
+            "signing_secret_missing",
+            "signing_secret_exists",
+            "snippet_breaks_templates",
+            "utm_pattern_invalid",
+        ] {
+            assert!(real.contains(code), "{code} was not found in the sources");
+            assert!(
+                listed.iter().any(|listed| listed == code),
+                "{code} is not listed"
+            );
+        }
     }
 
     /// The codes whose literal is not next to a marker: set from a value of another crate, or
@@ -1342,17 +1489,46 @@ mod tests {
                 "{needle} is missing from the unfrozen list"
             );
         }
-        let mut tagged = 0;
-        for (method, path, operation) in operations(&document) {
-            let has_tag = operation["tags"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|tag| tag == "preview");
-            assert_eq!(has_tag, is_preview(&path), "{method} {path}");
-            tagged += usize::from(has_tag);
-        }
-        assert!(tagged >= 15, "the preview operations were not found");
+        const RULED: [(&str, &str); 17] = [
+            ("get", "/api/v1/admin/jobs"),
+            ("get", "/api/v1/admin/jobs/dead"),
+            ("post", "/api/v1/admin/jobs/{id}/retry"),
+            ("post", "/api/v1/workspaces/{ws}/ai/drafts"),
+            ("post", "/api/v1/workspaces/{ws}/ai/drafts/{id}/accept"),
+            ("get", "/api/v1/workspaces/{ws}/ai/models"),
+            ("get", "/api/v1/workspaces/{ws}/ai/settings"),
+            ("put", "/api/v1/workspaces/{ws}/ai/settings"),
+            ("get", "/api/v1/workspaces/{ws}/ai/usage"),
+            ("post", "/api/v1/workspaces/{ws}/events/explore/breakdown"),
+            ("post", "/api/v1/workspaces/{ws}/events/explore/count"),
+            ("post", "/api/v1/workspaces/{ws}/events/explore/export"),
+            ("post", "/api/v1/workspaces/{ws}/events/explore/list"),
+            ("post", "/api/v1/workspaces/{ws}/flows/{id}/ai/explain"),
+            ("post", "/api/v1/workspaces/{ws}/segments/{id}/ai/explain"),
+            (
+                "post",
+                "/api/v1/workspaces/{ws}/traces/{trace_id}/ai/explain",
+            ),
+            ("post", "/hooks/{id}"),
+        ];
+        let mut tagged: Vec<(String, String)> = operations(&document)
+            .into_iter()
+            .filter(|(_, _, operation)| {
+                operation["tags"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|tag| tag == "preview")
+            })
+            .map(|(method, path, _)| (method, path))
+            .collect();
+        tagged.sort();
+        let mut ruled: Vec<(String, String)> = RULED
+            .iter()
+            .map(|(method, path)| ((*method).to_owned(), (*path).to_owned()))
+            .collect();
+        ruled.sort();
+        assert_eq!(tagged, ruled);
         assert!(
             document["tags"]
                 .as_array()

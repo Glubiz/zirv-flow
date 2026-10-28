@@ -87,4 +87,17 @@ mod tests {
         assert_eq!(headers["deprecation"], "@1803902400");
         assert_eq!(headers["sunset"], "Sun, 06 Nov 1994 08:49:37 GMT");
     }
+
+    #[test]
+    fn the_sunset_date_is_in_gmt_with_a_padded_day_for_a_saturday_in_december() {
+        let mut headers = HeaderMap::new();
+        mark_deprecated(
+            &mut headers,
+            datetime!(2027-12-04 00:00:00 UTC),
+            datetime!(2027-12-04 01:02:03 UTC),
+        )
+        .unwrap();
+        assert_eq!(headers["deprecation"], "@1827878400");
+        assert_eq!(headers["sunset"], "Sat, 04 Dec 2027 01:02:03 GMT");
+    }
 }
