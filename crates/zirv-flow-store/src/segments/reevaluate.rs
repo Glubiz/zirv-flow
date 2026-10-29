@@ -21,6 +21,33 @@ use crate::flows::{
 };
 use crate::{DirtyPerson, StoreError};
 
+/// The classes read by live segments, held stable until this writer commits. Saves take the
+/// exclusive form through `lock_segments`; the separate read gets a fresh READ COMMITTED snapshot.
+pub(crate) async fn active_change_classes(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+) -> Result<ChangeClasses, StoreError> {
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock_shared(hashtextextended('segments/' || $1::text, 0))",
+    )
+    .bind(workspace.as_uuid())
+    .execute(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    let deps: Vec<Value> = sqlx::query_scalar(
+        "SELECT v.deps FROM segments s \
+         JOIN segment_versions v ON v.segment_id = s.id AND v.version = s.current_version \
+         WHERE s.workspace_id = $1 AND s.archived_at IS NULL",
+    )
+    .bind(workspace.as_uuid())
+    .fetch_all(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(deps.iter().fold(ChangeClasses::NONE, |classes, deps| {
+        classes | Deps::parse(deps).classes
+    }))
+}
+
 /// A claimed batch as the parallel arrays the diff statement unnests: each person with the
 /// trace and cause of the latest change that marked it.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

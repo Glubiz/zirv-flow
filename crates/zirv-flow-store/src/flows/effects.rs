@@ -86,6 +86,7 @@ pub async fn apply_flow_trait(
     connection: &mut PgConnection,
     write: &FlowTraitWrite<'_>,
 ) -> Result<bool, EffectError> {
+    crate::changes::cache_change_readers(connection, write.workspace).await?;
     let FlowTraitWrite {
         workspace,
         flow,
@@ -167,6 +168,7 @@ pub async fn apply_flow_list(
     change: ListChange,
     trace: &TraceContext,
 ) -> Result<bool, EffectError> {
+    crate::changes::cache_change_readers(connection, workspace).await?;
     let people = [person];
     let outcome = match change {
         ListChange::Add => {

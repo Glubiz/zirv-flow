@@ -42,10 +42,10 @@ pub use preview::{
     SampleRow, SqlParam, SqlQuery, begin_segment_snapshot, run_person_batch, run_segment_preview,
     snapshot_now,
 };
-pub(crate) use reevaluate::lock_segments_of_people;
 pub use reevaluate::{
     DirtyBatch, ReevaluateApply, apply_reevaluation, lock_reevaluation, reevaluation_order,
 };
+pub(crate) use reevaluate::{active_change_classes, lock_segments_of_people};
 pub use refresh::{
     MembershipCause, REFRESH_JOB_KIND, REFRESH_LOCK_CLASS, RefreshApply, RefreshOutcome,
     RefreshRequest, RefreshTrigger, SegmentMembershipChange, SegmentMembershipChanges,
@@ -60,6 +60,7 @@ pub(crate) mod tests_support {
     use serde_json::json;
     use sqlx::PgPool;
     use uuid::Uuid;
+    use zirv_flow_core::segment::ChangeClasses;
     use zirv_flow_core::{Cause, Slug, TraceContext, WorkspaceId, WorkspaceName};
 
     use super::{NewSegment, NewSegmentVersion, Segment, create_segment, lock_segments};
@@ -125,6 +126,37 @@ pub(crate) mod tests_support {
         other: Uuid,
     ) -> Segment {
         make(pool, ws, name, 60, &[other]).await
+    }
+
+    /// A dependency fixture for dirty-mark tests; these tests do not compile the definition.
+    pub(crate) async fn segment_reading(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        classes: ChangeClasses,
+    ) -> Segment {
+        let mut tx = begin(pool).await.unwrap();
+        let (segment, _) = create_segment(
+            &mut tx,
+            ws,
+            &NewSegment {
+                id: Uuid::now_v7(),
+                name: format!("Reads {}", classes.bits()),
+                description: String::new(),
+                cadence_minutes: 60,
+            },
+            &NewSegmentVersion {
+                definition: json!({"v": 1, "all": []}),
+                normalized: json!({"v": 1, "all": []}),
+                deps: json!({"classes": classes.bits(), "segments": []}),
+                time_sensitive: false,
+            },
+            None,
+            &TraceContext::root(Cause::api("t")),
+        )
+        .await
+        .unwrap();
+        commit(tx).await.unwrap();
+        segment
     }
 
     /// A person with an email and the `plan` trait.

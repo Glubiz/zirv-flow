@@ -63,6 +63,7 @@ pub async fn sweep_unreached(
     unit: &SweepUnit<'_>,
 ) -> Result<SweepOutcome, StoreError> {
     let mut tx = begin(pool).await?;
+    crate::changes::cache_change_readers(&mut tx, unit.workspace).await?;
     match fence_run(
         &mut tx,
         unit.workspace,
@@ -714,6 +715,12 @@ mod tests {
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_sweep_that_removes_records_requests_the_reevaluation_it_marked(pool: PgPool) {
         let fx = second_run(&pool, 2).await;
+        crate::segments::tests_support::segment_reading(
+            &pool,
+            fx.ws,
+            zirv_flow_core::segment::ChangeClasses::from_bits(63),
+        )
+        .await;
         let source = fx.source_id.to_string();
         sqlx::query("DELETE FROM person_changes")
             .execute(&pool)

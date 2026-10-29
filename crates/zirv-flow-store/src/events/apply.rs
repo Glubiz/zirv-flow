@@ -97,6 +97,7 @@ pub(crate) async fn apply_event_records(
     key: &HmacKey,
     records: &[EventRecord],
 ) -> Result<Vec<EventOutcome>, StoreError> {
+    crate::changes::cache_change_readers(connection, workspace).await?;
     let mut batch = EventBatch::default();
     let mut outcomes = Vec::with_capacity(records.len());
     for record in records {
@@ -203,6 +204,7 @@ pub(crate) async fn apply_event_record(
     batch: &mut EventBatch,
     record: &EventRecord,
 ) -> Result<EventOutcome, StoreError> {
+    crate::changes::cache_change_readers(connection, workspace).await?;
     let outcome = judge_event_record(connection, workspace, key, batch, record).await?;
     if let EventOutcome::Accepted {
         event_id,
@@ -1114,6 +1116,12 @@ mod tests {
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_late_event_is_flagged_and_keeps_the_earliest_late_from(pool: PgPool) {
         let ws = workspace(&pool, "one").await;
+        crate::segments::tests_support::segment_reading(
+            &pool,
+            ws,
+            zirv_flow_core::segment::ChangeClasses::EVENTS,
+        )
+        .await;
         let day = |days: i64| NOW - Duration::days(days);
         let mut batch = Vec::new();
         for (index, at) in [day(3), day(5), day(4)].into_iter().enumerate() {
@@ -1867,6 +1875,13 @@ mod tests {
         pool: PgPool,
     ) {
         let ws = workspace(&pool, "one").await;
+        crate::segments::tests_support::segment_reading(
+            &pool,
+            ws,
+            zirv_flow_core::segment::ChangeClasses::EVENTS
+                | zirv_flow_core::segment::ChangeClasses::IDENTIFIERS,
+        )
+        .await;
 
         apply_one(&pool, ws, event("anything", json!({}))).await;
 

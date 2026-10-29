@@ -16,8 +16,8 @@
 //! lease expiries and the retries together can use them up: the last attempt records a failed
 //! outcome, and a job whose attempts run out through lease expiry goes dead.
 //!
-//! The runs follow the worker's `execute`: begin, `lock_lease`, the handler, `complete_job`,
-//! commit.
+//! The runs follow the worker's `execute`: begin, person-change guard, `lock_lease`, handler,
+//! `complete_job`, commit.
 
 use std::cell::Cell;
 use std::sync::Arc;
@@ -138,6 +138,17 @@ impl World {
     /// handler's, after the transaction was rolled back.
     pub(super) async fn final_run(&self, claimed: &ClaimedJob) -> Result<(), RunError> {
         let mut tx = zirv_flow_store::begin(&self.env.pool).await.unwrap();
+        let kind = crate::Registry::built_in().get(&claimed.kind).unwrap();
+        if kind.needs_change_readers()
+            && let Some(workspace) = claimed.workspace_id
+        {
+            zirv_flow_store::cache_change_readers(
+                &mut tx,
+                zirv_flow_core::WorkspaceId::from_uuid(workspace),
+            )
+            .await
+            .unwrap();
+        }
         if !lock_lease(&mut tx, claimed.id, claimed.lease_token)
             .await
             .unwrap()

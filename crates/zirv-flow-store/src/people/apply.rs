@@ -92,7 +92,8 @@ pub(crate) async fn apply_profile_records(
     workspace: WorkspaceId,
     records: &[ProfileRecord],
 ) -> Result<Vec<ProfileOutcome>, StoreError> {
-    // First statement of a trait writer, before any row lock; see `slots` for the order.
+    crate::changes::cache_change_readers(connection, workspace).await?;
+    // Before any row lock; see `slots` for the order.
     lock_slots_shared(connection, workspace).await?;
     let mut outcomes = Vec::with_capacity(records.len());
     for record in records {
@@ -109,6 +110,7 @@ pub(crate) async fn apply_profile_records_singly(
     workspace: WorkspaceId,
     records: &[ProfileRecord],
 ) -> Result<Vec<Option<ProfileOutcome>>, StoreError> {
+    crate::changes::cache_change_readers(connection, workspace).await?;
     lock_slots_shared(connection, workspace).await?;
     let mut outcomes = Vec::with_capacity(records.len());
     for record in records {
@@ -176,6 +178,7 @@ pub(crate) async fn remove_contribution_in(
     record_key: &str,
     trace: &TraceContext,
 ) -> Result<Option<RemovedRecord>, StoreError> {
+    crate::changes::cache_change_readers(connection, workspace).await?;
     lock_slots_shared(connection, workspace).await?;
     // The record is locked first, then its person: the order the drain's existing-record path
     // uses. With the record locked a merge cannot move it, so the owner cannot change.
@@ -389,7 +392,8 @@ pub(crate) async fn apply_profile_record_into(
     record: &ProfileRecord,
     decisions: &mut DecisionBuffer,
 ) -> Result<ProfileOutcome, StoreError> {
-    // First, before any row lock: see the lock order in `slots`.
+    crate::changes::cache_change_readers(connection, workspace).await?;
+    // After the segment guard, before any row lock: see the lock order in `slots`.
     lock_slots_shared(connection, workspace).await?;
     let identifiers = match normalize_identifiers(&record.identifiers) {
         Ok(identifiers) => identifiers,
@@ -1180,7 +1184,10 @@ mod tests {
         message_id: &str,
     ) -> Uuid {
         let id = Uuid::now_v7();
-        let mut connection = pool.acquire().await.unwrap();
+        let mut connection = begin(pool).await.unwrap();
+        crate::changes::cache_change_readers(&mut connection, ws)
+            .await
+            .unwrap();
         crate::events::insert_event(
             &mut connection,
             ws,
@@ -1204,6 +1211,7 @@ mod tests {
         )
         .await
         .unwrap();
+        commit(connection).await.unwrap();
         sqlx::query(
             "INSERT INTO event_dedupe (workspace_id, message_id, event_id, event_occurred_at, \
                 person_id) VALUES ($1, $2, $3, $4, $5)",
@@ -1451,6 +1459,13 @@ mod tests {
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_first_record_creates_a_person_with_identities_traits_and_decisions(pool: PgPool) {
         let ws = workspace(&pool, "one").await;
+        crate::segments::tests_support::segment_reading(
+            &pool,
+            ws,
+            zirv_flow_core::segment::ChangeClasses::TRAITS
+                | zirv_flow_core::segment::ChangeClasses::IDENTIFIERS,
+        )
+        .await;
         let at = datetime!(2026-05-01 10:00 UTC);
         let mut rec = record(
             "crm",
@@ -1655,6 +1670,12 @@ mod tests {
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_replay_of_the_same_record_is_a_no_op(pool: PgPool) {
         let ws = workspace(&pool, "one").await;
+        crate::segments::tests_support::segment_reading(
+            &pool,
+            ws,
+            zirv_flow_core::segment::ChangeClasses::from_bits(63),
+        )
+        .await;
         let first = record(
             "crm",
             "1",
@@ -2415,6 +2436,12 @@ mod tests {
         use crate::privacy::testing::profile;
 
         let ws = workspace(&pool, "one").await;
+        crate::segments::tests_support::segment_reading(
+            &pool,
+            ws,
+            zirv_flow_core::segment::ChangeClasses::from_bits(63),
+        )
+        .await;
         let crm = profile(
             "crm",
             "1",
@@ -2687,6 +2714,12 @@ mod tests {
         pool: PgPool,
     ) {
         let ws = workspace(&pool, "one").await;
+        crate::segments::tests_support::segment_reading(
+            &pool,
+            ws,
+            zirv_flow_core::segment::ChangeClasses::from_bits(63),
+        )
+        .await;
         define(&pool, ws, "plan", Precedence::Latest, &[]).await;
         let at = datetime!(2026-01-01 00:00 UTC);
         let first = record("crm", "1", "a@example.com", json!({"plan": "free"}), at);

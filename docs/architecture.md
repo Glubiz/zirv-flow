@@ -414,8 +414,9 @@ As built (consent, topics and suppressions):
 Every path ends in **apply-batch**, one transaction per batch (default 500
 records): normalize identifiers; resolve or create the person (merging if
 needed); upsert ledger contributions and recompute affected traits; insert
-events with dedupe; write coalesced dirty marks (`person_changes`); enqueue
-follow-ups (segment re-evaluation, event triggers, event-wait wakeups); commit
+events with dedupe; write coalesced dirty marks (`person_changes`) when a live
+segment reads the changed class; enqueue follow-ups (segment re-evaluation for
+relevant marks, event triggers, event-wait wakeups); commit
 the stream checkpoint. Customer-event schema validation, redaction, reject
 handling, lateness and trace propagation are defined once in section 12 and
 used by every ingestion path.
@@ -426,6 +427,9 @@ on conflict, so repeated marks coalesce and keep every class that changed. A mar
 `segment.reevaluate` claimed a row re-inserts it (8.4). `segment.*` events never mark a person
 dirty: a membership change reaches dependent segments through topological evaluation, not
 through the dirty set. A mark carries the trace and cause of the latest change, which the entries and exits it causes continue; the writer's transaction enqueues `segment.reevaluate` once, only to cut latency.
+The live dependency classes are read once per workspace and transaction, using the
+workspace's segment index, and cached in transaction-local state. With no matching reader,
+the writer adds neither marks nor a re-evaluation request.
 
 As built (identify / track ingestion): `POST /api/v1/ingest/{identify,track,batch}` validate
 structure, charge the key's in-process token bucket (items, per `serve` process), and append
@@ -538,8 +542,8 @@ applies the same reject rule per message.
 
 As built (M3): `sync_runs` holds the state, trigger, counters, per-run checkpoint, attempt,
 trace id and error code; a partial unique index allows one `queued` or `running` run per
-stream. A unit of at least 500 records commits in one transaction that first locks the job's
-lease (`store::lock_lease`) and then the run row, so a lost lease or a cancel writes nothing.
+stream. A unit of at least 500 records takes the shared segment guard, then locks the job's
+lease (`store::lock_lease`) and the run row, so a lost lease or a cancel writes nothing.
 An expired lease does not return the run to `queued`: the row stays `running`, the job system
 re-delivers the job, `attempt` counts it, and the next attempt resumes from the run's
 checkpoint; only the last failed attempt marks the run `failed` (`source_error` for a read error,
@@ -860,8 +864,8 @@ A workspace without a saved definition needs only the key; with one, a contact h
 its fields. `store::contacts` applies a single write through `apply_profile_record` in a
 savepoint of the caller's transaction, so the API commits the data and its audit entry
 together, and a registry rejection (a dropped trait) rolls the write back as a `422`. A
-write takes two advisory locks, the idempotency key and then the contact, so concurrent
-requests with either run in turn, and the drain takes the contact lock of every contact in its batch (sorted, after claiming the inbox rows and before the source records and people), so a bulk upsert and a single write of one contact do not overwrite each other. `contact_idempotency (workspace_id, key, request_hash,
+write takes the shared segment guard before its idempotency and contact advisory locks, so concurrent
+requests with either run in turn, and the drain takes that guard before its inbox and contact locks (contacts sorted, after claiming the inbox rows and before the source records and people), so a bulk upsert and a single write of one contact do not overwrite each other. `contact_idempotency (workspace_id, key, request_hash,
 status, created_at)` holds no field value, no person id and no contact key (which may be an
 email address): a replay takes the key from its own request, whose hash covers the path and
 body, and answers the stored status with the contact as it is now (`404` once it is gone, `204` for a delete),
@@ -962,6 +966,13 @@ classes intersect the batch's combined classes, plus their transitive segment de
 topological order, with `person_id = ANY(batch)`. Name-level filtering (event names, trait
 keys) is an optimization, made only if the M4 benchmark misses.
 **Safety net and pending segments.** The scheduler leader enqueues `segment.reevaluate` for any workspace whose oldest mark is more than 2 s old, so correctness never depends on a writer's enqueue, and it publishes the dirty backlog and age. A pass skips a segment whose `computed_version` is null or differs from `current_version`: its pending full refresh covers everyone.
+Writers take the shared workspace segment advisory lock before any contact, slot, lease or row
+lock and hold it through commit while deciding which marks to skip;
+creates and saves hold it exclusively. The dependency read uses a fresh snapshot after the lock
+wait. A save therefore commits after earlier skipped batches, and its transactionally queued
+full refresh evaluates everyone after that commit, including those batches' people.
+A segment save waits for in-flight batches; new writers queue behind the save, bounding this
+serialization by those transactions.
 
 ## 9. Flow engine
 

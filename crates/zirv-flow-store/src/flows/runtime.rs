@@ -173,7 +173,8 @@ const LOCK_ROUNDS: usize = 8;
 /// Locks an enrollment `FOR UPDATE` and reads it. Two steps of one enrollment run one after the
 /// other: the second reads the state the first committed.
 ///
-/// Lock order: the person row first (`FOR UPDATE`, the strength a trait write's recompute needs,
+/// A step that may write people takes the shared segment guard before calling. Row lock order:
+/// the person first (`FOR UPDATE`, the strength a trait write's recompute needs,
 /// so it is never upgraded), then the enrollment. Person erasure locks the person before it
 /// deletes the enrollment and the jobs, so a step and an erasure never wait for each other in a
 /// cycle, and an erasure that waits for a step sees the jobs the step enqueued.

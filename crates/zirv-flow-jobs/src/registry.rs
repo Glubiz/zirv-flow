@@ -13,6 +13,11 @@ pub trait JobKind: Send + Sync + 'static {
     /// The `kind` column value jobs of this kind carry, such as `maintenance.noop`.
     const KIND: &'static str;
 
+    /// This handler needs the person-change guard in the worker's transaction. The worker takes
+    /// the shared segment guard before locking its lease. Jobs using separate batch
+    /// transactions acquire the guard there instead, never across those transactions.
+    const NEEDS_CHANGE_READERS: bool = false;
+
     /// Runs one attempt. Writes go through `ctx` so they commit atomically with the job's
     /// completion; the work must be idempotent, since a lost lease runs the job again.
     fn run(
@@ -26,6 +31,8 @@ pub trait JobKind: Send + Sync + 'static {
 pub trait ErasedKind: Send + Sync {
     fn kind(&self) -> &'static str;
 
+    fn needs_change_readers(&self) -> bool;
+
     fn run<'a>(
         &'a self,
         ctx: &'a mut JobContext<'_>,
@@ -36,6 +43,10 @@ pub trait ErasedKind: Send + Sync {
 impl<K: JobKind> ErasedKind for K {
     fn kind(&self) -> &'static str {
         K::KIND
+    }
+
+    fn needs_change_readers(&self) -> bool {
+        K::NEEDS_CHANGE_READERS
     }
 
     fn run<'a>(

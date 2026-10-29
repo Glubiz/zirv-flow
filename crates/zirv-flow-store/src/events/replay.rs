@@ -613,6 +613,7 @@ pub async fn replay_rejects(
     }
     for id in ids {
         let mut tx = begin(pool).await?;
+        crate::changes::cache_change_readers(&mut tx, workspace).await?;
         let Some(reject) = load_reject(&mut tx, workspace, *id, true).await? else {
             totals.skipped += 1;
             continue;
@@ -1593,6 +1594,12 @@ mod tests {
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_replay_that_stores_an_event_requests_the_reevaluation_it_marked(pool: PgPool) {
         let (ws, reject) = rejected(&pool).await;
+        crate::segments::tests_support::segment_reading(
+            &pool,
+            ws,
+            zirv_flow_core::segment::ChangeClasses::EVENTS,
+        )
+        .await;
         fix_the_schema(&pool, ws).await;
         sqlx::query("DELETE FROM jobs WHERE kind = 'segment.reevaluate'")
             .execute(&pool)

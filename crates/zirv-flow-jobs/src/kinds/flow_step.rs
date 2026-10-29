@@ -58,6 +58,7 @@ const CASES: [&str; MAX_CONDITIONS] = [
 
 impl JobKind for FlowStep {
     const KIND: &'static str = STEP_JOB_KIND;
+    const NEEDS_CHANGE_READERS: bool = true;
 
     async fn run(&self, ctx: &mut JobContext<'_>, payload: Value) -> Result<(), JobError> {
         let job = StepJobPayload::parse(&payload)
@@ -72,12 +73,13 @@ impl JobKind for FlowStep {
         let job_id = ctx.job_id();
         let last_attempt = ctx.attempts() >= ctx.max_attempts();
         let conn = ctx.conn();
+        zirv_flow_store::cache_change_readers(conn, job.workspace).await?;
         let now = clock.now(conn).await?;
         let Some(known) = find_enrollment(conn, job.workspace, job.enrollment).await? else {
             // Erased with the person: nothing is left to advance.
             return Ok(());
         };
-        // The flow's state is read first, and held until this transaction ends, so a resume
+        // After the segment guard, the flow's state is read and held until commit, so a resume
         // either sees the enrollment this step holds or the step sees the flow resumed. The
         // flow, then the person, then the enrollment: the order a resume locks them in.
         let flow_state = flow_state_for_step(conn, job.workspace, known.flow_id).await?;

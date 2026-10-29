@@ -109,6 +109,7 @@ pub async fn set_consent(
     change: &ConsentChange,
     trace: &TraceContext,
 ) -> Result<ConsentOutcome, StoreError> {
+    crate::changes::cache_change_readers(connection, workspace).await?;
     if let Some(topic) = change.topic {
         match find_topic(&mut *connection, workspace, topic).await? {
             Some(found) if found.channel == change.channel => {}
@@ -1085,6 +1086,12 @@ mod tests {
     ) {
         crate::decision_testing::checked(pool, |pool| async move {
             let ws = workspace(&pool, "one").await;
+            crate::segments::tests_support::segment_reading(
+                &pool,
+                ws,
+                zirv_flow_core::segment::ChangeClasses::CONSENT,
+            )
+            .await;
             let ada = person(&pool, ws, PERSONAL_DATA.email).await;
             let trace = TraceContext::root(Cause::api("consent"));
             let change = change(ada, None, ConsentStatus::Subscribed, T1);

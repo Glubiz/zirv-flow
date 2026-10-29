@@ -76,7 +76,8 @@ pub(crate) async fn resolve_person(
     existing: Option<Uuid>,
     trace: &TraceContext,
 ) -> Result<Resolution, StoreError> {
-    // A merge here writes traits, and a new person is a row lock: the slot lock comes first.
+    crate::changes::cache_change_readers(connection, workspace).await?;
+    // After the segment guard, take the slot lock before a merge or a new person writes traits.
     super::slots::lock_slots_shared(connection, workspace).await?;
     let mut attempt = 0;
     loop {
@@ -571,7 +572,7 @@ mod tests {
         let name = WorkspaceName::parse("one").unwrap();
         let slug = Slug::parse("one").unwrap();
         let ws = create_workspace(&pool, &name, &slug).await.unwrap().id;
-        let mut connection = pool.acquire().await.unwrap();
+        let mut connection = crate::begin(&pool).await.unwrap();
         let email = identifier("email", "a@example.com");
         let phone = identifier("phone", "+4512345678");
 
@@ -587,6 +588,7 @@ mod tests {
         let second = resolve_person(&mut connection, ws, &[email, phone], None, &trace())
             .await
             .unwrap();
+        crate::commit(connection).await.unwrap();
 
         assert!(first.created && !second.created);
         assert_eq!(first.person_id, second.person_id);
@@ -680,7 +682,7 @@ mod tests {
         let name = WorkspaceName::parse("one").unwrap();
         let slug = Slug::parse("one").unwrap();
         let ws = create_workspace(&pool, &name, &slug).await.unwrap().id;
-        let mut connection = pool.acquire().await.unwrap();
+        let mut connection = crate::begin(&pool).await.unwrap();
         let first = resolve_person(
             &mut connection,
             ws,

@@ -686,6 +686,7 @@ pub async fn drain_batch(
     limit: i64,
 ) -> Result<DrainOutcome, StoreError> {
     let mut tx = begin(pool).await?;
+    crate::changes::cache_change_readers(&mut tx, workspace).await?;
     let (rows, more) = take_rows(&mut tx, workspace, shard, limit).await?;
     let hooks = HookConfigs::load(&mut tx, workspace, &rows).await?;
     lock_contact_rows(&mut tx, workspace, &rows).await?;
@@ -746,6 +747,7 @@ pub async fn drain_batch_singly(
     limit: i64,
 ) -> Result<DrainOutcome, StoreError> {
     let mut tx = begin(pool).await?;
+    crate::changes::cache_change_readers(&mut tx, workspace).await?;
     let (rows, more) = take_rows(&mut tx, workspace, shard, limit).await?;
     let hooks = HookConfigs::load(&mut tx, workspace, &rows).await?;
     lock_contact_rows(&mut tx, workspace, &rows).await?;
@@ -1267,6 +1269,335 @@ mod tests {
         .await;
     }
 
+    async fn dirty_and_reevaluation_count(pool: &PgPool, ws: WorkspaceId) -> (i64, i64) {
+        sqlx::query_as(
+            "SELECT (SELECT count(*) FROM person_changes WHERE workspace_id = $1), \
+                    (SELECT count(*) FROM jobs WHERE workspace_id = $1 AND kind = 'segment.reevaluate')",
+        )
+        .bind(ws.as_uuid())
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_drain_without_active_segments_writes_no_marks_or_reevaluation_job(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            for singly in [false, true] {
+                let ws = workspace(&pool, if singly { "singly" } else { "batch" }).await;
+                append(
+                    &pool,
+                    ws,
+                    &TraceContext::root(Cause::api("req")),
+                    &[
+                        identify("u1", "identify-1", json!({"plan": "pro"})),
+                        track("u1", "track-1", "seen", json!({})),
+                    ],
+                )
+                .await;
+
+                let outcome = if singly {
+                    drain_batch_singly(&pool, ws, Shard::ALL, &key(), 500).await
+                } else {
+                    drain_batch(&pool, ws, Shard::ALL, &key(), 500).await
+                }
+                .unwrap();
+
+                assert_eq!(outcome.rows, 2);
+                assert_eq!(outcome.applied[&("identify", "valid")], 1);
+                assert_eq!(outcome.applied[&("track", "unplanned")], 1);
+                assert_eq!(dirty_and_reevaluation_count(&pool, ws).await, (0, 0));
+            }
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_drain_with_matching_segment_classes_keeps_marks_and_reevaluation(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            use zirv_flow_core::segment::ChangeClasses;
+
+            let classes =
+                ChangeClasses::TRAITS | ChangeClasses::EVENTS | ChangeClasses::IDENTIFIERS;
+            for singly in [false, true] {
+                let ws = workspace(&pool, if singly { "singly" } else { "batch" }).await;
+                crate::segments::tests_support::segment_reading(&pool, ws, classes).await;
+                append(
+                    &pool,
+                    ws,
+                    &TraceContext::root(Cause::api("req")),
+                    &[
+                        identify("u1", "identify-1", json!({"plan": "pro"})),
+                        track("u1", "track-1", "seen", json!({})),
+                    ],
+                )
+                .await;
+
+                let outcome = if singly {
+                    drain_batch_singly(&pool, ws, Shard::ALL, &key(), 500).await
+                } else {
+                    drain_batch(&pool, ws, Shard::ALL, &key(), 500).await
+                }
+                .unwrap();
+
+                assert_eq!(outcome.rows, 2);
+                assert_eq!(dirty_and_reevaluation_count(&pool, ws).await, (1, 1));
+                let marked: i16 = sqlx::query_scalar(
+                    "SELECT classes FROM person_changes WHERE workspace_id = $1",
+                )
+                .bind(ws.as_uuid())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                assert_eq!(marked, i16::from(classes.bits()));
+            }
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_drain_ignores_archived_other_workspace_and_unrelated_segment_readers(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            use crate::segments::tests_support::segment_reading;
+            use zirv_flow_core::segment::ChangeClasses;
+
+            let ws = workspace(&pool, "ours").await;
+            let other = workspace(&pool, "other").await;
+            segment_reading(&pool, other, ChangeClasses::EVENTS).await;
+            segment_reading(&pool, ws, ChangeClasses::TRAITS).await;
+            let archived = segment_reading(&pool, ws, ChangeClasses::EVENTS).await;
+            let mut tx = begin(&pool).await.unwrap();
+            crate::lock_segments(&mut tx, ws).await.unwrap();
+            crate::archive_segment(&mut tx, ws, archived.id)
+                .await
+                .unwrap();
+            commit(tx).await.unwrap();
+            append(
+                &pool,
+                ws,
+                &TraceContext::root(Cause::api("req")),
+                &[track("u1", "track-1", "seen", json!({}))],
+            )
+            .await;
+
+            let outcome = drain_batch(&pool, ws, Shard::ALL, &key(), 500)
+                .await
+                .unwrap();
+
+            assert_eq!(outcome.applied[&("track", "unplanned")], 1);
+            assert_eq!(dirty_and_reevaluation_count(&pool, ws).await, (0, 0));
+        })
+        .await;
+    }
+
+    async fn wal_lsn(pool: &PgPool) -> String {
+        sqlx::query_scalar("SELECT pg_current_wal_lsn()::text")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn report_ingest_wal(
+        pool: &PgPool,
+        phase: &str,
+        start: &str,
+        end: &str,
+        inspect: bool,
+    ) -> i64 {
+        let delta: i64 = sqlx::query_scalar("SELECT ($2::pg_lsn - $1::pg_lsn)::bigint")
+            .bind(start)
+            .bind(end)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert!(delta > 0, "{phase} must write WAL");
+        println!("\n{phase}: {start}..{end}; cluster LSN delta = {delta} bytes");
+        if !inspect {
+            println!(
+                "  fallback: statement-group LSN bytes = {delta}; relation attribution unavailable"
+            );
+            return delta;
+        }
+
+        // Several block references can belong to one record. Attribute its complete length
+        // once, to the distinct relation set; keep records without blocks (e.g. commits) too.
+        let rows: Vec<(String, i64, i64, i64)> = sqlx::query_as(
+            r#"
+            WITH refs AS (
+                SELECT DISTINCT b.start_lsn,
+                    CASE WHEN b.reldatabase = d.oid THEN
+                        COALESCE(pg_filenode_relation(b.reltablespace, b.relfilenode)::text,
+                                 format('unmapped %s/%s', b.reltablespace, b.relfilenode))
+                    ELSE format('other database %s: %s/%s',
+                                b.reldatabase, b.reltablespace, b.relfilenode)
+                    END AS relation
+                FROM pg_get_wal_block_info($1::pg_lsn, $2::pg_lsn, false) b
+                CROSS JOIN pg_database d
+                WHERE d.datname = current_database()
+            ), relations AS (
+                SELECT start_lsn, string_agg(relation, ' + ' ORDER BY relation) AS relation
+                FROM refs GROUP BY start_lsn
+            )
+            SELECT COALESCE(r.relation, 'no relation: ' || w.resource_manager),
+                   count(*), sum(w.record_length)::bigint, sum(w.fpi_length)::bigint
+            FROM pg_get_wal_records_info($1::pg_lsn, $2::pg_lsn) w
+            LEFT JOIN relations r USING (start_lsn)
+            GROUP BY 1 ORDER BY 1
+            "#,
+        )
+        .bind(start)
+        .bind(end)
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        println!(
+            "  {:<60} {:>8} {:>12} {:>12}",
+            "relation(s) / resource", "records", "WAL bytes", "FPI bytes"
+        );
+        for (relation, records, bytes, fpi) in &rows {
+            println!("  {relation:<60} {records:>8} {bytes:>12} {fpi:>12}");
+        }
+        let total: i64 = rows.iter().map(|row| row.2).sum();
+        let fpi: i64 = rows.iter().map(|row| row.3).sum();
+        // Reconcile against the independent resource-manager totals, including non-relation WAL.
+        let expected: i64 = sqlx::query_scalar(
+            "SELECT sum(combined_size)::bigint FROM pg_get_wal_stats($1::pg_lsn, $2::pg_lsn)",
+        )
+        .bind(start)
+        .bind(end)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(total, expected, "every WAL record must be counted once");
+        assert!(total > 0);
+        println!(
+            "  total = {total} record bytes (includes {fpi} FPI bytes; excludes WAL page headers/padding)"
+        );
+        total
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_drain_batch_reports_wal_by_relation_without_active_segments(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "wal-measurement").await;
+            let (user, superuser): (String, bool) = sqlx::query_as(
+                "SELECT rolname::text, rolsuper FROM pg_roles WHERE rolname = current_user",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let inspect = match sqlx::query("CREATE EXTENSION IF NOT EXISTS pg_walinspect")
+                .execute(&pool)
+                .await
+            {
+                Ok(_) => sqlx::query_scalar::<_, bool>(
+                    "SELECT has_function_privilege('pg_get_wal_records_info(pg_lsn,pg_lsn)', 'EXECUTE') \
+                     AND has_function_privilege('pg_get_wal_block_info(pg_lsn,pg_lsn,boolean)', 'EXECUTE') \
+                     AND has_function_privilege('pg_get_wal_stats(pg_lsn,pg_lsn,boolean)', 'EXECUTE')",
+                )
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+                Err(error)
+                    if matches!(
+                        error.as_database_error().and_then(|error| error.code()).as_deref(),
+                        Some("42501" | "0A000" | "58P01")
+                    ) =>
+                {
+                    println!("pg_walinspect unavailable; using statement-group LSN deltas: {error}");
+                    false
+                }
+                Err(error) => panic!("create pg_walinspect: {error}"),
+            };
+            println!("ingest WAL fixture: user={user}, superuser={superuser}, pg_walinspect={inspect}");
+
+            // Seed directly so changes to ingest's marking policy cannot change the baseline.
+            // Both batches use these same 500 existing people; no segments or workers run.
+            let people: Vec<Uuid> = (1..=500).map(Uuid::from_u128).collect();
+            let users: Vec<String> = (1..=500).map(|n| format!("wal-{n:04}")).collect();
+            sqlx::query(
+                "INSERT INTO people (id, workspace_id) SELECT id, $1 FROM unnest($2::uuid[]) p(id)",
+            )
+            .bind(ws.as_uuid())
+            .bind(&people)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO identities (id, workspace_id, person_id, kind, value) \
+                 SELECT id, $1, id, 'external:user_id', value \
+                 FROM unnest($2::uuid[], $3::text[]) p(id, value)",
+            )
+            .bind(ws.as_uuid())
+            .bind(&people)
+            .bind(&users)
+            .execute(&pool)
+            .await
+            .unwrap();
+            let segments: i64 = sqlx::query_scalar("SELECT count(*) FROM segments")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(segments, 0);
+
+            let tracks: Vec<_> = users.iter().map(|user| {
+                track(user, &format!("track-{user}"), "seen", json!({"n": 1}))
+            }).collect();
+            let identifies: Vec<_> = users.iter().map(|user| {
+                identify(user, &format!("identify-{user}"), json!({"plan": "pro"}))
+            }).collect();
+            let trace = TraceContext {
+                trace_id: TraceId::from_uuid(Uuid::from_u128(501)),
+                cause: Cause::api(Uuid::from_u128(502).to_string()),
+            };
+            let key = key();
+            // CI connects as postgres. Start after a checkpoint so FPI eligibility is repeatable.
+            if superuser {
+                sqlx::query("CHECKPOINT").execute(&pool).await.unwrap();
+            }
+            println!("500 track + 500 identify items; append + drain only; checkpoint={superuser}");
+            let mut workload_bytes = 0;
+            for (kind, items, outcome) in [
+                ("track", tracks, "unplanned"),
+                ("identify", identifies, "valid"),
+            ] {
+                let start = wal_lsn(&pool).await;
+                let appended = append_inbox(&pool, ws, Uuid::from_u128(502), &trace, &items)
+                    .await
+                    .unwrap();
+                let appended_lsn = wal_lsn(&pool).await;
+                let drained = drain_batch(&pool, ws, Shard::ALL, &key, 500).await.unwrap();
+                let drained_lsn = wal_lsn(&pool).await;
+                assert_eq!(appended, 500);
+                assert_eq!(drained.rows, 500);
+                assert_eq!(drained.applied[&(kind, outcome)], 500);
+                assert_eq!(inbox_count(&pool).await, 0);
+
+                let append_bytes = report_ingest_wal(
+                    &pool, &format!("{kind} append"), &start, &appended_lsn, inspect,
+                ).await;
+                let drain_bytes = report_ingest_wal(
+                    &pool, &format!("{kind} drain"), &appended_lsn, &drained_lsn, inspect,
+                ).await;
+                let bytes = append_bytes + drain_bytes;
+                let unit = if kind == "track" { "event" } else { "identify" };
+                println!("{kind}: {bytes} total WAL bytes / 500 = {:.2} bytes/{unit}", bytes as f64 / 500.0);
+                workload_bytes += bytes;
+            }
+            println!("workload: {workload_bytes} total WAL bytes / 1000 = {:.2} bytes/input item", workload_bytes as f64 / 1000.0);
+            let people: i64 = sqlx::query_scalar("SELECT count(*) FROM people")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(people, 500, "both batches must resolve the existing people");
+        })
+        .await;
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_drain_batch_appends_its_decisions_in_one_statement_in_the_order_made(pool: PgPool) {
@@ -1492,6 +1823,12 @@ mod tests {
     async fn replaying_the_same_batch_leaves_the_database_identical(pool: PgPool) {
         crate::decision_testing::checked(pool, |pool| async move {
             let ws = workspace(&pool, "ours").await;
+            crate::segments::tests_support::segment_reading(
+                &pool,
+                ws,
+                zirv_flow_core::segment::ChangeClasses::from_bits(63),
+            )
+            .await;
             crate::set_event_policy(
                 &pool,
                 ws,

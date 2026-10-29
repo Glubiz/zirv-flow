@@ -409,6 +409,87 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_initial_refresh_includes_people_from_a_drain_that_skipped_its_marks(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            use zirv_flow_store::{IngestItem, IngestPayload, Shard};
+
+            let ws = workspace(&pool).await;
+            define_trait(&pool, ws, "plan").await;
+            let trace = TraceContext::root(Cause::api("req"));
+            let items: Vec<_> = [("u1", "pro"), ("u2", "free"), ("u3", "pro")]
+                .into_iter()
+                .map(|(user, plan)| IngestItem {
+                    identifiers: vec![("external:user_id".into(), user.into())],
+                    timestamp: None,
+                    message_id: Some(user.into()),
+                    payload: IngestPayload::Identify {
+                        traits: json!({"plan": plan}).as_object().cloned().unwrap(),
+                    },
+                })
+                .collect();
+            zirv_flow_store::append_inbox(&pool, ws, Uuid::now_v7(), &trace, &items)
+                .await
+                .unwrap();
+            let key =
+                HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction);
+            let drained = zirv_flow_store::drain_batch(&pool, ws, Shard::ALL, &key, 500)
+                .await
+                .unwrap();
+            assert_eq!(drained.applied[&("identify", "valid")], 3);
+            let skipped: (i64, i64) = sqlx::query_as(
+                "SELECT (SELECT count(*) FROM person_changes), \
+                        (SELECT count(*) FROM jobs WHERE kind = 'segment.reevaluate')",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(skipped, (0, 0));
+            let expected: Vec<Uuid> = sqlx::query_scalar(
+                "SELECT id FROM people WHERE traits ->> 'plan' = 'pro' ORDER BY id",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(expected.len(), 2);
+
+            let segment = create(
+                &pool,
+                ws,
+                "Pro",
+                json!({
+                    "v": 1, "trait": "plan", "op": "eq", "value": "pro",
+                }),
+                &trace,
+            )
+            .await;
+            // Run the actual save job; its commit makes it visible to the worker.
+            let claimed = zirv_flow_store::claim_job(
+                &pool,
+                "w",
+                &[SegmentRefresh::KIND],
+                Duration::from_secs(30),
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(claimed.payload["segment_id"], json!(segment.id));
+            assert_eq!(claimed.payload["trigger"], "save");
+            let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+            let mut ctx = JobContext::new(&mut tx, &claimed).with_clock(Clock::Database);
+            SegmentRefresh
+                .run(&mut ctx, claimed.payload.clone())
+                .await
+                .unwrap();
+            zirv_flow_store::commit(tx).await.unwrap();
+
+            assert_eq!(open(&pool, segment.id).await, expected);
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_time_window_segment_gains_members_as_the_clock_advances_with_no_new_data(
         pool: PgPool,
     ) {

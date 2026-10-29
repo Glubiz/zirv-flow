@@ -402,7 +402,8 @@ async fn settle_failure(
     }
 }
 
-/// The handler's transaction: confirm the lease, run the handler beside a heartbeat, then
+/// The handler's transaction: take its person-change guard if needed, confirm the lease,
+/// run the handler beside a heartbeat, then
 /// delete the job and commit with everything the handler wrote.
 async fn execute(shared: Arc<Shared>, job: ClaimedJob) -> Attempt {
     let Some(kind) = shared.registry.get(&job.kind) else {
@@ -411,6 +412,17 @@ async fn execute(shared: Arc<Shared>, job: ClaimedJob) -> Attempt {
     let Ok(mut tx) = begin(&shared.pool).await else {
         return Attempt::Failed("could not start the job transaction".into(), None);
     };
+    if kind.needs_change_readers()
+        && let Some(workspace) = job.workspace_id
+        && zirv_flow_store::cache_change_readers(
+            &mut tx,
+            zirv_flow_core::WorkspaceId::from_uuid(workspace),
+        )
+        .await
+        .is_err()
+    {
+        return Attempt::Failed("could not guard person changes".into(), None);
+    }
     match lock_lease(&mut tx, job.id, job.lease_token).await {
         Ok(true) => {}
         Ok(false) => return Attempt::LeaseLost,
@@ -833,6 +845,86 @@ mod tests {
         assert_eq!(config.concurrency, 1);
         assert_eq!(config.lease, Duration::from_secs(30));
         assert_eq!(config.max_running_per_workspace, None);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_person_writer_waits_for_the_segment_guard_before_locking_its_job(pool: PgPool) {
+        use zirv_flow_core::{Slug, WorkspaceName};
+
+        migrated(&pool).await;
+        let ws = zirv_flow_store::create_workspace(
+            &pool,
+            &WorkspaceName::parse("ours").unwrap(),
+            &Slug::parse("ours").unwrap(),
+        )
+        .await
+        .unwrap()
+        .id;
+        let mut job = NewJob::new("traits.recompute", TraceContext::root(Cause::api("t")));
+        job.workspace_id = Some(ws);
+        job.payload = json!({"workspace_id": ws, "key": "plan"});
+        enqueue(&pool, &job).await.unwrap();
+        let claimed = claim_job(
+            &pool,
+            "w",
+            &["traits.recompute"],
+            Duration::from_secs(60),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let job_id = claimed.id;
+        let mut save = begin(&pool).await.unwrap();
+        zirv_flow_store::lock_segments(&mut save, ws).await.unwrap();
+        let save_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *save)
+            .await
+            .unwrap();
+        let registry = Registry::built_in();
+        let shared = Arc::new(Shared {
+            pool: pool.clone(),
+            heartbeat_pool: pool.clone(),
+            listener_pool: pool.clone(),
+            kinds: registry.kinds(),
+            registry,
+            config: test_config(1),
+            wake: Notify::new(),
+        });
+        let writer = tokio::spawn(execute(shared, claimed));
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' \
+                     AND NOT granted AND $1 = ANY(pg_blocking_pids(pid)))",
+                )
+                .bind(save_pid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                if waiting {
+                    break;
+                }
+                assert!(!writer.is_finished());
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the writer must wait for the segment guard");
+        let mut probe = begin(&pool).await.unwrap();
+        sqlx::query("SELECT id FROM jobs WHERE id = $1 FOR UPDATE NOWAIT")
+            .bind(job_id)
+            .fetch_one(&mut *probe)
+            .await
+            .expect("a writer waiting for the guard must not hold its lease row lock");
+        probe.rollback().await.unwrap();
+        save.commit().await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(10), writer)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(result, Attempt::Completed));
     }
 
     #[sqlx::test]
