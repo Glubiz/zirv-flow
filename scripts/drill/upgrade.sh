@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# CI-only populated upgrade. API bodies, SQL errors, compose output and identifiers stay private.
-# --self-test runs the production count comparator without Docker or PostgreSQL.
+# CI-only populated upgrade. Diagnostics contain counts and redacted logs, never row values.
+# --self-test checks counts and checkpoint diagnostics without Docker or PostgreSQL.
 # --self-test-postgres additionally checks real constraints using DATABASE_URL and psql.
 set +x
 set -euo pipefail
@@ -15,10 +15,17 @@ compare_counts() {
   jq -en --slurpfile before "$1" --slurpfile after "$2" '
     def counts: type == "object" and length > 0 and
       all(.[]; type == "number" and . >= 0 and . == floor);
-    ($before | length) == 1 and ($after | length) == 1 and
-    ($before[0] | counts) and ($after[0] | counts) and
-    all($before[0] | to_entries[]; . as $row |
-      ($after[0] | has($row.key)) and $after[0][$row.key] >= $row.value)
+    if ($before | length) != 1 or ($after | length) != 1 or
+       ($before[0] | counts | not) or ($after[0] | counts | not) then
+      error("integrity check=count_snapshot: invalid or empty snapshot")
+    else
+      all($before[0] | to_entries[]; . as $row |
+        if ($after[0] | has($row.key) | not) then
+          error("integrity check=table_present table=\($row.key)")
+        elif $after[0][$row.key] < $row.value then
+          error("integrity check=row_count table=\($row.key) before=\($row.value) after=\($after[0][$row.key])")
+        else true end)
+    end
   ' >/dev/null
 }
 
@@ -29,13 +36,21 @@ count_self_test() {
   printf '%s\n' '{"people":3000,"events":3001,"new_table":0}' > "$scratch/after"
   compare_counts "$scratch/before" "$scratch/after" || die 'self-test rejected intact rows'
   printf '%s\n' '{"people":2999,"events":3000}' > "$scratch/after"
-  if compare_counts "$scratch/before" "$scratch/after"; then die 'self-test missed a lost row'; fi
+  if compare_counts "$scratch/before" "$scratch/after" 2> "$scratch/error"; then die 'self-test missed a lost row'; fi
+  grep -Fq 'check=row_count table=people before=3000 after=2999' "$scratch/error" || die 'self-test missing row diagnostic'
   printf '%s\n' '{"people":3000}' > "$scratch/after"
-  if compare_counts "$scratch/before" "$scratch/after"; then die 'self-test missed a lost table'; fi
+  if compare_counts "$scratch/before" "$scratch/after" 2> "$scratch/error"; then die 'self-test missed a lost table'; fi
+  grep -Fq 'check=table_present table=events' "$scratch/error" || die 'self-test missing table diagnostic'
   printf '%s\n' '{}' > "$scratch/after"
-  if compare_counts "$scratch/before" "$scratch/after"; then die 'self-test accepted empty counts'; fi
+  if compare_counts "$scratch/before" "$scratch/after" 2> "$scratch/error"; then die 'self-test accepted empty counts'; fi
+  grep -Fq 'check=count_snapshot' "$scratch/error" || die 'self-test missing snapshot diagnostic'
   rm -rf "$scratch"
   echo 'upgrade count self-test OK (intact, missing row, missing table, empty snapshot)'
+}
+
+integrity_error() {
+  # Only our metadata-only exceptions are printable; PostgreSQL errors may carry row values.
+  grep 'ERROR:  integrity check=' "$1" >&2 || echo 'integrity check=script table=unknown constraint=unknown (no safe SQL diagnostic)' >&2
 }
 
 sql_self_test() (
@@ -43,34 +58,153 @@ sql_self_test() (
   local schema scratch
   schema="upgrade_drill_test_${RANDOM}_$$"
   scratch=$(mktemp -d)
-  trap 'psql -Xq "$DATABASE_URL" -c "DROP SCHEMA IF EXISTS $schema CASCADE" > /dev/null 2>&1; rm -rf "$scratch"' EXIT
-  psql -Xq -v ON_ERROR_STOP=1 "$DATABASE_URL" > "$scratch/setup" 2>&1 <<SQL
+  trap 'psql -Xq "$DATABASE_URL" -c "DROP SCHEMA IF EXISTS $schema, ${schema}_unrelated CASCADE" > /dev/null 2>&1; rm -rf "$scratch"' EXIT
+  self_sql() {
+    psql -Xq -v ON_ERROR_STOP=1 "$DATABASE_URL" > "$scratch/setup" 2>&1 || die "SQL self-test check=$1 schema=$schema"
+  }
+  self_sql setup <<SQL
 CREATE SCHEMA $schema;
+CREATE SCHEMA ${schema}_unrelated;
+CREATE TABLE ${schema}_unrelated.child (n int);
+INSERT INTO ${schema}_unrelated.child VALUES (0);
+ALTER TABLE ${schema}_unrelated.child ADD CONSTRAINT unrelated CHECK (n > 0) NOT VALID;
+CREATE DOMAIN $schema.positive AS int CHECK (VALUE > 0);
 CREATE TABLE $schema.parent (id int PRIMARY KEY);
-CREATE TABLE $schema.child (id int REFERENCES $schema.parent, n int CHECK (n > 0));
+CREATE TABLE $schema.child (id int CONSTRAINT child_fk REFERENCES $schema.parent,
+                           n int CONSTRAINT child_positive CHECK (n > 0));
 INSERT INTO $schema.parent VALUES (1);
 INSERT INTO $schema.child VALUES (1, 1);
+CREATE TABLE $schema.pair_parent (a int, b int, PRIMARY KEY (a, b));
+CREATE TABLE $schema.pair_child (a int, b int, CONSTRAINT pair_fk
+    FOREIGN KEY (a, b) REFERENCES $schema.pair_parent MATCH FULL);
+INSERT INTO $schema.pair_parent VALUES (1, 1);
+INSERT INTO $schema.pair_child VALUES (1, 1), (NULL, NULL);
+CREATE TABLE $schema.events (source text, name text);
+INSERT INTO $schema.events VALUES ('api', 'drill_event'), ('segments', 'segment.entered');
 SQL
   integrity_test() {
     psql -XqAt -v ON_ERROR_STOP=1 -v schema="$schema" -v verify=true "$DATABASE_URL" \
       -f "$ROOT/scripts/drill/integrity.sql" > "$scratch/result" 2> "$scratch/error"
   }
-  integrity_test || die 'SQL self-test rejected intact data'
-  psql -Xq -v ON_ERROR_STOP=1 "$DATABASE_URL" > "$scratch/setup" 2>&1 <<SQL
+  expect_integrity_failure() {
+    if integrity_test; then die "SQL self-test missed $1"; fi
+    if ! grep -Fq "$1" "$scratch/error"; then
+      integrity_error "$scratch/error"
+      die "SQL self-test expected $1"
+    fi
+  }
+  integrity_test || { integrity_error "$scratch/error"; die 'SQL self-test rejected intact data'; }
+  # A segment refresh adds system events; checkpoints count only the seeded API events.
+  local seeded
+  seeded=$(psql -XqAt -v ON_ERROR_STOP=1 "$DATABASE_URL" \
+    -c "SET search_path TO $schema; $SEED_EVENT_COUNT" 2> "$scratch/error") || die 'SQL self-test check=seed_events query failed'
+  [[ "$seeded" == 1 ]] || die "SQL self-test check=seed_events table=events expected=1 last=$seeded"
+  self_sql plant_check <<SQL
 ALTER TABLE $schema.child ADD CONSTRAINT planted CHECK (n > 2) NOT VALID;
 SQL
-  if integrity_test; then die 'SQL self-test missed an invalid CHECK'; fi
-  psql -Xq -v ON_ERROR_STOP=1 "$DATABASE_URL" > "$scratch/setup" 2>&1 <<SQL
+  expect_integrity_failure "check=validate_constraint table=$schema.child constraint=planted"
+  self_sql plant_fk <<SQL
 ALTER TABLE $schema.child DROP CONSTRAINT planted;
 SET session_replication_role = replica;
 INSERT INTO $schema.child VALUES (2, 1);
 SQL
-  if integrity_test; then die 'SQL self-test missed a broken validated FK'; fi
-  echo 'upgrade SQL self-test OK (intact data, invalid CHECK, broken validated FK)'
+  expect_integrity_failure "check=foreign_key_rows table=$schema.child constraint=child_fk"
+  self_sql plant_full_fk <<SQL
+DELETE FROM $schema.child WHERE id = 2;
+SET session_replication_role = replica;
+INSERT INTO $schema.pair_child VALUES (1, NULL);
+SQL
+  expect_integrity_failure "check=foreign_key_rows table=$schema.pair_child constraint=pair_fk"
+  self_sql repair <<SQL
+DELETE FROM $schema.pair_child WHERE b IS NULL AND a IS NOT NULL;
+SQL
+  integrity_test || { integrity_error "$scratch/error"; die 'SQL self-test rejected repaired data'; }
+  echo 'upgrade SQL self-test OK (isolated tables, domain, CHECK, validated FK, MATCH FULL, seeded event count)'
+)
+
+# Identify changes profiles; track writes one API event. Segment refresh also writes events.
+SEED_EVENT_COUNT="SELECT count(*) FROM events WHERE source = 'api' AND name = 'drill_event'"
+
+redact() { python3 -I "$ROOT/scripts/drill/upgrade-diagnostics.py"; }
+
+checkpoint_failure() {
+  printf 'upgrade drill: checkpoint failed stage=%s label=%s expected=%s last=%s\n' \
+    "$STAGE" "$1" "$2" "$3" | redact >&2
+  {
+    echo 'Ingest counts and reject reasons:'
+    sql -c "SELECT 'inbox', count(*) FROM ingest_inbox;
+      SELECT 'rejects', count(*) FROM ingest_rejects;
+      SELECT 'reject_reason', reason, count(*) FROM ingest_rejects GROUP BY reason ORDER BY reason;
+      SELECT 'drain_jobs', state, count(*), max(attempts) FROM jobs
+        WHERE kind = 'ingest.drain' GROUP BY state ORDER BY state;" || echo 'Ingest diagnostics unavailable'
+    echo 'Compose service state:'
+    compose ps -a || echo 'Compose state unavailable'
+    echo 'zirv-flow log tail:'
+    compose logs --no-color --tail 100 zirv-flow || echo 'Service logs unavailable'
+  } 2>&1 | redact >&2
+  die "checkpoint failed during $STAGE"
+}
+
+wait_sql() {
+  local query=$1 want=$2 last='not observed'
+  for _ in $(seq 1 180); do
+    if ! last=$(sql -c "$query"); then last='SQL query failed'; fi
+    [[ "$last" != "$want" ]] || return 0
+    sleep 1
+  done
+  checkpoint_failure "SQL timeout: $query" "$want" "$last"
+}
+
+wait_api() {
+  local path=$1 predicate=$2 last=false
+  for _ in $(seq 1 180); do
+    # Only expose the predicate result, never the API response body.
+    if api GET "$path" 200 | jq -e "$predicate" > /dev/null; then return 0; fi
+    sleep 1
+  done
+  checkpoint_failure "API timeout: $path predicate=$predicate" true "$last"
+}
+
+checkpoint_self_test() (
+  local DRILL_WORK STAGE=population_ingest status
+  DRILL_WORK=$(mktemp -d)
+  trap 'rm -rf "$DRILL_WORK"' EXIT
+  sql() { echo 2999; }
+  compose() {
+    case "$1" in
+      ps) echo 'zirv-flow running' ;;
+      logs) echo 'owner@example.com +45-20304050 drill-user-0 person-0 event-0'; echo 'job attempt failed reason=apply_failed' ;;
+      *) return 1 ;;
+    esac
+  }
+  seq() { echo 1; }
+  sleep() { :; }
+  api() { echo '{"ready":false,"email":"owner@example.com"}'; }
+  wait_sql 'SELECT count(*) FROM people' 2999
+  status=0
+  (wait_sql 'SELECT count(*) FROM people' 3000) > "$DRILL_WORK/result" 2>&1 || status=$?
+  [[ "$status" == 1 ]] || die 'checkpoint self-test missed SQL timeout'
+  grep -Fq 'stage=population_ingest label=SQL timeout: SELECT count(*) FROM people expected=3000 last=2999' "$DRILL_WORK/result" || die 'checkpoint self-test missing SQL diagnostic'
+  grep -Fq 'zirv-flow running' "$DRILL_WORK/result" || die 'checkpoint self-test missing compose state'
+  grep -Fq 'job attempt failed reason=apply_failed' "$DRILL_WORK/result" || die 'checkpoint self-test missing log tail'
+  if grep -Eq 'owner@example.com|20304050|drill-user-0|person-0|event-0' "$DRILL_WORK/result"; then die 'checkpoint self-test exposed identifiers'; fi
+  status=0
+  (wait_api /health '.ready') > "$DRILL_WORK/result" 2>&1 || status=$?
+  [[ "$status" == 1 ]] || die 'checkpoint self-test missed API timeout'
+  grep -Fq 'label=API timeout: /health predicate=.ready expected=true last=false' "$DRILL_WORK/result" || die 'checkpoint self-test missing API diagnostic'
+  if grep -Fq 'owner@example.com' "$DRILL_WORK/result"; then die 'checkpoint self-test exposed API body'; fi
+  api() { echo '{"ready":true}'; }
+  wait_api /health '.ready'
+  echo 'upgrade checkpoint self-test OK (success, SQL/API timeouts, redacted diagnostics)'
 )
 
 case "${1:-}" in
-  --self-test) [[ $# == 1 ]] || die 'unexpected self-test argument'; count_self_test; exit ;;
+  --self-test)
+    [[ $# == 1 ]] || die 'unexpected self-test argument'
+    count_self_test
+    python3 -I "$ROOT/scripts/drill/upgrade-diagnostics.py" --self-test
+    checkpoint_self_test
+    exit ;;
   --self-test-postgres) [[ $# == 1 ]] || die 'unexpected self-test argument'; sql_self_test; exit ;;
 esac
 
@@ -189,24 +323,14 @@ api() {
   cat "$DRILL_WORK/body"
 }
 sql() { compose exec -T postgres psql -XqAt -v ON_ERROR_STOP=1 -U zirv -d zirv_flow "$@" 2> "$DRILL_WORK/sql-error"; }
-wait_sql() {
-  local query=$1 want=$2
-  for _ in $(seq 1 180); do
-    [[ "$(sql -c "$query")" != "$want" ]] || return 0
-    sleep 1
-  done
-  die "SQL checkpoint timed out during $STAGE"
-}
-wait_api() {
-  local path=$1 predicate=$2
-  for _ in $(seq 1 180); do
-    if api GET "$path" 200 | jq -e "$predicate" > /dev/null; then return 0; fi
-    sleep 1
-  done
-  die "API checkpoint timed out during $STAGE"
+snapshot() {
+  sql -v schema=public -v verify="$1" < "$ROOT/scripts/drill/integrity.sql" || {
+    integrity_error "$DRILL_WORK/sql-error"
+    die "integrity check failed during $STAGE"
+  }
 }
 
-STAGE=population
+STAGE=population_ingest
 TOKEN=$(compose logs --no-color zirv-flow | sed -nE 's/.*setup token ([^ ,"]+).*/\1/p' | head -1)
 [[ -n "$TOKEN" ]] || die 'no setup token'
 PASSWORD=$(openssl rand -hex 24)
@@ -221,34 +345,41 @@ SOURCE=$(api POST "$P/sources" 201 \
   '{"name":"Drill file","kind":"file","config":{"url":"https://example.com/people.csv","format":"csv"}}' | jq -er .id)
 KEY=$(api POST "$P/api-keys" 201 '{"name":"Drill ingestion","scopes":["ingest"]}' | jq -er .key)
 
-# Three batches of 1,000 events, one per past month, and 3,000 distinct people. No future dates.
+# Twelve requests of 250 identify/track pairs: 6,000 inbox items, 3,000 people and API events.
 for month in 1 2 3; do
   stamp=$(date -u -d "$(date -u +%Y-%m-15) -$month month" +%Y-%m-%dT12:00:00Z)
   for batch in $(seq 0 3); do
     body=$(jq -n --arg stamp "$stamp" --argjson start "$(((month - 1) * 1000 + batch * 250))" '
       {batch:[range($start; $start+250) as $n |
-        {type:"identify",userId:($n|tostring),messageId:("person-"+($n|tostring)),traits:{plan:"drill"}},
-        {type:"track",userId:($n|tostring),messageId:("event-"+($n|tostring)),
+        {type:"identify",userId:("drill-user-"+($n|tostring)),messageId:("person-"+($n|tostring)),traits:{plan:"drill"}},
+        {type:"track",userId:("drill-user-"+($n|tostring)),messageId:("event-"+($n|tostring)),
          event:"drill_event",timestamp:$stamp,properties:{quantity:1}}]}')
     api POST /ingest/batch 202 "$body" > /dev/null
   done
 done
+wait_sql 'SELECT count(*) FROM ingest_inbox' 0
+if ! REJECTS=$(sql -c 'SELECT count(*) FROM ingest_rejects'); then
+  checkpoint_failure 'SELECT count(*) FROM ingest_rejects' 0 'SQL query failed'
+fi
+[[ "$REJECTS" == 0 ]] || checkpoint_failure 'SELECT count(*) FROM ingest_rejects' 0 "$REJECTS"
 wait_sql 'SELECT count(*) FROM people' 3000
-wait_sql 'SELECT count(*) FROM events' 3000
-[[ "$(sql -c 'SELECT count(DISTINCT tableoid) FROM events')" -ge 3 ]] || die 'events did not span three partitions'
-SURVIVOR=$(api POST "$P/people/search" 200 '{"identifier":{"kind":"external:user_id","value":"0"}}' | jq -er .people[0].id)
-ERASED=$(api POST "$P/people/search" 200 '{"identifier":{"kind":"external:user_id","value":"1"}}' | jq -er .people[0].id)
+wait_sql "$SEED_EVENT_COUNT" 3000
+[[ "$(sql -c "SELECT count(DISTINCT tableoid) FROM events WHERE source = 'api' AND name = 'drill_event'")" == 3 ]] || die 'seed events did not span three partitions'
+SURVIVOR=$(api POST "$P/people/search" 200 '{"identifier":{"kind":"external:user_id","value":"drill-user-0"}}' | jq -er .people[0].id)
+ERASED=$(api POST "$P/people/search" 200 '{"identifier":{"kind":"external:user_id","value":"drill-user-1"}}' | jq -er .people[0].id)
 LIST=$(api POST "$P/lists" 201 '{"name":"Drill audience"}' | jq -er .id)
 api POST "$P/lists/$LIST/members" 200 "$(jq -n --arg id "$SURVIVOR" '{person_ids:[$id]}')" > /dev/null
 api PUT "$P/people/$SURVIVOR/consent" 200 '{"channel":"email","status":"subscribed"}' > /dev/null
 api PUT "$P/people/$SURVIVOR/consent" 200 '{"channel":"email","status":"unsubscribed"}' > /dev/null
+STAGE=population_segment_refresh
 SEGMENT=$(api POST "$P/segments" 201 '{"name":"Drill segment","definition":{"v":1,"all":[]}}' | jq -er .id)
 api POST "$P/segments/$SEGMENT/refresh" 202 > /dev/null
 wait_api "$P/segments/$SEGMENT" '.computed_version == .current_version and .member_count == 3000'
+STAGE=population_erasure
 api POST "$P/privacy/erasures" 202 "$(jq -n --arg id "$ERASED" '{person_id:$id}')" > /dev/null
 wait_api "$P/privacy/erasures" '.erasures | length == 1 and all(.[]; .status == "completed")'
 wait_sql 'SELECT count(*) FROM people' 2999
-wait_sql 'SELECT count(*) FROM events' 2999
+wait_sql "$SEED_EVENT_COUNT" 2999
 api GET "$P/people/$ERASED" 404 > /dev/null
 
 STAGE=sending_setup
@@ -281,7 +412,7 @@ wait_api "$P/flows/$FLOW/enrollments" '.enrollments | length == 1 and all(.[]; .
 ENROLLMENT=$(api GET "$P/flows/$FLOW/enrollments" 200 | jq -er .enrollments[0].id)
 quiet_compose stop zirv-flow
 [[ "$(sql -c "SELECT count(*) FROM enrollments WHERE state = 'waiting'")" == 1 ]] || die 'old enrollment was not waiting at shutdown'
-sql -v schema=public -v verify=false < "$ROOT/scripts/drill/integrity.sql" > "$DRILL_WORK/before.json"
+snapshot false > "$DRILL_WORK/before.json"
 BASELINE_SCHEMA=$(sql -c 'SELECT max(version) FROM _sqlx_migrations')
 [[ "$BASELINE_SCHEMA" =~ ^[0-9]+$ ]] || die 'invalid baseline schema version'
 
@@ -292,7 +423,7 @@ quiet_compose run --rm --no-deps zirv-flow migrate
 MIGRATE_SECONDS=$(($(date +%s) - MIGRATE_START))
 quiet_compose run --rm --no-deps zirv-flow migrate
 grep -Fxq 'database schema is up to date' "$DRILL_WORK/compose.log" || die 'second migrate did not report up to date'
-sql -v schema=public -v verify=true < "$ROOT/scripts/drill/integrity.sql" > "$DRILL_WORK/after.json"
+snapshot true > "$DRILL_WORK/after.json"
 compare_counts "$DRILL_WORK/before.json" "$DRILL_WORK/after.json" || die 'migration lost rows or tables'
 [[ "$(sql -v erased="$ERASED" <<'SQL'
 SELECT count(*) FROM people WHERE id = :'erased'::uuid;
@@ -300,7 +431,7 @@ SQL
 )" == 0 ]] || die 'erased person reappeared'
 
 {
-  printf '## Upgrade drill\n\nPrevious: `%s`; candidate: `%s`.\n\n' "$PREVIOUS" "$CANDIDATE_VERSION"
+  printf "## Upgrade drill\n\nPrevious: \`%s\`; candidate: \`%s\`.\n\n" "$PREVIOUS" "$CANDIDATE_VERSION"
   printf 'Migration wall time: %ss. Seed: 3,000 people and 3,000 events in three partitions; one erased before the baseline.\n\n' "$MIGRATE_SECONDS"
   printf '| Table | Before migration | After migration |\n| --- | ---: | ---: |\n'
   jq -r --slurpfile before "$DRILL_WORK/before.json" 'to_entries[] |
@@ -316,7 +447,7 @@ curl -fsS "$BASE/readyz" > /dev/null 2> "$DRILL_WORK/http-error"
 curl -fsS "$BASE/" 2> "$DRILL_WORK/http-error" | grep -q 'id="root"'
 api GET /version 200 | jq -e --arg version "$CANDIDATE_VERSION" '.version == $version' > /dev/null
 wait_sql 'SELECT count(*) FROM people' 2999
-wait_sql 'SELECT count(*) FROM events' 2999
+wait_sql "$SEED_EVENT_COUNT" 2999
 api GET "$P/people/$ERASED" 404 > /dev/null
 api GET "$P/people/$SURVIVOR" 200 > /dev/null
 wait_api "$P/privacy/erasures" '.erasures | length == 1 and all(.[]; .status == "completed")'
