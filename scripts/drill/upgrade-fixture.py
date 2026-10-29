@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Isolated drill DNS and TLS SMTP sink. Retains a delivery count, never message data."""
+"""Drill DNS and TLS SMTP sink; --capture retains synthetic guide mail in scratch only."""
 
 import base64
+from email import policy
+from email.parser import BytesParser
 import json
 from pathlib import Path
 import socketserver
@@ -32,13 +34,26 @@ def dns_reply(packet, records):
             + question + answer)
 
 
-def serve(directory):
+def captured_message(data, recipients):
+    message = BytesParser(policy=policy.default).parsebytes(data)
+    return {
+        "subject": str(message["Subject"]),
+        "recipients": recipients,
+        "html": message.get_body(preferencelist=("html",)).get_content(),
+        "text": message.get_body(preferencelist=("plain",)).get_content(),
+    }
+
+
+def serve(directory, capture=False):
     directory = Path(directory)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(directory / "smtp.pem", directory / "smtp.key")
     lock = threading.Lock()
     count = 0
     (directory / "arrivals").write_text("0")
+    messages = []
+    if capture:
+        (directory / "messages.json").write_text("[]")
 
     class DNS(socketserver.BaseRequestHandler):
         def handle(self):
@@ -57,6 +72,7 @@ def serve(directory):
                         stream.flush()
 
                     reply(b"220 fixture ESMTP")
+                    recipients = 0
                     while line := stream.readline(8192):
                         command = line.split(b" ", 1)[0].strip().upper()
                         if command == b"EHLO":
@@ -70,17 +86,29 @@ def serve(directory):
                             valid = (len(parts) == 3 and parts[1].upper() == b"PLAIN"
                                      and base64.b64decode(parts[2]) == b"\0drill\0drill")
                             reply(b"235 authenticated" if valid else b"535 refused")
-                        elif command in (b"MAIL", b"RCPT", b"RSET"):
+                        elif command in (b"MAIL", b"RSET"):
+                            recipients = 0
+                            reply(b"250 ok")
+                        elif command == b"RCPT":
+                            recipients += 1
                             reply(b"250 ok")
                         elif command == b"DATA":
                             reply(b"354 end with dot")
+                            body = bytearray()
                             while True:
                                 data = stream.readline(65536)
                                 if not data:
                                     return
                                 if data == b".\r\n":
                                     break
+                                if capture:
+                                    body.extend(data[1:] if data.startswith(b"..") else data)
                             with lock:
+                                if capture:
+                                    messages.append(captured_message(bytes(body), recipients))
+                                    pending = directory / "messages.new"
+                                    pending.write_text(json.dumps(messages))
+                                    pending.replace(directory / "messages.json")
                                 count += 1
                                 (directory / "arrivals").write_text(str(count))
                             reply(b"250 accepted")
@@ -102,4 +130,4 @@ def serve(directory):
 
 
 if __name__ == "__main__":
-    serve(sys.argv[1])
+    serve(sys.argv[1], capture="--capture" in sys.argv[2:])
