@@ -1316,9 +1316,9 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_drain_with_matching_segment_classes_keeps_marks_and_reevaluation(pool: PgPool) {
-        use zirv_flow_core::segment::ChangeClasses;
-
         crate::decision_testing::checked(pool, |pool| async move {
+            use zirv_flow_core::segment::ChangeClasses;
+
             let classes =
                 ChangeClasses::TRAITS | ChangeClasses::EVENTS | ChangeClasses::IDENTIFIERS;
             for singly in [false, true] {
@@ -1360,10 +1360,10 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_drain_ignores_archived_other_workspace_and_unrelated_segment_readers(pool: PgPool) {
-        use crate::segments::tests_support::segment_reading;
-        use zirv_flow_core::segment::ChangeClasses;
-
         crate::decision_testing::checked(pool, |pool| async move {
+            use crate::segments::tests_support::segment_reading;
+            use zirv_flow_core::segment::ChangeClasses;
+
             let ws = workspace(&pool, "ours").await;
             let other = workspace(&pool, "other").await;
             segment_reading(&pool, other, ChangeClasses::EVENTS).await;

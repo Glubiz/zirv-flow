@@ -410,9 +410,9 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_initial_refresh_includes_people_from_a_drain_that_skipped_its_marks(pool: PgPool) {
-        use zirv_flow_store::{IngestItem, IngestPayload, Shard};
-
         zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            use zirv_flow_store::{IngestItem, IngestPayload, Shard};
+
             let ws = workspace(&pool).await;
             define_trait(&pool, ws, "plan").await;
             let trace = TraceContext::root(Cause::api("req"));
