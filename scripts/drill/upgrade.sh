@@ -8,6 +8,8 @@ umask 077
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 # shellcheck source=scripts/semver-compare.sh
 source "$ROOT/scripts/semver-compare.sh"
+# shellcheck source=scripts/drill/lib.sh
+source "$ROOT/scripts/drill/lib.sh"
 
 die() { echo "::error::upgrade drill: $*" >&2; exit 1; }
 
@@ -229,26 +231,15 @@ semver_valid "$CANDIDATE_VERSION" || die 'candidate must be a version tag or upg
 DRILL_WORK=$(mktemp -d)
 export DRILL_WORK
 PROJECT="zf-upgrade-$(date +%s)-$$"
+COMPOSE_FILES=(-f "$ROOT/scripts/drill/compose.upgrade.yaml")
 STARTED=false
 STAGE=selection
-compose() { docker compose -p "$PROJECT" -f "$ROOT/scripts/drill/compose.upgrade.yaml" "$@"; }
-quiet_compose() { compose "$@" > "$DRILL_WORK/compose.log" 2>&1; }
-cleanup() {
-  local status=$?
-  trap - EXIT
-  if [[ "$STARTED" == true ]]; then
-    if ! quiet_compose down -v --remove-orphans; then
-      echo '::error::upgrade drill cleanup failed' >&2
-      status=1
-    fi
-  fi
-  if [[ "$status" != 0 ]]; then echo "::error::upgrade drill failed during $STAGE; raw output withheld" >&2; fi
-  rm -rf "$DRILL_WORK"
-  exit "$status"
+CLEANUP_DIAGNOSTICS=after
+CLEANUP_ERROR='::error::upgrade drill cleanup failed'
+cleanup_diagnostics() {
+  echo "::error::upgrade drill failed during $STAGE; raw output withheld" >&2
 }
-trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+install_cleanup_traps
 
 if [[ -z "$PREVIOUS" ]]; then
   # CD publishes v<version> releases and GHCR :<version>, never :v<version>.
@@ -290,23 +281,10 @@ if ! docker image inspect "$NEW_IMAGE" > /dev/null 2>&1; then
 fi
 
 STAGE=fixtures
-echo '{}' > "$DRILL_WORK/records.json"
-openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=upgrade-drill-ca \
-  -addext basicConstraints=critical,CA:TRUE -keyout "$DRILL_WORK/ca.key" \
-  -out "$DRILL_WORK/ca.pem" > "$DRILL_WORK/tls.log" 2>&1
-openssl req -newkey rsa:2048 -nodes -subj /CN=fixture \
-  -keyout "$DRILL_WORK/smtp.key" -out "$DRILL_WORK/smtp.csr" >> "$DRILL_WORK/tls.log" 2>&1
-printf '%s\n' 'subjectAltName=DNS:fixture' 'basicConstraints=critical,CA:FALSE' \
-  'extendedKeyUsage=serverAuth' > "$DRILL_WORK/smtp.ext"
-openssl x509 -req -days 1 -in "$DRILL_WORK/smtp.csr" -CA "$DRILL_WORK/ca.pem" \
-  -CAkey "$DRILL_WORK/ca.key" -CAcreateserial -extfile "$DRILL_WORK/smtp.ext" \
-  -out "$DRILL_WORK/smtp.pem" >> "$DRILL_WORK/tls.log" 2>&1
+fixture_tls upgrade-drill-ca DNS:fixture
 STARTED=true
 quiet_compose up -d --wait --wait-timeout 120 postgres fixture
-DRILL_DNS_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$(compose ps -q fixture)")
-export DRILL_DNS_IP
-for _ in $(seq 1 60); do [[ ! -f "$DRILL_WORK/fixture-ready" ]] || break; sleep 1; done
-[[ -f "$DRILL_WORK/fixture-ready" ]] || die 'DNS/SMTP fixture did not start'
+wait_fixture '::error::upgrade drill: DNS/SMTP fixture did not start'
 quiet_compose run --rm --no-deps zirv-flow migrate
 quiet_compose up -d --no-build --wait --wait-timeout 120 zirv-flow
 BASE="http://$(compose port zirv-flow 8080)"
@@ -331,7 +309,7 @@ snapshot() {
 }
 
 STAGE=population_ingest
-TOKEN=$(compose logs --no-color zirv-flow | sed -nE 's/.*setup token ([^ ,"]+).*/\1/p' | head -1)
+TOKEN=$(setup_token)
 [[ -n "$TOKEN" ]] || die 'no setup token'
 PASSWORD=$(openssl rand -hex 24)
 SESSION=$(api POST /setup 200 "$(jq -n --arg token "$TOKEN" --arg password "$PASSWORD" \

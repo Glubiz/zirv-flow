@@ -233,7 +233,7 @@ jobs:
       - name: Upgrade drill self-test
         run: bash scripts/drill/upgrade.sh --self-test
       - name: Upgrade drill shellcheck
-        run: shellcheck -x scripts/drill/upgrade.sh
+        run: shellcheck -x scripts/drill/upgrade.sh scripts/drill/guide.sh
 
   web:
     name: Web UI
@@ -650,7 +650,7 @@ jobs:
             if ! grep -qE '^crates/zirv-flow-store/migrations/|^scripts/drill/|^\.github/workflows/ci\.yaml$' <<< "$changed"; then
               run=false
             fi
-            if ! grep -qE '^docs/guide/getting-started\.md$|^docker-compose\.yml$|^scripts/drill/(guide\.sh|guide-nginx\.conf|compose\.guide\.yaml|upgrade-fixture\.py)$|^web/e2e/guide/|^web/e2e/playwright\.config\.ts$|^\.github/workflows/ci\.yaml$' <<< "$changed"; then
+            if ! grep -qE '^docs/guide/getting-started\.md$|^docker-compose\.yml$|^scripts/drill/(lib\.sh|guide\.sh|guide-nginx\.conf|compose\.guide\.yaml|upgrade-fixture\.py)$|^web/e2e/guide/|^web/e2e/playwright\.config\.ts$|^\.github/workflows/ci\.yaml$' <<< "$changed"; then
               guide=false
             fi
           fi
