@@ -13,21 +13,21 @@ a configuration key, a metric, a link or a test named on these pages does not ex
 
 | Requirement | Enforced | Operator duty | Where |
 | --- | --- | --- | --- |
-| Consent before marketing mail | E1 consent policy with rules that deny a send; E2 consent per person, channel and topic, with an append-only history | Collect consent with clear wording and keep proof (duty 2) | [Consent](#consent-and-unsubscribe), [README](../../README.md#consent-and-suppressions) |
-| Easy opt-out | E3 a signed unsubscribe link and a preference page in every marketing message | Test the link in the mail clients you care about | [Consent](#consent-and-unsubscribe), [README](../../README.md#tracking-and-unsubscribe-links) |
+| Consent before marketing mail | E1 consent policy with rules that deny a send; E2 consent per person, channel and topic, with an append-only history | Collect consent with clear wording and keep proof (duty 2) | [Consent](#consent-and-unsubscribe), [Reference](channels.md#consent-and-suppressions) |
+| Easy opt-out | E3 a signed unsubscribe link and a preference page in every marketing message | Test the link in the mail clients you care about | [Consent](#consent-and-unsubscribe), [Reference](channels.md#tracking-and-unsubscribe-links) |
 | Never mail an address again | E4 suppressions by keyed hash, per workspace and organization-wide | Import the suppressions you already hold elsewhere | [Suppressions](#suppressions) |
 | Stop a send that should not go | E5 send gates, each recorded in the trace; E6 quiet hours and frequency caps | Choose the caps and quiet hours that fit your promises | [Send gates](#send-gates-quiet-hours-and-frequency-caps), [architecture 10.1](../architecture.md#101-destinations-and-the-send-pipeline) |
-| Sender authentication | E7 a message is skipped unless its sending domain verified SPF, DKIM and DMARC | Publish the DNS records and look after sender reputation (duty 4) | [Sending domains](../../README.md#sending-domains) |
+| Sender authentication | E7 a message is skipped unless its sending domain verified SPF, DKIM and DMARC | Publish the DNS records and look after sender reputation (duty 4) | [Sending domains](channels.md#sending-domains) |
 | Right to erasure | E8 erasure across every table; E9 merged identities; E10 erase calls to destinations that support them | Handle systems the product does not call (duty 12) | [Erasure](#erasure) |
 | Erasure survives a restore | E11 the ledger directory outside the database; E12 replay after a restore | Back up the ledger directory apart from the database and replay after a restore (duties 5 and 7) | [Erasure](#erasure), [backup and restore](../operations/backup-restore.md) |
 | Right of access | E13 export of everything held on a person | Answer requests that reach you outside the product (duty 9) | [Export](#export-of-a-person) |
-| Keep data no longer than needed | E14 retention windows enforced by scheduled jobs | Choose windows within the deployment bounds (duty 11) | [Retention](#retention), [README](../../README.md#retention-windows) |
+| Keep data no longer than needed | E14 retention windows enforced by scheduled jobs | Choose windows within the deployment bounds (duty 11) | [Retention](#retention), [Reference](../people.md#retention-windows) |
 | Limit who sees personal data | E15 masking unless `view_pii` or the `pii` key scope | Review members and keys (duty 10) | [Masking](#personal-data-masking) |
 | Accountability | E16 append-only audit log with ids only | Review the audit and keep what you need beyond 2 years | [Audit](#audit) |
 | Protect credentials | E17 secrets sealed at rest under a master key | Keep and escrow the master key (duty 6) | [Secrets](#secrets-egress-logs-and-the-assistant), [secrets guide](../operations/secrets.md) |
-| Limit outbound reach | E18 egress policy for outbound HTTP | List only the internal hosts you mean to reach | [Secrets](#secrets-egress-logs-and-the-assistant), [README](../../README.md#egress) |
-| No identifiers in logs | E19 default-level logs hold no identifier value | Protect and age the logs you ship elsewhere | [Secrets](#secrets-egress-logs-and-the-assistant), [README](../../README.md#logs-and-traces) |
-| Control what an AI provider sees | E20 the assistant is off by default and sends no personal data unless an admin opts in | Sign the agreement with the provider and decide on the opt-in (duty 3) | [Secrets](#secrets-egress-logs-and-the-assistant), [README](../../README.md#ai-assistant) |
+| Limit outbound reach | E18 egress policy for outbound HTTP | List only the internal hosts you mean to reach | [Secrets](#secrets-egress-logs-and-the-assistant), [Reference](sources.md#egress) |
+| No identifiers in logs | E19 default-level logs hold no identifier value | Protect and age the logs you ship elsewhere | [Secrets](#secrets-egress-logs-and-the-assistant), [Reference](../operations/runtime.md#logs-and-traces) |
+| Control what an AI provider sees | E20 the assistant is off by default and sends no personal data unless an admin opts in | Sign the agreement with the provider and decide on the opt-in (duty 3) | [Secrets](#secrets-egress-logs-and-the-assistant), [Reference](templates.md#ai-assistant) |
 
 ## Part 1: What Zirv Flow enforces
 

@@ -1,4 +1,4 @@
-/** The closed list of sources a forwarding mapping may read (README, forwarding). */
+/** The closed list of sources a forwarding mapping may read (docs/guide/channels.md, event forwarding). */
 export const SOURCES = [
   { id: "event.id", label: "Event id" },
   { id: "event.name", label: "Event name" },

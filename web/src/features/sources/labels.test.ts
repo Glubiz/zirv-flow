@@ -296,7 +296,7 @@ describe("webhook labels", () => {
     expect(schemeSummary(aWebhook({ timestamp_header: null }))).toContain("only the dedupe field stops a replay");
   });
 
-  it("writes the example command the README documents, for either scheme", () => {
+  it("writes the example command the sources guide documents, for either scheme", () => {
     const timestamped = curlExample("https://flow.example.test/hooks/hook-1", aWebhook(), "zfwh_secret");
     expect(timestamped).toContain(`printf '%s' "$TS.$BODY" | openssl dgst -sha256 -hmac 'zfwh_secret'`);
     expect(timestamped).toContain(`-H "X-Zirv-Timestamp: $TS"`);

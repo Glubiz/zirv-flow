@@ -135,9 +135,9 @@ mod tests {
         found
     }
 
-    /// The series of `emitted` that no table row of `readme` names.
-    fn missing_from_table(emitted: &BTreeSet<String>, readme: &str) -> Vec<String> {
-        let table: String = readme
+    /// The series of `emitted` that no table row of `reference` names.
+    fn missing_from_table(emitted: &BTreeSet<String>, reference: &str) -> Vec<String> {
+        let table: String = reference
             .lines()
             .filter(|line| line.starts_with('|'))
             .collect::<Vec<_>>()
@@ -147,16 +147,16 @@ mod tests {
     }
 
     #[test]
-    fn every_series_the_code_emits_is_in_the_readme_table() {
+    fn every_series_the_code_emits_is_in_the_runtime_table() {
         let emitted = series_in_crates();
         assert!(emitted.len() > 50, "the scan found only {emitted:?}");
-        let readme = std::fs::read_to_string(root().join("README.md")).unwrap();
+        let reference = std::fs::read_to_string(root().join("docs/operations/runtime.md")).unwrap();
 
-        let missing = missing_from_table(&emitted, &readme);
+        let missing = missing_from_table(&emitted, &reference);
 
         assert!(
             missing.is_empty(),
-            "the README metric table lacks these series: {}",
+            "the runtime metric table lacks these series: {}",
             missing.join(", ")
         );
     }
@@ -203,12 +203,12 @@ mod tests {
             ["zirv_flow_drifted_total", "zirv_flow_listed"]
         );
 
-        let readme = "| `zirv_flow_listed` | gauge |
+        let reference = "| `zirv_flow_listed` | gauge |
 prose about zirv_flow_drifted_total
 ";
 
         assert_eq!(
-            missing_from_table(&emitted, readme),
+            missing_from_table(&emitted, reference),
             ["zirv_flow_drifted_total"]
         );
     }

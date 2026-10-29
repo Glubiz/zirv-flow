@@ -64,8 +64,8 @@ real-person previews and flow tests; owners and admins already have that access.
 
 ## 3. Bring in an event
 
-This path uses the ingestion API. A [file source](../../README.md#the-file-source)
-or [HTTP manifest source](../../README.md#the-http-manifest-source) is another
+This path uses the ingestion API. A [file source](sources.md#the-file-source)
+or [HTTP manifest source](sources.md#the-http-manifest-source) is another
 way to bring data in; use one path for this first run.
 
 In **Events**, choose **Add schema**, name the event `order_placed`, and choose

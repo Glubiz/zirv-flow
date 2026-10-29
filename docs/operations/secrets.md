@@ -1,8 +1,70 @@
 # Secrets and the master key
 
 This guide covers what the master key protects, what losing it costs, how to notice, and how to
-rotate it. The design is in `docs/architecture.md` section 16.2; the rotation steps are in the
-README under Secrets.
+rotate it. The design is in `docs/architecture.md` section 16.2; the rotation steps are [below](#rotation).
+
+## Master key
+
+`serve`, `worker` and `all` need the operator master key and refuse to start
+without it (`scheduler`, `migrate`, `config check` and the other `admin`
+commands do not). It is 32 random bytes as base64. It wraps the keys that
+encrypt stored secrets (see [Secrets](#secrets)). Create it once and point
+`secrets.master_key_file` at it:
+
+```sh
+zirv-flow admin generate-master-key --out /etc/zirv-flow/master.key
+```
+
+The command writes the file readable only by its owner (mode 0600 on Unix),
+refuses to overwrite an existing file, prints the key id (the first 8 bytes of
+its SHA-256 as hex, also logged at start as `master key loaded`) and never
+prints the key. `--if-missing` keeps an existing valid key and succeeds.
+Keep the key and back it up separately from your database backups (a dump and
+the key together defeat the point of having a key). Never swap the key in
+place: change it with the rotation below.
+
+## Secrets
+
+Connector credentials, OAuth tokens and AI provider keys are stored encrypted.
+Each secret gets its own random data key (XChaCha20-Poly1305), and the master
+key wraps that data key; the database holds only ciphertext, the wrapped key and
+the id of the wrapping master key. A database dump without the master key
+reveals no credential, and the API never returns one. A lost master key means
+the stored secrets must be created again, and every hash and tracking token made
+before is dead; see [Secrets and the master key](#what-losing-it-means).
+
+## Rotation
+
+The identifier, suppression and redaction hashes derive from a stable HMAC root,
+not from the master key. The first `serve` or `worker` start stores that root,
+sealed like any secret, made from the master key it starts with (the key the
+existing hashes were made with), so a rotation never changes a hash. Start once
+with only the current key before rotating.
+
+To rotate the master key:
+
+1. Create a new key with `zirv-flow admin generate-master-key`.
+2. Set it as `secrets.master_key_file`, and set the old key as
+   `secrets.previous_master_key_file`.
+3. Restart every `serve` and `worker` process. A process left on the old key cannot
+   write secrets once the rotation has run: it is refused with an error until it
+   restarts with the current key.
+4. Run `zirv-flow admin rotate-master-key`. It re-wraps every data key, and the
+   HMAC root, in one transaction, leaves the ciphertexts alone, writes an audit
+   entry with the key ids and the count, and prints the count. A second run
+   re-wraps 0. It aborts, changing nothing, if a row is wrapped by a key you
+   have not configured, and names that key id.
+5. Remove the previous key from the configuration and restart.
+
+A start with a previous key configured and no stored HMAC root is refused, as is
+a previous key equal to the current one. `rotate-master-key` is refused, changing
+nothing, when no HMAC root exists. The rotation holds every row in one
+transaction, which suits secrets in the thousands.
+
+Run `zirv-flow config check` to validate the effective configuration and print
+it as TOML with the database password, the OIDC client secret and the master key redacted.
+Supply the client secret as `ZIRV_FLOW_AUTH__OIDC__CLIENT_SECRET` rather than in
+a file.
 
 ## What the key protects
 
@@ -135,7 +197,7 @@ hold until the last such backup has expired.
 
 ## A compromised key
 
-Rotate the master key first (below). Then rotate the secrets themselves: a rotation re-wraps data
+Rotate the master key first (see [Rotation](#rotation)). Then rotate the secrets themselves: a rotation re-wraps data
 keys but does not change a secret's value, and old backups still hold the old wraps, which the
 leaked key opens. Replace the credentials, tokens, provider keys, webhook secrets, signing
 secrets, DKIM keys and allowlist addresses, and retire the old copies.

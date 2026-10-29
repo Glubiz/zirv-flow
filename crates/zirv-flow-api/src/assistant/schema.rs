@@ -383,18 +383,18 @@ mod tests {
         ));
     }
 
-    /// A mapping the README shows in its mapping reference.
+    /// A mapping the sources guide shows in its mapping reference.
     #[test]
-    fn the_readme_mapping_example_matches_the_lowered_schema() {
-        let readme = include_str!("../../../../README.md");
-        let section = readme
+    fn the_sources_guide_mapping_example_matches_the_lowered_schema() {
+        let guide = include_str!("../../../../docs/guide/sources.md");
+        let section = guide
             .find("Example, a JSON file of customers with an order each")
             .expect("the mapping example");
-        let start = section + readme[section..].find("\"columns\"").unwrap();
-        let open = readme[..start].rfind('{').unwrap();
+        let start = section + guide[section..].find("\"columns\"").unwrap();
+        let open = guide[..start].rfind('{').unwrap();
         let mut depth = 0;
         let mut end = open;
-        for (index, character) in readme[open..].char_indices() {
+        for (index, character) in guide[open..].char_indices() {
             match character {
                 '{' => depth += 1,
                 '}' => {
@@ -407,7 +407,7 @@ mod tests {
                 _ => {}
             }
         }
-        let text = readme[open..end].replace("\"...\"", "\"0190d0f2-0000-7000-8000-000000000001\"");
+        let text = guide[open..end].replace("\"...\"", "\"0190d0f2-0000-7000-8000-000000000001\"");
         let example: Value = serde_json::from_str(&text).unwrap();
         let schema = tool_parameters::<MappingBody>().unwrap();
 

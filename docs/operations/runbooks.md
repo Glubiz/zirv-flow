@@ -13,7 +13,7 @@ Conventions used below:
   step here needs, prints or pastes a secret, an address or a person's name.
 - `psql "$DATABASE_URL"` is a read-only probe against the database. Every probe counts or groups;
   none selects a person, an address or a payload.
-- The metric names are in the README metric table. The config keys are in the README
+- The metric names are in the [runtime metric table](runtime.md#metrics). The config keys are in the README
   Configuration table; `zirv-flow config check` prints the effective values with secrets redacted.
 
 ## ZirvFlowJobsBacklog
@@ -404,7 +404,7 @@ None yet. A full disk stops the database, and with it everything.
 2. Shorten `retention.decision_days` (within `retention.decision_max_days`), restart, and let the
    next run drop the older partitions. Dropped partitions are not brought back by raising the
    value again.
-3. Grow the disk if the window is needed; the README Retention windows section has the measured
+3. Grow the disk if the window is needed; the [event reference](../people.md#events) has the measured
    bytes per record for sizing.
 
 ### Fixed when
