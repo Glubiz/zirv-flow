@@ -644,13 +644,18 @@ jobs:
         run: |
           set -euo pipefail
           run=true
+          guide=true
           if [[ "$EVENT" == pull_request ]]; then
             changed=$(git diff --name-only --no-renames "origin/$BASE_REF...HEAD")
             if ! grep -qE '^crates/zirv-flow-store/migrations/|^scripts/drill/|^\.github/workflows/ci\.yaml$' <<< "$changed"; then
               run=false
             fi
+            if ! grep -qE '^docs/guide/getting-started\.md$|^docker-compose\.yml$|^scripts/drill/(guide\.sh|guide-nginx\.conf|compose\.guide\.yaml|upgrade-fixture\.py)$|^web/e2e/guide/|^web/e2e/playwright\.config\.ts$|^\.github/workflows/ci\.yaml$' <<< "$changed"; then
+              guide=false
+            fi
           fi
           echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "guide=$guide" >> "$GITHUB_OUTPUT"
 
       - name: Select previous published release
         if: steps.paths.outputs.run == 'true'
@@ -662,11 +667,11 @@ jobs:
         run: bash scripts/drill/upgrade.sh --select-previous --image "$IMAGE_TAG" --previous "$PREVIOUS_TAG"
 
       - name: Set Up Docker Buildx
-        if: steps.previous.outputs.previous != '' && inputs.image_tag == ''
+        if: (steps.previous.outputs.previous != '' || steps.paths.outputs.guide == 'true') && inputs.image_tag == ''
         uses: docker/setup-buildx-action@v3.11.1
 
       - name: Build candidate image
-        if: steps.previous.outputs.previous != '' && inputs.image_tag == ''
+        if: (steps.previous.outputs.previous != '' || steps.paths.outputs.guide == 'true') && inputs.image_tag == ''
         uses: docker/build-push-action@v6.18.0
         with:
           context: .
@@ -682,6 +687,38 @@ jobs:
           IMAGE_TAG: ${{ inputs.image_tag || 'upgrade-drill' }}
           PREVIOUS_TAG: ${{ steps.previous.outputs.previous }}
         run: bash scripts/drill/upgrade.sh --image "$IMAGE_TAG" --previous "$PREVIOUS_TAG"
+
+      # Reuses the image above, but starts the quickstart on fresh volumes. A previous
+      # release is not needed for this walkthrough; guide-only PRs can run it alone.
+      - name: Set Up Node for walkthrough
+        if: steps.paths.outputs.guide == 'true'
+        uses: actions/setup-node@v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install walkthrough browser
+        if: steps.paths.outputs.guide == 'true'
+        working-directory: web
+        run: |
+          npm ci
+          npm run e2e:install
+
+      - name: Getting-started walkthrough
+        id: guide
+        if: steps.paths.outputs.guide == 'true'
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag || 'upgrade-drill' }}
+        run: bash scripts/drill/guide.sh
+
+      - name: Upload guide screenshots
+        if: steps.guide.outcome == 'success'
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: getting-started-screenshots
+          path: web/e2e/test-results/guide-screenshots/*.png
+          if-no-files-found: error
 
   # Proves the clean-checkout promise of the README quickstart: the image
   # builds, the compose stack comes up healthy and /readyz answers 200.

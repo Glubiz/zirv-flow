@@ -16,6 +16,7 @@ const binary =
 export default defineConfig({
   testDir: ".",
   testMatch: "**/*.spec.ts",
+  testIgnore: "**/guide/**",
   globalTeardown: "./global-teardown.ts",
   fullyParallel: false,
   workers: 1,
