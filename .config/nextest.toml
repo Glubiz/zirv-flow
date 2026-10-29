@@ -6,6 +6,12 @@ slow-timeout = { period = "60s", terminate-after = 3 }
 filter = 'package(zirv-flow-jobs) & test(a_segment_entry_trigger_for_100000_people_enrolls_each_exactly_once)'
 slow-timeout = { period = "60s", terminate-after = 6 }
 
+# WAL positions are cluster-wide: keep other tests out of the measurement window.
+[[profile.default.overrides]]
+filter = 'package(zirv-flow-store) & test(a_drain_batch_reports_wal_by_relation_without_active_segments)'
+success-output = "immediate"
+threads-required = "num-test-threads"
+
 # The throughput tests drain thousands of jobs or people through one PostgreSQL server and run
 # close to their 60 s wait on a busy CI runner, where they time out together when they also
 # share it with each other. Running these one at a time keeps them from competing.
