@@ -325,7 +325,7 @@ test("getting started on a clean Compose stack", async ({ page, request }) => {
     if (!summary) throw new Error("GITHUB_STEP_SUMMARY is required.");
     const names = [...new Set(decisions.map(({ action, outcome }) => `${action} → ${outcome}`))];
     for (const name of names) expect(name).toMatch(/^[a-z_.]+ → [a-z_]+$/);
-    appendFileSync(summary, [
+    const evidence = [
       "\n### Getting-started walkthrough",
       "Clean docker-compose.yml stack; synthetic data; setup through publish exercised in Chromium.",
       `- Test SMTP capture: **${testMessage.subject}**; recipients: **${testMessage.recipients}**.`,
@@ -334,6 +334,8 @@ test("getting started on a clean Compose stack", async ({ page, request }) => {
       `- Enrollment trace read in the UI: ${names.map((name) => `\`${name}\``).join(", ")}.`,
       "- Newsletter editor and preview PNGs: getting-started-screenshots artifact.",
       "",
-    ].join("\n"));
+    ].join("\n");
+    appendFileSync(summary, evidence);
+    console.log(evidence);
   });
 });
