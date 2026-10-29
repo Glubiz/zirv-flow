@@ -24,6 +24,17 @@ on:
         default: ''
 
 jobs:
+  docs:
+    name: Documentation links and guide accuracy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4.4.0
+      - name: Documentation checker self-test
+        run: python3 scripts/check-docs.py --self-test
+      - name: Check links, API routes, configuration and flow nodes
+        run: python3 scripts/check-docs.py
+
   test:
     name: Test, Lint, and Format Check
     runs-on: ubuntu-latest
@@ -57,6 +68,12 @@ jobs:
       # to re-run --self-test locally.
       - name: Test-presence gate self-test
         run: bash scripts/check-test-presence.sh --self-test
+
+      - name: Threat model evidence
+        run: bash scripts/check-threat-model.sh
+
+      - name: Threat model evidence self-test
+        run: bash scripts/check-threat-model.sh --self-test
 
       - name: Set Up Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
