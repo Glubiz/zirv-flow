@@ -72,8 +72,9 @@ In **Events**, choose **Add schema**, name the event `order_placed`, and choose
 **Add schema** in the dialog. Open its draft and choose **Publish**, then
 **Publish version**. Leave the property list empty for the event below.
 
-In **API keys**, choose **Create key** and select only the **Ingest** scope in
-the **New API key** dialog. Choose **Create key** there and copy the
+In **API keys**, choose **Create key**, enter a **Name** such as *Guide ingestion*,
+and select only the **Ingest** scope in the **New API key** dialog (clear the
+default **Read** selection). Choose **Create key** there and copy the
 key when it appears; it is shown only once. In a terminal, set `INGEST_KEY` to
 that key and `FLOW_URL` to your instance's public address. These are shell
 variables for this example, not server configuration keys.
@@ -90,7 +91,7 @@ curl -i -X POST "$FLOW_URL/api/v1/ingest/track" \
 
 Use an address accepted by your capture server. The `messageId` makes retrying
 this request safe: reuse it for a retry, and use a new one for a new event.
-A 202 response means queued. Wait for the applied result in the debugger.
+A 202 response means queued. Wait for **Accepted** in the debugger.
 **Reveal PII** shows values only to someone allowed to see them. Open **People**
 (`/w/:ws/people`), find the person, and check their profile and timeline.
 
@@ -104,13 +105,14 @@ accepted into the event store.
 ## 4. Preview a segment and record consent
 
 Open **Segments**, choose **New segment**, and name it *Newsletter readers*.
-In **Who belongs**, set the condition's **Type** to **Event**, choose
+In **Who belongs**, change the top-level **Type** from **All of** to **Event**, choose
 `order_placed`, and leave **Time window** at **Any time**. Leave the property
 filters empty and add no summary: one matching event is enough.
 
 The **Who matches** panel previews the count and a sample as you build. Check
 that the synthetic person appears, then choose **Create segment**. Wait for its
-membership to be computed before using it in a flow. This segment includes
+membership to be computed before using it in a flow: reload the page and check
+the **Members** tab for the person. This segment includes
 everyone with that event, so keep the workspace limited to your test person.
 
 Open **Consent** on the person's **Profile** tab. Under **Applies to**, select
@@ -125,19 +127,24 @@ See the [compliance guide](compliance.md) before using real data.
 
 An admin does this part. Have a domain whose DNS you can change and an SMTP
 capture server reachable from the application container. The capture server
-must accept the configured username and password. The quickstart has no SMTP
-capture service; the browser harness's sink is a test fixture only.
+must support STARTTLS or implicit TLS and accept the configured username and
+password. The quickstart has no SMTP capture service; the browser harness's
+sink is a test fixture only.
 
 1. Open **Sending domains** (`/w/:ws/sending-domains`), choose **Add a domain**,
-   and enter your domain. Publish the displayed SPF, DKIM and DMARC records in
-   DNS. Choose **Check DNS now** and wait for verification.
+   enter your domain, and choose **Add the domain**. Publish the displayed SPF,
+   DKIM and DMARC records in DNS. Choose **Check DNS now** and wait for verification.
 2. On the domain page, choose **Add sender identity**. Enter **From name** and a
    **From address** on that domain. **Reply-to (optional)** can be left empty.
    Choose **Add the identity** and check that it says **Can send**.
 3. Open **Destinations**, choose **New destination**, and select **SMTP** as the
-   **Type**. Name it *Newsletter capture*. Choose or create its credential with
-   **Host**, **Port**, **TLS mode**, **Username** and **Password** from the capture
-   server. Choose **Create destination**. Use the server address reachable from
+   **Type**. Name it *Newsletter capture*. Choose an existing credential, or choose
+   **New credential** and enter **Host**, **Port**, **Username** and **Password**
+   from the capture server. In **TLS mode**, type `tls` for implicit TLS or
+   `starttls` for STARTTLS, then choose **Create credential**.
+   For a private certificate authority, paste its PEM into
+   **CA certificate (optional)** on the destination form. Choose
+   **Create destination**. Use the server address reachable from
    the container; its localhost is the container itself.
 4. Open **Sending** (`/w/:ws/settings/sending`), headed **Sending limits**. Under
    **Test inboxes**, enter the synthetic recipient's **Address** and choose
@@ -181,11 +188,12 @@ Wait for **Draft saved**. Check the HTML and text previews. A publisher chooses
 **Publish…**, reviews the checks on **Review and publish version 1**, then
 chooses **Publish version 1**. Fix any failing checks before publishing.
 
-Choose **Send a test**. Select the allowlisted address under **Test inboxes**,
-choose **Version 1 · live**, and select the sender under **From**. Select the
+Choose **Send a test**. Select the masked allowlisted address under **Test inboxes**
+(`r***@example.com` for this example), choose **Version 1 · live**, and select
+the sender under **From**. Select the
 SMTP destination under **Send through**. Choose **Send 1 test** and wait for
-the captured message in the SMTP server. Check its subject, HTML, text and
-unsubscribe link. **Queued** is not proof of receipt.
+the captured message in the SMTP server. Check its subject (*[TEST] Spring is here*),
+HTML, text and unsubscribe link. **Queued** is not proof of receipt.
 
 This sends a real test message to the chosen inbox. Flow test mode, below, sends
 nothing. A template test send does not prove the person's consent, frequency
@@ -194,9 +202,9 @@ cap or quiet-hours checks will allow a live flow send.
 **Common mistake:** leaving out the unsubscribe link in a marketing template.
 **Fix:** use the system variable above and publish again after the checks pass.
 
-> **Screenshot pending:** capture the newsletter editor and preview from the
-> browser harness's seeded workspace. Use synthetic content only; store the
-> approved lean view under `docs/guide/img/`. The instructions above stand alone.
+![Newsletter block editor with synthetic Spring newsletter content and message settings](img/newsletter-editor.png)
+
+![HTML preview of the Spring newsletter with its heading, collection button and unsubscribe footer](img/newsletter-preview.png)
 
 ## 7. Build and test the flow
 
@@ -250,9 +258,7 @@ stopped it; use **Pause** while you investigate a live flow.
 **Fix:** confirm capture separately. Delivery feedback and opens are later events;
 an SMTP acceptance alone does not prove delivery or reading.
 
-> **Walkthrough pending:** on a clean Compose stack with the delivery
-> prerequisites above, follow this page and record the captured test message,
-> captured flow message and enrollment trace in the pull request. The existing
-> browser newsletter and Rust send-path tests cover parts of this path, not this
-> combined clean-stack walkthrough. No live walkthrough or screenshot was run
-> while writing this guide.
+The **Upgrade Drill** CI job's **Getting-started walkthrough** step follows this
+page on a clean Compose stack, checks both SMTP captures and the enrollment trace,
+and records synthetic evidence in the run summary. It runs when this guide or
+the walkthrough's Compose, browser, fixture or CI files change.
