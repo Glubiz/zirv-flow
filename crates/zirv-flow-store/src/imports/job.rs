@@ -49,33 +49,37 @@ mod tests {
     async fn a_pass_holds_one_job_per_import_and_kind_with_the_workspace_and_the_trace(
         pool: PgPool,
     ) {
-        let name = WorkspaceName::parse("one").unwrap();
-        let slug = Slug::parse("one").unwrap();
-        let ws = create_workspace(&pool, &name, &slug).await.unwrap().id;
-        let import = Uuid::now_v7();
-        let trace = TraceContext::root(Cause::api("req"));
+        crate::decision_testing::checked(pool, |pool| async move {
+            let name = WorkspaceName::parse("one").unwrap();
+            let slug = Slug::parse("one").unwrap();
+            let ws = create_workspace(&pool, &name, &slug).await.unwrap().id;
+            let import = Uuid::now_v7();
+            let trace = TraceContext::root(Cause::api("req"));
 
-        let first = enqueue_import_job(&pool, RUN_JOB_KIND, ws, import, &trace)
-            .await
-            .unwrap();
-        let again = enqueue_import_job(&pool, RUN_JOB_KIND, ws, import, &trace)
-            .await
-            .unwrap();
-        let dry = enqueue_import_job(&pool, DRY_RUN_JOB_KIND, ws, import, &trace)
-            .await
-            .unwrap();
+            let first = enqueue_import_job(&pool, RUN_JOB_KIND, ws, import, &trace)
+                .await
+                .unwrap();
+            let again = enqueue_import_job(&pool, RUN_JOB_KIND, ws, import, &trace)
+                .await
+                .unwrap();
+            let dry = enqueue_import_job(&pool, DRY_RUN_JOB_KIND, ws, import, &trace)
+                .await
+                .unwrap();
 
-        assert!(first && !again && dry);
-        let jobs: Vec<(String, Option<Uuid>, serde_json::Value, Option<String>)> = sqlx::query_as(
-            "SELECT kind, workspace_id, payload, unique_key FROM jobs ORDER BY kind",
-        )
-        .fetch_all(&pool)
-        .await
-        .unwrap();
-        assert_eq!(jobs.len(), 2);
-        assert_eq!(jobs[1].0, "import.run");
-        assert_eq!(jobs[1].1, Some(ws.as_uuid()));
-        assert_eq!(jobs[1].2, serde_json::json!({ "import_id": import }));
-        assert_eq!(jobs[1].3, Some(format!("import.run:{import}")));
+            assert!(first && !again && dry);
+            let jobs: Vec<(String, Option<Uuid>, serde_json::Value, Option<String>)> =
+                sqlx::query_as(
+                    "SELECT kind, workspace_id, payload, unique_key FROM jobs ORDER BY kind",
+                )
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+            assert_eq!(jobs.len(), 2);
+            assert_eq!(jobs[1].0, "import.run");
+            assert_eq!(jobs[1].1, Some(ws.as_uuid()));
+            assert_eq!(jobs[1].2, serde_json::json!({ "import_id": import }));
+            assert_eq!(jobs[1].3, Some(format!("import.run:{import}")));
+        })
+        .await;
     }
 }

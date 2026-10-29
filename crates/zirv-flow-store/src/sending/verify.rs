@@ -256,40 +256,60 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_failed_recheck_drops_a_verified_domain_and_appends_a_decision(pool: PgPool) {
-        let ws = workspace(&pool, "one").await;
-        let id = plant_domain(&pool, ws, "example.com").await.unwrap();
-        let up = TraceContext::root(Cause::definition_change(id));
-        let down = TraceContext::root(Cause::schedule(id));
-        let verified = check(&pool, ws, id, &all(RecordStatus::Ok), &up).await;
-        let stamp = verified.domain.verified_at.unwrap();
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            let id = plant_domain(&pool, ws, "example.com").await.unwrap();
+            let up = TraceContext::root(Cause::definition_change(id));
+            let down = TraceContext::root(Cause::schedule(id));
+            let verified = check(&pool, ws, id, &all(RecordStatus::Ok), &up).await;
+            let stamp = verified.domain.verified_at.unwrap();
 
-        let still = check(&pool, ws, id, &all(RecordStatus::Ok), &up).await;
-        assert_eq!(still.domain.verified_at, Some(stamp));
-        let dropped = check(
-            &pool,
-            ws,
-            id,
-            &[finding(RecordKind::Spf, RecordStatus::Mismatch)],
-            &down,
-        )
+            let still = check(&pool, ws, id, &all(RecordStatus::Ok), &up).await;
+            assert_eq!(still.domain.verified_at, Some(stamp));
+            let dropped = check(
+                &pool,
+                ws,
+                id,
+                &[finding(RecordKind::Spf, RecordStatus::Mismatch)],
+                &down,
+            )
+            .await;
+
+            assert_eq!(dropped.domain.status, "unverified");
+            assert!(dropped.changed());
+            let (up_log, _) = list_trace(&pool, ws, up.trace_id, 10).await.unwrap();
+            let (down_log, _) = list_trace(&pool, ws, down.trace_id, 10).await.unwrap();
+            // Becoming verified is one decision; staying verified appends none.
+            assert_eq!(up_log.len(), 1);
+            assert_eq!(
+                (up_log[0].action.as_str(), up_log[0].outcome.as_str()),
+                ("sending_domain.verify", "verified")
+            );
+            assert_eq!(down_log.len(), 1);
+            assert_eq!(
+                (down_log[0].action.as_str(), down_log[0].outcome.as_str()),
+                ("sending_domain.verify", "unverified")
+            );
+            assert_eq!(down_log[0].reason.as_deref(), Some("record_failed"));
+
+            crate::decision_testing::assert_fixture(
+                &pool,
+                ws,
+                &up,
+                ("sending_domain.verify", "verified", Some("records_ok")),
+                serde_json::json!({"sending_domain": id}),
+            )
+            .await;
+            crate::decision_testing::assert_fixture(
+                &pool,
+                ws,
+                &down,
+                ("sending_domain.verify", "unverified", Some("record_failed")),
+                serde_json::json!({"sending_domain": id}),
+            )
+            .await;
+        })
         .await;
-
-        assert_eq!(dropped.domain.status, "unverified");
-        assert!(dropped.changed());
-        let (up_log, _) = list_trace(&pool, ws, up.trace_id, 10).await.unwrap();
-        let (down_log, _) = list_trace(&pool, ws, down.trace_id, 10).await.unwrap();
-        // Becoming verified is one decision; staying verified appends none.
-        assert_eq!(up_log.len(), 1);
-        assert_eq!(
-            (up_log[0].action.as_str(), up_log[0].outcome.as_str()),
-            ("sending_domain.verify", "verified")
-        );
-        assert_eq!(down_log.len(), 1);
-        assert_eq!(
-            (down_log[0].action.as_str(), down_log[0].outcome.as_str()),
-            ("sending_domain.verify", "unverified")
-        );
-        assert_eq!(down_log[0].reason.as_deref(), Some("record_failed"));
     }
 
     #[sqlx::test]

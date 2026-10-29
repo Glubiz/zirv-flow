@@ -2112,6 +2112,17 @@ the trace of its jobs and of every decision it writes. An applied record is
 the `contribution.removed` decision that retracting it writes. Unchanged records write none.
 Both `cause_kind` CHECKs (`jobs`, and the partitioned `decision_records`) include `sync_run`.
 
+Dirty marks coalesce per person before segment reevaluation: their change classes are
+combined, but only the latest mark's trace and cause survive. The segment entry and its
+enrollment therefore belong to that later trace, including when the cause is `sync_run`.
+The older trace retains the decisions its writer already appended; it has no causal link
+to the eventual entry. This is a limit of the coalesced dirty set, not a multi-parent trace.
+
+Operator retries and skips record a `manual` decision on the enrollment's trace but their
+jobs and subsequent steps retain its original cause, so they do not form one tree rooted
+at the operator; bulk exit instead records `manual` exit decisions on its own trace and
+executes no further steps.
+
 The `trace_id` and cause cross transactional job enqueue, retries and external
 effects. Retries add attempts under the same logical record rather than hiding
 failures. `GET /api/v1/workspaces/{ws}/traces/{trace_id}` and the trace UI return
@@ -2147,6 +2158,20 @@ As built (M1 skeleton):
   `schedule(<schedule id>)`.
 - **Jobs.** `jobs.trace_id`, `cause_kind` and `cause_id` are required; handlers read
   the trace from `JobContext::trace()` and pass it to follow-up jobs they enqueue.
+  For an API request the original request id remains `cause_id` through child jobs
+  and their decisions, and appears as `cause_id` in each logged job span. A feedback
+  webhook retains its received request id in the HTTP response and request log;
+  its decision uses the message's original trace and cause, not the webhook's new trace.
+- **Forwarding.** Migration 0084 adds nullable `forwarding_outbox.trace_id`, copied
+  from the accepted event. Each retry or dead-letter `event.forward` decision uses
+  that trace with cause `event(<event id>)`, even when a destination job delivers
+  several events. Rows written before the migration retain NULL and use the job's
+  fresh trace and destination `schedule` cause. The job's own `job.attempt` decisions
+  always retain the job trace.
+- **Test sends and erasure.** A test send's job and failed-attempt decisions retain
+  the request trace and cause; success is recorded in `test_sends`, with no message
+  or send decision. `privacy.erase` retains its request trace through the
+  `person.deleted` decision, which has no person subject after the erasure.
 - **`decision_records`.** Columns: `id`, `workspace_id`, `trace_id`, `recorded_at`,
   `action`, `outcome`, `reason`, `cause_kind`, `cause_id`, `subject_ids` (name to
   uuid, durable ids only), `job_id` and `attempt`. The table is partitioned by
@@ -2225,7 +2250,8 @@ before and after on the same input.
   id`), the mapped `payload`, `state` (`pending`, `delivered`, `dead`), `attempts` of the current
   cycle, `attempt_offset` (the attempts of earlier cycles, so the numbers in `delivery_attempts`, which
   names the row as a `forwarding` subject, never repeat), a fixed `last_error` code, `next_attempt_at`
-  and the times, with `UNIQUE (destination_id, event_id)`. Partial indexes serve the due-row claim and
+  and the times, with `UNIQUE (destination_id, event_id)`. Migration 0084 adds nullable `trace_id`,
+  the originating event's trace; it is not backfilled. Partial indexes serve the due-row claim and
   the depth and lag reads, the dead-letter list, the purge of delivered rows, and the job lookup.
 - **The mapping and the filter** are typed in `zirv-flow-core::forwarding` and evaluated in SQL by the
   outbox insert: sources are `event.id`, `event.name`, `event.time`, `event.received_at`, `person.id`,
@@ -2242,7 +2268,8 @@ before and after on the same input.
   after a segment pass for its `segment.entered` and `segment.exited` events (which are written by SQL
   and read back by name, time and segment). With no active rule in the workspace it costs one indexed
   `EXISTS`; otherwise it runs one `INSERT ... SELECT ... ON CONFLICT (destination_id, event_id) DO
-  NOTHING` per active rule over the whole batch, joined to `events` by its primary key. Replay writes
+  NOTHING` per active rule over the whole batch, joined to `events` by its primary key, copying
+  `events.trace_id` into the outbox row. Replay writes
   no outbox row. A source scan test fails when a file that inserts events is not on the list of
   writers that call the enqueue.
 - **The job.** `event.forward` (one registry line) delivers one destination. At most one is ready per
@@ -2257,7 +2284,10 @@ before and after on the same input.
   loses its payload; a retryable verdict sets `next_attempt_at` with the worker backoff (5 s doubling
   to an hour, or a longer `Retry-After`); a terminal verdict, or the eighth attempt, makes the row
   `dead`. Each retry and dead letter appends an `event.forward` decision in the same transaction
-  (destination, rule, event and outbox ids and the reason code). A rate-limit wait gives the row
+  (destination, rule, event and outbox ids and the reason code), under the row's event trace
+  with cause `event` and the event id. A legacy row with NULL `trace_id` falls back to the
+  destination job's trace and `schedule` cause; `job.attempt` records always use the job trace.
+  A rate-limit wait gives the row
   back without spending an attempt. When rows remain, the job leaves its successor, due at the
   earliest `next_attempt_at`. It never calls `enqueue_arrivals` and never writes an event. The
   leader gives a destination with waiting rows and no job a new one. Delivered rows are purged
@@ -2275,7 +2305,9 @@ before and after on the same input.
   delivery code; labels are ids only.
 - **Erasure and merge.** `delete_person` deletes the person's outbox rows and the erasure scan test
   covers the table; the job payload names only the destination, so `names_erased_person!` has
-  nothing to purge. A merge re-points `forwarding_outbox.person_id` through `REWRITE_TARGETS`. The
+  nothing to purge. The outbox's `trace_id` is not personal data and needs no extra erasure
+  target: deletion already removes the row. A merge re-points `forwarding_outbox.person_id`
+  through `REWRITE_TARGETS` and preserves the event trace. The
   destination's own erase call is `destination.erase` (#227, 16.3); the erasure flow asserts that
   pending and dead outbox rows are gone and the suppression hash stays.
 - **Ingest cost (#209).** `apply_event_batch` over 200 batches of 500 events after 20 warm-up

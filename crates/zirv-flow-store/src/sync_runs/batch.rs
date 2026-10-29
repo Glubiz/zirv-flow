@@ -856,287 +856,310 @@ mod tests {
     async fn a_batch_applies_deletes_and_rejects_and_records_each_under_the_run_trace(
         pool: PgPool,
     ) {
-        let fx = fixture(&pool, "one", "full_refresh").await;
-        let source = fx.source_id.to_string();
-        let first = [
-            upsert(&fx, "k0", "a0@example.com"),
-            upsert(&fx, "k1", "a1@example.com"),
-            upsert(&fx, "k2", "a2@example.com"),
-        ];
-        let cp1 = json!({"offset": 3});
-        let one = commit_sync_batch(&pool, &batch(&fx, &source, &first, &cp1))
+        crate::decision_testing::checked(pool, |pool| async move {
+            let fx = fixture(&pool, "one", "full_refresh").await;
+            let source = fx.source_id.to_string();
+            let upsert = |fx: &Fixture, key: &str, email: &str| {
+                let mut record = upsert(fx, key, email);
+                record.record.traits = crate::decision_testing::PERSONAL_DATA.traits();
+                record
+            };
+            let first = [
+                upsert(&fx, "k0", "a0@example.com"),
+                upsert(&fx, "k1", "a1@example.com"),
+                upsert(&fx, "k2", "a2@example.com"),
+            ];
+            let cp1 = json!({"offset": 3});
+            let one = commit_sync_batch(&pool, &batch(&fx, &source, &first, &cp1))
+                .await
+                .unwrap();
+            let BatchOutcome::Committed(one) = one else {
+                panic!("{one:?}");
+            };
+            assert_eq!((one.batch.read, one.batch.applied), (3, 3));
+
+            let second = [
+                upsert(&fx, "k3", "a3@example.com"),
+                upsert(&fx, "k1", "a1@example.com"),
+                upsert(&fx, "kbad", "not-an-email"),
+            ];
+            let deleted = [("k0".to_owned(), DELETE_BY_SOURCE)];
+            let rejected = [reject()];
+            let cp2 = json!({"offset": 6});
+            let two = commit_sync_batch(
+                &pool,
+                &SyncBatch {
+                    deleted: &deleted,
+                    rejected: &rejected,
+                    ..batch(&fx, &source, &second, &cp2)
+                },
+            )
             .await
             .unwrap();
-        let BatchOutcome::Committed(one) = one else {
-            panic!("{one:?}");
-        };
-        assert_eq!((one.batch.read, one.batch.applied), (3, 3));
+            let BatchOutcome::Committed(two) = two else {
+                panic!("{two:?}");
+            };
 
-        let second = [
-            upsert(&fx, "k3", "a3@example.com"),
-            upsert(&fx, "k1", "a1@example.com"),
-            upsert(&fx, "kbad", "not-an-email"),
-        ];
-        let deleted = [("k0".to_owned(), DELETE_BY_SOURCE)];
-        let rejected = [reject()];
-        let cp2 = json!({"offset": 6});
-        let two = commit_sync_batch(
-            &pool,
-            &SyncBatch {
-                deleted: &deleted,
-                rejected: &rejected,
-                ..batch(&fx, &source, &second, &cp2)
-            },
-        )
-        .await
-        .unwrap();
-        let BatchOutcome::Committed(two) = two else {
-            panic!("{two:?}");
-        };
+            assert_eq!(
+                (
+                    two.batch.read,
+                    two.batch.applied,
+                    two.batch.unchanged,
+                    two.batch.rejected,
+                    two.batch.deleted
+                ),
+                (5, 1, 1, 2, 1)
+            );
+            assert_eq!(
+                two.run,
+                Counts {
+                    read: 8,
+                    applied: 4,
+                    unchanged: 1,
+                    rejected: 2,
+                    deleted: 1
+                }
+            );
+            assert!(!two.threshold_exceeded);
+            let run = find_run(&pool, fx.ws, fx.source_id, fx.run.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(run.checkpoint, Some(cp2));
+            assert_eq!(run.state, "running");
 
-        assert_eq!(
-            (
-                two.batch.read,
-                two.batch.applied,
-                two.batch.unchanged,
-                two.batch.rejected,
-                two.batch.deleted
-            ),
-            (5, 1, 1, 2, 1)
-        );
-        assert_eq!(
-            two.run,
-            Counts {
-                read: 8,
-                applied: 4,
-                unchanged: 1,
-                rejected: 2,
-                deleted: 1
-            }
-        );
-        assert!(!two.threshold_exceeded);
-        let run = find_run(&pool, fx.ws, fx.source_id, fx.run.id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(run.checkpoint, Some(cp2));
-        assert_eq!(run.state, "running");
-
-        // Every decision of the run is under its one trace, caused by the run.
-        let decisions: Vec<DecisionTuple> = sqlx::query_as(
-            "SELECT trace_id, cause_kind, cause_id, action, outcome, reason, subject_ids \
+            // Every decision of the run is under its one trace, caused by the run.
+            let decisions: Vec<DecisionTuple> = sqlx::query_as(
+                "SELECT trace_id, cause_kind, cause_id, action, outcome, reason, subject_ids \
                  FROM decision_records ORDER BY recorded_at, id",
-        )
-        .fetch_all(&pool)
-        .await
-        .unwrap();
-        assert!(!decisions.is_empty());
-        for decision in &decisions {
-            assert_eq!(decision.0, fx.run.trace_id);
-            assert_eq!(decision.1, "sync_run");
-            assert_eq!(decision.2, fx.run.id.to_string());
-        }
-        let of = |action: &str, outcome: &str| {
-            decisions
-                .iter()
-                .filter(|d| d.3 == action && d.4 == outcome)
-                .collect::<Vec<_>>()
-        };
-        let applied = of("sync.record", "applied");
-        assert_eq!(applied.len(), 4);
-        for decision in &applied {
-            assert!(decision.6["person"].is_string() && decision.6["source_record"].is_string());
-        }
-        let rejects = of("sync.record", "rejected");
-        assert_eq!(rejects.len(), 2);
-        let reject_ids: Vec<String> = sqlx::query_scalar("SELECT id::text FROM ingest_rejects")
+            )
             .fetch_all(&pool)
             .await
             .unwrap();
-        for decision in &rejects {
-            let id = decision.6["ingest_reject"].as_str().unwrap();
-            assert!(reject_ids.iter().any(|known| known == id));
-            assert_eq!(decision.6.as_object().unwrap().len(), 1);
-        }
-        let mut codes: Vec<_> = rejects.iter().map(|d| d.5.clone().unwrap()).collect();
-        codes.sort();
-        assert_eq!(codes, ["invalid_email", "invalid_identifier"]);
-        assert_eq!(of("contribution.removed", "removed").len(), 1);
-        let shown = format!("{decisions:?}");
-        assert!(!shown.contains("example.com") && !shown.contains("not-an-email"));
-
-        // The rejects name the run and hold no person.
-        let rows: Vec<RejectTuple> =
-            sqlx::query_as("SELECT sync_run_id, kind, name, person_id, source FROM ingest_rejects")
+            assert!(!decisions.is_empty());
+            for decision in &decisions {
+                assert_eq!(decision.0, fx.run.trace_id);
+                assert_eq!(decision.1, "sync_run");
+                assert_eq!(decision.2, fx.run.id.to_string());
+            }
+            let of = |action: &str, outcome: &str| {
+                decisions
+                    .iter()
+                    .filter(|d| d.3 == action && d.4 == outcome)
+                    .collect::<Vec<_>>()
+            };
+            let applied = of("sync.record", "applied");
+            assert_eq!(applied.len(), 4);
+            for decision in &applied {
+                assert!(
+                    decision.6["person"].is_string() && decision.6["source_record"].is_string()
+                );
+            }
+            let rejects = of("sync.record", "rejected");
+            assert_eq!(rejects.len(), 2);
+            let reject_ids: Vec<String> = sqlx::query_scalar("SELECT id::text FROM ingest_rejects")
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(rows.len(), 2);
-        for row in rows {
-            assert_eq!(row.0, fx.run.id);
-            assert_eq!(row.1, "record");
-            assert_eq!(row.2.as_deref(), Some("contacts"));
-            assert_eq!(row.3, None);
-            assert_eq!(row.4, source);
-        }
-        // Applied and unchanged records are marked seen by the run; a full refresh keeps no
-        // cursor on the stream.
-        let seen: Vec<(String, Option<uuid::Uuid>)> = sqlx::query_as(
-            "SELECT record_key, last_seen_run FROM source_records \
+            for decision in &rejects {
+                let id = decision.6["ingest_reject"].as_str().unwrap();
+                assert!(reject_ids.iter().any(|known| known == id));
+                assert_eq!(decision.6.as_object().unwrap().len(), 1);
+            }
+            let mut codes: Vec<_> = rejects.iter().map(|d| d.5.clone().unwrap()).collect();
+            codes.sort();
+            assert_eq!(codes, ["invalid_email", "invalid_identifier"]);
+            assert_eq!(of("contribution.removed", "removed").len(), 1);
+            let shown = format!("{decisions:?}");
+            assert!(!shown.contains("example.com") && !shown.contains("not-an-email"));
+
+            // The rejects name the run and hold no person.
+            let rows: Vec<RejectTuple> = sqlx::query_as(
+                "SELECT sync_run_id, kind, name, person_id, source FROM ingest_rejects",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(rows.len(), 2);
+            for row in rows {
+                assert_eq!(row.0, fx.run.id);
+                assert_eq!(row.1, "record");
+                assert_eq!(row.2.as_deref(), Some("contacts"));
+                assert_eq!(row.3, None);
+                assert_eq!(row.4, source);
+            }
+            // Applied and unchanged records are marked seen by the run; a full refresh keeps no
+            // cursor on the stream.
+            let seen: Vec<(String, Option<uuid::Uuid>)> = sqlx::query_as(
+                "SELECT record_key, last_seen_run FROM source_records \
              WHERE deleted_at IS NULL ORDER BY record_key",
-        )
-        .fetch_all(&pool)
-        .await
-        .unwrap();
-        let keys: Vec<_> = seen.iter().map(|(key, _)| key.as_str()).collect();
-        assert_eq!(keys, ["k1", "k2", "k3"]);
-        assert!(seen.iter().all(|(_, run)| *run == Some(fx.run.id)));
-        let stream_checkpoint: Option<Value> =
-            sqlx::query_scalar("SELECT checkpoint FROM streams WHERE id = $1")
-                .bind(fx.stream_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(stream_checkpoint, None);
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            let keys: Vec<_> = seen.iter().map(|(key, _)| key.as_str()).collect();
+            assert_eq!(keys, ["k1", "k2", "k3"]);
+            assert!(seen.iter().all(|(_, run)| *run == Some(fx.run.id)));
+            let stream_checkpoint: Option<Value> =
+                sqlx::query_scalar("SELECT checkpoint FROM streams WHERE id = $1")
+                    .bind(fx.stream_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(stream_checkpoint, None);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_batch_that_fails_midway_writes_nothing(pool: PgPool) {
-        let fx = fixture(&pool, "one", "full_refresh").await;
-        let source = fx.source_id.to_string();
-        let upserts = [upsert(&fx, "k0", "a0@example.com")];
-        // PostgreSQL refuses a NUL in jsonb, after the record was applied and before the commit.
-        let poison = [SyncReject {
-            record_key: "poison".into(),
-            reasons: vec![("\u{0}".into(), "invalid_identifier")],
-            sample: json!({}),
-        }];
-        let cp = json!({"offset": 1});
+        crate::decision_testing::checked(pool, |pool| async move {
+            let fx = fixture(&pool, "one", "full_refresh").await;
+            let source = fx.source_id.to_string();
+            let upserts = [upsert(&fx, "k0", "a0@example.com")];
+            // PostgreSQL refuses a NUL in jsonb, after the record was applied and before the commit.
+            let poison = [SyncReject {
+                record_key: "poison".into(),
+                reasons: vec![("\u{0}".into(), "invalid_identifier")],
+                sample: json!({}),
+            }];
+            let cp = json!({"offset": 1});
 
-        let result = commit_sync_batch(
-            &pool,
-            &SyncBatch {
-                rejected: &poison,
-                ..batch(&fx, &source, &upserts, &cp)
-            },
-        )
+            let result = commit_sync_batch(
+                &pool,
+                &SyncBatch {
+                    rejected: &poison,
+                    ..batch(&fx, &source, &upserts, &cp)
+                },
+            )
+            .await;
+
+            assert!(result.is_err());
+            nothing_written(&pool, &fx).await;
+        })
         .await;
-
-        assert!(result.is_err());
-        nothing_written(&pool, &fx).await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_worker_whose_lease_was_taken_over_commits_nothing(pool: PgPool) {
-        let fx = fixture(&pool, "one", "incremental").await;
-        let source = fx.source_id.to_string();
-        let upserts = [upsert(&fx, "k0", "a0@example.com")];
-        let cp = json!({"offset": 1});
-        sqlx::query("UPDATE jobs SET lease_token = gen_random_uuid() WHERE id = $1")
-            .bind(fx.job.id)
-            .execute(&pool)
+        crate::decision_testing::checked(pool, |pool| async move {
+            let fx = fixture(&pool, "one", "incremental").await;
+            let source = fx.source_id.to_string();
+            let upserts = [upsert(&fx, "k0", "a0@example.com")];
+            let cp = json!({"offset": 1});
+            sqlx::query("UPDATE jobs SET lease_token = gen_random_uuid() WHERE id = $1")
+                .bind(fx.job.id)
+                .execute(&pool)
+                .await
+                .unwrap();
+
+            let outcome = commit_sync_batch(
+                &pool,
+                &SyncBatch {
+                    incremental: true,
+                    ..batch(&fx, &source, &upserts, &cp)
+                },
+            )
             .await
             .unwrap();
 
-        let outcome = commit_sync_batch(
-            &pool,
-            &SyncBatch {
-                incremental: true,
-                ..batch(&fx, &source, &upserts, &cp)
-            },
-        )
-        .await
-        .unwrap();
-
-        assert!(matches!(outcome, BatchOutcome::LeaseLost));
-        nothing_written(&pool, &fx).await;
-        let stream_checkpoint: Option<Value> =
-            sqlx::query_scalar("SELECT checkpoint FROM streams WHERE id = $1")
-                .bind(fx.stream_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(stream_checkpoint, None);
+            assert!(matches!(outcome, BatchOutcome::LeaseLost));
+            nothing_written(&pool, &fx).await;
+            let stream_checkpoint: Option<Value> =
+                sqlx::query_scalar("SELECT checkpoint FROM streams WHERE id = $1")
+                    .bind(fx.stream_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(stream_checkpoint, None);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_batch_for_a_job_that_is_gone_commits_nothing(pool: PgPool) {
-        let fx = fixture(&pool, "one", "full_refresh").await;
-        let source = fx.source_id.to_string();
-        let upserts = [upsert(&fx, "k0", "a0@example.com")];
-        let cp = json!({"offset": 1});
-        sqlx::query("DELETE FROM jobs WHERE id = $1")
-            .bind(fx.job.id)
-            .execute(&pool)
-            .await
-            .unwrap();
+        crate::decision_testing::checked(pool, |pool| async move {
+            let fx = fixture(&pool, "one", "full_refresh").await;
+            let source = fx.source_id.to_string();
+            let upserts = [upsert(&fx, "k0", "a0@example.com")];
+            let cp = json!({"offset": 1});
+            sqlx::query("DELETE FROM jobs WHERE id = $1")
+                .bind(fx.job.id)
+                .execute(&pool)
+                .await
+                .unwrap();
 
-        let outcome = commit_sync_batch(&pool, &batch(&fx, &source, &upserts, &cp))
-            .await
-            .unwrap();
+            let outcome = commit_sync_batch(&pool, &batch(&fx, &source, &upserts, &cp))
+                .await
+                .unwrap();
 
-        assert!(matches!(outcome, BatchOutcome::LeaseLost));
-        nothing_written(&pool, &fx).await;
+            assert!(matches!(outcome, BatchOutcome::LeaseLost));
+            nothing_written(&pool, &fx).await;
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_cancel_stops_the_run_at_the_batch_boundary(pool: PgPool) {
-        let fx = fixture(&pool, "one", "incremental").await;
-        let source = fx.source_id.to_string();
-        let first = [upsert(&fx, "k0", "a0@example.com")];
-        let cp1 = json!({"offset": 1});
-        let outcome = commit_sync_batch(
-            &pool,
-            &SyncBatch {
-                incremental: true,
-                ..batch(&fx, &source, &first, &cp1)
-            },
-        )
-        .await
-        .unwrap();
-        assert!(matches!(outcome, BatchOutcome::Committed(_)));
-        let mut connection = pool.acquire().await.unwrap();
-        cancel_run(&mut connection, fx.ws, fx.source_id, fx.run.id)
+        crate::decision_testing::checked(pool, |pool| async move {
+            let fx = fixture(&pool, "one", "incremental").await;
+            let source = fx.source_id.to_string();
+            let first = [upsert(&fx, "k0", "a0@example.com")];
+            let cp1 = json!({"offset": 1});
+            let outcome = commit_sync_batch(
+                &pool,
+                &SyncBatch {
+                    incremental: true,
+                    ..batch(&fx, &source, &first, &cp1)
+                },
+            )
             .await
             .unwrap();
-        drop(connection);
-
-        let second = [upsert(&fx, "k1", "a1@example.com")];
-        let cp2 = json!({"offset": 2});
-        let outcome = commit_sync_batch(
-            &pool,
-            &SyncBatch {
-                incremental: true,
-                ..batch(&fx, &source, &second, &cp2)
-            },
-        )
-        .await
-        .unwrap();
-
-        assert!(matches!(outcome, BatchOutcome::Cancelled));
-        let run = find_run(&pool, fx.ws, fx.source_id, fx.run.id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(run.state, "cancelled");
-        assert_eq!((run.records_read, run.records_applied), (1, 1));
-        assert_eq!(run.checkpoint, Some(cp1.clone()));
-        let keys: Vec<String> = sqlx::query_scalar("SELECT record_key FROM source_records")
-            .fetch_all(&pool)
-            .await
-            .unwrap();
-        assert_eq!(keys, ["k0"]);
-        let stream_checkpoint: Option<Value> =
-            sqlx::query_scalar("SELECT checkpoint FROM streams WHERE id = $1")
-                .bind(fx.stream_id)
-                .fetch_one(&pool)
+            assert!(matches!(outcome, BatchOutcome::Committed(_)));
+            let mut connection = pool.acquire().await.unwrap();
+            cancel_run(&mut connection, fx.ws, fx.source_id, fx.run.id)
                 .await
                 .unwrap();
-        assert_eq!(stream_checkpoint, Some(cp1));
+            drop(connection);
+
+            let second = [upsert(&fx, "k1", "a1@example.com")];
+            let cp2 = json!({"offset": 2});
+            let outcome = commit_sync_batch(
+                &pool,
+                &SyncBatch {
+                    incremental: true,
+                    ..batch(&fx, &source, &second, &cp2)
+                },
+            )
+            .await
+            .unwrap();
+
+            assert!(matches!(outcome, BatchOutcome::Cancelled));
+            let run = find_run(&pool, fx.ws, fx.source_id, fx.run.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(run.state, "cancelled");
+            assert_eq!((run.records_read, run.records_applied), (1, 1));
+            assert_eq!(run.checkpoint, Some(cp1.clone()));
+            let keys: Vec<String> = sqlx::query_scalar("SELECT record_key FROM source_records")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+            assert_eq!(keys, ["k0"]);
+            let stream_checkpoint: Option<Value> =
+                sqlx::query_scalar("SELECT checkpoint FROM streams WHERE id = $1")
+                    .bind(fx.stream_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(stream_checkpoint, Some(cp1));
+        })
+        .await;
     }
 
     fn many(fx: &Fixture, from: usize, to: usize) -> Vec<SyncUpsert> {
@@ -1148,46 +1171,49 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_dropped_duplicate_counts_as_read_and_in_the_reject_check_only(pool: PgPool) {
-        let fx = fixture(&pool, "one", "incremental").await;
-        let source = fx.source_id.to_string();
-        // 90 applied, 6 rejected and 4 duplicates dropped by the planner: 100 records read, and
-        // 6 of them rejected is over the 5% threshold. Without the duplicates only 96 were read
-        // and the check would not apply yet.
-        let upserts = many(&fx, 0, 90);
-        let rejects: Vec<SyncReject> = (0..6).map(|_| reject()).collect();
-        let cp = json!({"offset": 100});
+        crate::decision_testing::checked(pool, |pool| async move {
+            let fx = fixture(&pool, "one", "incremental").await;
+            let source = fx.source_id.to_string();
+            // 90 applied, 6 rejected and 4 duplicates dropped by the planner: 100 records read, and
+            // 6 of them rejected is over the 5% threshold. Without the duplicates only 96 were read
+            // and the check would not apply yet.
+            let upserts = many(&fx, 0, 90);
+            let rejects: Vec<SyncReject> = (0..6).map(|_| reject()).collect();
+            let cp = json!({"offset": 100});
 
-        let outcome = commit_sync_batch(
-            &pool,
-            &SyncBatch {
-                rejected: &rejects,
-                duplicates: 4,
-                incremental: true,
-                ..batch(&fx, &source, &upserts, &cp)
-            },
-        )
-        .await
-        .unwrap();
-
-        let BatchOutcome::Committed(progress) = outcome else {
-            panic!("{outcome:?}");
-        };
-        assert_eq!(progress.batch.read, 100);
-        assert_eq!(
-            (
-                progress.batch.applied,
-                progress.batch.unchanged,
-                progress.batch.rejected,
-                progress.batch.deleted
-            ),
-            (90, 0, 6, 0)
-        );
-        assert!(progress.threshold_exceeded);
-        let run = find_run(&pool, fx.ws, fx.source_id, fx.run.id)
+            let outcome = commit_sync_batch(
+                &pool,
+                &SyncBatch {
+                    rejected: &rejects,
+                    duplicates: 4,
+                    incremental: true,
+                    ..batch(&fx, &source, &upserts, &cp)
+                },
+            )
             .await
-            .unwrap()
             .unwrap();
-        assert_eq!(run.records_read, 100);
+
+            let BatchOutcome::Committed(progress) = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert_eq!(progress.batch.read, 100);
+            assert_eq!(
+                (
+                    progress.batch.applied,
+                    progress.batch.unchanged,
+                    progress.batch.rejected,
+                    progress.batch.deleted
+                ),
+                (90, 0, 6, 0)
+            );
+            assert!(progress.threshold_exceeded);
+            let run = find_run(&pool, fx.ws, fx.source_id, fx.run.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(run.records_read, 100);
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -1195,193 +1221,205 @@ mod tests {
     async fn the_reject_check_waits_for_the_minimum_then_fails_the_run_and_keeps_earlier_batches(
         pool: PgPool,
     ) {
-        let fx = fixture(&pool, "one", "incremental").await;
-        let source = fx.source_id.to_string();
-
-        // 10 applied and 89 rejected: 99 records read, over the share but under the minimum.
-        let first = many(&fx, 0, 10);
-        let rejects: Vec<SyncReject> = (0..89).map(|_| reject()).collect();
-        let cp1 = json!({"offset": 99});
-        let outcome = commit_sync_batch(
-            &pool,
-            &SyncBatch {
-                rejected: &rejects,
-                incremental: true,
-                ..batch(&fx, &source, &first, &cp1)
-            },
-        )
-        .await
-        .unwrap();
-        let BatchOutcome::Committed(progress) = outcome else {
-            panic!("{outcome:?}");
-        };
-        assert_eq!(progress.run.read, 99);
-        assert!(!progress.threshold_exceeded);
-        let run = find_run(&pool, fx.ws, fx.source_id, fx.run.id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(run.state, "running");
-
-        // The hundredth record, a reject, puts it over.
-        let second = many(&fx, 10, 11);
-        let one = [reject()];
-        let cp2 = json!({"offset": 100});
-        let outcome = commit_sync_batch(
-            &pool,
-            &SyncBatch {
-                rejected: &one,
-                incremental: true,
-                ..batch(&fx, &source, &second, &cp2)
-            },
-        )
-        .await
-        .unwrap();
-        let BatchOutcome::Committed(progress) = outcome else {
-            panic!("{outcome:?}");
-        };
-
-        assert!(progress.threshold_exceeded);
-        let run = find_run(&pool, fx.ws, fx.source_id, fx.run.id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(run.state, "failed");
-        assert_eq!(run.error_code.as_deref(), Some("reject_threshold"));
-        assert!(run.finished_at.is_some());
-        // Earlier batches stay applied; nothing is swept.
-        assert_eq!(
-            count(
-                &pool,
-                "SELECT count(*) FROM source_records WHERE deleted_at IS NULL"
-            )
-            .await,
-            11
-        );
-        // The stream's cursor stays at the last batch that did not fail the run.
-        let stream_checkpoint: Option<Value> =
-            sqlx::query_scalar("SELECT checkpoint FROM streams WHERE id = $1")
-                .bind(fx.stream_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(stream_checkpoint, Some(cp1));
-        // A failed run takes no more batches.
-        let late = many(&fx, 11, 12);
-        let cp3 = json!({"offset": 101});
-        let outcome = commit_sync_batch(&pool, &batch(&fx, &source, &late, &cp3))
-            .await
-            .unwrap();
-        assert!(matches!(outcome, BatchOutcome::Cancelled));
-    }
-
-    #[sqlx::test]
-    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn only_an_incremental_run_moves_the_streams_checkpoint(pool: PgPool) {
-        let incremental = fixture(&pool, "one", "incremental").await;
-        let full = fixture(&pool, "two", "full_refresh").await;
-        for (fx, is_incremental) in [(&incremental, true), (&full, false)] {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let fx = fixture(&pool, "one", "incremental").await;
             let source = fx.source_id.to_string();
-            let upserts = [upsert(fx, "k0", "a0@example.com")];
-            let cp = json!({"offset": 1});
+
+            // 10 applied and 89 rejected: 99 records read, over the share but under the minimum.
+            let first = many(&fx, 0, 10);
+            let rejects: Vec<SyncReject> = (0..89).map(|_| reject()).collect();
+            let cp1 = json!({"offset": 99});
             let outcome = commit_sync_batch(
                 &pool,
                 &SyncBatch {
-                    incremental: is_incremental,
-                    ..batch(fx, &source, &upserts, &cp)
+                    rejected: &rejects,
+                    incremental: true,
+                    ..batch(&fx, &source, &first, &cp1)
                 },
             )
             .await
             .unwrap();
-            assert!(matches!(outcome, BatchOutcome::Committed(_)));
-        }
+            let BatchOutcome::Committed(progress) = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert_eq!(progress.run.read, 99);
+            assert!(!progress.threshold_exceeded);
+            let run = find_run(&pool, fx.ws, fx.source_id, fx.run.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(run.state, "running");
 
-        for (fx, expected) in [(&incremental, Some(json!({"offset": 1}))), (&full, None)] {
-            let stream: Option<Value> =
+            // The hundredth record, a reject, puts it over.
+            let second = many(&fx, 10, 11);
+            let one = [reject()];
+            let cp2 = json!({"offset": 100});
+            let outcome = commit_sync_batch(
+                &pool,
+                &SyncBatch {
+                    rejected: &one,
+                    incremental: true,
+                    ..batch(&fx, &source, &second, &cp2)
+                },
+            )
+            .await
+            .unwrap();
+            let BatchOutcome::Committed(progress) = outcome else {
+                panic!("{outcome:?}");
+            };
+
+            assert!(progress.threshold_exceeded);
+            let run = find_run(&pool, fx.ws, fx.source_id, fx.run.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(run.state, "failed");
+            assert_eq!(run.error_code.as_deref(), Some("reject_threshold"));
+            assert!(run.finished_at.is_some());
+            // Earlier batches stay applied; nothing is swept.
+            assert_eq!(
+                count(
+                    &pool,
+                    "SELECT count(*) FROM source_records WHERE deleted_at IS NULL"
+                )
+                .await,
+                11
+            );
+            // The stream's cursor stays at the last batch that did not fail the run.
+            let stream_checkpoint: Option<Value> =
                 sqlx::query_scalar("SELECT checkpoint FROM streams WHERE id = $1")
                     .bind(fx.stream_id)
                     .fetch_one(&pool)
                     .await
                     .unwrap();
-            assert_eq!(stream, expected);
-            let run = find_run(&pool, fx.ws, fx.source_id, fx.run.id)
+            assert_eq!(stream_checkpoint, Some(cp1));
+            // A failed run takes no more batches.
+            let late = many(&fx, 11, 12);
+            let cp3 = json!({"offset": 101});
+            let outcome = commit_sync_batch(&pool, &batch(&fx, &source, &late, &cp3))
                 .await
-                .unwrap()
                 .unwrap();
-            assert_eq!(run.checkpoint, Some(json!({"offset": 1})));
-        }
+            assert!(matches!(outcome, BatchOutcome::Cancelled));
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn only_an_incremental_run_moves_the_streams_checkpoint(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let incremental = fixture(&pool, "one", "incremental").await;
+            let full = fixture(&pool, "two", "full_refresh").await;
+            for (fx, is_incremental) in [(&incremental, true), (&full, false)] {
+                let source = fx.source_id.to_string();
+                let upserts = [upsert(fx, "k0", "a0@example.com")];
+                let cp = json!({"offset": 1});
+                let outcome = commit_sync_batch(
+                    &pool,
+                    &SyncBatch {
+                        incremental: is_incremental,
+                        ..batch(fx, &source, &upserts, &cp)
+                    },
+                )
+                .await
+                .unwrap();
+                assert!(matches!(outcome, BatchOutcome::Committed(_)));
+            }
+
+            for (fx, expected) in [(&incremental, Some(json!({"offset": 1}))), (&full, None)] {
+                let stream: Option<Value> =
+                    sqlx::query_scalar("SELECT checkpoint FROM streams WHERE id = $1")
+                        .bind(fx.stream_id)
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                assert_eq!(stream, expected);
+                let run = find_run(&pool, fx.ws, fx.source_id, fx.run.id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(run.checkpoint, Some(json!({"offset": 1})));
+            }
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn applying_record_by_record_gives_the_same_result(pool: PgPool) {
-        let fx = fixture(&pool, "one", "full_refresh").await;
-        let source = fx.source_id.to_string();
-        let upserts = [
-            upsert(&fx, "k0", "a0@example.com"),
-            upsert(&fx, "kbad", "not-an-email"),
-        ];
-        let cp = json!({"offset": 2});
+        crate::decision_testing::checked(pool, |pool| async move {
+            let fx = fixture(&pool, "one", "full_refresh").await;
+            let source = fx.source_id.to_string();
+            let upserts = [
+                upsert(&fx, "k0", "a0@example.com"),
+                upsert(&fx, "kbad", "not-an-email"),
+            ];
+            let cp = json!({"offset": 2});
 
-        let outcome = commit_sync_batch(
-            &pool,
-            &SyncBatch {
-                singly: true,
-                ..batch(&fx, &source, &upserts, &cp)
-            },
-        )
-        .await
-        .unwrap();
+            let outcome = commit_sync_batch(
+                &pool,
+                &SyncBatch {
+                    singly: true,
+                    ..batch(&fx, &source, &upserts, &cp)
+                },
+            )
+            .await
+            .unwrap();
 
-        let BatchOutcome::Committed(progress) = outcome else {
-            panic!("{outcome:?}");
-        };
-        assert_eq!((progress.batch.applied, progress.batch.rejected), (1, 1));
+            let BatchOutcome::Committed(progress) = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert_eq!((progress.batch.applied, progress.batch.rejected), (1, 1));
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_nul_in_a_record_does_not_stop_its_reject_from_being_stored(pool: PgPool) {
-        use zirv_flow_core::mapping::{ColumnRule, Mapping, Target, reject_sample};
+        crate::decision_testing::checked(pool, |pool| async move {
+            use zirv_flow_core::mapping::{ColumnRule, Mapping, Target, reject_sample};
 
-        let fx = fixture(&pool, "one", "full_refresh").await;
-        let source = fx.source_id.to_string();
-        let mapping = Mapping {
-            delete_when: None,
-            key_column: None,
-            event: None,
-            columns: vec![ColumnRule {
-                column: "plan".into(),
-                target: Target::Trait { key: "plan".into() },
-                transforms: Vec::new(),
-            }],
-        };
-        let data = json!({"plan": "pr\0o", "e\0mail": "a@b.c"});
-        let sample = reject_sample(&mapping, &data, |_| true);
-        let rejected = [SyncReject {
-            record_key: "kwrong".into(),
-            reasons: vec![("plan".into(), "wrong_type")],
-            sample: json!({"properties": sample.properties, "masked": sample.masked}),
-        }];
-        let cp = json!({"offset": 1});
+            let fx = fixture(&pool, "one", "full_refresh").await;
+            let source = fx.source_id.to_string();
+            let mapping = Mapping {
+                delete_when: None,
+                key_column: None,
+                event: None,
+                columns: vec![ColumnRule {
+                    column: "plan".into(),
+                    target: Target::Trait { key: "plan".into() },
+                    transforms: Vec::new(),
+                }],
+            };
+            let data = json!({"plan": "pr\0o", "e\0mail": "a@b.c"});
+            let sample = reject_sample(&mapping, &data, |_| true);
+            let rejected = [SyncReject {
+                record_key: "kwrong".into(),
+                reasons: vec![("plan".into(), "wrong_type")],
+                sample: json!({"properties": sample.properties, "masked": sample.masked}),
+            }];
+            let cp = json!({"offset": 1});
 
-        let outcome = commit_sync_batch(
-            &pool,
-            &SyncBatch {
-                rejected: &rejected,
-                ..batch(&fx, &source, &[], &cp)
-            },
-        )
-        .await
-        .unwrap();
-
-        assert!(matches!(outcome, BatchOutcome::Committed(_)));
-        let stored: Value = sqlx::query_scalar("SELECT sample FROM ingest_rejects")
-            .fetch_one(&pool)
+            let outcome = commit_sync_batch(
+                &pool,
+                &SyncBatch {
+                    rejected: &rejected,
+                    ..batch(&fx, &source, &[], &cp)
+                },
+            )
             .await
             .unwrap();
-        assert_eq!(stored["properties"]["plan"], "pr\u{FFFD}o");
-        assert_eq!(stored["masked"], json!(["e\u{FFFD}mail"]));
+
+            assert!(matches!(outcome, BatchOutcome::Committed(_)));
+            let stored: Value = sqlx::query_scalar("SELECT sample FROM ingest_rejects")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(stored["properties"]["plan"], "pr\u{FFFD}o");
+            assert_eq!(stored["masked"], json!(["e\u{FFFD}mail"]));
+        })
+        .await;
     }
 
     // The events and lists of a batch (file sources).
@@ -1556,6 +1594,7 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_batch_applies_profiles_events_and_list_members_in_one_transaction(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
         let fx = fixture(&pool, "one", "full_refresh").await;
         let source = fx.source_id.to_string();
         let news = list(&pool, &fx, "news").await;
@@ -1646,91 +1685,99 @@ mod tests {
         assert!(actions.contains("sync.record"));
         let shown = format!("{decisions:?}");
         assert!(!shown.contains("example.com") && !shown.contains("order_placed"));
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_second_read_of_the_same_records_changes_nothing(pool: PgPool) {
-        let fx = fixture(&pool, "one", "full_refresh").await;
-        let source = fx.source_id.to_string();
-        let news = list(&pool, &fx, "news").await;
-        let key = key();
-        let upserts = [
-            with_event(&fx, "k0", "a0@example.com", json!(10), &[news]),
-            with_event(&fx, "k1", "a1@example.com", json!(20), &[news]),
-        ];
-        let cp = json!({"offset": 2});
-        commit_sync_batch(&pool, &keyed(&fx, &source, &upserts, &cp, &key))
-            .await
-            .unwrap();
-        let events_before = count(&pool, "SELECT count(*) FROM events").await;
-        let changes_before = count(&pool, "SELECT count(*) FROM list_member_changes").await;
-
-        let again = commit_sync_batch(&pool, &keyed(&fx, &source, &upserts, &cp, &key))
-            .await
-            .unwrap();
-
-        let BatchOutcome::Committed(progress) = again else {
-            panic!("{again:?}");
-        };
-        assert_eq!(
-            (
-                progress.batch.applied,
-                progress.batch.unchanged,
-                progress.batch.rejected
-            ),
-            (0, 2, 0)
-        );
-        assert_eq!(
-            progress.events,
-            EventCounts {
-                accepted: 0,
-                duplicate: 2,
-                rejected: 0
-            }
-        );
-        assert_eq!(
-            count(&pool, "SELECT count(*) FROM events").await,
-            events_before
-        );
-        assert_eq!(
-            count(&pool, "SELECT count(*) FROM list_member_changes").await,
-            changes_before
-        );
-        let duplicates: i64 =
-            sqlx::query_scalar("SELECT sum(duplicates)::bigint FROM event_dedupe")
-                .fetch_one(&pool)
+        crate::decision_testing::checked(pool, |pool| async move {
+            let fx = fixture(&pool, "one", "full_refresh").await;
+            let source = fx.source_id.to_string();
+            let news = list(&pool, &fx, "news").await;
+            let key = key();
+            let upserts = [
+                with_event(&fx, "k0", "a0@example.com", json!(10), &[news]),
+                with_event(&fx, "k1", "a1@example.com", json!(20), &[news]),
+            ];
+            let cp = json!({"offset": 2});
+            commit_sync_batch(&pool, &keyed(&fx, &source, &upserts, &cp, &key))
                 .await
                 .unwrap();
-        assert_eq!(duplicates, 2);
+            let events_before = count(&pool, "SELECT count(*) FROM events").await;
+            let changes_before = count(&pool, "SELECT count(*) FROM list_member_changes").await;
+
+            let again = commit_sync_batch(&pool, &keyed(&fx, &source, &upserts, &cp, &key))
+                .await
+                .unwrap();
+
+            let BatchOutcome::Committed(progress) = again else {
+                panic!("{again:?}");
+            };
+            assert_eq!(
+                (
+                    progress.batch.applied,
+                    progress.batch.unchanged,
+                    progress.batch.rejected
+                ),
+                (0, 2, 0)
+            );
+            assert_eq!(
+                progress.events,
+                EventCounts {
+                    accepted: 0,
+                    duplicate: 2,
+                    rejected: 0
+                }
+            );
+            assert_eq!(
+                count(&pool, "SELECT count(*) FROM events").await,
+                events_before
+            );
+            assert_eq!(
+                count(&pool, "SELECT count(*) FROM list_member_changes").await,
+                changes_before
+            );
+            let duplicates: i64 =
+                sqlx::query_scalar("SELECT sum(duplicates)::bigint FROM event_dedupe")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(duplicates, 2);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_new_event_on_an_unchanged_profile_counts_the_record_as_applied(pool: PgPool) {
-        let fx = fixture(&pool, "one", "full_refresh").await;
-        let source = fx.source_id.to_string();
-        let key = key();
-        let first = [upsert(&fx, "k0", "a0@example.com")];
-        let cp = json!({"offset": 1});
-        commit_sync_batch(&pool, &keyed(&fx, &source, &first, &cp, &key))
-            .await
-            .unwrap();
+        crate::decision_testing::checked(pool, |pool| async move {
+            let fx = fixture(&pool, "one", "full_refresh").await;
+            let source = fx.source_id.to_string();
+            let key = key();
+            let first = [upsert(&fx, "k0", "a0@example.com")];
+            let cp = json!({"offset": 1});
+            commit_sync_batch(&pool, &keyed(&fx, &source, &first, &cp, &key))
+                .await
+                .unwrap();
 
-        let second = [with_event(&fx, "k0", "a0@example.com", json!(5), &[])];
-        let outcome = commit_sync_batch(&pool, &keyed(&fx, &source, &second, &cp, &key))
-            .await
-            .unwrap();
+            let second = [with_event(&fx, "k0", "a0@example.com", json!(5), &[])];
+            let outcome = commit_sync_batch(&pool, &keyed(&fx, &source, &second, &cp, &key))
+                .await
+                .unwrap();
 
-        let BatchOutcome::Committed(progress) = outcome else {
-            panic!("{outcome:?}");
-        };
-        assert_eq!(
-            (progress.batch.applied, progress.batch.unchanged),
-            (1, 0),
-            "an accepted event is something the record changed"
-        );
-        assert_eq!(progress.events.accepted, 1);
+            let BatchOutcome::Committed(progress) = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert_eq!(
+                (progress.batch.applied, progress.batch.unchanged),
+                (1, 0),
+                "an accepted event is something the record changed"
+            );
+            assert_eq!(progress.events.accepted, 1);
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -1738,117 +1785,126 @@ mod tests {
     async fn a_refused_event_is_a_reject_of_the_run_and_the_record_counts_once_as_rejected(
         pool: PgPool,
     ) {
-        let fx = fixture(&pool, "one", "full_refresh").await;
-        block_order_placed(&pool, &fx).await;
-        let source = fx.source_id.to_string();
-        let news = list(&pool, &fx, "news").await;
-        let key = key();
-        let upserts = [
-            with_event(&fx, "good", "a0@example.com", json!(10), &[news]),
-            with_event(&fx, "bad", "a1@example.com", json!("not a number"), &[news]),
-        ];
-        let cp = json!({"offset": 2});
+        crate::decision_testing::checked(pool, |pool| async move {
+            let fx = fixture(&pool, "one", "full_refresh").await;
+            block_order_placed(&pool, &fx).await;
+            let source = fx.source_id.to_string();
+            let news = list(&pool, &fx, "news").await;
+            let key = key();
+            let upserts = [
+                with_event(&fx, "good", "a0@example.com", json!(10), &[news]),
+                with_event(&fx, "bad", "a1@example.com", json!("not a number"), &[news]),
+            ];
+            let cp = json!({"offset": 2});
 
-        let outcome = commit_sync_batch(&pool, &keyed(&fx, &source, &upserts, &cp, &key))
-            .await
-            .unwrap();
-
-        let BatchOutcome::Committed(progress) = outcome else {
-            panic!("{outcome:?}");
-        };
-        // One accepted, one refused: the refused record is rejected, its profile change stands.
-        assert_eq!(
-            (
-                progress.batch.read,
-                progress.batch.applied,
-                progress.batch.rejected
-            ),
-            (2, 1, 1)
-        );
-        assert_eq!((progress.events.accepted, progress.events.rejected), (1, 1));
-        assert_eq!(count(&pool, "SELECT count(*) FROM people").await, 2);
-        assert_eq!(count(&pool, "SELECT count(*) FROM events").await, 1);
-        assert_eq!(count(&pool, "SELECT count(*) FROM list_members").await, 2);
-        // The reject is the event path's, kind event, tied to the run, with no value in it.
-        let rejects: Vec<(String, Option<Uuid>, Value, Option<String>)> =
-            sqlx::query_as("SELECT kind, sync_run_id, sample, reason FROM ingest_rejects")
-                .fetch_all(&pool)
+            let outcome = commit_sync_batch(&pool, &keyed(&fx, &source, &upserts, &cp, &key))
                 .await
                 .unwrap();
-        assert_eq!(rejects.len(), 1);
-        assert_eq!(rejects[0].0, "event");
-        assert_eq!(rejects[0].1, Some(fx.run.id));
-        assert_eq!(rejects[0].3.as_deref(), Some("validation_failed"));
-        let listed = crate::list_run_rejects(&pool, fx.ws, fx.run.id, 10)
-            .await
-            .unwrap();
-        assert_eq!(listed.len(), 1);
-        let run = find_run(&pool, fx.ws, fx.source_id, fx.run.id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            (run.records_read, run.records_applied, run.records_rejected),
-            (2, 1, 1)
-        );
+
+            let BatchOutcome::Committed(progress) = outcome else {
+                panic!("{outcome:?}");
+            };
+            // One accepted, one refused: the refused record is rejected, its profile change stands.
+            assert_eq!(
+                (
+                    progress.batch.read,
+                    progress.batch.applied,
+                    progress.batch.rejected
+                ),
+                (2, 1, 1)
+            );
+            assert_eq!((progress.events.accepted, progress.events.rejected), (1, 1));
+            assert_eq!(count(&pool, "SELECT count(*) FROM people").await, 2);
+            assert_eq!(count(&pool, "SELECT count(*) FROM events").await, 1);
+            assert_eq!(count(&pool, "SELECT count(*) FROM list_members").await, 2);
+            // The reject is the event path's, kind event, tied to the run, with no value in it.
+            let rejects: Vec<(String, Option<Uuid>, Value, Option<String>)> =
+                sqlx::query_as("SELECT kind, sync_run_id, sample, reason FROM ingest_rejects")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(rejects.len(), 1);
+            assert_eq!(rejects[0].0, "event");
+            assert_eq!(rejects[0].1, Some(fx.run.id));
+            assert_eq!(rejects[0].3.as_deref(), Some("validation_failed"));
+            let listed = crate::list_run_rejects(&pool, fx.ws, fx.run.id, 10)
+                .await
+                .unwrap();
+            assert_eq!(listed.len(), 1);
+            let run = find_run(&pool, fx.ws, fx.source_id, fx.run.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                (run.records_read, run.records_applied, run.records_rejected),
+                (2, 1, 1)
+            );
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_open_reject_found_again_is_tied_to_the_run_that_hit_it(pool: PgPool) {
-        let fx = fixture(&pool, "one", "full_refresh").await;
-        block_order_placed(&pool, &fx).await;
-        let source = fx.source_id.to_string();
-        let key = key();
-        let upserts = [with_event(&fx, "bad", "a1@example.com", json!("x"), &[])];
-        let cp = json!({"offset": 1});
-        commit_sync_batch(&pool, &keyed(&fx, &source, &upserts, &cp, &key))
-            .await
-            .unwrap();
-        // The reject stays open and is forgotten by its run, as when an earlier run is deleted.
-        sqlx::query("UPDATE ingest_rejects SET sync_run_id = NULL")
-            .execute(&pool)
-            .await
-            .unwrap();
+        crate::decision_testing::checked(pool, |pool| async move {
+            let fx = fixture(&pool, "one", "full_refresh").await;
+            block_order_placed(&pool, &fx).await;
+            let source = fx.source_id.to_string();
+            let key = key();
+            let upserts = [with_event(&fx, "bad", "a1@example.com", json!("x"), &[])];
+            let cp = json!({"offset": 1});
+            commit_sync_batch(&pool, &keyed(&fx, &source, &upserts, &cp, &key))
+                .await
+                .unwrap();
+            // The reject stays open and is forgotten by its run, as when an earlier run is deleted.
+            sqlx::query("UPDATE ingest_rejects SET sync_run_id = NULL")
+                .execute(&pool)
+                .await
+                .unwrap();
 
-        let again = commit_sync_batch(&pool, &keyed(&fx, &source, &upserts, &cp, &key))
-            .await
-            .unwrap();
+            let again = commit_sync_batch(&pool, &keyed(&fx, &source, &upserts, &cp, &key))
+                .await
+                .unwrap();
 
-        let BatchOutcome::Committed(progress) = again else {
-            panic!("{again:?}");
-        };
-        assert_eq!(progress.batch.rejected, 1);
-        assert_eq!(count(&pool, "SELECT count(*) FROM ingest_rejects").await, 1);
-        let linked: Option<Uuid> = sqlx::query_scalar("SELECT sync_run_id FROM ingest_rejects")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(linked, Some(fx.run.id));
+            let BatchOutcome::Committed(progress) = again else {
+                panic!("{again:?}");
+            };
+            assert_eq!(progress.batch.rejected, 1);
+            assert_eq!(count(&pool, "SELECT count(*) FROM ingest_rejects").await, 1);
+            let linked: Option<Uuid> = sqlx::query_scalar("SELECT sync_run_id FROM ingest_rejects")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(linked, Some(fx.run.id));
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_missing_list_rolls_the_whole_batch_back(pool: PgPool) {
-        let fx = fixture(&pool, "one", "full_refresh").await;
-        let source = fx.source_id.to_string();
-        let key = key();
-        let upserts = [with_event(
-            &fx,
-            "k0",
-            "a0@example.com",
-            json!(1),
-            &[Uuid::now_v7()],
-        )];
-        let cp = json!({"offset": 1});
+        crate::decision_testing::checked(pool, |pool| async move {
+            let fx = fixture(&pool, "one", "full_refresh").await;
+            let source = fx.source_id.to_string();
+            let key = key();
+            let upserts = [with_event(
+                &fx,
+                "k0",
+                "a0@example.com",
+                json!(1),
+                &[Uuid::now_v7()],
+            )];
+            let cp = json!({"offset": 1});
 
-        let outcome = commit_sync_batch(&pool, &keyed(&fx, &source, &upserts, &cp, &key))
-            .await
-            .unwrap();
+            let outcome = commit_sync_batch(&pool, &keyed(&fx, &source, &upserts, &cp, &key))
+                .await
+                .unwrap();
 
-        assert!(matches!(outcome, BatchOutcome::ListMissing));
-        nothing_of_events_and_lists(&pool).await;
-        nothing_written(&pool, &fx).await;
+            assert!(matches!(outcome, BatchOutcome::ListMissing));
+            nothing_of_events_and_lists(&pool).await;
+            nothing_written(&pool, &fx).await;
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -1856,126 +1912,138 @@ mod tests {
     async fn a_failure_after_the_events_and_members_rolls_back_profiles_events_and_members_together(
         pool: PgPool,
     ) {
-        let fx = fixture(&pool, "one", "full_refresh").await;
-        let source = fx.source_id.to_string();
-        let news = list(&pool, &fx, "news").await;
-        let key = key();
-        let upserts = [with_event(&fx, "k0", "a0@example.com", json!(1), &[news])];
-        // PostgreSQL refuses a NUL in jsonb, after everything else was written.
-        let poison = [SyncReject {
-            record_key: "poison".into(),
-            reasons: vec![("\u{0}".into(), "invalid_identifier")],
-            sample: json!({}),
-        }];
-        let cp = json!({"offset": 1});
+        crate::decision_testing::checked(pool, |pool| async move {
+            let fx = fixture(&pool, "one", "full_refresh").await;
+            let source = fx.source_id.to_string();
+            let news = list(&pool, &fx, "news").await;
+            let key = key();
+            let upserts = [with_event(&fx, "k0", "a0@example.com", json!(1), &[news])];
+            // PostgreSQL refuses a NUL in jsonb, after everything else was written.
+            let poison = [SyncReject {
+                record_key: "poison".into(),
+                reasons: vec![("\u{0}".into(), "invalid_identifier")],
+                sample: json!({}),
+            }];
+            let cp = json!({"offset": 1});
 
-        let result = commit_sync_batch(
-            &pool,
-            &SyncBatch {
-                rejected: &poison,
-                ..keyed(&fx, &source, &upserts, &cp, &key)
-            },
-        )
+            let result = commit_sync_batch(
+                &pool,
+                &SyncBatch {
+                    rejected: &poison,
+                    ..keyed(&fx, &source, &upserts, &cp, &key)
+                },
+            )
+            .await;
+
+            assert!(result.is_err());
+            nothing_of_events_and_lists(&pool).await;
+            assert_eq!(
+                count(&pool, "SELECT count(*) FROM event_dedupe").await,
+                0,
+                "the dedupe row is rolled back with the event"
+            );
+            let members: i64 = sqlx::query_scalar("SELECT member_count FROM lists WHERE id = $1")
+                .bind(news)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(members, 0);
+        })
         .await;
-
-        assert!(result.is_err());
-        nothing_of_events_and_lists(&pool).await;
-        assert_eq!(
-            count(&pool, "SELECT count(*) FROM event_dedupe").await,
-            0,
-            "the dedupe row is rolled back with the event"
-        );
-        let members: i64 = sqlx::query_scalar("SELECT member_count FROM lists WHERE id = $1")
-            .bind(news)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(members, 0);
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_batch_of_events_and_members_is_fenced_by_the_lease_and_by_a_cancel(pool: PgPool) {
-        let fx = fixture(&pool, "one", "full_refresh").await;
-        let source = fx.source_id.to_string();
-        let news = list(&pool, &fx, "news").await;
-        let key = key();
-        let upserts = [with_event(&fx, "k0", "a0@example.com", json!(1), &[news])];
-        let cp = json!({"offset": 1});
+        crate::decision_testing::checked(pool, |pool| async move {
+            let fx = fixture(&pool, "one", "full_refresh").await;
+            let source = fx.source_id.to_string();
+            let news = list(&pool, &fx, "news").await;
+            let key = key();
+            let upserts = [with_event(&fx, "k0", "a0@example.com", json!(1), &[news])];
+            let cp = json!({"offset": 1});
 
-        // Another worker holds the lease.
-        sqlx::query("UPDATE jobs SET lease_token = gen_random_uuid() WHERE id = $1")
-            .bind(fx.job.id)
-            .execute(&pool)
-            .await
-            .unwrap();
-        let lost = commit_sync_batch(&pool, &keyed(&fx, &source, &upserts, &cp, &key))
-            .await
-            .unwrap();
-        assert!(matches!(lost, BatchOutcome::LeaseLost));
-        nothing_of_events_and_lists(&pool).await;
+            // Another worker holds the lease.
+            sqlx::query("UPDATE jobs SET lease_token = gen_random_uuid() WHERE id = $1")
+                .bind(fx.job.id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let lost = commit_sync_batch(&pool, &keyed(&fx, &source, &upserts, &cp, &key))
+                .await
+                .unwrap();
+            assert!(matches!(lost, BatchOutcome::LeaseLost));
+            nothing_of_events_and_lists(&pool).await;
 
-        // The run was cancelled.
-        let fx = fixture(&pool, "two", "full_refresh").await;
-        let source = fx.source_id.to_string();
-        let news = list(&pool, &fx, "news").await;
-        let upserts = [with_event(&fx, "k0", "a0@example.com", json!(1), &[news])];
-        let mut connection = pool.acquire().await.unwrap();
-        cancel_run(&mut connection, fx.ws, fx.source_id, fx.run.id)
-            .await
-            .unwrap();
-        drop(connection);
-        let cancelled = commit_sync_batch(&pool, &keyed(&fx, &source, &upserts, &cp, &key))
-            .await
-            .unwrap();
-        assert!(matches!(cancelled, BatchOutcome::Cancelled));
-        nothing_of_events_and_lists(&pool).await;
+            // The run was cancelled.
+            let fx = fixture(&pool, "two", "full_refresh").await;
+            let source = fx.source_id.to_string();
+            let news = list(&pool, &fx, "news").await;
+            let upserts = [with_event(&fx, "k0", "a0@example.com", json!(1), &[news])];
+            let mut connection = pool.acquire().await.unwrap();
+            cancel_run(&mut connection, fx.ws, fx.source_id, fx.run.id)
+                .await
+                .unwrap();
+            drop(connection);
+            let cancelled = commit_sync_batch(&pool, &keyed(&fx, &source, &upserts, &cp, &key))
+                .await
+                .unwrap();
+            assert!(matches!(cancelled, BatchOutcome::Cancelled));
+            nothing_of_events_and_lists(&pool).await;
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn applying_events_record_by_record_gives_the_same_result(pool: PgPool) {
-        let fx = fixture(&pool, "one", "full_refresh").await;
-        block_order_placed(&pool, &fx).await;
-        let source = fx.source_id.to_string();
-        let news = list(&pool, &fx, "news").await;
-        let key = key();
-        let upserts = [
-            with_event(&fx, "good", "a0@example.com", json!(10), &[news]),
-            with_event(&fx, "bad", "a1@example.com", json!("x"), &[news]),
-        ];
-        let cp = json!({"offset": 2});
+        crate::decision_testing::checked(pool, |pool| async move {
+            let fx = fixture(&pool, "one", "full_refresh").await;
+            block_order_placed(&pool, &fx).await;
+            let source = fx.source_id.to_string();
+            let news = list(&pool, &fx, "news").await;
+            let key = key();
+            let upserts = [
+                with_event(&fx, "good", "a0@example.com", json!(10), &[news]),
+                with_event(&fx, "bad", "a1@example.com", json!("x"), &[news]),
+            ];
+            let cp = json!({"offset": 2});
 
-        let outcome = commit_sync_batch(
-            &pool,
-            &SyncBatch {
-                singly: true,
-                ..keyed(&fx, &source, &upserts, &cp, &key)
-            },
-        )
-        .await
-        .unwrap();
+            let outcome = commit_sync_batch(
+                &pool,
+                &SyncBatch {
+                    singly: true,
+                    ..keyed(&fx, &source, &upserts, &cp, &key)
+                },
+            )
+            .await
+            .unwrap();
 
-        let BatchOutcome::Committed(progress) = outcome else {
-            panic!("{outcome:?}");
-        };
-        assert_eq!((progress.batch.applied, progress.batch.rejected), (1, 1));
-        assert_eq!((progress.events.accepted, progress.events.rejected), (1, 1));
-        assert_eq!(count(&pool, "SELECT count(*) FROM list_members").await, 2);
+            let BatchOutcome::Committed(progress) = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert_eq!((progress.batch.applied, progress.batch.rejected), (1, 1));
+            assert_eq!((progress.events.accepted, progress.events.rejected), (1, 1));
+            assert_eq!(count(&pool, "SELECT count(*) FROM list_members").await, 2);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_batch_with_events_and_no_redaction_key_writes_nothing(pool: PgPool) {
-        let fx = fixture(&pool, "one", "full_refresh").await;
-        let source = fx.source_id.to_string();
-        let upserts = [with_event(&fx, "k0", "a0@example.com", json!(1), &[])];
-        let cp = json!({"offset": 1});
+        crate::decision_testing::checked(pool, |pool| async move {
+            let fx = fixture(&pool, "one", "full_refresh").await;
+            let source = fx.source_id.to_string();
+            let upserts = [with_event(&fx, "k0", "a0@example.com", json!(1), &[])];
+            let cp = json!({"offset": 1});
 
-        let result = commit_sync_batch(&pool, &batch(&fx, &source, &upserts, &cp)).await;
+            let result = commit_sync_batch(&pool, &batch(&fx, &source, &upserts, &cp)).await;
 
-        assert!(result.is_err());
-        nothing_of_events_and_lists(&pool).await;
+            assert!(result.is_err());
+            nothing_of_events_and_lists(&pool).await;
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -1983,38 +2051,41 @@ mod tests {
     async fn a_run_failed_on_its_rejects_marks_its_stream_failing_in_the_same_transaction(
         pool: PgPool,
     ) {
-        let fx = fixture(&pool, "one", "full_refresh").await;
-        let source = fx.source_id.to_string();
-        let rejects: Vec<SyncReject> = (0..SYNC_REJECT_CHECK_MIN_RECORDS)
-            .map(|_| reject())
-            .collect();
-        let cp = json!({"offset": 100});
-        let before = crate::find_stream_by_id(&pool, fx.ws, fx.source_id, fx.stream_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(!before.last_run_failed);
+        crate::decision_testing::checked(pool, |pool| async move {
+            let fx = fixture(&pool, "one", "full_refresh").await;
+            let source = fx.source_id.to_string();
+            let rejects: Vec<SyncReject> = (0..SYNC_REJECT_CHECK_MIN_RECORDS)
+                .map(|_| reject())
+                .collect();
+            let cp = json!({"offset": 100});
+            let before = crate::find_stream_by_id(&pool, fx.ws, fx.source_id, fx.stream_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!before.last_run_failed);
 
-        let outcome = commit_sync_batch(
-            &pool,
-            &SyncBatch {
-                rejected: &rejects,
-                ..batch(&fx, &source, &[], &cp)
-            },
-        )
-        .await
-        .unwrap();
-
-        let BatchOutcome::Committed(progress) = outcome else {
-            panic!("{outcome:?}");
-        };
-        assert!(progress.threshold_exceeded);
-        let after = crate::find_stream_by_id(&pool, fx.ws, fx.source_id, fx.stream_id)
+            let outcome = commit_sync_batch(
+                &pool,
+                &SyncBatch {
+                    rejected: &rejects,
+                    ..batch(&fx, &source, &[], &cp)
+                },
+            )
             .await
-            .unwrap()
             .unwrap();
-        assert!(after.last_run_failed);
-        assert_eq!(after.last_success_at, None);
+
+            let BatchOutcome::Committed(progress) = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert!(progress.threshold_exceeded);
+            let after = crate::find_stream_by_id(&pool, fx.ws, fx.source_id, fx.stream_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(after.last_run_failed);
+            assert_eq!(after.last_success_at, None);
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -2022,57 +2093,60 @@ mod tests {
     async fn a_removed_record_appends_a_deleted_decision_with_the_reason_it_was_removed_for(
         pool: PgPool,
     ) {
-        let fx = fixture(&pool, "one", "incremental").await;
-        let source = fx.source_id.to_string();
-        let first = many(&fx, 0, 3);
-        let cp1 = json!({"offset": 3});
-        commit_sync_batch(&pool, &batch(&fx, &source, &first, &cp1))
+        crate::decision_testing::checked(pool, |pool| async move {
+            let fx = fixture(&pool, "one", "incremental").await;
+            let source = fx.source_id.to_string();
+            let first = many(&fx, 0, 3);
+            let cp1 = json!({"offset": 3});
+            commit_sync_batch(&pool, &batch(&fx, &source, &first, &cp1))
+                .await
+                .unwrap();
+
+            let deleted = [
+                ("k0".to_owned(), DELETE_BY_SOURCE),
+                ("k1".to_owned(), DELETE_BY_SIGNAL),
+                ("ghost".to_owned(), DELETE_BY_SOURCE),
+            ];
+            let cp2 = json!({"offset": 6});
+            let outcome = commit_sync_batch(
+                &pool,
+                &SyncBatch {
+                    deleted: &deleted,
+                    ..batch(&fx, &source, &[], &cp2)
+                },
+            )
             .await
             .unwrap();
 
-        let deleted = [
-            ("k0".to_owned(), DELETE_BY_SOURCE),
-            ("k1".to_owned(), DELETE_BY_SIGNAL),
-            ("ghost".to_owned(), DELETE_BY_SOURCE),
-        ];
-        let cp2 = json!({"offset": 6});
-        let outcome = commit_sync_batch(
-            &pool,
-            &SyncBatch {
-                deleted: &deleted,
-                ..batch(&fx, &source, &[], &cp2)
-            },
-        )
-        .await
-        .unwrap();
-
-        let BatchOutcome::Committed(progress) = outcome else {
-            panic!("{outcome:?}");
-        };
-        // The key that has no live record is unchanged, as before.
-        assert_eq!((progress.batch.deleted, progress.batch.unchanged), (2, 1));
-        let rows: Vec<(String, Option<String>, Value, uuid::Uuid)> = sqlx::query_as(
-            "SELECT outcome, reason, subject_ids, trace_id FROM decision_records \
+            let BatchOutcome::Committed(progress) = outcome else {
+                panic!("{outcome:?}");
+            };
+            // The key that has no live record is unchanged, as before.
+            assert_eq!((progress.batch.deleted, progress.batch.unchanged), (2, 1));
+            let rows: Vec<(String, Option<String>, Value, uuid::Uuid)> = sqlx::query_as(
+                "SELECT outcome, reason, subject_ids, trace_id FROM decision_records \
              WHERE action = 'sync.record' AND outcome = 'deleted' ORDER BY reason",
-        )
-        .fetch_all(&pool)
-        .await
-        .unwrap();
-        let reasons: Vec<_> = rows.iter().map(|row| row.1.as_deref()).collect();
-        assert_eq!(reasons, [Some("signal"), Some("source")]);
-        for row in &rows {
-            assert_eq!(row.2.as_object().unwrap().len(), 1);
-            assert!(row.2["source_record"].is_string());
-            assert_eq!(row.3, fx.run.trace_id);
-        }
-        assert_eq!(
-            count(
-                &pool,
-                "SELECT count(*) FROM decision_records WHERE action = 'contribution.removed'"
             )
-            .await,
-            2
-        );
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            let reasons: Vec<_> = rows.iter().map(|row| row.1.as_deref()).collect();
+            assert_eq!(reasons, [Some("signal"), Some("source")]);
+            for row in &rows {
+                assert_eq!(row.2.as_object().unwrap().len(), 1);
+                assert!(row.2["source_record"].is_string());
+                assert_eq!(row.3, fx.run.trace_id);
+            }
+            assert_eq!(
+                count(
+                    &pool,
+                    "SELECT count(*) FROM decision_records WHERE action = 'contribution.removed'"
+                )
+                .await,
+                2
+            );
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -2080,41 +2154,44 @@ mod tests {
     async fn a_record_flagged_deleted_is_not_marked_seen_and_listed_keys_are_counted_as_read(
         pool: PgPool,
     ) {
-        let fx = fixture(&pool, "one", "incremental").await;
-        let source = fx.source_id.to_string();
-        let first = many(&fx, 0, 2);
-        let cp1 = json!({"offset": 2});
-        commit_sync_batch(&pool, &batch(&fx, &source, &first, &cp1))
+        crate::decision_testing::checked(pool, |pool| async move {
+            let fx = fixture(&pool, "one", "incremental").await;
+            let source = fx.source_id.to_string();
+            let first = many(&fx, 0, 2);
+            let cp1 = json!({"offset": 2});
+            commit_sync_batch(&pool, &batch(&fx, &source, &first, &cp1))
+                .await
+                .unwrap();
+            // A second attempt of the same run: k0 is listed, k1 is deleted.
+            let listed = ["k0".to_owned()];
+            let deleted = [("k1".to_owned(), DELETE_BY_SOURCE)];
+            let cp2 = json!({"offset": 4});
+
+            let outcome = commit_sync_batch(
+                &pool,
+                &SyncBatch {
+                    seen: &listed,
+                    deleted: &deleted,
+                    ..batch(&fx, &source, &[], &cp2)
+                },
+            )
             .await
             .unwrap();
-        // A second attempt of the same run: k0 is listed, k1 is deleted.
-        let listed = ["k0".to_owned()];
-        let deleted = [("k1".to_owned(), DELETE_BY_SOURCE)];
-        let cp2 = json!({"offset": 4});
 
-        let outcome = commit_sync_batch(
-            &pool,
-            &SyncBatch {
-                seen: &listed,
-                deleted: &deleted,
-                ..batch(&fx, &source, &[], &cp2)
-            },
-        )
-        .await
-        .unwrap();
-
-        let BatchOutcome::Committed(progress) = outcome else {
-            panic!("{outcome:?}");
-        };
-        assert_eq!((progress.batch.read, progress.batch.deleted), (2, 1));
-        assert_eq!(progress.batch.applied, 0);
-        let live: Vec<(String, Option<uuid::Uuid>)> = sqlx::query_as(
-            "SELECT record_key, last_seen_run FROM source_records WHERE deleted_at IS NULL",
-        )
-        .fetch_all(&pool)
-        .await
-        .unwrap();
-        assert_eq!(live, [("k0".to_owned(), Some(fx.run.id))]);
+            let BatchOutcome::Committed(progress) = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert_eq!((progress.batch.read, progress.batch.deleted), (2, 1));
+            assert_eq!(progress.batch.applied, 0);
+            let live: Vec<(String, Option<uuid::Uuid>)> = sqlx::query_as(
+                "SELECT record_key, last_seen_run FROM source_records WHERE deleted_at IS NULL",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(live, [("k0".to_owned(), Some(fx.run.id))]);
+        })
+        .await;
     }
 
     // The offsets of a consumer (Kafka).
@@ -2139,152 +2216,161 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_offsets_commit_with_the_batch_and_each_batch_sets_them_exactly(pool: PgPool) {
-        let fx = fixture(&pool, "one", "stream").await;
-        let source = fx.source_id.to_string();
-        let first = many(&fx, 0, 3);
-        let offsets = [at(0, 2, 9), at(1, 1, 4)];
-        let cp = json!({});
+        crate::decision_testing::checked(pool, |pool| async move {
+            let fx = fixture(&pool, "one", "stream").await;
+            let source = fx.source_id.to_string();
+            let first = many(&fx, 0, 3);
+            let offsets = [at(0, 2, 9), at(1, 1, 4)];
+            let cp = json!({});
 
-        let outcome = commit_sync_batch(
-            &pool,
-            &SyncBatch {
-                offsets: &offsets,
-                ..batch(&fx, &source, &first, &cp)
-            },
-        )
-        .await
-        .unwrap();
+            let outcome = commit_sync_batch(
+                &pool,
+                &SyncBatch {
+                    offsets: &offsets,
+                    ..batch(&fx, &source, &first, &cp)
+                },
+            )
+            .await
+            .unwrap();
 
-        let BatchOutcome::Committed(progress) = outcome else {
-            panic!("{outcome:?}");
-        };
-        assert_eq!((progress.batch.read, progress.batch.applied), (3, 3));
-        assert_eq!(
-            stored_offsets(&pool).await,
-            [(0, 2, Some(9)), (1, 1, Some(4))]
-        );
-        // The next batch sets the position exactly: the lease holder is the only writer.
-        let again = [at(0, 5, 9)];
-        commit_sync_batch(
-            &pool,
-            &SyncBatch {
-                offsets: &again,
-                ..batch(&fx, &source, &[], &cp)
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            stored_offsets(&pool).await,
-            [(0, 5, Some(9)), (1, 1, Some(4))]
-        );
-        // The cursor of the stream is never written for a stream-mode run.
-        let cursor: Option<Value> =
-            sqlx::query_scalar("SELECT checkpoint FROM streams WHERE id = $1")
-                .bind(fx.stream_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(cursor, None);
+            let BatchOutcome::Committed(progress) = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert_eq!((progress.batch.read, progress.batch.applied), (3, 3));
+            assert_eq!(
+                stored_offsets(&pool).await,
+                [(0, 2, Some(9)), (1, 1, Some(4))]
+            );
+            // The next batch sets the position exactly: the lease holder is the only writer.
+            let again = [at(0, 5, 9)];
+            commit_sync_batch(
+                &pool,
+                &SyncBatch {
+                    offsets: &again,
+                    ..batch(&fx, &source, &[], &cp)
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                stored_offsets(&pool).await,
+                [(0, 5, Some(9)), (1, 1, Some(4))]
+            );
+            // The cursor of the stream is never written for a stream-mode run.
+            let cursor: Option<Value> =
+                sqlx::query_scalar("SELECT checkpoint FROM streams WHERE id = $1")
+                    .bind(fx.stream_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(cursor, None);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_batch_that_is_not_committed_writes_no_offset(pool: PgPool) {
-        let fx = fixture(&pool, "one", "stream").await;
-        let source = fx.source_id.to_string();
-        let upserts = [upsert(&fx, "k0", "a0@example.com")];
-        let offsets = [at(0, 1, 1)];
-        let cp = json!({});
+        crate::decision_testing::checked(pool, |pool| async move {
+            let fx = fixture(&pool, "one", "stream").await;
+            let source = fx.source_id.to_string();
+            let upserts = [upsert(&fx, "k0", "a0@example.com")];
+            let offsets = [at(0, 1, 1)];
+            let cp = json!({});
 
-        // 1. A failure after the offsets were written rolls them back with the batch.
-        let poison = [SyncReject {
-            record_key: "poison".into(),
-            reasons: vec![("\u{0}".into(), "invalid_identifier")],
-            sample: json!({}),
-        }];
-        let failed = commit_sync_batch(
-            &pool,
-            &SyncBatch {
-                offsets: &offsets,
-                rejected: &poison,
-                ..batch(&fx, &source, &upserts, &cp)
-            },
-        )
+            // 1. A failure after the offsets were written rolls them back with the batch.
+            let poison = [SyncReject {
+                record_key: "poison".into(),
+                reasons: vec![("\u{0}".into(), "invalid_identifier")],
+                sample: json!({}),
+            }];
+            let failed = commit_sync_batch(
+                &pool,
+                &SyncBatch {
+                    offsets: &offsets,
+                    rejected: &poison,
+                    ..batch(&fx, &source, &upserts, &cp)
+                },
+            )
+            .await;
+            assert!(failed.is_err());
+            assert!(stored_offsets(&pool).await.is_empty(), "rolled back");
+
+            // 2. A missing list refuses the batch after the offsets were written.
+            let key = key();
+            let listed = [with_event(
+                &fx,
+                "k1",
+                "a1@example.com",
+                json!(1),
+                &[Uuid::now_v7()],
+            )];
+            let missing = commit_sync_batch(
+                &pool,
+                &SyncBatch {
+                    offsets: &offsets,
+                    ..keyed(&fx, &source, &listed, &cp, &key)
+                },
+            )
+            .await
+            .unwrap();
+            assert!(matches!(missing, BatchOutcome::ListMissing));
+            assert!(stored_offsets(&pool).await.is_empty());
+
+            // 3. A cancelled run is fenced before anything is written.
+            cancel_run(
+                &mut pool.acquire().await.unwrap(),
+                fx.ws,
+                fx.source_id,
+                fx.run.id,
+            )
+            .await
+            .unwrap();
+            let cancelled = commit_sync_batch(
+                &pool,
+                &SyncBatch {
+                    offsets: &offsets,
+                    ..batch(&fx, &source, &upserts, &cp)
+                },
+            )
+            .await
+            .unwrap();
+            assert!(matches!(cancelled, BatchOutcome::Cancelled));
+            assert!(stored_offsets(&pool).await.is_empty());
+        })
         .await;
-        assert!(failed.is_err());
-        assert!(stored_offsets(&pool).await.is_empty(), "rolled back");
-
-        // 2. A missing list refuses the batch after the offsets were written.
-        let key = key();
-        let listed = [with_event(
-            &fx,
-            "k1",
-            "a1@example.com",
-            json!(1),
-            &[Uuid::now_v7()],
-        )];
-        let missing = commit_sync_batch(
-            &pool,
-            &SyncBatch {
-                offsets: &offsets,
-                ..keyed(&fx, &source, &listed, &cp, &key)
-            },
-        )
-        .await
-        .unwrap();
-        assert!(matches!(missing, BatchOutcome::ListMissing));
-        assert!(stored_offsets(&pool).await.is_empty());
-
-        // 3. A cancelled run is fenced before anything is written.
-        cancel_run(
-            &mut pool.acquire().await.unwrap(),
-            fx.ws,
-            fx.source_id,
-            fx.run.id,
-        )
-        .await
-        .unwrap();
-        let cancelled = commit_sync_batch(
-            &pool,
-            &SyncBatch {
-                offsets: &offsets,
-                ..batch(&fx, &source, &upserts, &cp)
-            },
-        )
-        .await
-        .unwrap();
-        assert!(matches!(cancelled, BatchOutcome::Cancelled));
-        assert!(stored_offsets(&pool).await.is_empty());
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_batch_from_a_lost_lease_writes_no_offset(pool: PgPool) {
-        let fx = fixture(&pool, "one", "stream").await;
-        let source = fx.source_id.to_string();
-        let upserts = [upsert(&fx, "k0", "a0@example.com")];
-        let offsets = [at(0, 1, 1)];
-        let cp = json!({});
-        sqlx::query("UPDATE jobs SET lease_token = gen_random_uuid() WHERE id = $1")
-            .bind(fx.job.id)
-            .execute(&pool)
+        crate::decision_testing::checked(pool, |pool| async move {
+            let fx = fixture(&pool, "one", "stream").await;
+            let source = fx.source_id.to_string();
+            let upserts = [upsert(&fx, "k0", "a0@example.com")];
+            let offsets = [at(0, 1, 1)];
+            let cp = json!({});
+            sqlx::query("UPDATE jobs SET lease_token = gen_random_uuid() WHERE id = $1")
+                .bind(fx.job.id)
+                .execute(&pool)
+                .await
+                .unwrap();
+
+            let outcome = commit_sync_batch(
+                &pool,
+                &SyncBatch {
+                    offsets: &offsets,
+                    ..batch(&fx, &source, &upserts, &cp)
+                },
+            )
             .await
             .unwrap();
 
-        let outcome = commit_sync_batch(
-            &pool,
-            &SyncBatch {
-                offsets: &offsets,
-                ..batch(&fx, &source, &upserts, &cp)
-            },
-        )
-        .await
-        .unwrap();
-
-        assert!(matches!(outcome, BatchOutcome::LeaseLost));
-        assert!(stored_offsets(&pool).await.is_empty());
-        nothing_written(&pool, &fx).await;
+            assert!(matches!(outcome, BatchOutcome::LeaseLost));
+            assert!(stored_offsets(&pool).await.is_empty());
+            nothing_written(&pool, &fx).await;
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -2292,34 +2378,37 @@ mod tests {
     async fn two_messages_with_one_key_are_two_events_and_a_replayed_offset_is_a_duplicate(
         pool: PgPool,
     ) {
-        let fx = fixture(&pool, "one", "stream").await;
-        let source = fx.source_id.to_string();
-        let key = key();
-        let cp = json!({});
-        let commit = |occurrence: &'static str, total: i64| {
-            let mut item = with_event(&fx, "same-key", "a@example.com", json!(total), &[]);
-            item.occurrence = Some(occurrence.to_owned());
-            let (pool, source, key, fx, cp) = (&pool, &source, &key, &fx, &cp);
-            async move {
-                let upserts = [item];
-                let outcome = commit_sync_batch(pool, &keyed(fx, source, &upserts, cp, key))
-                    .await
-                    .unwrap();
-                let BatchOutcome::Committed(progress) = outcome else {
-                    panic!("{outcome:?}");
-                };
-                progress.events
-            }
-        };
+        crate::decision_testing::checked(pool, |pool| async move {
+            let fx = fixture(&pool, "one", "stream").await;
+            let source = fx.source_id.to_string();
+            let key = key();
+            let cp = json!({});
+            let commit = |occurrence: &'static str, total: i64| {
+                let mut item = with_event(&fx, "same-key", "a@example.com", json!(total), &[]);
+                item.occurrence = Some(occurrence.to_owned());
+                let (pool, source, key, fx, cp) = (&pool, &source, &key, &fx, &cp);
+                async move {
+                    let upserts = [item];
+                    let outcome = commit_sync_batch(pool, &keyed(fx, source, &upserts, cp, key))
+                        .await
+                        .unwrap();
+                    let BatchOutcome::Committed(progress) = outcome else {
+                        panic!("{outcome:?}");
+                    };
+                    progress.events
+                }
+            };
 
-        let first = commit("0/1", 10).await;
-        let second = commit("0/2", 20).await;
-        let replay = commit("0/1", 10).await;
+            let first = commit("0/1", 10).await;
+            let second = commit("0/2", 20).await;
+            let replay = commit("0/1", 10).await;
 
-        assert_eq!(first.accepted, 1);
-        assert_eq!(second.accepted, 1, "the later message is a new event");
-        assert_eq!((replay.accepted, replay.duplicate), (0, 1));
-        assert_eq!(count(&pool, "SELECT count(*) FROM events").await, 2);
+            assert_eq!(first.accepted, 1);
+            assert_eq!(second.accepted, 1, "the later message is a new event");
+            assert_eq!((replay.accepted, replay.duplicate), (0, 1));
+            assert_eq!(count(&pool, "SELECT count(*) FROM events").await, 2);
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -2327,38 +2416,41 @@ mod tests {
     async fn a_tombstone_removes_the_record_and_its_events_and_one_never_seen_is_unchanged(
         pool: PgPool,
     ) {
-        let fx = fixture(&pool, "one", "stream").await;
-        let source = fx.source_id.to_string();
-        let key = key();
-        let mut item = with_event(&fx, "gone", "a@example.com", json!(1), &[]);
-        item.occurrence = Some("0/0".into());
-        let cp = json!({});
-        commit_sync_batch(&pool, &keyed(&fx, &source, &[item], &cp, &key))
+        crate::decision_testing::checked(pool, |pool| async move {
+            let fx = fixture(&pool, "one", "stream").await;
+            let source = fx.source_id.to_string();
+            let key = key();
+            let mut item = with_event(&fx, "gone", "a@example.com", json!(1), &[]);
+            item.occurrence = Some("0/0".into());
+            let cp = json!({});
+            commit_sync_batch(&pool, &keyed(&fx, &source, &[item], &cp, &key))
+                .await
+                .unwrap();
+            assert_eq!(count(&pool, "SELECT count(*) FROM events").await, 1);
+
+            let deleted = [
+                ("gone".to_owned(), DELETE_BY_SOURCE),
+                ("never".to_owned(), DELETE_BY_SOURCE),
+            ];
+            let offsets = [at(0, 3, 3)];
+            let outcome = commit_sync_batch(
+                &pool,
+                &SyncBatch {
+                    deleted: &deleted,
+                    offsets: &offsets,
+                    ..batch(&fx, &source, &[], &cp)
+                },
+            )
             .await
             .unwrap();
-        assert_eq!(count(&pool, "SELECT count(*) FROM events").await, 1);
 
-        let deleted = [
-            ("gone".to_owned(), DELETE_BY_SOURCE),
-            ("never".to_owned(), DELETE_BY_SOURCE),
-        ];
-        let offsets = [at(0, 3, 3)];
-        let outcome = commit_sync_batch(
-            &pool,
-            &SyncBatch {
-                deleted: &deleted,
-                offsets: &offsets,
-                ..batch(&fx, &source, &[], &cp)
-            },
-        )
-        .await
-        .unwrap();
-
-        let BatchOutcome::Committed(progress) = outcome else {
-            panic!("{outcome:?}");
-        };
-        assert_eq!((progress.batch.deleted, progress.batch.unchanged), (1, 1));
-        assert_eq!(count(&pool, "SELECT count(*) FROM events").await, 0);
-        assert_eq!(stored_offsets(&pool).await, [(0, 3, Some(3))]);
+            let BatchOutcome::Committed(progress) = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert_eq!((progress.batch.deleted, progress.batch.unchanged), (1, 1));
+            assert_eq!(count(&pool, "SELECT count(*) FROM events").await, 0);
+            assert_eq!(stored_offsets(&pool).await, [(0, 3, Some(3))]);
+        })
+        .await;
     }
 }

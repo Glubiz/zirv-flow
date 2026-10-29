@@ -229,6 +229,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use zirv_flow_store::decision_testing::PERSONAL_DATA;
+
     use std::time::Duration;
 
     use serde_json::json;
@@ -265,7 +267,7 @@ mod tests {
                 message_id: Some(format!("m-{n}")),
                 payload: IngestPayload::Track {
                     event: "seen".into(),
-                    properties: serde_json::Map::new(),
+                    properties: PERSONAL_DATA.properties(),
                 },
             })
             .collect();
@@ -358,135 +360,157 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_job_drains_in_batches_until_a_short_batch(pool: PgPool) {
-        let ws = workspace(&pool).await;
-        append(&pool, ws, 5).await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool).await;
+            append(&pool, ws, 5).await;
 
-        run_job(&pool, key(), 2).await.unwrap();
+            run_job(&pool, key(), 2).await.unwrap();
 
-        assert_eq!(inbox(&pool).await, 0);
-        let events: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(events, 5);
+            assert_eq!(inbox(&pool).await, 0);
+            let events: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(events, 5);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_job_does_not_enqueue_itself_again(pool: PgPool) {
-        let ws = workspace(&pool).await;
-        append(&pool, ws, 3).await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool).await;
+            append(&pool, ws, 3).await;
 
-        run_job(&pool, key(), 1).await.unwrap();
+            run_job(&pool, key(), 1).await.unwrap();
 
-        let jobs: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = 'ingest.drain'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(jobs, 1, "only the running job itself");
+            let jobs: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = 'ingest.drain'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(jobs, 1, "only the running job itself");
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_retryable_error_is_retried_and_the_batch_then_applies(pool: PgPool) {
-        let ws = workspace(&pool).await;
-        append(&pool, ws, 3).await;
-        for statement in [
-            "CREATE SEQUENCE flaky_calls",
-            "CREATE FUNCTION flake() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool).await;
+            append(&pool, ws, 3).await;
+            for statement in [
+                "CREATE SEQUENCE flaky_calls",
+                "CREATE FUNCTION flake() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
                IF nextval('flaky_calls') <= 2 THEN \
                  RAISE EXCEPTION 'flaky' USING ERRCODE = '40001'; \
                END IF; RETURN OLD; END $$",
-            "CREATE TRIGGER flaky BEFORE DELETE ON ingest_inbox \
+                "CREATE TRIGGER flaky BEFORE DELETE ON ingest_inbox \
              FOR EACH ROW EXECUTE FUNCTION flake()",
-        ] {
-            sqlx::query(statement).execute(&pool).await.unwrap();
-        }
+            ] {
+                sqlx::query(statement).execute(&pool).await.unwrap();
+            }
 
-        run_job(&pool, key(), 500).await.unwrap();
+            run_job(&pool, key(), 500).await.unwrap();
 
-        assert_eq!(inbox(&pool).await, 0);
-        let calls: i64 = sqlx::query_scalar("SELECT last_value FROM flaky_calls")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert!(calls >= 3, "the delete ran again after each failure");
-        let events: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(events, 3, "nothing was applied twice");
+            assert_eq!(inbox(&pool).await, 0);
+            let calls: i64 = sqlx::query_scalar("SELECT last_value FROM flaky_calls")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert!(calls >= 3, "the delete ran again after each failure");
+            let events: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(events, 3, "nothing was applied twice");
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_batch_that_keeps_conflicting_fails_the_job_and_keeps_the_rows(pool: PgPool) {
-        let ws = workspace(&pool).await;
-        append(&pool, ws, 2).await;
-        for statement in [
-            "CREATE FUNCTION flake() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool).await;
+            append(&pool, ws, 2).await;
+            for statement in [
+                "CREATE FUNCTION flake() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
                RAISE EXCEPTION 'flaky' USING ERRCODE = '40001'; END $$",
-            "CREATE TRIGGER flaky BEFORE DELETE ON ingest_inbox \
+                "CREATE TRIGGER flaky BEFORE DELETE ON ingest_inbox \
              FOR EACH ROW EXECUTE FUNCTION flake()",
-        ] {
-            sqlx::query(statement).execute(&pool).await.unwrap();
-        }
+            ] {
+                sqlx::query(statement).execute(&pool).await.unwrap();
+            }
 
-        let error = run_job(&pool, key(), 500).await.unwrap_err();
+            let error = run_job(&pool, key(), 500).await.unwrap_err();
 
-        assert_eq!(error, CONFLICTED);
-        assert_eq!(inbox(&pool).await, 2);
+            assert_eq!(error, CONFLICTED);
+            assert_eq!(inbox(&pool).await, 2);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_poison_row_is_rejected_and_the_rest_of_the_inbox_applies(pool: PgPool) {
-        let ws = workspace(&pool).await;
-        append(&pool, ws, 4).await;
-        sqlx::query("UPDATE ingest_inbox SET item = '{}' WHERE message_id = 'm-1'")
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        run_job(&pool, key(), 500).await.unwrap();
-
-        assert_eq!(inbox(&pool).await, 0);
-        let events: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(events, 3);
-        let reasons: Vec<(String, Option<String>)> =
-            sqlx::query_as("SELECT reason, message_id FROM ingest_rejects")
-                .fetch_all(&pool)
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool).await;
+            append(&pool, ws, 4).await;
+            sqlx::query("UPDATE ingest_inbox SET item = '{}' WHERE message_id = 'm-1'")
+                .execute(&pool)
                 .await
                 .unwrap();
-        assert_eq!(reasons, [("apply_failed".into(), Some("m-1".into()))]);
+
+            run_job(&pool, key(), 500).await.unwrap();
+
+            assert_eq!(inbox(&pool).await, 0);
+            let events: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(events, 3);
+            let reasons: Vec<(String, Option<String>)> =
+                sqlx::query_as("SELECT reason, message_id FROM ingest_rejects")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(reasons, [("apply_failed".into(), Some("m-1".into()))]);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_worker_without_a_master_key_fails_the_job_and_touches_nothing(pool: PgPool) {
-        let ws = workspace(&pool).await;
-        append(&pool, ws, 2).await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool).await;
+            append(&pool, ws, 2).await;
 
-        let error = run_job(&pool, None, 500).await.unwrap_err();
+            let error = run_job(&pool, None, 500).await.unwrap_err();
 
-        assert_eq!(error.message(), "the worker has no master key");
-        assert_eq!(inbox(&pool).await, 2);
+            assert_eq!(error.message(), "the worker has no master key");
+            assert_eq!(inbox(&pool).await, 2);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_payload_without_a_workspace_fails_the_job(pool: PgPool) {
-        zirv_flow_store::migrate(&pool).await.unwrap();
-        let mut new = NewJob::new(IngestDrain::KIND, TraceContext::root(Cause::api("req")));
-        new.payload = json!({});
-        zirv_flow_store::enqueue(&pool, &new).await.unwrap();
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            zirv_flow_store::migrate(&pool).await.unwrap();
+            let mut new = NewJob::new(IngestDrain::KIND, TraceContext::root(Cause::api("req")));
+            new.payload = json!({});
+            zirv_flow_store::enqueue(&pool, &new).await.unwrap();
 
-        let error = run_job(&pool, key(), 500).await.unwrap_err();
+            let error = run_job(&pool, key(), 500).await.unwrap_err();
 
-        assert_eq!(error.message(), "the payload has no workspace_id");
+            assert_eq!(error.message(), "the payload has no workspace_id");
+        })
+        .await;
     }
 
     fn identify(user: &str, message_id: &str, plan: &str) -> IngestItem {
@@ -522,78 +546,90 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn four_shards_drain_a_backlog_completely_to_the_last_value(pool: PgPool) {
-        let ws = workspace(&pool).await;
-        let mut items = Vec::new();
-        for round in ["free", "pro"] {
-            for n in 0..200 {
-                items.push(identify(&format!("u{n}"), &format!("{round}-{n}"), round));
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool).await;
+            let mut items = Vec::new();
+            for round in ["free", "pro"] {
+                for n in 0..200 {
+                    items.push(identify(&format!("u{n}"), &format!("{round}-{n}"), round));
+                }
             }
-        }
-        append_items(&pool, ws, &items).await;
+            append_items(&pool, ws, &items).await;
 
-        run_job_with(&pool, key(), 7, 4).await.unwrap();
+            run_job_with(&pool, key(), 7, 4).await.unwrap();
 
-        assert_eq!(inbox(&pool).await, 0);
-        for n in [0, 17, 199] {
-            assert_eq!(
-                plan_of(&pool, &format!("u{n}")).await.as_deref(),
-                Some("pro")
-            );
-        }
+            assert_eq!(inbox(&pool).await, 0);
+            for n in [0, 17, 199] {
+                assert_eq!(
+                    plan_of(&pool, &format!("u{n}")).await.as_deref(),
+                    Some("pro")
+                );
+            }
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn unbucketed_rows_apply_before_newer_bucketed_rows_of_the_same_key(pool: PgPool) {
-        let ws = workspace(&pool).await;
-        append_items(&pool, ws, &[identify("k", "old", "older")]).await;
-        sqlx::query("UPDATE ingest_inbox SET affinity = NULL")
-            .execute(&pool)
-            .await
-            .unwrap();
-        append_items(&pool, ws, &[identify("k", "new", "newer")]).await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool).await;
+            append_items(&pool, ws, &[identify("k", "old", "older")]).await;
+            sqlx::query("UPDATE ingest_inbox SET affinity = NULL")
+                .execute(&pool)
+                .await
+                .unwrap();
+            append_items(&pool, ws, &[identify("k", "new", "newer")]).await;
 
-        run_job_with(&pool, key(), 500, 4).await.unwrap();
+            run_job_with(&pool, key(), 500, 4).await.unwrap();
 
-        assert_eq!(inbox(&pool).await, 0);
-        assert_eq!(plan_of(&pool, "k").await.as_deref(), Some("newer"));
+            assert_eq!(inbox(&pool).await, 0);
+            assert_eq!(plan_of(&pool, "k").await.as_deref(), Some("newer"));
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_shard_whose_rows_are_locked_does_not_stop_the_other_shards(pool: PgPool) {
-        let ws = workspace(&pool).await;
-        let items: Vec<IngestItem> = (0..80)
-            .map(|n| identify(&format!("u{n}"), &format!("m-{n}"), "free"))
-            .collect();
-        append_items(&pool, ws, &items).await;
-        let mut holder = zirv_flow_store::begin(&pool).await.unwrap();
-        let locked: Vec<i64> = sqlx::query_scalar(
-            "SELECT id FROM ingest_inbox WHERE affinity % 4 = 0 ORDER BY id FOR UPDATE",
-        )
-        .fetch_all(&mut *holder)
-        .await
-        .unwrap();
-        assert!(!locked.is_empty());
-
-        run_job_with(&pool, key(), 5, 4).await.unwrap();
-
-        let left: Vec<i64> = sqlx::query_scalar("SELECT id FROM ingest_inbox ORDER BY id")
-            .fetch_all(&pool)
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool).await;
+            let items: Vec<IngestItem> = (0..80)
+                .map(|n| identify(&format!("u{n}"), &format!("m-{n}"), "free"))
+                .collect();
+            append_items(&pool, ws, &items).await;
+            let mut holder = zirv_flow_store::begin(&pool).await.unwrap();
+            let locked: Vec<i64> = sqlx::query_scalar(
+                "SELECT id FROM ingest_inbox WHERE affinity % 4 = 0 ORDER BY id FOR UPDATE",
+            )
+            .fetch_all(&mut *holder)
             .await
             .unwrap();
-        assert_eq!(left, locked, "only the locked shard's rows remain");
+            assert!(!locked.is_empty());
+
+            run_job_with(&pool, key(), 5, 4).await.unwrap();
+
+            let left: Vec<i64> = sqlx::query_scalar("SELECT id FROM ingest_inbox ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+            assert_eq!(left, locked, "only the locked shard's rows remain");
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn one_shard_drains_everything_too(pool: PgPool) {
-        let ws = workspace(&pool).await;
-        append(&pool, ws, 30).await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool).await;
+            append(&pool, ws, 30).await;
 
-        run_job_with(&pool, key(), 4, 1).await.unwrap();
+            run_job_with(&pool, key(), 4, 1).await.unwrap();
 
-        assert_eq!(inbox(&pool).await, 0);
+            assert_eq!(inbox(&pool).await, 0);
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -601,71 +637,77 @@ mod tests {
     async fn a_row_an_old_serve_appended_after_a_bucketed_one_of_its_key_applies_after_it(
         pool: PgPool,
     ) {
-        let ws = workspace(&pool).await;
-        append_items(&pool, ws, &[identify("k", "first", "old")]).await;
-        append_items(&pool, ws, &[identify("k", "second", "new")]).await;
-        sqlx::query("UPDATE ingest_inbox SET affinity = NULL WHERE message_id = 'second'")
-            .execute(&pool)
-            .await
-            .unwrap();
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool).await;
+            append_items(&pool, ws, &[identify("k", "first", "old")]).await;
+            append_items(&pool, ws, &[identify("k", "second", "new")]).await;
+            sqlx::query("UPDATE ingest_inbox SET affinity = NULL WHERE message_id = 'second'")
+                .execute(&pool)
+                .await
+                .unwrap();
 
-        run_job_with(&pool, key(), 500, 4).await.unwrap();
+            run_job_with(&pool, key(), 500, 4).await.unwrap();
 
-        assert_eq!(inbox(&pool).await, 0);
-        assert_eq!(plan_of(&pool, "k").await.as_deref(), Some("new"));
+            assert_eq!(inbox(&pool).await, 0);
+            assert_eq!(plan_of(&pool, "k").await.as_deref(), Some("new"));
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_spent_budget_ends_the_backfill_and_the_shard_loop_after_one_batch(pool: PgPool) {
-        let ws = workspace(&pool).await;
-        let items: Vec<IngestItem> = (0..30)
-            .map(|n| identify(&format!("u{n}"), &format!("m-{n}"), "free"))
-            .collect();
-        append_items(&pool, ws, &items).await;
-        sqlx::query("UPDATE ingest_inbox SET affinity = NULL")
-            .execute(&pool)
-            .await
-            .unwrap();
-        let spent = Duration::ZERO;
-
-        let finished = backfill(&pool, ws, 10, Instant::now(), spent)
-            .await
-            .unwrap();
-
-        assert!(!finished, "ten of thirty rows are bucketed");
-        let unbucketed: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM ingest_inbox WHERE affinity IS NULL")
-                .fetch_one(&pool)
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool).await;
+            let items: Vec<IngestItem> = (0..30)
+                .map(|n| identify(&format!("u{n}"), &format!("m-{n}"), "free"))
+                .collect();
+            append_items(&pool, ws, &items).await;
+            sqlx::query("UPDATE ingest_inbox SET affinity = NULL")
+                .execute(&pool)
                 .await
                 .unwrap();
-        assert_eq!(unbucketed, 20);
-        assert!(
-            backfill(&pool, ws, 10, Instant::now(), Duration::from_secs(60))
-                .await
-                .unwrap()
-        );
+            let spent = Duration::ZERO;
 
-        // One bucket with more rows than a batch holds.
-        sqlx::query("UPDATE ingest_inbox SET affinity = 0")
-            .execute(&pool)
+            let finished = backfill(&pool, ws, 10, Instant::now(), spent)
+                .await
+                .unwrap();
+
+            assert!(!finished, "ten of thirty rows are bucketed");
+            let unbucketed: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM ingest_inbox WHERE affinity IS NULL")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(unbucketed, 20);
+            assert!(
+                backfill(&pool, ws, 10, Instant::now(), Duration::from_secs(60))
+                    .await
+                    .unwrap()
+            );
+
+            // One bucket with more rows than a batch holds.
+            sqlx::query("UPDATE ingest_inbox SET affinity = 0")
+                .execute(&pool)
+                .await
+                .unwrap();
+            let hmac = key().unwrap();
+            let finished = drain_shard(
+                &pool,
+                ws,
+                &hmac,
+                Shard { index: 0, count: 1 },
+                10,
+                Instant::now(),
+                spent,
+            )
             .await
             .unwrap();
-        let hmac = key().unwrap();
-        let finished = drain_shard(
-            &pool,
-            ws,
-            &hmac,
-            Shard { index: 0, count: 1 },
-            10,
-            Instant::now(),
-            spent,
-        )
-        .await
-        .unwrap();
 
-        assert!(!finished);
-        assert!(inbox(&pool).await > 0, "one batch is not the backlog");
+            assert!(!finished);
+            assert!(inbox(&pool).await > 0, "one batch is not the backlog");
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -717,90 +759,96 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn dropping_the_handler_aborts_every_shard_task(pool: PgPool) {
-        let ws = workspace(&pool).await;
-        append(&pool, ws, 4000).await;
-        let total = inbox(&pool).await;
-        let handler = tokio::spawn({
-            let pool = pool.clone();
-            async move { run_job_with(&pool, key(), 1, 4).await }
-        });
-        while inbox(&pool).await == total {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool).await;
+            append(&pool, ws, 4000).await;
+            let total = inbox(&pool).await;
+            let handler = tokio::spawn({
+                let pool = pool.clone();
+                async move { run_job_with(&pool, key(), 1, 4).await }
+            });
+            while inbox(&pool).await == total {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
 
-        handler.abort();
-        assert!(handler.await.unwrap_err().is_cancelled());
+            handler.abort();
+            assert!(handler.await.unwrap_err().is_cancelled());
 
-        // Every connection must come back: a shard that outlived the handler would hold one.
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while pool.num_idle() != pool.size() as usize {
-            assert!(
-                Instant::now() < deadline,
-                "a shard still holds a connection"
+            // Every connection must come back: a shard that outlived the handler would hold one.
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while pool.num_idle() != pool.size() as usize {
+                assert!(
+                    Instant::now() < deadline,
+                    "a shard still holds a connection"
+                );
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            // The client side lets go at once, but PostgreSQL only notices a dropped client when
+            // the statement it is running ends, so give the server a bounded time to finish
+            // with the abandoned backends before the baseline is read.
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while busy_connections(&pool).await != 0 {
+                assert!(
+                    Instant::now() < deadline,
+                    "no query is still running: a backend stayed busy after the drop"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            let left = inbox(&pool).await;
+            assert!(left > 0, "the run was cut off with rows remaining");
+            // A shard that outlived the handler, even one asleep in its longest retry backoff
+            // (400 ms), would commit another one-row batch within this window.
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            assert_eq!(
+                inbox(&pool).await,
+                left,
+                "no shard committed after the drop"
             );
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        // The client side lets go at once, but PostgreSQL only notices a dropped client when
-        // the statement it is running ends, so give the server a bounded time to finish
-        // with the abandoned backends before the baseline is read.
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while busy_connections(&pool).await != 0 {
-            assert!(
-                Instant::now() < deadline,
-                "no query is still running: a backend stayed busy after the drop"
+            assert_eq!(
+                busy_connections(&pool).await,
+                0,
+                "no query was started after the drop"
             );
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        let left = inbox(&pool).await;
-        assert!(left > 0, "the run was cut off with rows remaining");
-        // A shard that outlived the handler, even one asleep in its longest retry backoff
-        // (400 ms), would commit another one-row batch within this window.
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        assert_eq!(
-            inbox(&pool).await,
-            left,
-            "no shard committed after the drop"
-        );
-        assert_eq!(
-            busy_connections(&pool).await,
-            0,
-            "no query was started after the drop"
-        );
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_failing_shard_fails_the_job_after_the_others_drained_their_rows(pool: PgPool) {
-        let ws = workspace(&pool).await;
-        let items: Vec<IngestItem> = (0..80)
-            .map(|n| identify(&format!("u{n}"), &format!("m-{n}"), "free"))
-            .collect();
-        append_items(&pool, ws, &items).await;
-        for statement in [
-            "CREATE FUNCTION flake() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool).await;
+            let items: Vec<IngestItem> = (0..80)
+                .map(|n| identify(&format!("u{n}"), &format!("m-{n}"), "free"))
+                .collect();
+            append_items(&pool, ws, &items).await;
+            for statement in [
+                "CREATE FUNCTION flake() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
                IF OLD.affinity % 4 = 0 THEN \
                  RAISE EXCEPTION 'flaky' USING ERRCODE = '40001'; \
                END IF; RETURN OLD; END $$",
-            "CREATE TRIGGER flaky BEFORE DELETE ON ingest_inbox \
+                "CREATE TRIGGER flaky BEFORE DELETE ON ingest_inbox \
              FOR EACH ROW EXECUTE FUNCTION flake()",
-        ] {
-            sqlx::query(statement).execute(&pool).await.unwrap();
-        }
-        let failing: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM ingest_inbox WHERE affinity % 4 = 0")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert!(failing > 0 && failing < 80);
+            ] {
+                sqlx::query(statement).execute(&pool).await.unwrap();
+            }
+            let failing: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM ingest_inbox WHERE affinity % 4 = 0")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert!(failing > 0 && failing < 80);
 
-        let error = run_job_with(&pool, key(), 5, 4).await.unwrap_err();
+            let error = run_job_with(&pool, key(), 5, 4).await.unwrap_err();
 
-        assert_eq!(error, CONFLICTED);
-        assert_eq!(
-            inbox(&pool).await,
-            failing,
-            "the other shards drained theirs"
-        );
+            assert_eq!(error, CONFLICTED);
+            assert_eq!(
+                inbox(&pool).await,
+                failing,
+                "the other shards drained theirs"
+            );
+        })
+        .await;
     }
 
     /// A mapped, enabled hook of the workspace, built through the store's public surface.
@@ -911,54 +959,58 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_webhook_row_drains_beside_track_rows_and_is_counted_under_its_kind(pool: PgPool) {
-        use metrics_exporter_prometheus::PrometheusBuilder;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            use metrics_exporter_prometheus::PrometheusBuilder;
 
-        let ws = workspace(&pool).await;
-        append(&pool, ws, 2).await;
-        let created = hook(&pool, ws).await;
-        let receive = zirv_flow_store::find_for_receive(&pool, created.id)
-            .await
-            .unwrap()
-            .unwrap();
-        let trace = TraceContext::root(Cause::api("hook"));
-        let payload = json!({"id": "o-1", "email": "ada@example.com"});
-        zirv_flow_store::append_webhook(
-            &pool,
-            &receive,
-            &trace,
-            &payload,
-            None,
-            &format!("wh:{}:o-1", created.id),
-            true,
-        )
-        .await
-        .unwrap();
-        let recorder = PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
-        let guard = metrics::set_default_local_recorder(&recorder);
-
-        run_job(&pool, key(), 500).await.unwrap();
-        drop(guard);
-
-        assert_eq!(inbox(&pool).await, 0);
-        let events: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
-            .fetch_one(&pool)
+            let ws = workspace(&pool).await;
+            append(&pool, ws, 2).await;
+            let created = hook(&pool, ws).await;
+            let receive = zirv_flow_store::find_for_receive(&pool, created.id)
+                .await
+                .unwrap()
+                .unwrap();
+            let trace = TraceContext::root(Cause::api("hook"));
+            let payload = json!({"id": "o-1", "email": PERSONAL_DATA.email});
+            zirv_flow_store::append_webhook(
+                &pool,
+                &receive,
+                &trace,
+                &payload,
+                None,
+                &format!("wh:{}:o-1", created.id),
+                true,
+            )
             .await
             .unwrap();
-        assert_eq!(events, 3);
-        let output = handle.render();
-        assert!(
-            output
-                .contains("zirv_flow_ingest_applied_total{kind=\"webhook\",outcome=\"applied\"} 1"),
-            "{output}"
-        );
-        assert!(
-            output.contains(
-                "zirv_flow_ingest_applied_total{kind=\"webhook\",outcome=\"accepted\"} 1"
-            ),
-            "{output}"
-        );
-        assert!(!output.contains("ada@example.com"), "{output}");
-        assert!(!output.contains(&created.id.to_string()), "{output}");
+            let recorder = PrometheusBuilder::new().build_recorder();
+            let handle = recorder.handle();
+            let guard = metrics::set_default_local_recorder(&recorder);
+
+            run_job(&pool, key(), 500).await.unwrap();
+            drop(guard);
+
+            assert_eq!(inbox(&pool).await, 0);
+            let events: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(events, 3);
+            let output = handle.render();
+            assert!(
+                output.contains(
+                    "zirv_flow_ingest_applied_total{kind=\"webhook\",outcome=\"applied\"} 1"
+                ),
+                "{output}"
+            );
+            assert!(
+                output.contains(
+                    "zirv_flow_ingest_applied_total{kind=\"webhook\",outcome=\"accepted\"} 1"
+                ),
+                "{output}"
+            );
+            assert!(!output.contains(PERSONAL_DATA.email), "{output}");
+            assert!(!output.contains(&created.id.to_string()), "{output}");
+        })
+        .await;
     }
 }

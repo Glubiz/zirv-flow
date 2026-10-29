@@ -367,7 +367,7 @@ pub(crate) struct InboxRow {
 impl InboxRow {
     pub(crate) fn trace(&self) -> TraceContext {
         let cause = match (self.webhook_id, self.api_key_id) {
-            (Some(hook), _) => Cause::api(format!("webhook:{hook}")),
+            (Some(hook), _) => Cause::api(hook.to_string()),
             (None, Some(key)) => Cause::api(key.to_string()),
             (None, None) => Cause::api("unknown"),
         };
@@ -932,6 +932,8 @@ async fn reject_row(
 
 #[cfg(test)]
 mod tests {
+    use crate::decision_testing::PERSONAL_DATA;
+
     use serde_json::json;
     use sqlx::PgPool;
     use time::macros::datetime;
@@ -989,6 +991,20 @@ mod tests {
             received_at: datetime!(2026-02-03 04:05:06 UTC),
             trace_id: Uuid::nil(),
         }
+    }
+
+    #[test]
+    fn a_webhook_cause_is_its_uuid_and_keeps_the_inbox_trace() {
+        let mut inbox = row("webhook", json!({}));
+        let hook = Uuid::now_v7();
+        inbox.webhook_id = Some(hook);
+        inbox.trace_id = Uuid::now_v7();
+
+        let trace = inbox.trace();
+
+        assert_eq!(trace.trace_id.as_uuid(), inbox.trace_id);
+        assert_eq!(trace.cause, Cause::api(hook.to_string()));
+        assert_eq!(Uuid::parse_str(&trace.cause.id).unwrap(), hook);
     }
 
     async fn workspace(pool: &PgPool, slug: &str) -> WorkspaceId {
@@ -1162,158 +1178,167 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_append_writes_every_row_with_the_trace_and_enqueues_one_drain(pool: PgPool) {
-        let ws = workspace(&pool, "ours").await;
-        let trace = TraceContext::root(Cause::api("req-1"));
-        let mut unlabelled = track("u1", "unused", "seen", json!({}));
-        unlabelled.message_id = None;
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            let trace = TraceContext::root(Cause::api("req-1"));
+            let mut unlabelled = track("u1", "unused", "seen", json!({}));
+            unlabelled.message_id = None;
 
-        append(
-            &pool,
-            ws,
-            &trace,
-            &[identify("u1", "m-1", json!({})), unlabelled],
-        )
+            append(
+                &pool,
+                ws,
+                &trace,
+                &[identify("u1", "m-1", json!({})), unlabelled],
+            )
+            .await;
+            append(&pool, ws, &trace, &[identify("u2", "m-2", json!({}))]).await;
+
+            let rows: Vec<(String, String, Uuid)> =
+                sqlx::query_as("SELECT kind, message_id, trace_id FROM ingest_inbox ORDER BY id")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(rows.len(), 3);
+            assert_eq!(rows[0].0, "identify");
+            assert_eq!(rows[1].0, "track");
+            assert!(Uuid::parse_str(&rows[1].1).is_ok(), "a server-assigned id");
+            assert!(rows.iter().all(|row| row.2 == trace.trace_id.as_uuid()));
+            let jobs: Vec<(String, Option<String>)> =
+                sqlx::query_as("SELECT kind, unique_key FROM jobs")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                jobs,
+                [(
+                    DRAIN_JOB_KIND.to_owned(),
+                    Some(format!("ingest.drain:{}", ws.as_uuid()))
+                )]
+            );
+        })
         .await;
-        append(&pool, ws, &trace, &[identify("u2", "m-2", json!({}))]).await;
-
-        let rows: Vec<(String, String, Uuid)> =
-            sqlx::query_as("SELECT kind, message_id, trace_id FROM ingest_inbox ORDER BY id")
-                .fetch_all(&pool)
-                .await
-                .unwrap();
-        assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0].0, "identify");
-        assert_eq!(rows[1].0, "track");
-        assert!(Uuid::parse_str(&rows[1].1).is_ok(), "a server-assigned id");
-        assert!(rows.iter().all(|row| row.2 == trace.trace_id.as_uuid()));
-        let jobs: Vec<(String, Option<String>)> =
-            sqlx::query_as("SELECT kind, unique_key FROM jobs")
-                .fetch_all(&pool)
-                .await
-                .unwrap();
-        assert_eq!(
-            jobs,
-            [(
-                DRAIN_JOB_KIND.to_owned(),
-                Some(format!("ingest.drain:{}", ws.as_uuid()))
-            )]
-        );
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_drain_applies_in_order_deletes_the_rows_and_records_the_request_trace(pool: PgPool) {
-        let ws = workspace(&pool, "ours").await;
-        let trace = TraceContext::root(Cause::api("req-1"));
-        append(
-            &pool,
-            ws,
-            &trace,
-            &[
-                identify("u1", "m-1", json!({"plan": "free"})),
-                identify("u1", "m-2", json!({"plan": "pro"})),
-                track("u1", "m-3", "seen", json!({})),
-                track("u1", "m-3", "seen", json!({})),
-            ],
-        )
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            let trace = TraceContext::root(Cause::api("req-1"));
+            append(
+                &pool,
+                ws,
+                &trace,
+                &[
+                    identify("u1", "m-1", json!({"plan": "free"})),
+                    identify("u1", "m-2", json!({"plan": "pro"})),
+                    track("u1", "m-3", "seen", json!({})),
+                    track("u1", "m-3", "seen", json!({})),
+                ],
+            )
+            .await;
+
+            let outcome = drain_batch(&pool, ws, Shard::ALL, &key(), 500)
+                .await
+                .unwrap();
+
+            assert_eq!(outcome.rows, 4);
+            assert_eq!(outcome.applied[&("identify", "valid")], 2);
+            assert_eq!(outcome.applied[&("track", "unplanned")], 1);
+            assert_eq!(outcome.applied[&("track", "duplicate")], 1);
+            assert_eq!(inbox_count(&pool).await, 0);
+            let (decisions, _) = list_trace(&pool, ws, trace.trace_id, 50).await.unwrap();
+            let actions: Vec<&str> = decisions.iter().map(|d| d.action.as_str()).collect();
+            assert!(actions.contains(&"person.created"), "{actions:?}");
+            assert!(actions.contains(&"event.accepted"), "{actions:?}");
+            assert!(decisions.iter().all(|d| d.cause.kind == CauseKind::Api));
+            let events: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE trace_id = $1")
+                .bind(trace.trace_id.as_uuid())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(events, 1);
+            let people: i64 = sqlx::query_scalar("SELECT count(*) FROM people")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(people, 1);
+        })
         .await;
-
-        let outcome = drain_batch(&pool, ws, Shard::ALL, &key(), 500)
-            .await
-            .unwrap();
-
-        assert_eq!(outcome.rows, 4);
-        assert_eq!(outcome.applied[&("identify", "valid")], 2);
-        assert_eq!(outcome.applied[&("track", "unplanned")], 1);
-        assert_eq!(outcome.applied[&("track", "duplicate")], 1);
-        assert_eq!(inbox_count(&pool).await, 0);
-        let (decisions, _) = list_trace(&pool, ws, trace.trace_id, 50).await.unwrap();
-        let actions: Vec<&str> = decisions.iter().map(|d| d.action.as_str()).collect();
-        assert!(actions.contains(&"person.created"), "{actions:?}");
-        assert!(actions.contains(&"event.accepted"), "{actions:?}");
-        assert!(decisions.iter().all(|d| d.cause.kind == CauseKind::Api));
-        let events: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE trace_id = $1")
-            .bind(trace.trace_id.as_uuid())
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(events, 1);
-        let people: i64 = sqlx::query_scalar("SELECT count(*) FROM people")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(people, 1);
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_drain_batch_appends_its_decisions_in_one_statement_in_the_order_made(pool: PgPool) {
-        let ws = workspace(&pool, "ours").await;
-        let trace = TraceContext::root(Cause::api("req-1"));
-        append(
-            &pool,
-            ws,
-            &trace,
-            &[
-                track("a", "m-1", "seen", json!({})),
-                identify("b", "m-2", json!({"plan": "pro"})),
-                track("a", "m-3", "seen", json!({})),
-                track("c", "m-4", "seen", json!({})),
-                track("a", "m-3", "seen", json!({})),
-            ],
-        )
-        .await;
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            let trace = TraceContext::root(Cause::api("req-1"));
+            append(
+                &pool,
+                ws,
+                &trace,
+                &[
+                    track("a", "m-1", "seen", json!({})),
+                    identify("b", "m-2", json!({"plan": "pro"})),
+                    track("a", "m-3", "seen", json!({})),
+                    track("c", "m-4", "seen", json!({})),
+                    track("a", "m-3", "seen", json!({})),
+                ],
+            )
+            .await;
 
-        let outcome = drain_batch(&pool, ws, Shard::ALL, &key(), 500)
+            let outcome = drain_batch(&pool, ws, Shard::ALL, &key(), 500)
+                .await
+                .unwrap();
+
+            assert_eq!(outcome.rows, 5);
+            let (decisions, _) = list_trace(&pool, ws, trace.trace_id, 50).await.unwrap();
+            let made: Vec<(&str, &str)> = decisions
+                .iter()
+                .map(|d| (d.action.as_str(), d.outcome.as_str()))
+                .collect();
+            assert_eq!(
+                made,
+                [
+                    ("person.created", "created"),
+                    ("event.accepted", "unplanned"),
+                    ("person.created", "created"),
+                    ("trait.change", "changed"),
+                    ("event.accepted", "unplanned"),
+                    ("person.created", "created"),
+                    ("event.accepted", "unplanned"),
+                ]
+            );
+            let keys: Vec<Vec<String>> = decisions
+                .iter()
+                .map(|d| {
+                    let mut keys: Vec<String> =
+                        d.subject_ids.as_object().unwrap().keys().cloned().collect();
+                    keys.sort();
+                    keys
+                })
+                .collect();
+            assert_eq!(keys[0], ["person"]);
+            assert_eq!(keys[1], ["event", "person"]);
+            assert_eq!(keys[2], ["person", "source_record"]);
+            assert_eq!(keys[3], ["person", "source_record"]);
+            assert!(decisions.iter().all(|d| d.cause.kind == CauseKind::Api));
+            assert!(
+                decisions
+                    .iter()
+                    .all(|d| d.job_id.is_none() && d.attempt.is_none())
+            );
+            // Rows written by one statement share a command id; one drain batch, one statement.
+            let statements: i64 = sqlx::query_scalar(
+                "SELECT count(DISTINCT cmin::text) FROM decision_records WHERE workspace_id = $1",
+            )
+            .bind(ws.as_uuid())
+            .fetch_one(&pool)
             .await
             .unwrap();
-
-        assert_eq!(outcome.rows, 5);
-        let (decisions, _) = list_trace(&pool, ws, trace.trace_id, 50).await.unwrap();
-        let made: Vec<(&str, &str)> = decisions
-            .iter()
-            .map(|d| (d.action.as_str(), d.outcome.as_str()))
-            .collect();
-        assert_eq!(
-            made,
-            [
-                ("person.created", "created"),
-                ("event.accepted", "unplanned"),
-                ("person.created", "created"),
-                ("trait.change", "changed"),
-                ("event.accepted", "unplanned"),
-                ("person.created", "created"),
-                ("event.accepted", "unplanned"),
-            ]
-        );
-        let keys: Vec<Vec<String>> = decisions
-            .iter()
-            .map(|d| {
-                let mut keys: Vec<String> =
-                    d.subject_ids.as_object().unwrap().keys().cloned().collect();
-                keys.sort();
-                keys
-            })
-            .collect();
-        assert_eq!(keys[0], ["person"]);
-        assert_eq!(keys[1], ["event", "person"]);
-        assert_eq!(keys[2], ["person", "source_record"]);
-        assert_eq!(keys[3], ["person", "source_record"]);
-        assert!(decisions.iter().all(|d| d.cause.kind == CauseKind::Api));
-        assert!(
-            decisions
-                .iter()
-                .all(|d| d.job_id.is_none() && d.attempt.is_none())
-        );
-        // Rows written by one statement share a command id; one drain batch, one statement.
-        let statements: i64 = sqlx::query_scalar(
-            "SELECT count(DISTINCT cmin::text) FROM decision_records WHERE workspace_id = $1",
-        )
-        .bind(ws.as_uuid())
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(statements, 1);
+            assert_eq!(statements, 1);
+        })
+        .await;
     }
 
     /// The benchmark script's rows as `(kind, items, p50_ms, p99_ms)`.
@@ -1332,103 +1357,109 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_applied_latency_script_measures_inbox_arrival_to_the_decision(pool: PgPool) {
-        let ws = workspace(&pool, "ours").await;
-        let trace = TraceContext::root(Cause::api("req-1"));
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            let trace = TraceContext::root(Cause::api("req-1"));
 
-        // Before anything is applied both kinds are listed with no items.
-        let empty = applied_latency(&pool).await;
-        assert_eq!(
-            empty,
-            [
-                ("identify".to_owned(), 0, None, None),
-                ("track".to_owned(), 0, None, None)
-            ]
-        );
+            // Before anything is applied both kinds are listed with no items.
+            let empty = applied_latency(&pool).await;
+            assert_eq!(
+                empty,
+                [
+                    ("identify".to_owned(), 0, None, None),
+                    ("track".to_owned(), 0, None, None)
+                ]
+            );
 
-        // First drain: both rows arrived 5 s before they were applied.
-        append(
-            &pool,
-            ws,
-            &trace,
-            &[
-                identify("u1", "m-1", json!({"plan": "free"})),
-                track("u1", "m-2", "seen", json!({})),
-            ],
-        )
+            // First drain: both rows arrived 5 s before they were applied.
+            append(
+                &pool,
+                ws,
+                &trace,
+                &[
+                    identify("u1", "m-1", json!({"plan": "free"})),
+                    track("u1", "m-2", "seen", json!({})),
+                ],
+            )
+            .await;
+            sqlx::query("UPDATE ingest_inbox SET received_at = now() - interval '5 seconds'")
+                .execute(&pool)
+                .await
+                .unwrap();
+            drain_batch(&pool, ws, Shard::ALL, &key(), 500)
+                .await
+                .unwrap();
+
+            let rows = applied_latency(&pool).await;
+            for (kind, items, p50, p99) in &rows {
+                let (p50, p99) = (p50.unwrap(), p99.unwrap());
+                assert_eq!(*items, 1, "{kind}");
+                assert!((5000.0..30_000.0).contains(&p50), "{kind} p50 {p50}");
+                assert!(p99 >= p50, "{kind}");
+            }
+
+            // A later identify of the same person changes the trait again; only that latest change
+            // counts for the record, so there is still one identify item and it is the newer 2 s one.
+            append(
+                &pool,
+                ws,
+                &trace,
+                &[identify("u1", "m-3", json!({"plan": "pro"}))],
+            )
+            .await;
+            sqlx::query("UPDATE ingest_inbox SET received_at = now() - interval '2 seconds'")
+                .execute(&pool)
+                .await
+                .unwrap();
+            drain_batch(&pool, ws, Shard::ALL, &key(), 500)
+                .await
+                .unwrap();
+
+            let rows = applied_latency(&pool).await;
+            let (kind, items, p50, _) = &rows[0];
+            assert_eq!((kind.as_str(), *items), ("identify", 1));
+            let p50 = p50.unwrap();
+            assert!((2000.0..5000.0).contains(&p50), "identify p50 {p50}");
+            assert_eq!((rows[1].0.as_str(), rows[1].1), ("track", 1));
+        })
         .await;
-        sqlx::query("UPDATE ingest_inbox SET received_at = now() - interval '5 seconds'")
-            .execute(&pool)
-            .await
-            .unwrap();
-        drain_batch(&pool, ws, Shard::ALL, &key(), 500)
-            .await
-            .unwrap();
-
-        let rows = applied_latency(&pool).await;
-        for (kind, items, p50, p99) in &rows {
-            let (p50, p99) = (p50.unwrap(), p99.unwrap());
-            assert_eq!(*items, 1, "{kind}");
-            assert!((5000.0..30_000.0).contains(&p50), "{kind} p50 {p50}");
-            assert!(p99 >= p50, "{kind}");
-        }
-
-        // A later identify of the same person changes the trait again; only that latest change
-        // counts for the record, so there is still one identify item and it is the newer 2 s one.
-        append(
-            &pool,
-            ws,
-            &trace,
-            &[identify("u1", "m-3", json!({"plan": "pro"}))],
-        )
-        .await;
-        sqlx::query("UPDATE ingest_inbox SET received_at = now() - interval '2 seconds'")
-            .execute(&pool)
-            .await
-            .unwrap();
-        drain_batch(&pool, ws, Shard::ALL, &key(), 500)
-            .await
-            .unwrap();
-
-        let rows = applied_latency(&pool).await;
-        let (kind, items, p50, _) = &rows[0];
-        assert_eq!((kind.as_str(), *items), ("identify", 1));
-        let p50 = p50.unwrap();
-        assert!((2000.0..5000.0).contains(&p50), "identify p50 {p50}");
-        assert_eq!((rows[1].0.as_str(), rows[1].1), ("track", 1));
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_drain_takes_at_most_the_limit_oldest_rows_of_its_own_workspace(pool: PgPool) {
-        let one = workspace(&pool, "one").await;
-        let name = WorkspaceName::parse("two").unwrap();
-        let slug = Slug::parse("two").unwrap();
-        let two = create_workspace(&pool, &name, &slug).await.unwrap().id;
-        let trace = TraceContext::root(Cause::api("req"));
-        let items: Vec<IngestItem> = (0..5)
-            .map(|n| track("u1", &format!("m-{n}"), "seen", json!({"n": n})))
-            .collect();
-        append(&pool, one, &trace, &items).await;
-        append(&pool, two, &trace, &items).await;
+        crate::decision_testing::checked(pool, |pool| async move {
+            let one = workspace(&pool, "one").await;
+            let name = WorkspaceName::parse("two").unwrap();
+            let slug = Slug::parse("two").unwrap();
+            let two = create_workspace(&pool, &name, &slug).await.unwrap().id;
+            let trace = TraceContext::root(Cause::api("req"));
+            let items: Vec<IngestItem> = (0..5)
+                .map(|n| track("u1", &format!("m-{n}"), "seen", json!({"n": n})))
+                .collect();
+            append(&pool, one, &trace, &items).await;
+            append(&pool, two, &trace, &items).await;
 
-        let outcome = drain_batch(&pool, one, Shard::ALL, &key(), 3)
+            let outcome = drain_batch(&pool, one, Shard::ALL, &key(), 3)
+                .await
+                .unwrap();
+
+            assert_eq!(outcome.rows, 3);
+            let left: Vec<(Uuid, String)> = sqlx::query_as(
+                "SELECT workspace_id, message_id FROM ingest_inbox ORDER BY workspace_id, id",
+            )
+            .fetch_all(&pool)
             .await
             .unwrap();
-
-        assert_eq!(outcome.rows, 3);
-        let left: Vec<(Uuid, String)> = sqlx::query_as(
-            "SELECT workspace_id, message_id FROM ingest_inbox ORDER BY workspace_id, id",
-        )
-        .fetch_all(&pool)
-        .await
-        .unwrap();
-        assert_eq!(left.iter().filter(|(w, _)| *w == two.as_uuid()).count(), 5);
-        let mine: Vec<&str> = left
-            .iter()
-            .filter(|(w, _)| *w == one.as_uuid())
-            .map(|(_, m)| m.as_str())
-            .collect();
-        assert_eq!(mine, ["m-3", "m-4"]);
+            assert_eq!(left.iter().filter(|(w, _)| *w == two.as_uuid()).count(), 5);
+            let mine: Vec<&str> = left
+                .iter()
+                .filter(|(w, _)| *w == one.as_uuid())
+                .map(|(_, m)| m.as_str())
+                .collect();
+            assert_eq!(mine, ["m-3", "m-4"]);
+        })
+        .await;
     }
 
     /// Every row of the tables a drain writes, with ids, in a stable order. `duplicates`
@@ -1459,77 +1490,81 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn replaying_the_same_batch_leaves_the_database_identical(pool: PgPool) {
-        let ws = workspace(&pool, "ours").await;
-        crate::set_event_policy(
-            &pool,
-            ws,
-            &crate::EventPolicy {
-                unplanned: zirv_flow_core::events::UnplannedPolicy::Reject,
-                ..crate::EventPolicy::default()
-            },
-        )
-        .await
-        .unwrap();
-        crate::create_event_schema(
-            &pool,
-            ws,
-            &crate::NewEventSchema {
-                name: "planned".into(),
-                mode: zirv_flow_core::events::EventMode::Allow,
-                description: String::new(),
-                properties: Vec::new(),
-            },
-        )
-        .await
-        .unwrap();
-        let mut tx = begin(&pool).await.unwrap();
-        crate::publish_schema_draft(&mut tx, ws, "planned", None)
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            crate::set_event_policy(
+                &pool,
+                ws,
+                &crate::EventPolicy {
+                    unplanned: zirv_flow_core::events::UnplannedPolicy::Reject,
+                    ..crate::EventPolicy::default()
+                },
+            )
             .await
             .unwrap();
-        commit(tx).await.unwrap();
-        let trace = TraceContext::root(Cause::api("req-1"));
-        let batch = || {
-            let mut stamped = identify("u2", "m-2", json!({"plan": "pro", "seats": 3}));
-            stamped.timestamp = Some(datetime!(2026-01-01 00:00 UTC));
-            let mut late = track("u1", "m-4", "planned", json!({"n": 1}));
-            late.timestamp = Some(datetime!(2020-01-01 00:00 UTC));
-            vec![
-                identify("u1", "m-1", json!({"plan": "free"})),
-                stamped,
-                track("u1", "m-3", "planned", json!({"n": 1})),
-                late,
-                track("u1", "m-5", "not_planned", json!({"n": 1})),
-                track("u3", "m-6", "planned", json!({})),
-            ]
-        };
-        append(&pool, ws, &trace, &batch()).await;
-        drain_batch(&pool, ws, Shard::ALL, &key(), 500)
+            crate::create_event_schema(
+                &pool,
+                ws,
+                &crate::NewEventSchema {
+                    name: "planned".into(),
+                    mode: zirv_flow_core::events::EventMode::Allow,
+                    description: String::new(),
+                    properties: Vec::new(),
+                },
+            )
             .await
             .unwrap();
-        let before = dump(&pool).await;
-        assert!(
-            before.iter().all(|(_, rows)| !rows.is_empty()),
-            "{before:?}"
-        );
-
-        append(&pool, ws, &trace, &batch()).await;
-        let replay = drain_batch(&pool, ws, Shard::ALL, &key(), 500)
-            .await
-            .unwrap();
-
-        assert_eq!(replay.rows, 6);
-        assert_eq!(dump(&pool).await, before);
-        let duplicates: i64 =
-            sqlx::query_scalar("SELECT COALESCE(sum(duplicates), 0)::bigint FROM event_dedupe")
-                .fetch_one(&pool)
+            let mut tx = begin(&pool).await.unwrap();
+            crate::publish_schema_draft(&mut tx, ws, "planned", None)
                 .await
                 .unwrap();
-        assert_eq!(duplicates, 3);
+            commit(tx).await.unwrap();
+            let trace = TraceContext::root(Cause::api("req-1"));
+            let batch = || {
+                let mut stamped = identify("u2", "m-2", json!({"plan": "pro", "seats": 3}));
+                stamped.timestamp = Some(datetime!(2026-01-01 00:00 UTC));
+                let mut late = track("u1", "m-4", "planned", json!({"n": 1}));
+                late.timestamp = Some(datetime!(2020-01-01 00:00 UTC));
+                vec![
+                    identify("u1", "m-1", json!({"plan": "free"})),
+                    stamped,
+                    track("u1", "m-3", "planned", json!({"n": 1})),
+                    late,
+                    track("u1", "m-5", "not_planned", json!({"n": 1})),
+                    track("u3", "m-6", "planned", json!({})),
+                ]
+            };
+            append(&pool, ws, &trace, &batch()).await;
+            drain_batch(&pool, ws, Shard::ALL, &key(), 500)
+                .await
+                .unwrap();
+            let before = dump(&pool).await;
+            assert!(
+                before.iter().all(|(_, rows)| !rows.is_empty()),
+                "{before:?}"
+            );
+
+            append(&pool, ws, &trace, &batch()).await;
+            let replay = drain_batch(&pool, ws, Shard::ALL, &key(), 500)
+                .await
+                .unwrap();
+
+            assert_eq!(replay.rows, 6);
+            assert_eq!(dump(&pool).await, before);
+            let duplicates: i64 =
+                sqlx::query_scalar("SELECT COALESCE(sum(duplicates), 0)::bigint FROM event_dedupe")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(duplicates, 3);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn concurrent_drainers_apply_every_row_exactly_once(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
         let ws = workspace(&pool, "ours").await;
         let trace = TraceContext::root(Cause::api("req"));
         sqlx::query(
@@ -1574,123 +1609,157 @@ mod tests {
         .unwrap();
         assert_eq!((events, distinct, duplicates), (2000, 2000, 0));
         assert_eq!(inbox_count(&pool).await, 0);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_poison_row_becomes_an_apply_failed_reject_while_the_rest_apply(pool: PgPool) {
-        let ws = workspace(&pool, "ours").await;
-        let trace = TraceContext::root(Cause::api("req"));
-        append(
-            &pool,
-            ws,
-            &trace,
-            &[
-                track("u1", "m-1", "seen", json!({})),
-                track("u1", "poison", "seen", json!({})),
-                track("u1", "m-3", "seen", json!({})),
-            ],
-        )
-        .await;
-        sqlx::query(
-            "UPDATE ingest_inbox SET item = '{\"identifiers\": 5}' WHERE message_id = 'poison'",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        let key = key();
-
-        let whole = drain_batch(&pool, ws, Shard::ALL, &key, 500)
-            .await
-            .unwrap_err();
-        assert!(!whole.is_retryable());
-        assert_eq!(
-            inbox_count(&pool).await,
-            3,
-            "the failed batch left every row"
-        );
-        let outcome = drain_batch_singly(&pool, ws, Shard::ALL, &key, 500)
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            let trace = TraceContext::root(Cause::api("req"));
+            append(
+                &pool,
+                ws,
+                &trace,
+                &[
+                    track("u1", "m-1", "seen", json!({})),
+                    track("u1", "poison", "seen", json!({})),
+                    track("u1", "m-3", "seen", json!({})),
+                ],
+            )
+            .await;
+            sqlx::query(
+                "UPDATE ingest_inbox SET item = '{\"identifiers\": 5}' WHERE message_id = 'poison'",
+            )
+            .execute(&pool)
             .await
             .unwrap();
+            let key = key();
 
-        assert_eq!(outcome.rows, 3);
-        assert_eq!(outcome.applied[&("track", "apply_failed")], 1);
-        assert_eq!(outcome.applied[&("track", "unplanned")], 2);
-        assert_eq!(inbox_count(&pool).await, 0);
-        let rejects: Vec<(String, String, Option<String>)> =
-            sqlx::query_as("SELECT kind, reason, message_id FROM ingest_rejects")
-                .fetch_all(&pool)
+            let whole = drain_batch(&pool, ws, Shard::ALL, &key, 500)
+                .await
+                .unwrap_err();
+            assert!(!whole.is_retryable());
+            assert_eq!(
+                inbox_count(&pool).await,
+                3,
+                "the failed batch left every row"
+            );
+            let outcome = drain_batch_singly(&pool, ws, Shard::ALL, &key, 500)
                 .await
                 .unwrap();
-        assert_eq!(
-            rejects,
-            [("event".into(), "apply_failed".into(), Some("poison".into()))]
-        );
-        let events: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
+
+            assert_eq!(outcome.rows, 3);
+            assert_eq!(outcome.applied[&("track", "apply_failed")], 1);
+            assert_eq!(outcome.applied[&("track", "unplanned")], 2);
+            assert_eq!(inbox_count(&pool).await, 0);
+            let rejects: Vec<(String, String, Option<String>)> =
+                sqlx::query_as("SELECT kind, reason, message_id FROM ingest_rejects")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                rejects,
+                [("event".into(), "apply_failed".into(), Some("poison".into()))]
+            );
+            let events: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(events, 2);
+            let rejected: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM decision_records \
+             WHERE action = 'event.rejected' AND reason = 'apply_failed'",
+            )
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(events, 2);
-        let rejected: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM decision_records \
-             WHERE action = 'event.rejected' AND reason = 'apply_failed'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(rejected, 1);
+            assert_eq!(rejected, 1);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_unmappable_identify_row_becomes_a_record_reject(pool: PgPool) {
-        let ws = workspace(&pool, "ours").await;
-        let trace = TraceContext::root(Cause::api("req"));
-        append(
-            &pool,
-            ws,
-            &trace,
-            &[identify("u1", "bad", json!({"plan": "pro"}))],
-        )
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            let trace = TraceContext::root(Cause::api("req"));
+            append(
+                &pool,
+                ws,
+                &trace,
+                &[identify("u1", "bad", json!({"plan": "pro"}))],
+            )
+            .await;
+            sqlx::query("UPDATE ingest_inbox SET item = '[]'")
+                .execute(&pool)
+                .await
+                .unwrap();
+
+            // The drain records the row's API key as the cause, not the request id.
+            let key_id: Uuid = sqlx::query_scalar("SELECT api_key_id FROM ingest_inbox")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            let drained = TraceContext {
+                trace_id: trace.trace_id,
+                cause: Cause::api(key_id.to_string()),
+            };
+
+            let outcome = drain_batch_singly(&pool, ws, Shard::ALL, &key(), 500)
+                .await
+                .unwrap();
+
+            assert_eq!(outcome.applied[&("identify", "apply_failed")], 1);
+            let kinds: Vec<String> = sqlx::query_scalar("SELECT kind FROM ingest_rejects")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+            assert_eq!(kinds, ["record"]);
+
+            let reject: Uuid = sqlx::query_scalar("SELECT id FROM ingest_rejects")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            crate::decision_testing::assert_fixture(
+                &pool,
+                ws,
+                &drained,
+                ("record.rejected", "rejected", Some("apply_failed")),
+                json!({"reject": reject}),
+            )
+            .await;
+        })
         .await;
-        sqlx::query("UPDATE ingest_inbox SET item = '[]'")
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        let outcome = drain_batch_singly(&pool, ws, Shard::ALL, &key(), 500)
-            .await
-            .unwrap();
-
-        assert_eq!(outcome.applied[&("identify", "apply_failed")], 1);
-        let kinds: Vec<String> = sqlx::query_scalar("SELECT kind FROM ingest_rejects")
-            .fetch_all(&pool)
-            .await
-            .unwrap();
-        assert_eq!(kinds, ["record"]);
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_heads_report_the_oldest_row_of_each_workspace_with_rows(pool: PgPool) {
-        let one = workspace(&pool, "one").await;
-        let name = WorkspaceName::parse("two").unwrap();
-        let slug = Slug::parse("two").unwrap();
-        let two = create_workspace(&pool, &name, &slug).await.unwrap().id;
-        let trace = TraceContext::root(Cause::api("req"));
-        append(&pool, one, &trace, &[track("u1", "m-1", "seen", json!({}))]).await;
-        sqlx::query("UPDATE ingest_inbox SET received_at = now() - interval '30 seconds'")
-            .execute(&pool)
-            .await
-            .unwrap();
-        append(&pool, one, &trace, &[track("u1", "m-2", "seen", json!({}))]).await;
+        crate::decision_testing::checked(pool, |pool| async move {
+            let one = workspace(&pool, "one").await;
+            let name = WorkspaceName::parse("two").unwrap();
+            let slug = Slug::parse("two").unwrap();
+            let two = create_workspace(&pool, &name, &slug).await.unwrap().id;
+            let trace = TraceContext::root(Cause::api("req"));
+            append(&pool, one, &trace, &[track("u1", "m-1", "seen", json!({}))]).await;
+            sqlx::query("UPDATE ingest_inbox SET received_at = now() - interval '30 seconds'")
+                .execute(&pool)
+                .await
+                .unwrap();
+            append(&pool, one, &trace, &[track("u1", "m-2", "seen", json!({}))]).await;
 
-        let heads = inbox_heads(&pool).await.unwrap();
+            let heads = inbox_heads(&pool).await.unwrap();
 
-        assert_eq!(heads.len(), 1);
-        assert_eq!(heads[0].workspace_id, one);
-        assert!((29.0..60.0).contains(&heads[0].age_seconds), "{heads:?}");
-        assert!(heads.iter().all(|head| head.workspace_id != two));
+            assert_eq!(heads.len(), 1);
+            assert_eq!(heads[0].workspace_id, one);
+            assert!((29.0..60.0).contains(&heads[0].age_seconds), "{heads:?}");
+            assert!(heads.iter().all(|head| head.workspace_id != two));
+        })
+        .await;
     }
 
     #[test]
@@ -1736,7 +1805,7 @@ mod tests {
 
         assert_eq!(item_bucket(&contact(&[])), bucket("c-1"));
         assert_eq!(
-            item_bucket(&contact(&[("email", "ada@example.com")])),
+            item_bucket(&contact(&[("email", PERSONAL_DATA.email)])),
             bucket("c-1")
         );
     }
@@ -1744,29 +1813,32 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_append_stores_the_bucket_of_each_items_record_key(pool: PgPool) {
-        let ws = workspace(&pool, "ours").await;
-        let trace = TraceContext::root(Cause::api("req"));
-        let mut unkeyed = identify("u1", "m-3", json!({}));
-        unkeyed.identifiers.clear();
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            let trace = TraceContext::root(Cause::api("req"));
+            let mut unkeyed = identify("u1", "m-3", json!({}));
+            unkeyed.identifiers.clear();
 
-        append(
-            &pool,
-            ws,
-            &trace,
-            &[
-                identify("u1", "m-1", json!({})),
-                track("u1", "m-2", "seen", json!({})),
-                unkeyed,
-            ],
-        )
+            append(
+                &pool,
+                ws,
+                &trace,
+                &[
+                    identify("u1", "m-1", json!({})),
+                    track("u1", "m-2", "seen", json!({})),
+                    unkeyed,
+                ],
+            )
+            .await;
+
+            let stored: Vec<Option<i16>> =
+                sqlx::query_scalar("SELECT affinity FROM ingest_inbox ORDER BY id")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(stored, [Some(19), Some(19), Some(0)]);
+        })
         .await;
-
-        let stored: Vec<Option<i16>> =
-            sqlx::query_scalar("SELECT affinity FROM ingest_inbox ORDER BY id")
-                .fetch_all(&pool)
-                .await
-                .unwrap();
-        assert_eq!(stored, [Some(19), Some(19), Some(0)]);
     }
 
     /// What `shard` takes from the workspace's inbox, in id order, and whether it may hold more.
@@ -1809,162 +1881,179 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_shard_takes_only_its_own_buckets_in_id_order(pool: PgPool) {
-        let ws = workspace(&pool, "ours").await;
-        let trace = TraceContext::root(Cause::api("req"));
-        let items: Vec<IngestItem> = (0..60)
-            .map(|n| track(&format!("u{n}"), &format!("m-{n}"), "seen", json!({})))
-            .collect();
-        append(&pool, ws, &trace, &items).await;
-        sqlx::query("UPDATE ingest_inbox SET affinity = NULL WHERE message_id IN ('m-0', 'm-1')")
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            let trace = TraceContext::root(Cause::api("req"));
+            let items: Vec<IngestItem> = (0..60)
+                .map(|n| track(&format!("u{n}"), &format!("m-{n}"), "seen", json!({})))
+                .collect();
+            append(&pool, ws, &trace, &items).await;
+            sqlx::query(
+                "UPDATE ingest_inbox SET affinity = NULL WHERE message_id IN ('m-0', 'm-1')",
+            )
             .execute(&pool)
             .await
             .unwrap();
-        let all: Vec<(i64, Option<i16>)> =
-            sqlx::query_as("SELECT id, affinity FROM ingest_inbox ORDER BY id")
-                .fetch_all(&pool)
-                .await
-                .unwrap();
+            let all: Vec<(i64, Option<i16>)> =
+                sqlx::query_as("SELECT id, affinity FROM ingest_inbox ORDER BY id")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
 
-        let mut shards = Vec::new();
-        for index in 0..4 {
-            shards.push(taken(&pool, ws, Shard { index, count: 4 }, 1000).await.0);
-        }
+            let mut shards = Vec::new();
+            for index in 0..4 {
+                shards.push(taken(&pool, ws, Shard { index, count: 4 }, 1000).await.0);
+            }
 
-        for (index, ids) in shards.iter().enumerate() {
-            let expected: Vec<i64> = all
+            for (index, ids) in shards.iter().enumerate() {
+                let expected: Vec<i64> = all
+                    .iter()
+                    .filter(|(_, affinity)| {
+                        affinity.is_some_and(|a| usize::try_from(a).unwrap() % 4 == index)
+                    })
+                    .map(|(id, _)| *id)
+                    .collect();
+                assert_eq!(ids, &expected, "shard {index}");
+            }
+            let unbucketed = all
                 .iter()
-                .filter(|(_, affinity)| {
-                    affinity.is_some_and(|a| usize::try_from(a).unwrap() % 4 == index)
-                })
-                .map(|(id, _)| *id)
-                .collect();
-            assert_eq!(ids, &expected, "shard {index}");
-        }
-        let unbucketed = all
-            .iter()
-            .filter(|(_, affinity)| affinity.is_none())
-            .count();
-        assert_eq!(shards.concat().len() + unbucketed, all.len());
-        assert_eq!(unbucketed, 2, "no shard takes an unbucketed row");
+                .filter(|(_, affinity)| affinity.is_none())
+                .count();
+            assert_eq!(shards.concat().len() + unbucketed, all.len());
+            assert_eq!(unbucketed, 2, "no shard takes an unbucketed row");
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_backfill_gives_a_row_the_bucket_an_append_would_have(pool: PgPool) {
-        let ws = workspace(&pool, "ours").await;
-        let trace = TraceContext::root(Cause::api("req"));
-        let contact = IngestItem {
-            identifiers: pairs(&[(contacts::KEY_KIND, "c-1"), ("email", "ada@example.com")]),
-            timestamp: None,
-            message_id: Some("m-3".to_owned()),
-            payload: IngestPayload::Contact { traits: Map::new() },
-        };
-        let mut email = identify("u2", "m-4", json!({}));
-        email.identifiers = pairs(&[("email", "Ada@Example.com"), ("external:user_id", "u2")]);
-        append(
-            &pool,
-            ws,
-            &trace,
-            &[
-                identify("u1", "m-1", json!({})),
-                track("u7", "m-2", "seen", json!({})),
-                contact,
-                email,
-            ],
-        )
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            let trace = TraceContext::root(Cause::api("req"));
+            let contact = IngestItem {
+                identifiers: pairs(&[(contacts::KEY_KIND, "c-1"), ("email", PERSONAL_DATA.email)]),
+                timestamp: None,
+                message_id: Some("m-3".to_owned()),
+                payload: IngestPayload::Contact { traits: Map::new() },
+            };
+            let mut email = identify("u2", "m-4", json!({}));
+            email.identifiers = pairs(&[("email", "Ada@Example.com"), ("external:user_id", "u2")]);
+            append(
+                &pool,
+                ws,
+                &trace,
+                &[
+                    identify("u1", "m-1", json!({})),
+                    track("u7", "m-2", "seen", json!({})),
+                    contact,
+                    email,
+                ],
+            )
+            .await;
+            let appended: Vec<Option<i16>> =
+                sqlx::query_scalar("SELECT affinity FROM ingest_inbox ORDER BY id")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            sqlx::query("UPDATE ingest_inbox SET affinity = NULL")
+                .execute(&pool)
+                .await
+                .unwrap();
+
+            let done = backfill_affinity(&pool, ws, 3).await.unwrap();
+            let rest = backfill_affinity(&pool, ws, 3).await.unwrap();
+            let none = backfill_affinity(&pool, ws, 3).await.unwrap();
+
+            assert_eq!((done, rest, none), (3, 1, 0));
+            let backfilled: Vec<Option<i16>> =
+                sqlx::query_scalar("SELECT affinity FROM ingest_inbox ORDER BY id")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(backfilled, appended);
+            assert!(appended.iter().all(Option::is_some));
+        })
         .await;
-        let appended: Vec<Option<i16>> =
-            sqlx::query_scalar("SELECT affinity FROM ingest_inbox ORDER BY id")
-                .fetch_all(&pool)
-                .await
-                .unwrap();
-        sqlx::query("UPDATE ingest_inbox SET affinity = NULL")
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        let done = backfill_affinity(&pool, ws, 3).await.unwrap();
-        let rest = backfill_affinity(&pool, ws, 3).await.unwrap();
-        let none = backfill_affinity(&pool, ws, 3).await.unwrap();
-
-        assert_eq!((done, rest, none), (3, 1, 0));
-        let backfilled: Vec<Option<i16>> =
-            sqlx::query_scalar("SELECT affinity FROM ingest_inbox ORDER BY id")
-                .fetch_all(&pool)
-                .await
-                .unwrap();
-        assert_eq!(backfilled, appended);
-        assert!(appended.iter().all(Option::is_some));
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_hot_key_fills_a_whole_batch_whatever_the_shard_count(pool: PgPool) {
-        let ws = workspace(&pool, "ours").await;
-        raw_rows(&pool, ws, Some(0), 24, "hot").await;
-        let hot: Vec<i64> = sqlx::query_scalar("SELECT id FROM ingest_inbox ORDER BY id")
-            .fetch_all(&pool)
-            .await
-            .unwrap();
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            raw_rows(&pool, ws, Some(0), 24, "hot").await;
+            let hot: Vec<i64> = sqlx::query_scalar("SELECT id FROM ingest_inbox ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
 
-        for count in [1, 4] {
-            let (ids, more) = taken(&pool, ws, Shard { index: 0, count }, 8).await;
+            for count in [1, 4] {
+                let (ids, more) = taken(&pool, ws, Shard { index: 0, count }, 8).await;
 
-            assert_eq!(ids, hot[..8], "{count} shards");
-            assert!(more);
-        }
+                assert_eq!(ids, hot[..8], "{count} shards");
+                assert!(more);
+            }
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_cold_buckets_rows_are_not_starved_by_a_hot_one(pool: PgPool) {
-        let ws = workspace(&pool, "ours").await;
-        raw_rows(&pool, ws, Some(4), 1, "older").await;
-        raw_rows(&pool, ws, Some(0), 24, "hot").await;
-        raw_rows(&pool, ws, Some(4), 1, "newer").await;
-        let cold: Vec<i64> =
-            sqlx::query_scalar("SELECT id FROM ingest_inbox WHERE affinity = 4 ORDER BY id")
-                .fetch_all(&pool)
-                .await
-                .unwrap();
-        let shard = Shard { index: 0, count: 4 };
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            raw_rows(&pool, ws, Some(4), 1, "older").await;
+            raw_rows(&pool, ws, Some(0), 24, "hot").await;
+            raw_rows(&pool, ws, Some(4), 1, "newer").await;
+            let cold: Vec<i64> =
+                sqlx::query_scalar("SELECT id FROM ingest_inbox WHERE affinity = 4 ORDER BY id")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            let shard = Shard { index: 0, count: 4 };
 
-        let (first, _) = taken(&pool, ws, shard, 8).await;
-        assert!(
-            first.contains(&cold[0]),
-            "the older cold row is in the first batch"
-        );
-
-        let key = key();
-        let mut batches = 0;
-        while sqlx::query_scalar::<_, i64>("SELECT count(*) FROM ingest_inbox WHERE id = $1")
-            .bind(cold[1])
-            .fetch_one(&pool)
-            .await
-            .unwrap()
-            == 1
-        {
-            drain_batch(&pool, ws, shard, &key, 8).await.unwrap();
-            batches += 1;
+            let (first, _) = taken(&pool, ws, shard, 8).await;
             assert!(
-                batches <= 4,
-                "within ceil(3 * limit / limit) batches, plus the first"
+                first.contains(&cold[0]),
+                "the older cold row is in the first batch"
             );
-        }
+
+            let key = key();
+            let mut batches = 0;
+            while sqlx::query_scalar::<_, i64>("SELECT count(*) FROM ingest_inbox WHERE id = $1")
+                .bind(cold[1])
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                == 1
+            {
+                drain_batch(&pool, ws, shard, &key, 8).await.unwrap();
+                batches += 1;
+                assert!(
+                    batches <= 4,
+                    "within ceil(3 * limit / limit) batches, plus the first"
+                );
+            }
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_shard_with_empty_buckets_takes_nothing_while_another_holds_a_backlog(pool: PgPool) {
-        let ws = workspace(&pool, "ours").await;
-        raw_rows(&pool, ws, Some(0), 300, "hot").await;
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            raw_rows(&pool, ws, Some(0), 300, "hot").await;
 
-        let (ids, more) = taken(&pool, ws, Shard { index: 1, count: 4 }, 8).await;
+            let (ids, more) = taken(&pool, ws, Shard { index: 1, count: 4 }, 8).await;
 
-        assert!(ids.is_empty());
-        assert!(!more, "an empty shard is finished after one batch");
-        let (ids, more) = taken(&pool, ws, Shard { index: 0, count: 4 }, 8).await;
-        assert!(!ids.is_empty() && ids.len() <= 8 && more);
+            assert!(ids.is_empty());
+            assert!(!more, "an empty shard is finished after one batch");
+            let (ids, more) = taken(&pool, ws, Shard { index: 0, count: 4 }, 8).await;
+            assert!(!ids.is_empty() && ids.len() <= 8 && more);
+        })
+        .await;
     }
 
     async fn plan_of(pool: &PgPool, user: &str) -> Option<String> {
@@ -1982,66 +2071,74 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn nothing_applies_past_a_locked_row_of_its_bucket(pool: PgPool) {
-        let ws = workspace(&pool, "ours").await;
-        let trace = TraceContext::root(Cause::api("req"));
-        let mut items = vec![identify("k", "k-old", json!({"plan": "old"}))];
-        items.extend((0..5).map(|n| identify(&format!("f{n}"), &format!("f-{n}"), json!({}))));
-        items.push(identify("k", "k-new", json!({"plan": "new"})));
-        append(&pool, ws, &trace, &items).await;
-        sqlx::query("UPDATE ingest_inbox SET affinity = 0 WHERE message_id LIKE 'k-%'")
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("UPDATE ingest_inbox SET affinity = 1 + id % 60 WHERE message_id LIKE 'f-%'")
-            .execute(&pool)
-            .await
-            .unwrap();
-        let mut holder = begin(&pool).await.unwrap();
-        sqlx::query("SELECT id FROM ingest_inbox WHERE message_id = 'k-old' FOR UPDATE")
-            .fetch_all(&mut *holder)
-            .await
-            .unwrap();
-
-        let outcome = drain_batch(&pool, ws, Shard::ALL, &key(), 500)
-            .await
-            .unwrap();
-
-        assert_eq!(outcome.rows, 5, "the other buckets' rows apply");
-        let left: Vec<String> =
-            sqlx::query_scalar("SELECT message_id FROM ingest_inbox ORDER BY id")
-                .fetch_all(&pool)
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            let trace = TraceContext::root(Cause::api("req"));
+            let mut items = vec![identify("k", "k-old", json!({"plan": "old"}))];
+            items.extend((0..5).map(|n| identify(&format!("f{n}"), &format!("f-{n}"), json!({}))));
+            items.push(identify("k", "k-new", json!({"plan": "new"})));
+            append(&pool, ws, &trace, &items).await;
+            sqlx::query("UPDATE ingest_inbox SET affinity = 0 WHERE message_id LIKE 'k-%'")
+                .execute(&pool)
                 .await
                 .unwrap();
-        assert_eq!(left, ["k-old", "k-new"]);
-        assert_eq!(plan_of(&pool, "k").await, None);
-
-        commit(holder).await.unwrap();
-        drain_batch(&pool, ws, Shard::ALL, &key(), 500)
+            sqlx::query(
+                "UPDATE ingest_inbox SET affinity = 1 + id % 60 WHERE message_id LIKE 'f-%'",
+            )
+            .execute(&pool)
             .await
             .unwrap();
+            let mut holder = begin(&pool).await.unwrap();
+            sqlx::query("SELECT id FROM ingest_inbox WHERE message_id = 'k-old' FOR UPDATE")
+                .fetch_all(&mut *holder)
+                .await
+                .unwrap();
 
-        assert_eq!(inbox_count(&pool).await, 0);
-        assert_eq!(plan_of(&pool, "k").await.as_deref(), Some("new"));
+            let outcome = drain_batch(&pool, ws, Shard::ALL, &key(), 500)
+                .await
+                .unwrap();
+
+            assert_eq!(outcome.rows, 5, "the other buckets' rows apply");
+            let left: Vec<String> =
+                sqlx::query_scalar("SELECT message_id FROM ingest_inbox ORDER BY id")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(left, ["k-old", "k-new"]);
+            assert_eq!(plan_of(&pool, "k").await, None);
+
+            commit(holder).await.unwrap();
+            drain_batch(&pool, ws, Shard::ALL, &key(), 500)
+                .await
+                .unwrap();
+
+            assert_eq!(inbox_count(&pool).await, 0);
+            assert_eq!(plan_of(&pool, "k").await.as_deref(), Some("new"));
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_batch_whose_picked_rows_are_all_locked_takes_nothing_and_is_not_more(pool: PgPool) {
-        let ws = workspace(&pool, "ours").await;
-        let trace = TraceContext::root(Cause::api("req"));
-        let items: Vec<IngestItem> = (0..3)
-            .map(|n| identify(&format!("u{n}"), &format!("m-{n}"), json!({})))
-            .collect();
-        append(&pool, ws, &trace, &items).await;
-        let mut holder = begin(&pool).await.unwrap();
-        sqlx::query("SELECT id FROM ingest_inbox FOR UPDATE")
-            .fetch_all(&mut *holder)
-            .await
-            .unwrap();
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            let trace = TraceContext::root(Cause::api("req"));
+            let items: Vec<IngestItem> = (0..3)
+                .map(|n| identify(&format!("u{n}"), &format!("m-{n}"), json!({})))
+                .collect();
+            append(&pool, ws, &trace, &items).await;
+            let mut holder = begin(&pool).await.unwrap();
+            sqlx::query("SELECT id FROM ingest_inbox FOR UPDATE")
+                .fetch_all(&mut *holder)
+                .await
+                .unwrap();
 
-        let outcome = drain_batch(&pool, ws, Shard::ALL, &key(), 2).await.unwrap();
+            let outcome = drain_batch(&pool, ws, Shard::ALL, &key(), 2).await.unwrap();
 
-        assert_eq!((outcome.rows, outcome.more), (0, false));
-        assert_eq!(inbox_count(&pool).await, 3);
+            assert_eq!((outcome.rows, outcome.more), (0, false));
+            assert_eq!(inbox_count(&pool).await, 3);
+        })
+        .await;
     }
 }

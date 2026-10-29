@@ -40,6 +40,8 @@ fn parse(payload: &Value) -> Result<(WorkspaceId, Uuid), JobError> {
 
 #[cfg(test)]
 mod tests {
+    use zirv_flow_store::decision_testing::PERSONAL_DATA;
+
     use std::time::Duration;
 
     use serde_json::json;
@@ -70,168 +72,179 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_job_builds_the_export_and_a_second_run_changes_nothing(pool: PgPool) {
-        zirv_flow_store::migrate(&pool).await.unwrap();
-        let name = WorkspaceName::parse("ours").unwrap();
-        let ws = zirv_flow_store::create_workspace(&pool, &name, &Slug::parse("ours").unwrap())
-            .await
-            .unwrap()
-            .id;
-        let trace = TraceContext::root(Cause::api("t"));
-        let outcomes = zirv_flow_store::apply_profile_batch(
-            &pool,
-            ws,
-            &[ProfileRecord {
-                source: "crm".into(),
-                stream: "s".into(),
-                record_key: "1".into(),
-                identifiers: vec![("email".into(), "ada@example.com".into())],
-                traits: json!({"plan": "pro"}).as_object().cloned().unwrap(),
-                observed_at: datetime!(2026-01-01 00:00 UTC),
-                trace: trace.clone(),
-            }],
-        )
-        .await
-        .unwrap();
-        let ProfileOutcome::Applied { person_id, .. } = outcomes[0] else {
-            panic!("not applied");
-        };
-        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
-        let export = zirv_flow_store::request_export(&mut tx, ws, person_id, None, &trace)
-            .await
-            .unwrap()
-            .unwrap();
-        zirv_flow_store::commit(tx).await.unwrap();
-        let claimed = zirv_flow_store::claim_job(
-            &pool,
-            "w",
-            &[PrivacyExport::KIND],
-            Duration::from_secs(30),
-            None,
-        )
-        .await
-        .unwrap()
-        .expect("the request enqueued the job");
-
-        for _ in 0..2 {
-            let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
-            let mut ctx = JobContext::new(&mut tx, &claimed);
-            PrivacyExport
-                .run(&mut ctx, claimed.payload.clone())
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            zirv_flow_store::migrate(&pool).await.unwrap();
+            let name = WorkspaceName::parse("ours").unwrap();
+            let ws = zirv_flow_store::create_workspace(&pool, &name, &Slug::parse("ours").unwrap())
                 .await
+                .unwrap()
+                .id;
+            let trace = TraceContext::root(Cause::api("t"));
+            let outcomes = zirv_flow_store::apply_profile_batch(
+                &pool,
+                ws,
+                &[ProfileRecord {
+                    source: "crm".into(),
+                    stream: "s".into(),
+                    record_key: "1".into(),
+                    identifiers: vec![("email".into(), PERSONAL_DATA.email.into())],
+                    traits: json!({"plan": "pro"}).as_object().cloned().unwrap(),
+                    observed_at: datetime!(2026-01-01 00:00 UTC),
+                    trace: trace.clone(),
+                }],
+            )
+            .await
+            .unwrap();
+            let ProfileOutcome::Applied { person_id, .. } = outcomes[0] else {
+                panic!("not applied");
+            };
+            let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+            let export = zirv_flow_store::request_export(&mut tx, ws, person_id, None, &trace)
+                .await
+                .unwrap()
                 .unwrap();
             zirv_flow_store::commit(tx).await.unwrap();
-        }
-
-        let stored = zirv_flow_store::find_privacy_export(&pool, ws, export.id)
+            let claimed = zirv_flow_store::claim_job(
+                &pool,
+                "w",
+                &[PrivacyExport::KIND],
+                Duration::from_secs(30),
+                None,
+            )
             .await
             .unwrap()
-            .unwrap();
-        assert_eq!(stored.status, ExportStatus::Ready);
-        assert!(matches!(
-            zirv_flow_store::download_export(&pool, ws, export.id)
+            .expect("the request enqueued the job");
+
+            for _ in 0..2 {
+                let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+                let mut ctx = JobContext::new(&mut tx, &claimed);
+                PrivacyExport
+                    .run(&mut ctx, claimed.payload.clone())
+                    .await
+                    .unwrap();
+                zirv_flow_store::commit(tx).await.unwrap();
+            }
+
+            let stored = zirv_flow_store::find_privacy_export(&pool, ws, export.id)
                 .await
-                .unwrap(),
-            ExportDownload::Content(_)
-        ));
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.status, ExportStatus::Ready);
+            assert!(matches!(
+                zirv_flow_store::download_export(&pool, ws, export.id)
+                    .await
+                    .unwrap(),
+                ExportDownload::Content(_)
+            ));
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_document_past_the_cap_finishes_the_job_and_leaves_a_failed_export(pool: PgPool) {
-        zirv_flow_store::migrate(&pool).await.unwrap();
-        let name = WorkspaceName::parse("ours").unwrap();
-        let ws = zirv_flow_store::create_workspace(&pool, &name, &Slug::parse("ours").unwrap())
-            .await
-            .unwrap()
-            .id;
-        let trace = TraceContext::root(Cause::api("t"));
-        let outcomes = zirv_flow_store::apply_profile_batch(
-            &pool,
-            ws,
-            &[ProfileRecord {
-                source: "crm".into(),
-                stream: "s".into(),
-                record_key: "1".into(),
-                identifiers: vec![("email".into(), "ada@example.com".into())],
-                traits: json!({"plan": "pro"}).as_object().cloned().unwrap(),
-                observed_at: datetime!(2026-01-01 00:00 UTC),
-                trace: trace.clone(),
-            }],
-        )
-        .await
-        .unwrap();
-        let ProfileOutcome::Applied { person_id, .. } = outcomes[0] else {
-            panic!("not applied");
-        };
-        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
-        let export = zirv_flow_store::request_export(&mut tx, ws, person_id, None, &trace)
-            .await
-            .unwrap()
-            .unwrap();
-        zirv_flow_store::commit(tx).await.unwrap();
-        let claimed = zirv_flow_store::claim_job(
-            &pool,
-            "w",
-            &[PrivacyExport::KIND],
-            Duration::from_secs(30),
-            None,
-        )
-        .await
-        .unwrap()
-        .expect("the request enqueued the job");
-        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
-        let mut ctx = JobContext::new(&mut tx, &claimed).with_export_max_bytes(10);
-
-        let result = PrivacyExport.run(&mut ctx, claimed.payload.clone()).await;
-
-        assert!(result.is_ok());
-        zirv_flow_store::commit(tx).await.unwrap();
-        let stored = zirv_flow_store::find_privacy_export(&pool, ws, export.id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(stored.status, ExportStatus::Failed);
-        assert_eq!(
-            stored.failure_code.as_deref(),
-            Some(zirv_flow_store::EXPORT_TOO_LARGE)
-        );
-        assert_eq!(
-            zirv_flow_store::download_export(&pool, ws, export.id)
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            zirv_flow_store::migrate(&pool).await.unwrap();
+            let name = WorkspaceName::parse("ours").unwrap();
+            let ws = zirv_flow_store::create_workspace(&pool, &name, &Slug::parse("ours").unwrap())
                 .await
-                .unwrap(),
-            ExportDownload::NotReady
-        );
+                .unwrap()
+                .id;
+            let trace = TraceContext::root(Cause::api("t"));
+            let outcomes = zirv_flow_store::apply_profile_batch(
+                &pool,
+                ws,
+                &[ProfileRecord {
+                    source: "crm".into(),
+                    stream: "s".into(),
+                    record_key: "1".into(),
+                    identifiers: vec![("email".into(), PERSONAL_DATA.email.into())],
+                    traits: json!({"plan": "pro"}).as_object().cloned().unwrap(),
+                    observed_at: datetime!(2026-01-01 00:00 UTC),
+                    trace: trace.clone(),
+                }],
+            )
+            .await
+            .unwrap();
+            let ProfileOutcome::Applied { person_id, .. } = outcomes[0] else {
+                panic!("not applied");
+            };
+            let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+            let export = zirv_flow_store::request_export(&mut tx, ws, person_id, None, &trace)
+                .await
+                .unwrap()
+                .unwrap();
+            zirv_flow_store::commit(tx).await.unwrap();
+            let claimed = zirv_flow_store::claim_job(
+                &pool,
+                "w",
+                &[PrivacyExport::KIND],
+                Duration::from_secs(30),
+                None,
+            )
+            .await
+            .unwrap()
+            .expect("the request enqueued the job");
+            let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+            let mut ctx = JobContext::new(&mut tx, &claimed).with_export_max_bytes(10);
+
+            let result = PrivacyExport.run(&mut ctx, claimed.payload.clone()).await;
+
+            assert!(result.is_ok());
+            zirv_flow_store::commit(tx).await.unwrap();
+            let stored = zirv_flow_store::find_privacy_export(&pool, ws, export.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.status, ExportStatus::Failed);
+            assert_eq!(
+                stored.failure_code.as_deref(),
+                Some(zirv_flow_store::EXPORT_TOO_LARGE)
+            );
+            assert_eq!(
+                zirv_flow_store::download_export(&pool, ws, export.id)
+                    .await
+                    .unwrap(),
+                ExportDownload::NotReady
+            );
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_export_that_is_gone_finishes_without_error(pool: PgPool) {
-        zirv_flow_store::migrate(&pool).await.unwrap();
-        let name = WorkspaceName::parse("ours").unwrap();
-        let ws = zirv_flow_store::create_workspace(&pool, &name, &Slug::parse("ours").unwrap())
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            zirv_flow_store::migrate(&pool).await.unwrap();
+            let name = WorkspaceName::parse("ours").unwrap();
+            let ws = zirv_flow_store::create_workspace(&pool, &name, &Slug::parse("ours").unwrap())
+                .await
+                .unwrap()
+                .id;
+            let mut job = zirv_flow_store::NewJob::new(
+                PrivacyExport::KIND,
+                TraceContext::root(Cause::api("t")),
+            );
+            job.workspace_id = Some(ws);
+            job.payload = json!({"workspace_id": ws, "export_id": Uuid::now_v7()});
+            zirv_flow_store::enqueue(&pool, &job).await.unwrap();
+            let claimed = zirv_flow_store::claim_job(
+                &pool,
+                "w",
+                &[PrivacyExport::KIND],
+                Duration::from_secs(30),
+                None,
+            )
             .await
             .unwrap()
-            .id;
-        let mut job =
-            zirv_flow_store::NewJob::new(PrivacyExport::KIND, TraceContext::root(Cause::api("t")));
-        job.workspace_id = Some(ws);
-        job.payload = json!({"workspace_id": ws, "export_id": Uuid::now_v7()});
-        zirv_flow_store::enqueue(&pool, &job).await.unwrap();
-        let claimed = zirv_flow_store::claim_job(
-            &pool,
-            "w",
-            &[PrivacyExport::KIND],
-            Duration::from_secs(30),
-            None,
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
-        let mut ctx = JobContext::new(&mut tx, &claimed);
+            .unwrap();
+            let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+            let mut ctx = JobContext::new(&mut tx, &claimed);
 
-        let result = PrivacyExport.run(&mut ctx, claimed.payload.clone()).await;
+            let result = PrivacyExport.run(&mut ctx, claimed.payload.clone()).await;
 
-        assert!(result.is_ok());
+            assert!(result.is_ok());
+        })
+        .await;
     }
 }

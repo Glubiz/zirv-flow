@@ -18,6 +18,8 @@ use crate::StoreError;
 
 mod retention;
 mod size;
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing;
 
 pub use retention::{
     DecisionRetention, DecisionRetentionReport, apply_decision_retention,

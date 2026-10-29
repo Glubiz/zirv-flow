@@ -1,5 +1,6 @@
 //! Test support: a workspace holding a person with every M2 data class.
 
+use crate::decision_testing::PERSONAL_DATA;
 use serde_json::json;
 use sqlx::PgPool;
 use time::OffsetDateTime;
@@ -20,7 +21,7 @@ use crate::{
 use zirv_flow_core::events::UnplannedPolicy;
 
 /// The email of the seeded person.
-pub(crate) const EMAIL: &str = "ada@example.com";
+pub(crate) const EMAIL: &str = PERSONAL_DATA.email;
 
 /// The email of the person the seeded person shares a list with.
 pub(crate) const BYSTANDER_EMAIL: &str = "grace@example.com";
@@ -92,7 +93,10 @@ fn event(name: &str, message_id: &str, at: Option<OffsetDateTime>) -> EventRecor
         source: "web".into(),
         identifiers: vec![("email".into(), EMAIL.into())],
         name: name.into(),
-        properties: json!({"plan": "pro"}).as_object().cloned().unwrap(),
+        properties: json!({"plan": "pro", "private_note": PERSONAL_DATA.property})
+            .as_object()
+            .cloned()
+            .unwrap(),
         timestamp: at,
         received_at: OffsetDateTime::now_utc(),
         message_id: Some(message_id.into()),
@@ -119,7 +123,7 @@ pub(crate) async fn seed_everything(pool: &PgPool) -> Seeded {
                 "crm",
                 "1",
                 &[("external:crm", "1"), ("email", EMAIL)],
-                json!({"plan": "free", "name": "Ada"}),
+                json!({"plan": "free", "name": "Ada", "first_name": PERSONAL_DATA.first_name, "last_name": PERSONAL_DATA.last_name}),
             ),
             profile(
                 "shop",
@@ -221,7 +225,9 @@ pub(crate) async fn seed_everything(pool: &PgPool) -> Seeded {
     commit(tx).await.unwrap();
 
     // Two lists; the bystander is in the first.
-    let vips = create_list(pool, ws, "VIPs", "", None).await.unwrap();
+    let vips = create_list(pool, ws, PERSONAL_DATA.list_name, "", None)
+        .await
+        .unwrap();
     let news = create_list(pool, ws, "News", "", None).await.unwrap();
     let mut tx = begin(pool).await.unwrap();
     add_members(
@@ -363,10 +369,11 @@ pub(crate) async fn seed_everything(pool: &PgPool) -> Seeded {
     let mut tx = begin(pool).await.unwrap();
     sqlx::query(
         "INSERT INTO segments (id, workspace_id, name, current_version, member_count) \
-         VALUES ($1, $2, 'Everyone', 1, 2)",
+         VALUES ($1, $2, $3, 1, 2)",
     )
     .bind(segment)
     .bind(ws.as_uuid())
+    .bind(PERSONAL_DATA.segment_name)
     .execute(&mut *tx)
     .await
     .unwrap();
@@ -536,14 +543,14 @@ pub(crate) async fn seed_export_extras(pool: &PgPool, seeded: &Seeded) {
     .await
     .unwrap();
     for (holder, marker) in [
-        (person, "survivor-decision"),
-        (merged, "merged-decision"),
-        (bystander, "bystander-decision"),
+        (person, "survivor_decision"),
+        (merged, "merged_decision"),
+        (bystander, "bystander_decision"),
     ] {
         sqlx::query(
-            "INSERT INTO decision_records (id, workspace_id, trace_id, action, outcome, \
+            "INSERT INTO decision_records (id, workspace_id, trace_id, action, outcome, reason, \
                 cause_kind, cause_id, subject_ids) \
-             VALUES (gen_random_uuid(), $1, gen_random_uuid(), $3, 'done', 'api', 't', \
+             VALUES (gen_random_uuid(), $1, gen_random_uuid(), 'flow.step', 'done', $3, 'api', 't', \
                      jsonb_build_object('person', $2::text))",
         )
         .bind(ws.as_uuid())

@@ -697,6 +697,8 @@ fn item_identifiers(item: &Value) -> Vec<(String, String)> {
 
 #[cfg(test)]
 mod tests {
+    use crate::decision_testing::PERSONAL_DATA;
+
     use super::*;
     use crate::people::erasure::rows_referencing_person;
     use crate::privacy::testing::{
@@ -713,13 +715,13 @@ mod tests {
                 "",
                 "  ",
                 " , ; \"| ",
-                "ada@example.com",
+                PERSONAL_DATA.email,
                 "Ada@Example.com",
             ]
             .map(String::from),
         );
 
-        assert_eq!(needles, ["Ada@Example.com", "ada@example.com"]);
+        assert_eq!(needles, ["Ada@Example.com", PERSONAL_DATA.email]);
     }
 
     fn hash(value: &str) -> [u8; 32] {
@@ -848,146 +850,159 @@ mod tests {
     async fn erasing_a_person_deletes_the_test_sends_and_allowlist_entries_of_their_hashes(
         pool: PgPool,
     ) {
-        let Seeded { ws, person, .. } = seed_everything(&pool).await;
-        let keys = keyring(&pool).await;
-        test_send_to(&pool, ws, &hash(EMAIL)).await;
-        test_send_to(&pool, ws, &hash(EMAIL)).await;
-        test_send_to(&pool, ws, &hash(BYSTANDER_EMAIL)).await;
-        allowlist(&pool, &keys, ws, EMAIL).await;
-        allowlist(&pool, &keys, ws, BYSTANDER_EMAIL).await;
+        crate::decision_testing::checked(pool, |pool| async move {
+            let Seeded { ws, person, .. } = seed_everything(&pool).await;
+            let keys = keyring(&pool).await;
+            test_send_to(&pool, ws, &hash(EMAIL)).await;
+            test_send_to(&pool, ws, &hash(EMAIL)).await;
+            test_send_to(&pool, ws, &hash(BYSTANDER_EMAIL)).await;
+            allowlist(&pool, &keys, ws, EMAIL).await;
+            allowlist(&pool, &keys, ws, BYSTANDER_EMAIL).await;
 
-        let request = request(&pool, ws, person).await;
-        erase(&pool, ws, request.id).await;
+            let request = request(&pool, ws, person).await;
+            erase(&pool, ws, request.id).await;
 
-        let remaining: Vec<Vec<u8>> = sqlx::query_scalar("SELECT recipient_hash FROM test_sends")
-            .fetch_all(&pool)
+            let remaining: Vec<Vec<u8>> =
+                sqlx::query_scalar("SELECT recipient_hash FROM test_sends")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(remaining, [hash(BYSTANDER_EMAIL).to_vec()]);
+            let allowed: Vec<Vec<u8>> =
+                sqlx::query_scalar("SELECT address_hash FROM test_send_allowlist")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(allowed, [hash(BYSTANDER_EMAIL).to_vec()]);
+            let sealed: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM encrypted_secrets WHERE purpose = 'test_send_address'",
+            )
+            .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(remaining, [hash(BYSTANDER_EMAIL).to_vec()]);
-        let allowed: Vec<Vec<u8>> =
-            sqlx::query_scalar("SELECT address_hash FROM test_send_allowlist")
-                .fetch_all(&pool)
-                .await
-                .unwrap();
-        assert_eq!(allowed, [hash(BYSTANDER_EMAIL).to_vec()]);
-        let sealed: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM encrypted_secrets WHERE purpose = 'test_send_address'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(sealed, 1, "the erased address is not kept sealed either");
-        assert!(rows_referencing_person(&pool, person).await.is_empty());
+            assert_eq!(sealed, 1, "the erased address is not kept sealed either");
+            assert!(rows_referencing_person(&pool, person).await.is_empty());
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn erasing_a_person_purges_the_test_send_jobs_that_render_them(pool: PgPool) {
-        let Seeded {
-            ws,
-            person,
-            bystander,
-            ..
-        } = seed_everything(&pool).await;
-        for (who, key) in [(person, "erased"), (bystander, "kept")] {
-            sqlx::query(
-                "INSERT INTO jobs (id, workspace_id, kind, payload, unique_key, cause_kind, \
+        crate::decision_testing::checked(pool, |pool| async move {
+            let Seeded {
+                ws,
+                person,
+                bystander,
+                ..
+            } = seed_everything(&pool).await;
+            for (who, key) in [(person, "erased"), (bystander, "kept")] {
+                sqlx::query(
+                    "INSERT INTO jobs (id, workspace_id, kind, payload, unique_key, cause_kind, \
                     cause_id, trace_id) \
                  VALUES (gen_random_uuid(), $1, 'template.test_send', \
                     jsonb_build_object('person_id', $2::text), $3, 'api', 't', gen_random_uuid())",
-            )
-            .bind(ws.as_uuid())
-            .bind(who)
-            .bind(key)
-            .execute(&pool)
-            .await
-            .unwrap();
-        }
-
-        let request = request(&pool, ws, person).await;
-        erase(&pool, ws, request.id).await;
-
-        let left: Vec<String> =
-            sqlx::query_scalar("SELECT unique_key FROM jobs WHERE kind = 'template.test_send'")
-                .fetch_all(&pool)
+                )
+                .bind(ws.as_uuid())
+                .bind(who)
+                .bind(key)
+                .execute(&pool)
                 .await
                 .unwrap();
-        assert_eq!(left, ["kept"]);
+            }
+
+            let request = request(&pool, ws, person).await;
+            erase(&pool, ws, request.id).await;
+
+            let left: Vec<String> =
+                sqlx::query_scalar("SELECT unique_key FROM jobs WHERE kind = 'template.test_send'")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(left, ["kept"]);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn replay_deletes_test_sends_and_allowlist_entries_by_the_ledger_hashes(pool: PgPool) {
-        let Seeded { ws, person, .. } = seed_everything(&pool).await;
-        let keys = keyring(&pool).await;
-        let request = request(&pool, ws, person).await;
-        erase(&pool, ws, request.id).await;
-        // A backup from before the erasure brings the rows back.
-        test_send_to(&pool, ws, &hash(EMAIL)).await;
-        test_send_to(&pool, ws, &hash(BYSTANDER_EMAIL)).await;
-        allowlist(&pool, &keys, ws, EMAIL).await;
-        allowlist(&pool, &keys, ws, BYSTANDER_EMAIL).await;
+        crate::decision_testing::checked(pool, |pool| async move {
+            let Seeded { ws, person, .. } = seed_everything(&pool).await;
+            let keys = keyring(&pool).await;
+            let request = request(&pool, ws, person).await;
+            erase(&pool, ws, request.id).await;
+            // A backup from before the erasure brings the rows back.
+            test_send_to(&pool, ws, &hash(EMAIL)).await;
+            test_send_to(&pool, ws, &hash(BYSTANDER_EMAIL)).await;
+            allowlist(&pool, &keys, ws, EMAIL).await;
+            allowlist(&pool, &keys, ws, BYSTANDER_EMAIL).await;
 
-        replay_erasures(&pool, Some(ws), None, &trace())
-            .await
-            .unwrap();
+            replay_erasures(&pool, Some(ws), None, &trace())
+                .await
+                .unwrap();
 
-        let sends: Vec<Vec<u8>> = sqlx::query_scalar("SELECT recipient_hash FROM test_sends")
-            .fetch_all(&pool)
-            .await
-            .unwrap();
-        let allowed: Vec<Vec<u8>> =
-            sqlx::query_scalar("SELECT address_hash FROM test_send_allowlist")
+            let sends: Vec<Vec<u8>> = sqlx::query_scalar("SELECT recipient_hash FROM test_sends")
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(sends, [hash(BYSTANDER_EMAIL).to_vec()]);
-        assert_eq!(allowed, [hash(BYSTANDER_EMAIL).to_vec()]);
+            let allowed: Vec<Vec<u8>> =
+                sqlx::query_scalar("SELECT address_hash FROM test_send_allowlist")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(sends, [hash(BYSTANDER_EMAIL).to_vec()]);
+            assert_eq!(allowed, [hash(BYSTANDER_EMAIL).to_vec()]);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn replay_purges_a_restored_test_send_job_whose_person_is_gone(pool: PgPool) {
-        let Seeded {
-            ws,
-            person,
-            bystander,
-            ..
-        } = seed_everything(&pool).await;
-        let request = request(&pool, ws, person).await;
-        erase(&pool, ws, request.id).await;
-        // A backup brings the jobs back; the erased person's row is not among the restored rows.
-        for (who, key) in [(person, "erased"), (bystander, "kept")] {
-            sqlx::query(
-                "INSERT INTO jobs (id, workspace_id, kind, payload, unique_key, cause_kind, \
+        crate::decision_testing::checked(pool, |pool| async move {
+            let Seeded {
+                ws,
+                person,
+                bystander,
+                ..
+            } = seed_everything(&pool).await;
+            let request = request(&pool, ws, person).await;
+            erase(&pool, ws, request.id).await;
+            // A backup brings the jobs back; the erased person's row is not among the restored rows.
+            for (who, key) in [(person, "erased"), (bystander, "kept")] {
+                sqlx::query(
+                    "INSERT INTO jobs (id, workspace_id, kind, payload, unique_key, cause_kind, \
                     cause_id, trace_id) \
                  VALUES (gen_random_uuid(), $1, 'template.test_send', \
                     jsonb_build_object('person_id', $2::text), $3, 'api', 't', gen_random_uuid())",
-            )
-            .bind(ws.as_uuid())
-            .bind(who)
-            .bind(key)
-            .execute(&pool)
-            .await
-            .unwrap();
-        }
-        let gone: i64 = sqlx::query_scalar("SELECT count(*) FROM people WHERE id = $1")
-            .bind(person)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(gone, 0, "the person is not there to delete");
-
-        replay_erasures(&pool, Some(ws), None, &trace())
-            .await
-            .unwrap();
-
-        let left: Vec<String> =
-            sqlx::query_scalar("SELECT unique_key FROM jobs WHERE kind = 'template.test_send'")
-                .fetch_all(&pool)
+                )
+                .bind(ws.as_uuid())
+                .bind(who)
+                .bind(key)
+                .execute(&pool)
                 .await
                 .unwrap();
-        assert_eq!(left, ["kept"]);
+            }
+            let gone: i64 = sqlx::query_scalar("SELECT count(*) FROM people WHERE id = $1")
+                .bind(person)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(gone, 0, "the person is not there to delete");
+
+            replay_erasures(&pool, Some(ws), None, &trace())
+                .await
+                .unwrap();
+
+            let left: Vec<String> =
+                sqlx::query_scalar("SELECT unique_key FROM jobs WHERE kind = 'template.test_send'")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(left, ["kept"]);
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -995,370 +1010,404 @@ mod tests {
     async fn erasing_a_person_deletes_the_ai_transcripts_that_name_them_and_no_others(
         pool: PgPool,
     ) {
-        let Seeded { ws, person, .. } = seed_everything(&pool).await;
-        let other = crate::create_workspace(
-            &pool,
-            &zirv_flow_core::WorkspaceName::parse("elsewhere").unwrap(),
-            &zirv_flow_core::Slug::parse("elsewhere").unwrap(),
-        )
-        .await
-        .unwrap()
-        .id;
-        let later = time::OffsetDateTime::now_utc() + time::Duration::days(7);
-        let mut connection = pool.acquire().await.unwrap();
-        for (workspace, content) in [
-            (
-                ws,
-                json!({"prompt": format!("map {}", EMAIL.to_uppercase())}),
-            ),
-            (ws, json!({"prompt": format!("person {person}")})),
-            (ws, json!({"prompt": format!("also {BYSTANDER_EMAIL}")})),
-            (other, json!({"prompt": format!("map {EMAIL}")})),
-        ] {
-            let call = Uuid::now_v7();
-            crate::record_ai_call(
-                &mut connection,
-                &crate::NewAiCall {
-                    id: call,
-                    workspace_id: workspace,
-                    user_id: None,
-                    feature: "mapping",
-                    provider_id: "p",
-                    model: "m",
-                    input_tokens: 1,
-                    output_tokens: 1,
-                    estimated_cost_micros: 1,
-                    latency_ms: 1,
-                    outcome: crate::CallOutcome::Ok,
-                    draft_id: None,
-                },
+        crate::decision_testing::checked(pool, |pool| async move {
+            let Seeded { ws, person, .. } = seed_everything(&pool).await;
+            let other = crate::create_workspace(
+                &pool,
+                &zirv_flow_core::WorkspaceName::parse("elsewhere").unwrap(),
+                &zirv_flow_core::Slug::parse("elsewhere").unwrap(),
             )
             .await
+            .unwrap()
+            .id;
+            let later = time::OffsetDateTime::now_utc() + time::Duration::days(7);
+            let mut connection = pool.acquire().await.unwrap();
+            for (workspace, content) in [
+                (
+                    ws,
+                    json!({"prompt": format!("map {}", EMAIL.to_uppercase())}),
+                ),
+                (ws, json!({"prompt": format!("person {person}")})),
+                (ws, json!({"prompt": format!("also {BYSTANDER_EMAIL}")})),
+                (other, json!({"prompt": format!("map {EMAIL}")})),
+            ] {
+                let call = Uuid::now_v7();
+                crate::record_ai_call(
+                    &mut connection,
+                    &crate::NewAiCall {
+                        id: call,
+                        workspace_id: workspace,
+                        user_id: None,
+                        feature: "mapping",
+                        provider_id: "p",
+                        model: "m",
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        estimated_cost_micros: 1,
+                        latency_ms: 1,
+                        outcome: crate::CallOutcome::Ok,
+                        draft_id: None,
+                    },
+                )
+                .await
+                .unwrap();
+                crate::insert_ai_transcript(
+                    &mut connection,
+                    workspace,
+                    call,
+                    None,
+                    &content,
+                    later,
+                )
+                .await
+                .unwrap();
+            }
+            drop(connection);
+            let request = request(&pool, ws, person).await;
+
+            erase(&pool, ws, request.id).await;
+
+            let left: Vec<(Uuid, Value)> = sqlx::query_as(
+                "SELECT workspace_id, content FROM ai_transcripts ORDER BY created_at",
+            )
+            .fetch_all(&pool)
+            .await
             .unwrap();
-            crate::insert_ai_transcript(&mut connection, workspace, call, None, &content, later)
-                .await
-                .unwrap();
-        }
-        drop(connection);
-        let request = request(&pool, ws, person).await;
-
-        erase(&pool, ws, request.id).await;
-
-        let left: Vec<(Uuid, Value)> =
-            sqlx::query_as("SELECT workspace_id, content FROM ai_transcripts ORDER BY created_at")
-                .fetch_all(&pool)
-                .await
-                .unwrap();
-        let texts: Vec<String> = left
-            .iter()
-            .map(|(_, content)| content.to_string())
-            .collect();
-        assert_eq!(left.len(), 2, "{texts:?}");
-        assert!(texts.iter().any(|text| text.contains(BYSTANDER_EMAIL)));
-        assert!(
-            left.iter()
-                .any(|(workspace, _)| *workspace == other.as_uuid())
-        );
-        assert!(texts.iter().all(|text| !text.contains(&person.to_string())));
+            let texts: Vec<String> = left
+                .iter()
+                .map(|(_, content)| content.to_string())
+                .collect();
+            assert_eq!(left.len(), 2, "{texts:?}");
+            assert!(texts.iter().any(|text| text.contains(BYSTANDER_EMAIL)));
+            assert!(
+                left.iter()
+                    .any(|(workspace, _)| *workspace == other.as_uuid())
+            );
+            assert!(texts.iter().all(|text| !text.contains(&person.to_string())));
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_request_records_the_hashes_of_every_identity_and_enqueues_the_job(pool: PgPool) {
-        let Seeded { ws, person, .. } = seed_everything(&pool).await;
+        crate::decision_testing::checked(pool, |pool| async move {
+            let Seeded { ws, person, .. } = seed_everything(&pool).await;
 
-        let request = request(&pool, ws, person).await;
+            let request = request(&pool, ws, person).await;
 
-        assert_eq!(request.status, ErasureStatus::Pending);
-        assert_eq!(request.person_id, person);
-        let (hashes, kinds): (Vec<Vec<u8>>, Vec<String>) = sqlx::query_as(
-            "SELECT identifier_hashes, identifier_kinds FROM erasure_requests WHERE id = $1",
-        )
-        .bind(request.id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        // The survivor holds the email, the external id and the merged person's anonymous id.
-        assert_eq!(hashes.len(), 3);
-        assert!(hashes.contains(&hash(EMAIL).to_vec()));
-        assert_eq!(kinds, ["anonymous_id", "email", "external:crm"]);
-        let jobs: Vec<(String, Option<String>, Value)> =
-            sqlx::query_as("SELECT kind, unique_key, payload FROM jobs WHERE kind = $1")
-                .bind(ERASE_JOB_KIND)
-                .fetch_all(&pool)
-                .await
-                .unwrap();
-        assert_eq!(jobs.len(), 1);
-        assert_eq!(
-            jobs[0].1.as_deref(),
-            Some(format!("privacy.erase:{}", request.id).as_str())
-        );
-        assert_eq!(jobs[0].2["request_id"], json!(request.id));
-        let unknown = {
-            let mut tx = begin(&pool).await.unwrap();
-            request_erasure(
-                &mut tx,
-                ws,
-                Uuid::now_v7(),
-                &identifier_key(),
-                None,
-                &trace(),
+            assert_eq!(request.status, ErasureStatus::Pending);
+            assert_eq!(request.person_id, person);
+            let (hashes, kinds): (Vec<Vec<u8>>, Vec<String>) = sqlx::query_as(
+                "SELECT identifier_hashes, identifier_kinds FROM erasure_requests WHERE id = $1",
             )
+            .bind(request.id)
+            .fetch_one(&pool)
             .await
-            .unwrap()
-        };
-        assert!(unknown.is_none());
+            .unwrap();
+            // The survivor holds the email, the external id and the merged person's anonymous id.
+            assert_eq!(hashes.len(), 3);
+            assert!(hashes.contains(&hash(EMAIL).to_vec()));
+            assert_eq!(kinds, ["anonymous_id", "email", "external:crm"]);
+            let jobs: Vec<(String, Option<String>, Value)> =
+                sqlx::query_as("SELECT kind, unique_key, payload FROM jobs WHERE kind = $1")
+                    .bind(ERASE_JOB_KIND)
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(jobs.len(), 1);
+            assert_eq!(
+                jobs[0].1.as_deref(),
+                Some(format!("privacy.erase:{}", request.id).as_str())
+            );
+            assert_eq!(jobs[0].2["request_id"], json!(request.id));
+            let unknown = {
+                let mut tx = begin(&pool).await.unwrap();
+                request_erasure(
+                    &mut tx,
+                    ws,
+                    Uuid::now_v7(),
+                    &identifier_key(),
+                    None,
+                    &trace(),
+                )
+                .await
+                .unwrap()
+            };
+            assert!(unknown.is_none());
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn erasing_a_person_with_every_data_class_leaves_only_the_ledger(pool: PgPool) {
-        let Seeded {
-            ws,
-            person,
-            merged,
-            bystander,
-            ..
-        } = seed_everything(&pool).await;
-        let request = request(&pool, ws, person).await;
-        // The records of the two people, and the rows that name them before the erasure: one
-        // event carries a record link.
-        let records: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT id FROM source_records WHERE workspace_id = $1 AND person_id = ANY($2)",
-        )
-        .bind(ws.as_uuid())
-        .bind(vec![person, merged])
-        .fetch_all(&pool)
-        .await
-        .unwrap();
-        let before = rows_naming_records(&pool, &records).await;
-        let linked = |scan: &[(String, i64)], table: &str| {
-            scan.iter()
-                .find(|(name, _)| name == table)
-                .map_or(0, |(_, count)| *count)
-        };
-        assert_eq!(linked(&before, "events"), 1, "{before:?}");
+        crate::decision_testing::checked(pool, |pool| async move {
+            let Seeded {
+                ws,
+                person,
+                merged,
+                bystander,
+                ..
+            } = seed_everything(&pool).await;
+            let request = request(&pool, ws, person).await;
+            // The records of the two people, and the rows that name them before the erasure: one
+            // event carries a record link.
+            let records: Vec<Uuid> = sqlx::query_scalar(
+                "SELECT id FROM source_records WHERE workspace_id = $1 AND person_id = ANY($2)",
+            )
+            .bind(ws.as_uuid())
+            .bind(vec![person, merged])
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            let before = rows_naming_records(&pool, &records).await;
+            let linked = |scan: &[(String, i64)], table: &str| {
+                scan.iter()
+                    .find(|(name, _)| name == table)
+                    .map_or(0, |(_, count)| *count)
+            };
+            assert_eq!(linked(&before, "events"), 1, "{before:?}");
 
-        let outcome = erase(&pool, ws, request.id).await;
+            let outcome = erase(&pool, ws, request.id).await;
 
-        assert_eq!(
-            outcome,
-            EraseOutcome::Completed {
-                person_found: true,
-                inbox_rows: 1
-            }
-        );
-        assert_eq!(rows_referencing_person(&pool, person).await, []);
-        assert_eq!(rows_referencing_person(&pool, merged).await, []);
-        // No table with a `source_record_id` column still names a record of the erased people.
-        let after = rows_naming_records(&pool, &records).await;
-        assert!(
-            after.iter().all(|(_, count)| *count == 0) && after.len() == before.len(),
-            "{after:?}"
-        );
-        // Only the ledger names the person.
-        let ledger: i64 = sqlx::query_scalar(
+            assert_eq!(
+                outcome,
+                EraseOutcome::Completed {
+                    person_found: true,
+                    inbox_rows: 1
+                }
+            );
+            assert_eq!(rows_referencing_person(&pool, person).await, []);
+            assert_eq!(rows_referencing_person(&pool, merged).await, []);
+            // No table with a `source_record_id` column still names a record of the erased people.
+            let after = rows_naming_records(&pool, &records).await;
+            assert!(
+                after.iter().all(|(_, count)| *count == 0) && after.len() == before.len(),
+                "{after:?}"
+            );
+            // Only the ledger names the person.
+            let ledger: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM erasure_requests WHERE person_id = $1 AND status = 'completed'",
         )
         .bind(person)
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(ledger, 1);
-        // The email is suppressed as erased; the bystander is untouched.
-        let suppression = crate::find_suppression(&pool, ws, &hash(EMAIL))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(suppression.reason, SuppressionReason::Erased);
-        assert_eq!(suppression.source, "erasure");
-        assert!(
-            !is_suppressed(&pool, ws, &hash(BYSTANDER_EMAIL))
+            assert_eq!(ledger, 1);
+            // The email is suppressed as erased; the bystander is untouched.
+            let suppression = crate::find_suppression(&pool, ws, &hash(EMAIL))
                 .await
                 .unwrap()
-        );
-        assert!(
-            rows_referencing_person(&pool, bystander)
-                .await
+                .unwrap();
+            assert_eq!(suppression.reason, SuppressionReason::Erased);
+            assert_eq!(suppression.source, "erasure");
+            assert!(
+                !is_suppressed(&pool, ws, &hash(BYSTANDER_EMAIL))
+                    .await
+                    .unwrap()
+            );
+            assert!(
+                rows_referencing_person(&pool, bystander)
+                    .await
+                    .iter()
+                    .any(|(place, _)| place == "people.id")
+            );
+            // The pending row naming the person is gone; the bystander's is kept.
+            assert_eq!(inbox_messages(&pool).await, ["i-2"]);
+            let audit = crate::list_audit(&pool, 5).await.unwrap();
+            let erased = audit
                 .iter()
-                .any(|(place, _)| place == "people.id")
-        );
-        // The pending row naming the person is gone; the bystander's is kept.
-        assert_eq!(inbox_messages(&pool).await, ["i-2"]);
-        let audit = crate::list_audit(&pool, 5).await.unwrap();
-        let erased = audit
-            .iter()
-            .find(|row| row.action == "privacy.erased")
-            .unwrap();
-        assert_eq!(erased.object_id, Some(request.id));
-        assert_eq!(erased.summary, json!({}));
-        let stored = find_erasure_request(&pool, ws, request.id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(stored.status, ErasureStatus::Completed);
-        assert!(stored.completed_at.is_some());
+                .find(|row| row.action == "privacy.erased")
+                .unwrap();
+            assert_eq!(erased.object_id, Some(request.id));
+            assert_eq!(erased.summary, json!({}));
+            let stored = find_erasure_request(&pool, ws, request.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.status, ErasureStatus::Completed);
+            assert!(stored.completed_at.is_some());
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn erasing_a_person_leaves_no_planted_value_in_a_slot_column(pool: PgPool) {
-        let Seeded { ws, person, .. } = seed_everything(&pool).await;
-        // `plan` is "pro" for the survivor; promote it to a slot and fill the column.
-        let mut tx = crate::begin(&pool).await.unwrap();
-        let assigned = crate::assign_trait_slot(&mut tx, ws, "plan").await.unwrap();
-        crate::commit(tx).await.unwrap();
-        let crate::Assigned::New(slot, generation) = assigned else {
-            panic!("not assigned");
-        };
-        loop {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let Seeded { ws, person, .. } = seed_everything(&pool).await;
+            // `plan` is "pro" for the survivor; promote it to a slot and fill the column.
             let mut tx = crate::begin(&pool).await.unwrap();
-            let step = crate::backfill_slot_batch(&mut tx, ws, "plan", slot, generation, None)
-                .await
-                .unwrap();
+            let assigned = crate::assign_trait_slot(&mut tx, ws, "plan").await.unwrap();
             crate::commit(tx).await.unwrap();
-            if step == crate::SlotStep::Finish {
-                break;
-            }
-        }
-        let planted = |pool: &PgPool| {
-            let sql = format!(
-                "SELECT count(*) FROM people WHERE workspace_id = $1 AND {} = 'pro'",
-                slot.as_str()
-            );
-            let pool = pool.clone();
-            async move {
-                sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(sql))
-                    .bind(ws.as_uuid())
-                    .fetch_one(&pool)
+            let crate::Assigned::New(slot, generation) = assigned else {
+                panic!("not assigned");
+            };
+            loop {
+                let mut tx = crate::begin(&pool).await.unwrap();
+                let step = crate::backfill_slot_batch(&mut tx, ws, "plan", slot, generation, None)
                     .await
-                    .unwrap()
+                    .unwrap();
+                crate::commit(tx).await.unwrap();
+                if step == crate::SlotStep::Finish {
+                    break;
+                }
             }
-        };
-        assert_eq!(planted(&pool).await, 1, "the survivor holds the marker");
+            let planted = |pool: &PgPool| {
+                let sql = format!(
+                    "SELECT count(*) FROM people WHERE workspace_id = $1 AND {} = 'pro'",
+                    slot.as_str()
+                );
+                let pool = pool.clone();
+                async move {
+                    sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(sql))
+                        .bind(ws.as_uuid())
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap()
+                }
+            };
+            assert_eq!(planted(&pool).await, 1, "the survivor holds the marker");
 
-        let request = request(&pool, ws, person).await;
-        erase(&pool, ws, request.id).await;
+            let request = request(&pool, ws, person).await;
+            erase(&pool, ws, request.id).await;
 
-        assert_eq!(planted(&pool).await, 0, "the marker left with the row");
+            assert_eq!(planted(&pool).await, 0, "the marker left with the row");
+        })
+        .await;
     }
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_pending_row_cannot_recreate_the_person_and_the_new_person_stays_suppressed(
         pool: PgPool,
     ) {
-        let Seeded { ws, person, .. } = seed_everything(&pool).await;
-        let request = request(&pool, ws, person).await;
-        erase(&pool, ws, request.id).await;
+        crate::decision_testing::checked(pool, |pool| async move {
+            let Seeded { ws, person, .. } = seed_everything(&pool).await;
+            let request = request(&pool, ws, person).await;
+            erase(&pool, ws, request.id).await;
 
-        // The drain sees only the bystander's row.
-        let key = zirv_flow_core::HmacRoot::bootstrap_from(
-            &zirv_flow_core::MasterKey::parse("BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=")
-                .unwrap(),
-        )
-        .hmac_key(zirv_flow_core::HmacPurpose::Redaction);
-        let drained = crate::drain_batch(&pool, ws, crate::Shard::ALL, &key, 100)
+            // The drain sees only the bystander's row.
+            let key = zirv_flow_core::HmacRoot::bootstrap_from(
+                &zirv_flow_core::MasterKey::parse("BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=")
+                    .unwrap(),
+            )
+            .hmac_key(zirv_flow_core::HmacPurpose::Redaction);
+            let drained = crate::drain_batch(&pool, ws, crate::Shard::ALL, &key, 100)
+                .await
+                .unwrap();
+            assert_eq!(drained.rows, 1);
+            let again = crate::people::find_person_by_identifier(
+                &pool,
+                ws,
+                &Identifier::parse("email", EMAIL).unwrap(),
+            )
             .await
             .unwrap();
-        assert_eq!(drained.rows, 1);
-        let again = crate::people::find_person_by_identifier(
-            &pool,
-            ws,
-            &Identifier::parse("email", EMAIL).unwrap(),
-        )
-        .await
-        .unwrap();
-        assert!(again.is_none());
+            assert!(again.is_none());
 
-        // A later ingest of the same email makes a new person, who is still suppressed.
-        let outcomes = crate::apply_profile_batch(
-            &pool,
-            ws,
-            &[profile("crm", "77", &[("email", EMAIL)], json!({}))],
-        )
-        .await
-        .unwrap();
-        let reborn = person_of(&outcomes[0]);
-        assert_ne!(reborn, person);
-        assert!(is_suppressed(&pool, ws, &hash(EMAIL)).await.unwrap());
-        assert_eq!(
-            remove_suppression(&pool, ws, &hash(EMAIL)).await.unwrap(),
-            crate::RemoveOutcome::Erased
-        );
+            // A later ingest of the same email makes a new person, who is still suppressed.
+            let outcomes = crate::apply_profile_batch(
+                &pool,
+                ws,
+                &[profile("crm", "77", &[("email", EMAIL)], json!({}))],
+            )
+            .await
+            .unwrap();
+            let reborn = person_of(&outcomes[0]);
+            assert_ne!(reborn, person);
+            assert!(is_suppressed(&pool, ws, &hash(EMAIL)).await.unwrap());
+            assert_eq!(
+                remove_suppression(&pool, ws, &hash(EMAIL)).await.unwrap(),
+                crate::RemoveOutcome::Erased
+            );
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_second_run_of_a_completed_request_does_nothing(pool: PgPool) {
-        let Seeded { ws, person, .. } = seed_everything(&pool).await;
-        let request = request(&pool, ws, person).await;
-        erase(&pool, ws, request.id).await;
+        crate::decision_testing::checked(pool, |pool| async move {
+            let Seeded { ws, person, .. } = seed_everything(&pool).await;
+            let request = request(&pool, ws, person).await;
+            erase(&pool, ws, request.id).await;
 
-        let again = erase(&pool, ws, request.id).await;
-        let missing = erase(&pool, ws, Uuid::now_v7()).await;
+            let again = erase(&pool, ws, request.id).await;
+            let missing = erase(&pool, ws, Uuid::now_v7()).await;
 
-        assert_eq!(again, EraseOutcome::AlreadyCompleted);
-        assert_eq!(missing, EraseOutcome::NoSuchRequest);
+            assert_eq!(again, EraseOutcome::AlreadyCompleted);
+            assert_eq!(missing, EraseOutcome::NoSuchRequest);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_failure_midway_rolls_everything_back_and_leaves_the_request_pending(pool: PgPool) {
-        let Seeded { ws, person, .. } = seed_everything(&pool).await;
-        let request = request(&pool, ws, person).await;
-        // A hash of the wrong length makes the suppression step fail after the inbox step.
-        sqlx::query(
-            "UPDATE erasure_requests SET identifier_hashes = ARRAY['\\x00'::bytea], \
+        crate::decision_testing::checked(pool, |pool| async move {
+            let Seeded { ws, person, .. } = seed_everything(&pool).await;
+            let request = request(&pool, ws, person).await;
+            // A hash of the wrong length makes the suppression step fail after the inbox step.
+            sqlx::query(
+                "UPDATE erasure_requests SET identifier_hashes = ARRAY['\\x00'::bytea], \
                 identifier_kinds = ARRAY['email'] WHERE id = $1",
-        )
-        .bind(request.id)
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        let mut tx = begin(&pool).await.unwrap();
-        let result = erase_person(&mut tx, ws, request.id, &identifier_key(), &[], &trace()).await;
-        drop(tx);
-
-        assert!(result.is_err());
-        assert_eq!(inbox_messages(&pool).await, ["i-1", "i-2"]);
-        assert!(!rows_referencing_person(&pool, person).await.is_empty());
-        let stored = find_erasure_request(&pool, ws, request.id)
+            )
+            .bind(request.id)
+            .execute(&pool)
             .await
-            .unwrap()
             .unwrap();
-        assert_eq!(stored.status, ErasureStatus::Pending);
+
+            let mut tx = begin(&pool).await.unwrap();
+            let result =
+                erase_person(&mut tx, ws, request.id, &identifier_key(), &[], &trace()).await;
+            drop(tx);
+
+            assert!(result.is_err());
+            assert_eq!(inbox_messages(&pool).await, ["i-1", "i-2"]);
+            assert!(!rows_referencing_person(&pool, person).await.is_empty());
+            let stored = find_erasure_request(&pool, ws, request.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.status, ErasureStatus::Pending);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_request_whose_job_went_dead_reads_as_failed_and_pages_newest_first(pool: PgPool) {
-        let Seeded { ws, person, .. } = seed_everything(&pool).await;
-        let first = request(&pool, ws, person).await;
-        let second = request(&pool, ws, person).await;
-        sqlx::query("UPDATE jobs SET state = 'dead', dead_at = now() WHERE unique_key = $1")
-            .bind(format!("privacy.erase:{}", first.id))
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        let (page, more) = list_erasure_requests(&pool, ws, 1, None).await.unwrap();
-        let (rest, more_after) =
-            list_erasure_requests(&pool, ws, 1, Some((page[0].requested_at, page[0].id)))
+        crate::decision_testing::checked(pool, |pool| async move {
+            let Seeded { ws, person, .. } = seed_everything(&pool).await;
+            let first = request(&pool, ws, person).await;
+            let second = request(&pool, ws, person).await;
+            sqlx::query("UPDATE jobs SET state = 'dead', dead_at = now() WHERE unique_key = $1")
+                .bind(format!("privacy.erase:{}", first.id))
+                .execute(&pool)
                 .await
                 .unwrap();
 
-        assert_eq!(page[0].id, second.id);
-        assert_eq!(page[0].status, ErasureStatus::Pending);
-        assert!(more);
-        assert_eq!(rest[0].id, first.id);
-        assert_eq!(rest[0].status, ErasureStatus::Failed);
-        assert!(!more_after);
+            let (page, more) = list_erasure_requests(&pool, ws, 1, None).await.unwrap();
+            let (rest, more_after) =
+                list_erasure_requests(&pool, ws, 1, Some((page[0].requested_at, page[0].id)))
+                    .await
+                    .unwrap();
+
+            assert_eq!(page[0].id, second.id);
+            assert_eq!(page[0].status, ErasureStatus::Pending);
+            assert!(more);
+            assert_eq!(rest[0].id, first.id);
+            assert_eq!(rest[0].status, ErasureStatus::Failed);
+            assert!(!more_after);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn replay_erases_a_restored_person_again_and_restores_the_suppressions(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
         let ws = workspace(&pool, "one").await;
         let outcomes = crate::apply_profile_batch(
             &pool,
@@ -1439,23 +1488,28 @@ mod tests {
                 ..ReplayReport::default()
             }
         );
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn replay_leaves_pending_and_other_workspaces_requests_alone(pool: PgPool) {
-        let Seeded { ws, person, .. } = seed_everything(&pool).await;
-        request(&pool, ws, person).await;
-        let other = workspace(&pool, "two").await;
+        crate::decision_testing::checked(pool, |pool| async move {
+            let Seeded { ws, person, .. } = seed_everything(&pool).await;
+            request(&pool, ws, person).await;
+            let other = workspace(&pool, "two").await;
 
-        let report = replay_erasures(&pool, Some(other), None, &trace())
-            .await
-            .unwrap();
-        let all = replay_erasures(&pool, None, None, &trace()).await.unwrap();
+            let report = replay_erasures(&pool, Some(other), None, &trace())
+                .await
+                .unwrap();
+            let all = replay_erasures(&pool, None, None, &trace()).await.unwrap();
 
-        assert_eq!(report, ReplayReport::default());
-        assert_eq!(all, ReplayReport::default());
-        assert!(!rows_referencing_person(&pool, person).await.is_empty());
+            assert_eq!(report, ReplayReport::default());
+            assert_eq!(all, ReplayReport::default());
+            assert!(!rows_referencing_person(&pool, person).await.is_empty());
+        })
+        .await;
     }
 
     async fn append(pool: &PgPool, ws: WorkspaceId, kind: &str, value: &str, message_id: &str) {
@@ -1482,34 +1536,37 @@ mod tests {
     async fn pending_rows_are_matched_by_hash_so_padding_and_non_ascii_case_do_not_hide_them(
         pool: PgPool,
     ) {
-        let ws = workspace(&pool, "one").await;
-        let outcomes = crate::apply_profile_batch(
-            &pool,
-            ws,
-            &[
-                profile("crm", "1", &[("email", EMAIL)], json!({})),
-                profile("crm", "2", &[("email", "élodie@example.com")], json!({})),
-            ],
-        )
-        .await
-        .unwrap();
-        let person = person_of(&outcomes[0]);
-        let other = person_of(&outcomes[1]);
-        for (email, id) in [
-            ("\tAda@Example.com\n", "tab"),
-            ("\u{a0}ada@example.com\u{a0}", "nbsp"),
-            ("ÉLODIE@example.com", "case"),
-            (BYSTANDER_EMAIL, "keep"),
-        ] {
-            append(&pool, ws, "email", email, id).await;
-        }
-        let first = request(&pool, ws, person).await;
-        let second = request(&pool, ws, other).await;
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            let outcomes = crate::apply_profile_batch(
+                &pool,
+                ws,
+                &[
+                    profile("crm", "1", &[("email", EMAIL)], json!({})),
+                    profile("crm", "2", &[("email", "élodie@example.com")], json!({})),
+                ],
+            )
+            .await
+            .unwrap();
+            let person = person_of(&outcomes[0]);
+            let other = person_of(&outcomes[1]);
+            for (email, id) in [
+                ("\tAda@Example.com\n", "tab"),
+                ("\u{a0}ada@example.com\u{a0}", "nbsp"),
+                ("ÉLODIE@example.com", "case"),
+                (BYSTANDER_EMAIL, "keep"),
+            ] {
+                append(&pool, ws, "email", email, id).await;
+            }
+            let first = request(&pool, ws, person).await;
+            let second = request(&pool, ws, other).await;
 
-        erase(&pool, ws, first.id).await;
-        erase(&pool, ws, second.id).await;
+            erase(&pool, ws, first.id).await;
+            erase(&pool, ws, second.id).await;
 
-        assert_eq!(inbox_messages(&pool).await, ["keep"]);
+            assert_eq!(inbox_messages(&pool).await, ["keep"]);
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -1517,220 +1574,238 @@ mod tests {
     async fn an_identity_gained_after_the_request_is_suppressed_and_its_pending_rows_deleted(
         pool: PgPool,
     ) {
-        let ws = workspace(&pool, "one").await;
-        let outcomes = crate::apply_profile_batch(
-            &pool,
-            ws,
-            &[profile("crm", "1", &[("email", EMAIL)], json!({}))],
-        )
-        .await
-        .unwrap();
-        let person = person_of(&outcomes[0]);
-        let request = request(&pool, ws, person).await;
-        // After the request the person gains an address, and a row names it.
-        crate::apply_profile_batch(
-            &pool,
-            ws,
-            &[profile(
-                "crm",
-                "1",
-                &[("email", EMAIL), ("phone", "+45 1234 5678")],
-                json!({}),
-            )],
-        )
-        .await
-        .unwrap();
-        append(&pool, ws, "phone", "0045 1234 5678", "gained").await;
-        append(&pool, ws, "email", BYSTANDER_EMAIL, "keep").await;
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            let outcomes = crate::apply_profile_batch(
+                &pool,
+                ws,
+                &[profile("crm", "1", &[("email", EMAIL)], json!({}))],
+            )
+            .await
+            .unwrap();
+            let person = person_of(&outcomes[0]);
+            let request = request(&pool, ws, person).await;
+            // After the request the person gains an address, and a row names it.
+            crate::apply_profile_batch(
+                &pool,
+                ws,
+                &[profile(
+                    "crm",
+                    "1",
+                    &[("email", EMAIL), ("phone", "+45 1234 5678")],
+                    json!({}),
+                )],
+            )
+            .await
+            .unwrap();
+            append(&pool, ws, "phone", "0045 1234 5678", "gained").await;
+            append(&pool, ws, "email", BYSTANDER_EMAIL, "keep").await;
 
-        erase(&pool, ws, request.id).await;
+            erase(&pool, ws, request.id).await;
 
-        assert_eq!(inbox_messages(&pool).await, ["keep"]);
-        let phone = identifier_hash(
-            &identifier_key(),
-            &Identifier::parse("phone", "+4512345678").unwrap(),
-        );
-        assert!(is_suppressed(&pool, ws, &phone).await.unwrap());
-        assert!(is_suppressed(&pool, ws, &hash(EMAIL)).await.unwrap());
+            assert_eq!(inbox_messages(&pool).await, ["keep"]);
+            let phone = identifier_hash(
+                &identifier_key(),
+                &Identifier::parse("phone", "+4512345678").unwrap(),
+            );
+            assert!(is_suppressed(&pool, ws, &phone).await.unwrap());
+            assert!(is_suppressed(&pool, ws, &hash(EMAIL)).await.unwrap());
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn erasing_a_person_deleted_before_the_job_still_clears_their_pending_rows(pool: PgPool) {
-        let Seeded { ws, person, .. } = seed_everything(&pool).await;
-        let request = request(&pool, ws, person).await;
-        let mut tx = begin(&pool).await.unwrap();
-        delete_person(&mut tx, ws, person, DeleteReason::Requested, &trace())
-            .await
-            .unwrap();
-        commit(tx).await.unwrap();
-        append(&pool, ws, "email", EMAIL, "late").await;
+        crate::decision_testing::checked(pool, |pool| async move {
+            let Seeded { ws, person, .. } = seed_everything(&pool).await;
+            let request = request(&pool, ws, person).await;
+            let mut tx = begin(&pool).await.unwrap();
+            delete_person(&mut tx, ws, person, DeleteReason::Requested, &trace())
+                .await
+                .unwrap();
+            commit(tx).await.unwrap();
+            append(&pool, ws, "email", EMAIL, "late").await;
 
-        let outcome = erase(&pool, ws, request.id).await;
+            let outcome = erase(&pool, ws, request.id).await;
 
-        assert_eq!(
-            outcome,
-            EraseOutcome::Completed {
-                person_found: false,
-                inbox_rows: 2
-            }
-        );
-        assert_eq!(inbox_messages(&pool).await, ["i-2"]);
-        assert!(is_suppressed(&pool, ws, &hash(EMAIL)).await.unwrap());
+            assert_eq!(
+                outcome,
+                EraseOutcome::Completed {
+                    person_found: false,
+                    inbox_rows: 2
+                }
+            );
+            assert_eq!(inbox_messages(&pool).await, ["i-2"]);
+            assert!(is_suppressed(&pool, ws, &hash(EMAIL)).await.unwrap());
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn replay_erases_every_id_the_group_had_when_a_backup_predates_the_merge(pool: PgPool) {
-        let Seeded {
-            ws, person, merged, ..
-        } = seed_everything(&pool).await;
-        let request = request(&pool, ws, person).await;
-        erase(&pool, ws, request.id).await;
-        // The backup is from before the merge: both people are back, apart.
-        for id in [person, merged] {
-            sqlx::query("INSERT INTO people (id, workspace_id) VALUES ($1, $2)")
-                .bind(id)
-                .bind(ws.as_uuid())
-                .execute(&pool)
+        crate::decision_testing::checked(pool, |pool| async move {
+            let Seeded {
+                ws, person, merged, ..
+            } = seed_everything(&pool).await;
+            let request = request(&pool, ws, person).await;
+            erase(&pool, ws, request.id).await;
+            // The backup is from before the merge: both people are back, apart.
+            for id in [person, merged] {
+                sqlx::query("INSERT INTO people (id, workspace_id) VALUES ($1, $2)")
+                    .bind(id)
+                    .bind(ws.as_uuid())
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+
+            let report = replay_erasures(&pool, Some(ws), None, &trace())
                 .await
                 .unwrap();
-        }
 
-        let report = replay_erasures(&pool, Some(ws), None, &trace())
-            .await
-            .unwrap();
-
-        assert_eq!(report.people, 2);
-        assert_eq!(rows_referencing_person(&pool, person).await, []);
-        assert_eq!(rows_referencing_person(&pool, merged).await, []);
+            assert_eq!(report.people, 2);
+            assert_eq!(rows_referencing_person(&pool, person).await, []);
+            assert_eq!(rows_referencing_person(&pool, merged).await, []);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_identity_attached_while_the_erasure_runs_is_ledgered_and_suppressed(pool: PgPool) {
-        let Seeded { ws, person, .. } = seed_everything(&pool).await;
-        let request = request(&pool, ws, person).await;
-        // A concurrent ingest has attached a new address and not committed yet: its insert
-        // holds a key-share lock on the person.
-        let mut ingest = begin(&pool).await.unwrap();
-        sqlx::query(
-            "INSERT INTO identities (id, workspace_id, person_id, kind, value) \
+        crate::decision_testing::checked(pool, |pool| async move {
+            let Seeded { ws, person, .. } = seed_everything(&pool).await;
+            let request = request(&pool, ws, person).await;
+            // A concurrent ingest has attached a new address and not committed yet: its insert
+            // holds a key-share lock on the person.
+            let mut ingest = begin(&pool).await.unwrap();
+            sqlx::query(
+                "INSERT INTO identities (id, workspace_id, person_id, kind, value) \
              VALUES ($1, $2, $3, 'email', 'b@example.com')",
-        )
-        .bind(Uuid::now_v7())
-        .bind(ws.as_uuid())
-        .bind(person)
-        .execute(&mut *ingest)
-        .await
-        .unwrap();
-        let erasure = tokio::spawn({
-            let pool = pool.clone();
-            async move {
-                let mut tx = begin(&pool).await.unwrap();
-                erase_person(&mut tx, ws, request.id, &identifier_key(), &[], &trace())
+            )
+            .bind(Uuid::now_v7())
+            .bind(ws.as_uuid())
+            .bind(person)
+            .execute(&mut *ingest)
+            .await
+            .unwrap();
+            let erasure = tokio::spawn({
+                let pool = pool.clone();
+                async move {
+                    let mut tx = begin(&pool).await.unwrap();
+                    erase_person(&mut tx, ws, request.id, &identifier_key(), &[], &trace())
+                        .await
+                        .unwrap();
+                    commit(tx).await.unwrap();
+                }
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            assert!(
+                !erasure.is_finished(),
+                "the erasure did not wait for the person"
+            );
+
+            commit(ingest).await.unwrap();
+            erasure.await.unwrap();
+
+            assert!(
+                is_suppressed(&pool, ws, &hash("b@example.com"))
+                    .await
+                    .unwrap()
+            );
+            let gone: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM identities WHERE value = 'b@example.com'")
+                    .fetch_one(&pool)
                     .await
                     .unwrap();
-                commit(tx).await.unwrap();
-            }
-        });
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        assert!(
-            !erasure.is_finished(),
-            "the erasure did not wait for the person"
-        );
-
-        commit(ingest).await.unwrap();
-        erasure.await.unwrap();
-
-        assert!(
-            is_suppressed(&pool, ws, &hash("b@example.com"))
-                .await
-                .unwrap()
-        );
-        let gone: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM identities WHERE value = 'b@example.com'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(gone, 0);
+            assert_eq!(gone, 0);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_erasure_locks_the_inbox_before_the_people(pool: PgPool) {
-        let Seeded { ws, person, .. } = seed_everything(&pool).await;
-        let request = request(&pool, ws, person).await;
-        // A drain holds the person; the erasure must already hold the inbox rows by then.
-        let mut drain = begin(&pool).await.unwrap();
-        sqlx::query("SELECT id FROM people WHERE id = $1 FOR UPDATE")
-            .bind(person)
-            .execute(&mut *drain)
-            .await
-            .unwrap();
-        let erasure = tokio::spawn({
-            let pool = pool.clone();
-            async move {
-                let mut tx = begin(&pool).await.unwrap();
-                erase_person(&mut tx, ws, request.id, &identifier_key(), &[], &trace())
-                    .await
-                    .unwrap();
-                commit(tx).await.unwrap();
-            }
-        });
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        crate::decision_testing::checked(pool, |pool| async move {
+            let Seeded { ws, person, .. } = seed_everything(&pool).await;
+            let request = request(&pool, ws, person).await;
+            // A drain holds the person; the erasure must already hold the inbox rows by then.
+            let mut drain = begin(&pool).await.unwrap();
+            sqlx::query("SELECT id FROM people WHERE id = $1 FOR UPDATE")
+                .bind(person)
+                .execute(&mut *drain)
+                .await
+                .unwrap();
+            let erasure = tokio::spawn({
+                let pool = pool.clone();
+                async move {
+                    let mut tx = begin(&pool).await.unwrap();
+                    erase_person(&mut tx, ws, request.id, &identifier_key(), &[], &trace())
+                        .await
+                        .unwrap();
+                    commit(tx).await.unwrap();
+                }
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-        let mut probe = begin(&pool).await.unwrap();
-        let inbox = sqlx::query("SELECT id FROM ingest_inbox FOR UPDATE NOWAIT")
-            .execute(&mut *probe)
-            .await;
-        drop(probe);
-        commit(drain).await.unwrap();
-        erasure.await.unwrap();
+            let mut probe = begin(&pool).await.unwrap();
+            let inbox = sqlx::query("SELECT id FROM ingest_inbox FOR UPDATE NOWAIT")
+                .execute(&mut *probe)
+                .await;
+            drop(probe);
+            commit(drain).await.unwrap();
+            erasure.await.unwrap();
 
-        assert!(
-            inbox.is_err(),
-            "the erasure waited on the people without holding the inbox"
-        );
+            assert!(
+                inbox.is_err(),
+                "the erasure waited on the people without holding the inbox"
+            );
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_resolution_that_waited_on_an_erased_person_retries_instead_of_failing(pool: PgPool) {
-        let Seeded { ws, person, .. } = seed_everything(&pool).await;
-        let request = request(&pool, ws, person).await;
-        // The erasure has run but not committed; a drain has found the owner and waits for it.
-        let mut eraser = begin(&pool).await.unwrap();
-        erase_person(
-            &mut eraser,
-            ws,
-            request.id,
-            &identifier_key(),
-            &[],
-            &trace(),
-        )
-        .await
-        .unwrap();
-        let drain = tokio::spawn({
-            let pool = pool.clone();
-            async move {
-                let mut tx = begin(&pool).await.unwrap();
-                let identifiers = [Identifier::parse("email", EMAIL).unwrap()];
-                crate::people::resolve_person(&mut tx, ws, &identifiers, None, &trace()).await
-            }
-        });
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        assert!(
-            !drain.is_finished(),
-            "the drain did not wait for the person"
-        );
+        crate::decision_testing::checked(pool, |pool| async move {
+            let Seeded { ws, person, .. } = seed_everything(&pool).await;
+            let request = request(&pool, ws, person).await;
+            // The erasure has run but not committed; a drain has found the owner and waits for it.
+            let mut eraser = begin(&pool).await.unwrap();
+            erase_person(
+                &mut eraser,
+                ws,
+                request.id,
+                &identifier_key(),
+                &[],
+                &trace(),
+            )
+            .await
+            .unwrap();
+            let drain = tokio::spawn({
+                let pool = pool.clone();
+                async move {
+                    let mut tx = begin(&pool).await.unwrap();
+                    let identifiers = [Identifier::parse("email", EMAIL).unwrap()];
+                    crate::people::resolve_person(&mut tx, ws, &identifiers, None, &trace()).await
+                }
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            assert!(
+                !drain.is_finished(),
+                "the drain did not wait for the person"
+            );
 
-        commit(eraser).await.unwrap();
-        let outcome = drain.await.unwrap();
+            commit(eraser).await.unwrap();
+            let outcome = drain.await.unwrap();
 
-        assert!(
-            matches!(&outcome, Err(error) if error.is_retryable()),
-            "{outcome:?}"
-        );
+            assert!(
+                matches!(&outcome, Err(error) if error.is_retryable()),
+                "{outcome:?}"
+            );
+        })
+        .await;
     }
 }

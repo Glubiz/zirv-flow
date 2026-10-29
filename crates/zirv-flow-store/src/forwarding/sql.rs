@@ -49,10 +49,10 @@ pub(super) fn insert_for(mapping: &Mapping, filters: &[PropertyFilter]) -> (Stri
     let sql = format!(
         "INSERT INTO forwarding_outbox \
             (id, workspace_id, destination_id, rule_id, event_id, person_id, idempotency_key, \
-             payload) \
+             payload, trace_id) \
          SELECT gen_random_uuid(), $1, $3, $2, e.id, e.person_id, \
                 encode(sha256(convert_to(e.id::text || ':' || $3::text, 'UTF8')), 'hex'), \
-                jsonb_build_object({pairs}) \
+                jsonb_build_object({pairs}), e.trace_id \
          FROM unnest($4::uuid[], $5::timestamptz[]) AS r(id, at) \
          JOIN events e ON e.occurred_at = r.at AND e.id = r.id AND e.workspace_id = $1 \
          WHERE {conditions} \

@@ -314,6 +314,8 @@ async fn enroll(
 
 #[cfg(test)]
 mod tests {
+    use zirv_flow_store::decision_testing::PERSONAL_DATA;
+
     use std::time::{Duration, Instant};
 
     use hashbrown::HashSet;
@@ -455,11 +457,12 @@ mod tests {
             let id = Uuid::now_v7();
             sqlx::query(
                 "INSERT INTO people (id, workspace_id, traits) \
-                 VALUES ($1, $2, jsonb_build_object('plan', $3::text))",
+                 VALUES ($1, $2, jsonb_build_object('plan', $3::text) || $4::jsonb)",
             )
             .bind(id)
             .bind(self.ws.as_uuid())
             .bind(plan)
+            .bind(json!(PERSONAL_DATA.traits()))
             .execute(&self.pool)
             .await
             .unwrap();
@@ -774,6 +777,7 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn entering_a_segment_enrolls_each_newcomer_for_the_event_that_recorded_it(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
         let env = Env::new(pool).await;
         env.define_plan().await;
         let (ann, bob, cy) = (
@@ -830,6 +834,8 @@ mod tests {
             );
         }
         assert_eq!(env.decisions("enrolled", None).await, 2);
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -837,129 +843,139 @@ mod tests {
     async fn leaving_a_segment_enrolls_for_the_exit_event_and_entering_enrolls_nobody(
         pool: PgPool,
     ) {
-        let env = Env::new(pool).await;
-        env.define_plan().await;
-        let (ann, bob) = (env.person("pro").await, env.person("pro").await);
-        let segment = env.segment("Pros", plan_is("pro")).await;
-        let leaving = env
-            .flow(
-                "Win back",
-                settings(entered_trigger(segment, "exited"), once()),
-            )
-            .await;
-        let entering = env
-            .flow(
-                "Welcome",
-                settings(entered_trigger(segment, "entered"), once()),
-            )
-            .await;
-        env.refresh(segment, "save", TraceContext::root(Cause::api("job")))
-            .await;
-        sqlx::query("UPDATE people SET traits = '{\"plan\": \"free\"}' WHERE id = $1")
-            .bind(ann)
-            .execute(&env.pool)
-            .await
-            .unwrap();
-        let (_, trace) = schedule_trace();
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            env.define_plan().await;
+            let (ann, bob) = (env.person("pro").await, env.person("pro").await);
+            let segment = env.segment("Pros", plan_is("pro")).await;
+            let leaving = env
+                .flow(
+                    "Win back",
+                    settings(entered_trigger(segment, "exited"), once()),
+                )
+                .await;
+            let entering = env
+                .flow(
+                    "Welcome",
+                    settings(entered_trigger(segment, "entered"), once()),
+                )
+                .await;
+            env.refresh(segment, "save", TraceContext::root(Cause::api("job")))
+                .await;
+            sqlx::query("UPDATE people SET traits = '{\"plan\": \"free\"}' WHERE id = $1")
+                .bind(ann)
+                .execute(&env.pool)
+                .await
+                .unwrap();
+            let (_, trace) = schedule_trace();
 
-        env.refresh(segment, "schedule", trace).await;
-        env.drain(1).await;
+            env.refresh(segment, "schedule", trace).await;
+            env.drain(1).await;
 
-        assert_eq!(env.enrolled(leaving).await, [ann]);
-        assert!(env.enrolled(entering).await.is_empty());
-        let exit_event: Uuid =
-            sqlx::query_scalar("SELECT id FROM events WHERE name = 'segment.exited'")
+            assert_eq!(env.enrolled(leaving).await, [ann]);
+            assert!(env.enrolled(entering).await.is_empty());
+            let exit_event: Uuid =
+                sqlx::query_scalar("SELECT id FROM events WHERE name = 'segment.exited'")
+                    .fetch_one(&env.pool)
+                    .await
+                    .unwrap();
+            let occurrence: Uuid = sqlx::query_scalar("SELECT occurrence_id FROM enrollments")
                 .fetch_one(&env.pool)
                 .await
                 .unwrap();
-        let occurrence: Uuid = sqlx::query_scalar("SELECT occurrence_id FROM enrollments")
-            .fetch_one(&env.pool)
-            .await
-            .unwrap();
-        assert_eq!(occurrence, exit_event);
-        assert_ne!(ann, bob);
+            assert_eq!(occurrence, exit_event);
+            assert_ne!(ann, bob);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_definition_edit_triggers_no_flow(pool: PgPool) {
-        let env = Env::new(pool).await;
-        env.define_plan().await;
-        env.person("pro").await;
-        env.person("free").await;
-        let segment = env.segment("Plan", plan_is("pro")).await;
-        env.flow("In", settings(entered_trigger(segment, "entered"), once()))
-            .await;
-        env.flow("Out", settings(entered_trigger(segment, "exited"), once()))
-            .await;
-        env.refresh(segment, "save", TraceContext::root(Cause::api("job")))
-            .await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            env.define_plan().await;
+            env.person("pro").await;
+            env.person("free").await;
+            let segment = env.segment("Plan", plan_is("pro")).await;
+            env.flow("In", settings(entered_trigger(segment, "entered"), once()))
+                .await;
+            env.flow("Out", settings(entered_trigger(segment, "exited"), once()))
+                .await;
+            env.refresh(segment, "save", TraceContext::root(Cause::api("job")))
+                .await;
 
-        // The edit moves the free person in and the pro person out, and it is the edit's doing.
-        env.resave(segment, plan_is("free")).await;
-        env.refresh(segment, "save", TraceContext::root(Cause::api("job")))
-            .await;
+            // The edit moves the free person in and the pro person out, and it is the edit's doing.
+            env.resave(segment, plan_is("free")).await;
+            env.refresh(segment, "save", TraceContext::root(Cause::api("job")))
+                .await;
 
-        assert_eq!(
-            env.count("SELECT count(*) FROM events WHERE name LIKE 'segment.%'")
-                .await,
-            3
-        );
-        assert_eq!(env.enroll_jobs().await, 0);
-        assert_eq!(env.count("SELECT count(*) FROM enrollments").await, 0);
+            assert_eq!(
+                env.count("SELECT count(*) FROM events WHERE name LIKE 'segment.%'")
+                    .await,
+                3
+            );
+            assert_eq!(env.enroll_jobs().await, 0);
+            assert_eq!(env.count("SELECT count(*) FROM enrollments").await, 0);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn publishing_enrolls_the_current_members_in_batches_for_the_publish(pool: PgPool) {
-        let env = Env::new(pool).await;
-        env.define_plan().await;
-        env.people(2_500, "pro").await;
-        let segment = env.segment("Pros", plan_is("pro")).await;
-        env.refresh(segment, "save", TraceContext::root(Cause::api("job")))
-            .await;
-        assert_eq!(
-            env.count("SELECT member_count::bigint FROM segments").await,
-            2_500
-        );
-        let trigger = json!({
-            "type": "segment", "segment_id": segment, "on": "entered", "enroll_current": true
-        });
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            env.define_plan().await;
+            env.people(2_500, "pro").await;
+            let segment = env.segment("Pros", plan_is("pro")).await;
+            env.refresh(segment, "save", TraceContext::root(Cause::api("job")))
+                .await;
+            assert_eq!(
+                env.count("SELECT member_count::bigint FROM segments").await,
+                2_500
+            );
+            let trigger = json!({
+                "type": "segment", "segment_id": segment, "on": "entered", "enroll_current": true
+            });
 
-        let flow = env.flow("Welcome", settings(trigger, once())).await;
-        let ran = env.drain(1).await;
+            let flow = env.flow("Welcome", settings(trigger, once())).await;
+            let ran = env.drain(1).await;
 
-        assert_eq!(ran, 3, "2,500 members make pages of 1,000, 1,000 and 500");
-        assert_eq!(env.enrolled(flow).await.len(), 2_500);
-        let publish_trace: Uuid =
-            sqlx::query_scalar("SELECT trace_id FROM flow_versions WHERE flow_id = $1")
-                .bind(flow)
-                .fetch_one(&env.pool)
-                .await
-                .unwrap();
-        assert_eq!(
-            env.count(&format!(
-                "SELECT count(DISTINCT occurrence_id) FROM enrollments \
+            assert_eq!(ran, 3, "2,500 members make pages of 1,000, 1,000 and 500");
+            assert_eq!(env.enrolled(flow).await.len(), 2_500);
+            let publish_trace: Uuid =
+                sqlx::query_scalar("SELECT trace_id FROM flow_versions WHERE flow_id = $1")
+                    .bind(flow)
+                    .fetch_one(&env.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                env.count(&format!(
+                    "SELECT count(DISTINCT occurrence_id) FROM enrollments \
                  WHERE occurrence_id = '{publish_trace}'"
-            ))
-            .await,
-            1
-        );
-        // A second publish fans out again, and `once` refuses everyone who entered, even once
-        // their enrollment has ended.
-        env.end_enrollments(flow).await;
-        env.publish(flow).await;
-        assert_eq!(env.drain(1).await, 3);
-        assert_eq!(env.enrolled(flow).await.len(), 2_500);
-        assert_eq!(
-            env.decisions("skipped", Some("already_entered")).await,
-            2_500
-        );
+                ))
+                .await,
+                1
+            );
+            // A second publish fans out again, and `once` refuses everyone who entered, even once
+            // their enrollment has ended.
+            env.end_enrollments(flow).await;
+            env.publish(flow).await;
+            assert_eq!(env.drain(1).await, 3);
+            assert_eq!(env.enrolled(flow).await.len(), 2_500);
+            assert_eq!(
+                env.decisions("skipped", Some("already_entered")).await,
+                2_500
+            );
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_member_who_joins_after_the_publish_is_not_enrolled_for_the_publish(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
         let env = Env::new(pool).await;
         env.define_plan().await;
         env.people(1_200, "pro").await;
@@ -1011,169 +1027,176 @@ mod tests {
             "the joiner is not a publish enrollment"
         );
         assert_eq!(enrolled, at_publish, "every member at the publish, once");
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_publish_waits_for_an_open_refresh_and_enrolls_the_member_it_adds(pool: PgPool) {
-        let env = Env::new(pool).await;
-        env.define_plan().await;
-        env.people(1, "pro").await;
-        let segment = env.segment("Pros", plan_is("pro")).await;
-        env.refresh(segment, "save", TraceContext::root(Cause::api("job")))
-            .await;
-        let early = env.members(segment).await;
-        assert_eq!(early.len(), 1);
-        let late = env.person("pro").await;
-        let trigger = json!({
-            "type": "segment", "segment_id": segment, "on": "entered", "enroll_current": true
-        });
-        let flow = Uuid::now_v7();
-        let mut connection = env.pool.acquire().await.unwrap();
-        zirv_flow_store::create_flow(
-            &mut connection,
-            env.ws,
-            &NewFlow {
-                id: flow,
-                name: "Welcome".into(),
-                graph: exit_graph(),
-                settings: settings(trigger, once()),
-            },
-            None,
-        )
-        .await
-        .unwrap();
-        drop(connection);
-
-        // Connection A refreshes the segment as its job does, and stays open: it holds the
-        // refresh lock and has read no flow that triggers on the segment.
-        sqlx::query("DELETE FROM jobs WHERE kind = 'segment.refresh'")
-            .execute(&env.pool)
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            env.define_plan().await;
+            env.people(1, "pro").await;
+            let segment = env.segment("Pros", plan_is("pro")).await;
+            env.refresh(segment, "save", TraceContext::root(Cause::api("job")))
+                .await;
+            let early = env.members(segment).await;
+            assert_eq!(early.len(), 1);
+            let late = env.person("pro").await;
+            let trigger = json!({
+                "type": "segment", "segment_id": segment, "on": "entered", "enroll_current": true
+            });
+            let flow = Uuid::now_v7();
+            let mut connection = env.pool.acquire().await.unwrap();
+            zirv_flow_store::create_flow(
+                &mut connection,
+                env.ws,
+                &NewFlow {
+                    id: flow,
+                    name: "Welcome".into(),
+                    graph: exit_graph(),
+                    settings: settings(trigger, once()),
+                },
+                None,
+            )
             .await
             .unwrap();
-        let mut job = NewJob::new(REFRESH_JOB_KIND, TraceContext::root(Cause::api("job")));
-        job.workspace_id = Some(env.ws);
-        job.payload = json!({
-            "workspace_id": env.ws, "segment_id": segment, "trigger": "save"
-        });
-        job.unique_key = Some(format!("test:{}", Uuid::new_v4()));
-        enqueue(&env.pool, &job).await.unwrap();
-        let claimed = claim_job(
-            &env.pool,
-            "w",
-            &[REFRESH_JOB_KIND],
-            Duration::from_secs(60),
-            None,
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        let mut refresh = zirv_flow_store::begin(&env.pool).await.unwrap();
-        {
-            let mut ctx = JobContext::new(&mut refresh, &claimed).with_clock(env.clock());
-            SegmentRefresh
-                .run(&mut ctx, claimed.payload.clone())
+            drop(connection);
+
+            // Connection A refreshes the segment as its job does, and stays open: it holds the
+            // refresh lock and has read no flow that triggers on the segment.
+            sqlx::query("DELETE FROM jobs WHERE kind = 'segment.refresh'")
+                .execute(&env.pool)
                 .await
                 .unwrap();
-        }
-
-        // Connection B publishes after the refresh stamped the new member.
-        env.clock.advance(time::Duration::seconds(5));
-        let (backend_tx, backend_rx) = tokio::sync::oneshot::channel::<i32>();
-        let publisher = {
-            let (pool, clock, ws) = (env.pool.clone(), env.clock(), env.ws);
-            tokio::spawn(async move {
-                let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
-                // The backend that publishes, so the test can ask whether it is the one waiting.
-                let backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-                    .fetch_one(&mut *tx)
+            let mut job = NewJob::new(REFRESH_JOB_KIND, TraceContext::root(Cause::api("job")));
+            job.workspace_id = Some(env.ws);
+            job.payload = json!({
+                "workspace_id": env.ws, "segment_id": segment, "trigger": "save"
+            });
+            job.unique_key = Some(format!("test:{}", Uuid::new_v4()));
+            enqueue(&env.pool, &job).await.unwrap();
+            let claimed = claim_job(
+                &env.pool,
+                "w",
+                &[REFRESH_JOB_KIND],
+                Duration::from_secs(60),
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let mut refresh = zirv_flow_store::begin(&env.pool).await.unwrap();
+            {
+                let mut ctx = JobContext::new(&mut refresh, &claimed).with_clock(env.clock());
+                SegmentRefresh
+                    .run(&mut ctx, claimed.payload.clone())
                     .await
                     .unwrap();
-                backend_tx.send(backend).unwrap();
-                let locked = zirv_flow_store::lock_flow(&mut tx, ws, flow).await.unwrap();
-                let trace = TraceContext::root(Cause::api("publish"));
-                zirv_flow_store::publish_flow(&mut tx, &clock, ws, &locked, None, &trace)
+            }
+
+            // Connection B publishes after the refresh stamped the new member.
+            env.clock.advance(time::Duration::seconds(5));
+            let (backend_tx, backend_rx) = tokio::sync::oneshot::channel::<i32>();
+            let publisher = {
+                let (pool, clock, ws) = (env.pool.clone(), env.clock(), env.ws);
+                tokio::spawn(async move {
+                    let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+                    // The backend that publishes, so the test can ask whether it is the one waiting.
+                    let backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                        .fetch_one(&mut *tx)
+                        .await
+                        .unwrap();
+                    backend_tx.send(backend).unwrap();
+                    let locked = zirv_flow_store::lock_flow(&mut tx, ws, flow).await.unwrap();
+                    let trace = TraceContext::root(Cause::api("publish"));
+                    zirv_flow_store::publish_flow(&mut tx, &clock, ws, &locked, None, &trace)
+                        .await
+                        .unwrap();
+                    zirv_flow_store::commit(tx).await.unwrap();
+                })
+            };
+            let backend = backend_rx.await.expect("the publisher reports its backend");
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let finished = loop {
+                if publisher.is_finished() {
+                    break true;
+                }
+                // The publisher's own backend, not any waiter on the server: other tests lock in
+                // databases of their own at the same time.
+                let blockers: i32 = sqlx::query_scalar("SELECT cardinality(pg_blocking_pids($1))")
+                    .bind(backend)
+                    .fetch_one(&env.pool)
                     .await
                     .unwrap();
-                zirv_flow_store::commit(tx).await.unwrap();
-            })
-        };
-        let backend = backend_rx.await.expect("the publisher reports its backend");
-        let deadline = Instant::now() + Duration::from_secs(30);
-        let finished = loop {
-            if publisher.is_finished() {
-                break true;
+                if blockers > 0 {
+                    break false;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "the publish neither ended nor waited"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            };
+            if finished {
+                // The publish did not wait: its pages ran without the new member.
+                publisher.await.unwrap();
+                env.drain(1).await;
+                zirv_flow_store::commit(refresh).await.unwrap();
+            } else {
+                zirv_flow_store::commit(refresh).await.unwrap();
+                publisher.await.unwrap();
+                env.drain(1).await;
             }
-            // The publisher's own backend, not any waiter on the server: other tests lock in
-            // databases of their own at the same time.
-            let blockers: i32 = sqlx::query_scalar("SELECT cardinality(pg_blocking_pids($1))")
-                .bind(backend)
-                .fetch_one(&env.pool)
-                .await
-                .unwrap();
-            if blockers > 0 {
-                break false;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "the publish neither ended nor waited"
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        };
-        if finished {
-            // The publish did not wait: its pages ran without the new member.
-            publisher.await.unwrap();
-            env.drain(1).await;
-            zirv_flow_store::commit(refresh).await.unwrap();
-        } else {
-            zirv_flow_store::commit(refresh).await.unwrap();
-            publisher.await.unwrap();
-            env.drain(1).await;
-        }
 
-        let mut expected = vec![early[0], late];
-        expected.sort();
-        assert_eq!(env.enrolled(flow).await, expected, "each member, once");
+            let mut expected = vec![early[0], late];
+            expected.sort();
+            assert_eq!(env.enrolled(flow).await, expected, "each member, once");
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_event_trigger_enrolls_the_people_whose_event_passes_its_filters(pool: PgPool) {
-        let env = Env::new(pool).await;
-        env.define_order().await;
-        let trigger = json!({
-            "type": "event", "event": "order",
-            "filters": [{"prop": "total", "op": "gt", "value": 100}]
-        });
-        let flow = env.flow("Big orders", settings(trigger, once())).await;
-        let key = HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction);
-        let record = |email: &str, name: &str, total: i64| EventRecord {
-            source_record_id: None,
-            source: "web".into(),
-            identifiers: vec![("email".into(), email.into())],
-            name: name.into(),
-            properties: json!({"total": total}).as_object().cloned().unwrap(),
-            timestamp: None,
-            received_at: env.clock.now(),
-            message_id: None,
-            trace: TraceContext::root(Cause::api("event")),
-        };
-        // One batch: a big order, a small one, and an event of another name.
-        zirv_flow_store::apply_event_batch(
-            &env.pool,
-            env.ws,
-            &key,
-            &[
-                record("ada@example.com", "order", 150),
-                record("bob@example.com", "order", 50),
-                record("cy@example.com", "refund", 500),
-            ],
-        )
-        .await
-        .unwrap();
-        assert_eq!(env.enroll_jobs().await, 1, "one job for the whole batch");
-        // The job is delivered twice, as a lost lease would.
-        sqlx::query(
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            env.define_order().await;
+            let trigger = json!({
+                "type": "event", "event": "order",
+                "filters": [{"prop": "total", "op": "gt", "value": 100}]
+            });
+            let flow = env.flow("Big orders", settings(trigger, once())).await;
+            let key =
+                HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction);
+            let record = |email: &str, name: &str, total: i64| EventRecord {
+                source_record_id: None,
+                source: "web".into(),
+                identifiers: vec![("email".into(), email.into())],
+                name: name.into(),
+                properties: json!({"total": total}).as_object().cloned().unwrap(),
+                timestamp: None,
+                received_at: env.clock.now(),
+                message_id: None,
+                trace: TraceContext::root(Cause::api("event")),
+            };
+            // One batch: a big order, a small one, and an event of another name.
+            zirv_flow_store::apply_event_batch(
+                &env.pool,
+                env.ws,
+                &key,
+                &[
+                    record(PERSONAL_DATA.email, "order", 150),
+                    record("bob@example.com", "order", 50),
+                    record("cy@example.com", "refund", 500),
+                ],
+            )
+            .await
+            .unwrap();
+            assert_eq!(env.enroll_jobs().await, 1, "one job for the whole batch");
+            // The job is delivered twice, as a lost lease would.
+            sqlx::query(
             "INSERT INTO jobs (id, workspace_id, kind, payload, trace_id, cause_kind, cause_id) \
              SELECT gen_random_uuid(), workspace_id, kind, payload, trace_id, cause_kind, cause_id \
              FROM jobs WHERE kind = 'flow.enroll'",
@@ -1182,35 +1205,38 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(env.drain(1).await, 2);
+            assert_eq!(env.drain(1).await, 2);
 
-        let ada: Uuid = sqlx::query_scalar(
+            let ada: Uuid = sqlx::query_scalar(
             "SELECT person_id FROM identities WHERE kind = 'email' AND value = 'ada@example.com'",
         )
         .fetch_one(&env.pool)
         .await
         .unwrap();
-        assert_eq!(env.enrolled(flow).await, [ada]);
-        let (occurrence, kind, cause): (Uuid, String, String) = sqlx::query_as(
-            "SELECT occurrence_id, cause_kind, cause_id FROM enrollments WHERE flow_id = $1",
-        )
-        .bind(flow)
-        .fetch_one(&env.pool)
-        .await
-        .unwrap();
-        let event: Uuid =
-            sqlx::query_scalar("SELECT id FROM events WHERE name = 'order' AND person_id = $1")
-                .bind(ada)
-                .fetch_one(&env.pool)
-                .await
-                .unwrap();
-        assert_eq!(occurrence, event);
-        assert_eq!((kind.as_str(), cause), ("event", event.to_string()));
+            assert_eq!(env.enrolled(flow).await, [ada]);
+            let (occurrence, kind, cause): (Uuid, String, String) = sqlx::query_as(
+                "SELECT occurrence_id, cause_kind, cause_id FROM enrollments WHERE flow_id = $1",
+            )
+            .bind(flow)
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+            let event: Uuid =
+                sqlx::query_scalar("SELECT id FROM events WHERE name = 'order' AND person_id = $1")
+                    .bind(ada)
+                    .fetch_one(&env.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(occurrence, event);
+            assert_eq!((kind.as_str(), cause), ("event", event.to_string()));
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_event_enrollment_and_a_refusal_are_on_the_trace_of_their_own_event(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
         let env = Env::new(pool).await;
         env.define_order().await;
         let flow = env
@@ -1232,14 +1258,14 @@ mod tests {
             trace: TraceContext::root(Cause::api("event")),
         };
         // Ada and Bob are in the flow already, so `once` refuses their second events; Cy is new.
-        let earlier = [record("ada@example.com"), record("bob@example.com")];
+        let earlier = [record(PERSONAL_DATA.email), record("bob@example.com")];
         zirv_flow_store::apply_event_batch(&env.pool, env.ws, &key, &earlier)
             .await
             .unwrap();
         assert_eq!(env.drain(1).await, 1);
         env.end_enrollments(flow).await;
         let events = [
-            record("ada@example.com"),
+            record(PERSONAL_DATA.email),
             record("bob@example.com"),
             record("cy@example.com"),
         ];
@@ -1294,11 +1320,14 @@ mod tests {
             HashSet::from([traces[0], traces[1]]),
             "each refusal is on the trace of the event it refused"
         );
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn each_enrollment_of_an_audience_run_starts_a_trace_of_its_own(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
         let env = Env::new(pool).await;
         let (ann, bob) = (env.person("a").await, env.person("b").await);
         let list = zirv_flow_store::create_list(&env.pool, env.ws, "VIPs", "", None)
@@ -1351,224 +1380,238 @@ mod tests {
             assert_ne!(*trace, job_trace.trace_id.as_uuid(), "not the job's trace");
             assert_eq!(kind, "api", "the trigger's cause");
         }
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_schedule_slot_enrolls_everyone_once_even_when_it_fires_twice(pool: PgPool) {
-        let env = Env::new(pool).await;
-        sqlx::query("DELETE FROM schedules WHERE flow_id IS NULL")
-            .execute(&env.pool)
-            .await
-            .unwrap();
-        let (ann, bob, cy) = (
-            env.person("a").await,
-            env.person("b").await,
-            env.person("c").await,
-        );
-        let trigger = json!({
-            "type": "schedule", "cron": "0 * * * *", "timezone": "UTC",
-            "audience": {"type": "everyone"}
-        });
-        let flow = env
-            .flow("Hourly", settings(trigger, json!({"mode": "always"})))
-            .await;
-        let (schedule, slot): (Uuid, OffsetDateTime) =
-            sqlx::query_as("SELECT id, next_run_at FROM schedules WHERE flow_id = $1")
-                .bind(flow)
-                .fetch_one(&env.pool)
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            sqlx::query("DELETE FROM schedules WHERE flow_id IS NULL")
+                .execute(&env.pool)
                 .await
                 .unwrap();
-        let mut leader = Scheduler::new(env.pool.clone(), SchedulerConfig::default());
+            let (ann, bob, cy) = (
+                env.person("a").await,
+                env.person("b").await,
+                env.person("c").await,
+            );
+            let trigger = json!({
+                "type": "schedule", "cron": "0 * * * *", "timezone": "UTC",
+                "audience": {"type": "everyone"}
+            });
+            let flow = env
+                .flow("Hourly", settings(trigger, json!({"mode": "always"})))
+                .await;
+            let (schedule, slot): (Uuid, OffsetDateTime) =
+                sqlx::query_as("SELECT id, next_run_at FROM schedules WHERE flow_id = $1")
+                    .bind(flow)
+                    .fetch_one(&env.pool)
+                    .await
+                    .unwrap();
+            let mut leader = Scheduler::new(env.pool.clone(), SchedulerConfig::default());
 
-        leader.tick_at(slot).await.unwrap();
-        assert_eq!(env.drain(1).await, 1);
-        // The slot fires again, as after a failover that lost the schedule's advance.
-        sqlx::query("UPDATE schedules SET next_run_at = $1 WHERE id = $2")
-            .bind(slot)
-            .bind(schedule)
-            .execute(&env.pool)
-            .await
-            .unwrap();
-        leader.tick_at(slot).await.unwrap();
-        assert_eq!(env.drain(1).await, 1);
-
-        let mut expected = vec![ann, bob, cy];
-        expected.sort_unstable();
-        assert_eq!(env.enrolled(flow).await, expected);
-        let occurrences = env
-            .count("SELECT count(DISTINCT occurrence_id) FROM enrollments")
-            .await;
-        assert_eq!(occurrences, 1, "the slot is the one occurrence");
-        let causes: Vec<(String, String)> =
-            sqlx::query_as("SELECT DISTINCT cause_kind, cause_id FROM enrollments")
-                .fetch_all(&env.pool)
+            leader.tick_at(slot).await.unwrap();
+            assert_eq!(env.drain(1).await, 1);
+            // The slot fires again, as after a failover that lost the schedule's advance.
+            sqlx::query("UPDATE schedules SET next_run_at = $1 WHERE id = $2")
+                .bind(slot)
+                .bind(schedule)
+                .execute(&env.pool)
                 .await
                 .unwrap();
-        assert_eq!(causes, [("schedule".to_owned(), schedule.to_string())]);
+            leader.tick_at(slot).await.unwrap();
+            assert_eq!(env.drain(1).await, 1);
+
+            let mut expected = vec![ann, bob, cy];
+            expected.sort_unstable();
+            assert_eq!(env.enrolled(flow).await, expected);
+            let occurrences = env
+                .count("SELECT count(DISTINCT occurrence_id) FROM enrollments")
+                .await;
+            assert_eq!(occurrences, 1, "the slot is the one occurrence");
+            let causes: Vec<(String, String)> =
+                sqlx::query_as("SELECT DISTINCT cause_kind, cause_id FROM enrollments")
+                    .fetch_all(&env.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(causes, [("schedule".to_owned(), schedule.to_string())]);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_manual_start_enrolls_a_list_and_an_api_request_one_person(pool: PgPool) {
-        let env = Env::new(pool).await;
-        let (ann, bob, cy) = (
-            env.person("a").await,
-            env.person("b").await,
-            env.person("c").await,
-        );
-        let list = zirv_flow_store::create_list(&env.pool, env.ws, "VIPs", "", None)
-            .await
-            .unwrap()
-            .id;
-        for person in [ann, bob] {
-            sqlx::query(
-                "INSERT INTO list_members (workspace_id, list_id, person_id, source) \
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            let (ann, bob, cy) = (
+                env.person("a").await,
+                env.person("b").await,
+                env.person("c").await,
+            );
+            let list = zirv_flow_store::create_list(&env.pool, env.ws, "VIPs", "", None)
+                .await
+                .unwrap()
+                .id;
+            for person in [ann, bob] {
+                sqlx::query(
+                    "INSERT INTO list_members (workspace_id, list_id, person_id, source) \
                  VALUES ($1, $2, $3, 'api')",
+                )
+                .bind(env.ws.as_uuid())
+                .bind(list)
+                .bind(person)
+                .execute(&env.pool)
+                .await
+                .unwrap();
+            }
+            let manual = env
+                .flow("By hand", settings(json!({"type": "manual"}), once()))
+                .await;
+            let api = env
+                .flow("By api", settings(json!({"type": "api"}), once()))
+                .await;
+            let occurrence = Uuid::now_v7();
+
+            env.run(
+                &EnrollJobPayload {
+                    workspace: env.ws,
+                    flow: manual,
+                    version: None,
+                    trigger: TriggerKind::Manual,
+                    work: EnrollWork::Audience {
+                        source: AudienceSource::List(list),
+                        occurrence: Some(occurrence),
+                        after: None,
+                        entered_by: None,
+                    },
+                },
+                &TraceContext::root(Cause::api("start")),
             )
-            .bind(env.ws.as_uuid())
-            .bind(list)
-            .bind(person)
-            .execute(&env.pool)
+            .await;
+            env.run(
+                &EnrollJobPayload {
+                    workspace: env.ws,
+                    flow: api,
+                    version: None,
+                    trigger: TriggerKind::Api,
+                    work: EnrollWork::People(vec![(cy, occurrence_of("key"))]),
+                },
+                &TraceContext::root(Cause::api("req")),
+            )
+            .await;
+
+            let mut members = vec![ann, bob];
+            members.sort_unstable();
+            assert_eq!(env.enrolled(manual).await, members);
+            assert_eq!(env.enrolled(api).await, [cy]);
+            let triggers: Vec<(String, String, Uuid)> = sqlx::query_as(
+                "SELECT DISTINCT context ->> 'trigger', cause_kind, occurrence_id FROM enrollments \
+             ORDER BY 1",
+            )
+            .fetch_all(&env.pool)
             .await
             .unwrap();
-        }
-        let manual = env
-            .flow("By hand", settings(json!({"type": "manual"}), once()))
-            .await;
-        let api = env
-            .flow("By api", settings(json!({"type": "api"}), once()))
-            .await;
-        let occurrence = Uuid::now_v7();
-
-        env.run(
-            &EnrollJobPayload {
-                workspace: env.ws,
-                flow: manual,
-                version: None,
-                trigger: TriggerKind::Manual,
-                work: EnrollWork::Audience {
-                    source: AudienceSource::List(list),
-                    occurrence: Some(occurrence),
-                    after: None,
-                    entered_by: None,
-                },
-            },
-            &TraceContext::root(Cause::api("start")),
-        )
+            assert_eq!(
+                triggers,
+                [
+                    ("api".to_owned(), "api".to_owned(), occurrence_of("key")),
+                    ("manual".to_owned(), "api".to_owned(), occurrence)
+                ]
+            );
+        })
         .await;
-        env.run(
-            &EnrollJobPayload {
-                workspace: env.ws,
-                flow: api,
-                version: None,
-                trigger: TriggerKind::Api,
-                work: EnrollWork::People(vec![(cy, occurrence_of("key"))]),
-            },
-            &TraceContext::root(Cause::api("req")),
-        )
-        .await;
-
-        let mut members = vec![ann, bob];
-        members.sort_unstable();
-        assert_eq!(env.enrolled(manual).await, members);
-        assert_eq!(env.enrolled(api).await, [cy]);
-        let triggers: Vec<(String, String, Uuid)> = sqlx::query_as(
-            "SELECT DISTINCT context ->> 'trigger', cause_kind, occurrence_id FROM enrollments \
-             ORDER BY 1",
-        )
-        .fetch_all(&env.pool)
-        .await
-        .unwrap();
-        assert_eq!(
-            triggers,
-            [
-                ("api".to_owned(), "api".to_owned(), occurrence_of("key")),
-                ("manual".to_owned(), "api".to_owned(), occurrence)
-            ]
-        );
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn once_at_a_time_lets_a_person_in_again_only_after_the_enrollment_ended(pool: PgPool) {
-        let env = Env::new(pool).await;
-        let ann = env.person("a").await;
-        let flow = env
-            .flow(
-                "Again",
-                settings(json!({"type": "api"}), json!({"mode": "once_at_a_time"})),
-            )
-            .await;
-        let request = || EnrollJobPayload {
-            workspace: env.ws,
-            flow,
-            version: None,
-            trigger: TriggerKind::Api,
-            work: EnrollWork::People(vec![(ann, Uuid::now_v7())]),
-        };
-        let trace = TraceContext::root(Cause::api("req"));
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            let ann = env.person("a").await;
+            let flow = env
+                .flow(
+                    "Again",
+                    settings(json!({"type": "api"}), json!({"mode": "once_at_a_time"})),
+                )
+                .await;
+            let request = || EnrollJobPayload {
+                workspace: env.ws,
+                flow,
+                version: None,
+                trigger: TriggerKind::Api,
+                work: EnrollWork::People(vec![(ann, Uuid::now_v7())]),
+            };
+            let trace = TraceContext::root(Cause::api("req"));
 
-        env.run(&request(), &trace).await;
-        env.run(&request(), &trace).await;
-        assert_eq!(env.count("SELECT count(*) FROM enrollments").await, 1);
-        assert_eq!(env.decisions("skipped", Some("already_active")).await, 1);
-        env.end_enrollments(flow).await;
-        env.run(&request(), &trace).await;
+            env.run(&request(), &trace).await;
+            env.run(&request(), &trace).await;
+            assert_eq!(env.count("SELECT count(*) FROM enrollments").await, 1);
+            assert_eq!(env.decisions("skipped", Some("already_active")).await, 1);
+            env.end_enrollments(flow).await;
+            env.run(&request(), &trace).await;
 
-        assert_eq!(env.count("SELECT count(*) FROM enrollments").await, 2);
-        assert_eq!(
-            env.count("SELECT entries::bigint FROM flow_entries").await,
-            2
-        );
+            assert_eq!(env.count("SELECT count(*) FROM enrollments").await, 2);
+            assert_eq!(
+                env.count("SELECT entries::bigint FROM flow_entries").await,
+                2
+            );
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn always_waits_out_its_minimum_interval_and_once_never_lets_a_person_back(pool: PgPool) {
-        let env = Env::new(pool).await;
-        let ann = env.person("a").await;
-        let always = env
-            .flow(
-                "Often",
-                settings(
-                    json!({"type": "api"}),
-                    json!({"mode": "always", "min_interval_seconds": 3600}),
-                ),
-            )
-            .await;
-        let once_only = env
-            .flow("Once", settings(json!({"type": "api"}), once()))
-            .await;
-        let request = |flow| EnrollJobPayload {
-            workspace: env.ws,
-            flow,
-            version: None,
-            trigger: TriggerKind::Api,
-            work: EnrollWork::People(vec![(ann, Uuid::now_v7())]),
-        };
-        let trace = TraceContext::root(Cause::api("req"));
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            let ann = env.person("a").await;
+            let always = env
+                .flow(
+                    "Often",
+                    settings(
+                        json!({"type": "api"}),
+                        json!({"mode": "always", "min_interval_seconds": 3600}),
+                    ),
+                )
+                .await;
+            let once_only = env
+                .flow("Once", settings(json!({"type": "api"}), once()))
+                .await;
+            let request = |flow| EnrollJobPayload {
+                workspace: env.ws,
+                flow,
+                version: None,
+                trigger: TriggerKind::Api,
+                work: EnrollWork::People(vec![(ann, Uuid::now_v7())]),
+            };
+            let trace = TraceContext::root(Cause::api("req"));
 
-        for flow in [always, once_only] {
-            env.run(&request(flow), &trace).await;
-        }
-        env.end_enrollments(always).await;
-        env.end_enrollments(once_only).await;
-        env.clock.advance(Span::minutes(59));
-        for flow in [always, once_only] {
-            env.run(&request(flow), &trace).await;
-        }
-        assert_eq!(env.enrolled(always).await.len(), 1);
-        assert_eq!(env.decisions("skipped", Some("reentry_interval")).await, 1);
-        assert_eq!(env.decisions("skipped", Some("already_entered")).await, 1);
-        env.clock.advance(Span::minutes(2));
-        for flow in [always, once_only] {
-            env.run(&request(flow), &trace).await;
-        }
+            for flow in [always, once_only] {
+                env.run(&request(flow), &trace).await;
+            }
+            env.end_enrollments(always).await;
+            env.end_enrollments(once_only).await;
+            env.clock.advance(Span::minutes(59));
+            for flow in [always, once_only] {
+                env.run(&request(flow), &trace).await;
+            }
+            assert_eq!(env.enrolled(always).await.len(), 1);
+            assert_eq!(env.decisions("skipped", Some("reentry_interval")).await, 1);
+            assert_eq!(env.decisions("skipped", Some("already_entered")).await, 1);
+            env.clock.advance(Span::minutes(2));
+            for flow in [always, once_only] {
+                env.run(&request(flow), &trace).await;
+            }
 
-        assert_eq!(env.enrolled(always).await.len(), 2);
-        assert_eq!(env.enrolled(once_only).await.len(), 1);
-        assert_eq!(env.decisions("skipped", Some("already_entered")).await, 2);
+            assert_eq!(env.enrolled(always).await.len(), 2);
+            assert_eq!(env.enrolled(once_only).await.len(), 1);
+            assert_eq!(env.decisions("skipped", Some("already_entered")).await, 2);
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -1576,75 +1619,78 @@ mod tests {
     async fn a_paused_flow_skips_every_person_with_a_decision_and_a_count_and_a_whole_audience_once(
         pool: PgPool,
     ) {
-        let recorder = PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
-        let _guard = ::metrics::set_default_local_recorder(&recorder);
-        let env = Env::new(pool).await;
-        let (ann, bob) = (env.person("a").await, env.person("b").await);
-        env.people(3, "c").await;
-        let flow = env
-            .flow("Paused", settings(json!({"type": "api"}), once()))
-            .await;
-        env.pause(flow).await;
-        let trace = TraceContext::root(Cause::api("req"));
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let recorder = PrometheusBuilder::new().build_recorder();
+            let handle = recorder.handle();
+            let _guard = ::metrics::set_default_local_recorder(&recorder);
+            let env = Env::new(pool).await;
+            let (ann, bob) = (env.person("a").await, env.person("b").await);
+            env.people(3, "c").await;
+            let flow = env
+                .flow("Paused", settings(json!({"type": "api"}), once()))
+                .await;
+            env.pause(flow).await;
+            let trace = TraceContext::root(Cause::api("req"));
 
-        env.run(
-            &EnrollJobPayload {
-                workspace: env.ws,
-                flow,
-                version: None,
-                trigger: TriggerKind::Api,
-                work: EnrollWork::People(vec![(ann, Uuid::now_v7()), (bob, Uuid::now_v7())]),
-            },
-            &trace,
-        )
-        .await;
-        env.run(
-            &EnrollJobPayload {
-                workspace: env.ws,
-                flow,
-                version: None,
-                trigger: TriggerKind::Schedule,
-                work: EnrollWork::Audience {
-                    source: AudienceSource::Everyone,
-                    occurrence: None,
-                    after: None,
-                    entered_by: None,
+            env.run(
+                &EnrollJobPayload {
+                    workspace: env.ws,
+                    flow,
+                    version: None,
+                    trigger: TriggerKind::Api,
+                    work: EnrollWork::People(vec![(ann, Uuid::now_v7()), (bob, Uuid::now_v7())]),
                 },
-            },
-            &trace,
-        )
-        .await;
+                &trace,
+            )
+            .await;
+            env.run(
+                &EnrollJobPayload {
+                    workspace: env.ws,
+                    flow,
+                    version: None,
+                    trigger: TriggerKind::Schedule,
+                    work: EnrollWork::Audience {
+                        source: AudienceSource::Everyone,
+                        occurrence: None,
+                        after: None,
+                        entered_by: None,
+                    },
+                },
+                &trace,
+            )
+            .await;
 
-        assert!(env.enrolled(flow).await.is_empty());
-        assert_eq!(env.decisions("skipped", Some("flow_paused")).await, 3);
-        let output = handle.render();
-        assert!(
-            output.contains(
-                "zirv_flow_flow_enroll_skips_total{trigger=\"api\",reason=\"flow_paused\"} 2"
-            ),
-            "{output}"
-        );
-        assert!(
+            assert!(env.enrolled(flow).await.is_empty());
+            assert_eq!(env.decisions("skipped", Some("flow_paused")).await, 3);
+            let output = handle.render();
+            assert!(
+                output.contains(
+                    "zirv_flow_flow_enroll_skips_total{trigger=\"api\",reason=\"flow_paused\"} 2"
+                ),
+                "{output}"
+            );
+            assert!(
             output.contains(
                 "zirv_flow_flow_enroll_skips_total{trigger=\"schedule\",reason=\"flow_paused\"} 1"
             ),
             "{output}"
         );
-        // Resumed, the same flow takes people again.
-        env.resume(flow).await;
-        env.run(
-            &EnrollJobPayload {
-                workspace: env.ws,
-                flow,
-                version: None,
-                trigger: TriggerKind::Api,
-                work: EnrollWork::People(vec![(ann, Uuid::now_v7())]),
-            },
-            &trace,
-        )
+            // Resumed, the same flow takes people again.
+            env.resume(flow).await;
+            env.run(
+                &EnrollJobPayload {
+                    workspace: env.ws,
+                    flow,
+                    version: None,
+                    trigger: TriggerKind::Api,
+                    work: EnrollWork::People(vec![(ann, Uuid::now_v7())]),
+                },
+                &trace,
+            )
+            .await;
+            assert_eq!(env.enrolled(flow).await, [ann]);
+        })
         .await;
-        assert_eq!(env.enrolled(flow).await, [ann]);
     }
 
     /// Exit criterion 4 of milestone 5: a segment-entry trigger for 100,000 people enrolls each
@@ -1652,32 +1698,33 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_segment_entry_trigger_for_100000_people_enrolls_each_exactly_once(pool: PgPool) {
-        const PEOPLE: i32 = 100_000;
-        let started = Instant::now();
-        let env = Env::new(pool).await;
-        env.define_plan().await;
-        env.people(PEOPLE, "free").await;
-        let segment = env.segment("Pros", plan_is("pro")).await;
-        let flow = env
-            .flow(
-                "Welcome",
-                settings(entered_trigger(segment, "entered"), once()),
-            )
-            .await;
-        // The first computation is the definition's and finds nobody; then everyone upgrades.
-        env.refresh(segment, "save", TraceContext::root(Cause::api("job")))
-            .await;
-        env.set_plan("free", "pro").await;
-        let seeded = started.elapsed();
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            const PEOPLE: i32 = 100_000;
+            let started = Instant::now();
+            let env = Env::new(pool).await;
+            env.define_plan().await;
+            env.people(PEOPLE, "free").await;
+            let segment = env.segment("Pros", plan_is("pro")).await;
+            let flow = env
+                .flow(
+                    "Welcome",
+                    settings(entered_trigger(segment, "entered"), once()),
+                )
+                .await;
+            // The first computation is the definition's and finds nobody; then everyone upgrades.
+            env.refresh(segment, "save", TraceContext::root(Cause::api("job")))
+                .await;
+            env.set_plan("free", "pro").await;
+            let seeded = started.elapsed();
 
-        let (_, trace) = schedule_trace();
-        env.refresh(segment, "schedule", trace).await;
-        let refreshed = started.elapsed();
-        let jobs = env.enroll_jobs().await;
-        assert_eq!(jobs, 100, "a thousand pairs to a job");
+            let (_, trace) = schedule_trace();
+            env.refresh(segment, "schedule", trace).await;
+            let refreshed = started.elapsed();
+            let jobs = env.enroll_jobs().await;
+            assert_eq!(jobs, 100, "a thousand pairs to a job");
 
-        // Ten of the jobs are delivered twice, and four workers race for them.
-        sqlx::query(
+            // Ten of the jobs are delivered twice, and four workers race for them.
+            sqlx::query(
             "INSERT INTO jobs (id, workspace_id, kind, payload, trace_id, cause_kind, cause_id) \
              SELECT gen_random_uuid(), workspace_id, kind, payload, trace_id, cause_kind, cause_id \
              FROM jobs WHERE kind = 'flow.enroll' ORDER BY id LIMIT 10",
@@ -1685,62 +1732,64 @@ mod tests {
         .execute(&env.pool)
         .await
         .unwrap();
-        assert_eq!(env.drain(4).await, 110);
-        let enrolled = started.elapsed();
+            assert_eq!(env.drain(4).await, 110);
+            let enrolled = started.elapsed();
 
-        let (rows, people, versions): (i64, i64, i64) = sqlx::query_as(
-            "SELECT count(*), count(DISTINCT person_id), count(DISTINCT occurrence_id) \
+            let (rows, people, versions): (i64, i64, i64) = sqlx::query_as(
+                "SELECT count(*), count(DISTINCT person_id), count(DISTINCT occurrence_id) \
              FROM enrollments WHERE flow_id = $1",
-        )
-        .bind(flow)
-        .fetch_one(&env.pool)
-        .await
-        .unwrap();
-        assert_eq!((rows, people), (100_000, 100_000));
-        assert_eq!(
-            versions, 100_000,
-            "each person enrolled for their own entry event"
-        );
-        assert_eq!(env.decisions("enrolled", None).await, 100_000);
-        assert_eq!(
-            env.count("SELECT count(*) FROM jobs WHERE kind = 'flow.step'")
-                .await,
-            100_000,
-            "a start job for each, and no more"
-        );
+            )
+            .bind(flow)
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+            assert_eq!((rows, people), (100_000, 100_000));
+            assert_eq!(
+                versions, 100_000,
+                "each person enrolled for their own entry event"
+            );
+            assert_eq!(env.decisions("enrolled", None).await, 100_000);
+            assert_eq!(
+                env.count("SELECT count(*) FROM jobs WHERE kind = 'flow.step'")
+                    .await,
+                100_000,
+                "a start job for each, and no more"
+            );
 
-        // The enrollments end, the segment is left and entered again: new events, so new
-        // occurrences, and the re-entry rule refuses all of them.
-        env.end_enrollments(flow).await;
-        env.set_plan("pro", "free").await;
-        let (_, trace) = schedule_trace();
-        env.refresh(segment, "schedule", trace).await;
-        env.set_plan("free", "pro").await;
-        let (_, trace) = schedule_trace();
-        env.refresh(segment, "schedule", trace).await;
-        assert_eq!(env.enroll_jobs().await, 100);
-        assert_eq!(env.drain(4).await, 100);
-        let finished = started.elapsed();
+            // The enrollments end, the segment is left and entered again: new events, so new
+            // occurrences, and the re-entry rule refuses all of them.
+            env.end_enrollments(flow).await;
+            env.set_plan("pro", "free").await;
+            let (_, trace) = schedule_trace();
+            env.refresh(segment, "schedule", trace).await;
+            env.set_plan("free", "pro").await;
+            let (_, trace) = schedule_trace();
+            env.refresh(segment, "schedule", trace).await;
+            assert_eq!(env.enroll_jobs().await, 100);
+            assert_eq!(env.drain(4).await, 100);
+            let finished = started.elapsed();
 
-        assert_eq!(env.enrolled(flow).await.len(), 100_000);
-        assert_eq!(
-            env.count("SELECT count(*) FROM enrollments").await,
-            100_000,
-            "nobody entered twice"
-        );
-        assert_eq!(
-            env.count("SELECT max(entries)::bigint FROM flow_entries")
-                .await,
-            1
-        );
-        assert_eq!(
-            env.decisions("skipped", Some("already_entered")).await,
-            100_000
-        );
-        eprintln!(
-            "criterion 4: seeded {seeded:?}, refreshed {refreshed:?}, enrolled {enrolled:?}, \
+            assert_eq!(env.enrolled(flow).await.len(), 100_000);
+            assert_eq!(
+                env.count("SELECT count(*) FROM enrollments").await,
+                100_000,
+                "nobody entered twice"
+            );
+            assert_eq!(
+                env.count("SELECT max(entries)::bigint FROM flow_entries")
+                    .await,
+                1
+            );
+            assert_eq!(
+                env.decisions("skipped", Some("already_entered")).await,
+                100_000
+            );
+            eprintln!(
+                "criterion 4: seeded {seeded:?}, refreshed {refreshed:?}, enrolled {enrolled:?}, \
              re-entry refused {finished:?}"
-        );
+            );
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -1748,100 +1797,106 @@ mod tests {
     async fn a_job_meeting_an_erased_person_writes_no_decision_naming_them_and_counts_the_skip(
         pool: PgPool,
     ) {
-        let recorder = PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
-        let _guard = ::metrics::set_default_local_recorder(&recorder);
-        let env = Env::new(pool).await;
-        let ann = env.person("a").await;
-        // Erased after the job was queued: no row, no id to write down.
-        let erased = Uuid::now_v7();
-        let flow = env
-            .flow("By api", settings(json!({"type": "api"}), once()))
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let recorder = PrometheusBuilder::new().build_recorder();
+            let handle = recorder.handle();
+            let _guard = ::metrics::set_default_local_recorder(&recorder);
+            let env = Env::new(pool).await;
+            let ann = env.person("a").await;
+            // Erased after the job was queued: no row, no id to write down.
+            let erased = Uuid::now_v7();
+            let flow = env
+                .flow("By api", settings(json!({"type": "api"}), once()))
+                .await;
+
+            env.run(
+                &EnrollJobPayload {
+                    workspace: env.ws,
+                    flow,
+                    version: None,
+                    trigger: TriggerKind::Api,
+                    work: EnrollWork::People(vec![(ann, Uuid::now_v7()), (erased, Uuid::now_v7())]),
+                },
+                &TraceContext::root(Cause::api("req")),
+            )
             .await;
 
-        env.run(
-            &EnrollJobPayload {
-                workspace: env.ws,
-                flow,
-                version: None,
-                trigger: TriggerKind::Api,
-                work: EnrollWork::People(vec![(ann, Uuid::now_v7()), (erased, Uuid::now_v7())]),
-            },
-            &TraceContext::root(Cause::api("req")),
-        )
-        .await;
-
-        assert_eq!(env.enrolled(flow).await, [ann]);
-        let naming = env
+            assert_eq!(env.enrolled(flow).await, [ann]);
+            let naming = env
             .count(&format!(
                 "SELECT count(*) FROM decision_records WHERE subject_ids::text LIKE '%{erased}%'"
             ))
             .await;
-        assert_eq!(naming, 0, "no decision names the erased person");
-        assert_eq!(env.decisions("skipped", Some("no_such_person")).await, 0);
-        let output = handle.render();
-        assert!(
-            output.contains(
-                "zirv_flow_flow_enroll_skips_total{trigger=\"api\",reason=\"no_such_person\"} 1"
-            ),
-            "{output}"
-        );
+            assert_eq!(naming, 0, "no decision names the erased person");
+            assert_eq!(env.decisions("skipped", Some("no_such_person")).await, 0);
+            let output = handle.render();
+            assert!(
+                output.contains(
+                    "zirv_flow_flow_enroll_skips_total{trigger=\"api\",reason=\"no_such_person\"} 1"
+                ),
+                "{output}"
+            );
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_job_naming_a_merged_away_person_enrolls_the_survivor_once(pool: PgPool) {
-        let env = Env::new(pool).await;
-        let (survivor, loser, other) = (
-            env.person("a").await,
-            env.person("b").await,
-            env.person("c").await,
-        );
-        sqlx::query("UPDATE people SET merged_into = $2 WHERE id = $1")
-            .bind(loser)
-            .bind(survivor)
-            .execute(&env.pool)
-            .await
-            .unwrap();
-        let only_loser = env
-            .flow("Loser only", settings(json!({"type": "api"}), once()))
-            .await;
-        let both = env
-            .flow("Both", settings(json!({"type": "api"}), once()))
-            .await;
-        let trace = TraceContext::root(Cause::api("req"));
-        let job = |flow, pairs| EnrollJobPayload {
-            workspace: env.ws,
-            flow,
-            version: None,
-            trigger: TriggerKind::Api,
-            work: EnrollWork::People(pairs),
-        };
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            let (survivor, loser, other) = (
+                env.person("a").await,
+                env.person("b").await,
+                env.person("c").await,
+            );
+            sqlx::query("UPDATE people SET merged_into = $2 WHERE id = $1")
+                .bind(loser)
+                .bind(survivor)
+                .execute(&env.pool)
+                .await
+                .unwrap();
+            let only_loser = env
+                .flow("Loser only", settings(json!({"type": "api"}), once()))
+                .await;
+            let both = env
+                .flow("Both", settings(json!({"type": "api"}), once()))
+                .await;
+            let trace = TraceContext::root(Cause::api("req"));
+            let job = |flow, pairs| EnrollJobPayload {
+                workspace: env.ws,
+                flow,
+                version: None,
+                trigger: TriggerKind::Api,
+                work: EnrollWork::People(pairs),
+            };
 
-        env.run(&job(only_loser, vec![(loser, Uuid::now_v7())]), &trace)
+            env.run(&job(only_loser, vec![(loser, Uuid::now_v7())]), &trace)
+                .await;
+            env.run(
+                &job(
+                    both,
+                    vec![
+                        (loser, Uuid::now_v7()),
+                        (survivor, Uuid::now_v7()),
+                        (other, Uuid::now_v7()),
+                    ],
+                ),
+                &trace,
+            )
             .await;
-        env.run(
-            &job(
-                both,
-                vec![
-                    (loser, Uuid::now_v7()),
-                    (survivor, Uuid::now_v7()),
-                    (other, Uuid::now_v7()),
-                ],
-            ),
-            &trace,
-        )
+
+            assert_eq!(env.enrolled(only_loser).await, [survivor]);
+            let mut expected = vec![survivor, other];
+            expected.sort_unstable();
+            assert_eq!(env.enrolled(both).await, expected, "the survivor once");
+            // The re-entry rule decides: the survivor is already in the flow, so a second job is refused.
+            env.run(&job(only_loser, vec![(loser, Uuid::now_v7())]), &trace)
+                .await;
+            assert_eq!(env.enrolled(only_loser).await, [survivor]);
+            assert_eq!(env.decisions("skipped", Some("already_active")).await, 1);
+        })
         .await;
-
-        assert_eq!(env.enrolled(only_loser).await, [survivor]);
-        let mut expected = vec![survivor, other];
-        expected.sort_unstable();
-        assert_eq!(env.enrolled(both).await, expected, "the survivor once");
-        // The re-entry rule decides: the survivor is already in the flow, so a second job is refused.
-        env.run(&job(only_loser, vec![(loser, Uuid::now_v7())]), &trace)
-            .await;
-        assert_eq!(env.enrolled(only_loser).await, [survivor]);
-        assert_eq!(env.decisions("skipped", Some("already_active")).await, 1);
     }
 
     #[sqlx::test]
@@ -1849,123 +1904,132 @@ mod tests {
     async fn an_event_job_for_a_merged_away_person_enrolls_the_survivor_whether_or_not_the_event_moved(
         pool: PgPool,
     ) {
-        let env = Env::new(pool).await;
-        env.define_order().await;
-        let flow = env
-            .flow(
-                "Orders",
-                settings(
-                    json!({"type": "event", "event": "order", "filters": []}),
-                    once(),
-                ),
-            )
-            .await;
-        let key = HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction);
-        let record = |email: &str| EventRecord {
-            source_record_id: None,
-            source: "web".into(),
-            identifiers: vec![("email".into(), email.into())],
-            name: "order".into(),
-            properties: json!({"total": 5}).as_object().cloned().unwrap(),
-            timestamp: None,
-            received_at: env.clock.now(),
-            message_id: None,
-            trace: TraceContext::root(Cause::api("event")),
-        };
-        zirv_flow_store::apply_event_batch(
-            &env.pool,
-            env.ws,
-            &key,
-            &[record("ada@example.com"), record("bea@example.com")],
-        )
-        .await
-        .unwrap();
-        assert_eq!(env.enroll_jobs().await, 1);
-        let person_of = |email: &'static str| {
-            let pool = env.pool.clone();
-            async move {
-                sqlx::query_scalar::<_, Uuid>(
-                    "SELECT person_id FROM identities WHERE kind = 'email' AND value = $1",
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            env.define_order().await;
+            let flow = env
+                .flow(
+                    "Orders",
+                    settings(
+                        json!({"type": "event", "event": "order", "filters": []}),
+                        once(),
+                    ),
                 )
-                .bind(email)
-                .fetch_one(&pool)
-                .await
-                .unwrap()
+                .await;
+            let key =
+                HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction);
+            let record = |email: &str| EventRecord {
+                source_record_id: None,
+                source: "web".into(),
+                identifiers: vec![("email".into(), email.into())],
+                name: "order".into(),
+                properties: json!({"total": 5}).as_object().cloned().unwrap(),
+                timestamp: None,
+                received_at: env.clock.now(),
+                message_id: None,
+                trace: TraceContext::root(Cause::api("event")),
+            };
+            zirv_flow_store::apply_event_batch(
+                &env.pool,
+                env.ws,
+                &key,
+                &[record(PERSONAL_DATA.email), record("bea@example.com")],
+            )
+            .await
+            .unwrap();
+            assert_eq!(env.enroll_jobs().await, 1);
+            let person_of = |email: &'static str| {
+                let pool = env.pool.clone();
+                async move {
+                    sqlx::query_scalar::<_, Uuid>(
+                        "SELECT person_id FROM identities WHERE kind = 'email' AND value = $1",
+                    )
+                    .bind(email)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+                }
+            };
+            let (ada, bea) = (
+                person_of(PERSONAL_DATA.email).await,
+                person_of("bea@example.com").await,
+            );
+            let (ada_survivor, bea_survivor) = (env.person("x").await, env.person("y").await);
+            // Both are merged after the job was queued. Ada's event was re-pointed to the survivor
+            // by the rewrite job; Bea's was not yet.
+            for (loser, survivor) in [(ada, ada_survivor), (bea, bea_survivor)] {
+                sqlx::query("UPDATE people SET merged_into = $2 WHERE id = $1")
+                    .bind(loser)
+                    .bind(survivor)
+                    .execute(&env.pool)
+                    .await
+                    .unwrap();
             }
-        };
-        let (ada, bea) = (
-            person_of("ada@example.com").await,
-            person_of("bea@example.com").await,
-        );
-        let (ada_survivor, bea_survivor) = (env.person("x").await, env.person("y").await);
-        // Both are merged after the job was queued. Ada's event was re-pointed to the survivor
-        // by the rewrite job; Bea's was not yet.
-        for (loser, survivor) in [(ada, ada_survivor), (bea, bea_survivor)] {
+            sqlx::query("UPDATE events SET person_id = $2 WHERE person_id = $1")
+                .bind(ada)
+                .bind(ada_survivor)
+                .execute(&env.pool)
+                .await
+                .unwrap();
+
+            assert_eq!(env.drain(1).await, 1);
+
+            let mut expected = vec![ada_survivor, bea_survivor];
+            expected.sort_unstable();
+            assert_eq!(env.enrolled(flow).await, expected);
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_redelivered_occurrence_after_a_merge_is_a_replay_under_the_losers_id(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            let (survivor, loser) = (env.person("a").await, env.person("b").await);
+            let flow = env
+                .flow(
+                    "By api",
+                    settings(json!({"type": "api"}), json!({"mode": "once_at_a_time"})),
+                )
+                .await;
+            let occurrence = Uuid::now_v7();
+            let trace = TraceContext::root(Cause::api("req"));
+            let job = EnrollJobPayload {
+                workspace: env.ws,
+                flow,
+                version: None,
+                trigger: TriggerKind::Api,
+                work: EnrollWork::People(vec![(loser, occurrence)]),
+            };
+            env.run(&job, &trace).await;
+            assert_eq!(env.enrolled(flow).await, [loser]);
+
+            // The merge exits the loser's enrollment and points the loser at the survivor.
+            sqlx::query(
+                "UPDATE enrollments SET state = 'exited', ended_at = now() WHERE flow_id = $1",
+            )
+            .bind(flow)
+            .execute(&env.pool)
+            .await
+            .unwrap();
             sqlx::query("UPDATE people SET merged_into = $2 WHERE id = $1")
                 .bind(loser)
                 .bind(survivor)
                 .execute(&env.pool)
                 .await
                 .unwrap();
-        }
-        sqlx::query("UPDATE events SET person_id = $2 WHERE person_id = $1")
-            .bind(ada)
-            .bind(ada_survivor)
-            .execute(&env.pool)
-            .await
-            .unwrap();
 
-        assert_eq!(env.drain(1).await, 1);
+            env.run(&job, &trace).await;
 
-        let mut expected = vec![ada_survivor, bea_survivor];
-        expected.sort_unstable();
-        assert_eq!(env.enrolled(flow).await, expected);
-    }
-
-    #[sqlx::test]
-    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_redelivered_occurrence_after_a_merge_is_a_replay_under_the_losers_id(pool: PgPool) {
-        let env = Env::new(pool).await;
-        let (survivor, loser) = (env.person("a").await, env.person("b").await);
-        let flow = env
-            .flow(
-                "By api",
-                settings(json!({"type": "api"}), json!({"mode": "once_at_a_time"})),
-            )
-            .await;
-        let occurrence = Uuid::now_v7();
-        let trace = TraceContext::root(Cause::api("req"));
-        let job = EnrollJobPayload {
-            workspace: env.ws,
-            flow,
-            version: None,
-            trigger: TriggerKind::Api,
-            work: EnrollWork::People(vec![(loser, occurrence)]),
-        };
-        env.run(&job, &trace).await;
-        assert_eq!(env.enrolled(flow).await, [loser]);
-
-        // The merge exits the loser's enrollment and points the loser at the survivor.
-        sqlx::query("UPDATE enrollments SET state = 'exited', ended_at = now() WHERE flow_id = $1")
-            .bind(flow)
-            .execute(&env.pool)
-            .await
-            .unwrap();
-        sqlx::query("UPDATE people SET merged_into = $2 WHERE id = $1")
-            .bind(loser)
-            .bind(survivor)
-            .execute(&env.pool)
-            .await
-            .unwrap();
-
-        env.run(&job, &trace).await;
-
-        assert_eq!(
-            env.enrolled(flow).await,
-            [loser],
-            "the redelivery enrolls nobody new"
-        );
-        assert_eq!(env.decisions("enrolled", None).await, 1);
+            assert_eq!(
+                env.enrolled(flow).await,
+                [loser],
+                "the redelivery enrolls nobody new"
+            );
+            assert_eq!(env.decisions("enrolled", None).await, 1);
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -1973,102 +2037,108 @@ mod tests {
     async fn a_page_ending_in_a_refused_person_erased_while_it_runs_queues_no_job_naming_them(
         pool: PgPool,
     ) {
-        let env = Env::new(pool).await;
-        env.people(MAX_ENROLL_PEOPLE as i32, "a").await;
-        let last: Uuid = sqlx::query_scalar(
-            "SELECT id FROM people WHERE workspace_id = $1 ORDER BY id DESC LIMIT 1",
-        )
-        .bind(env.ws.as_uuid())
-        .fetch_one(&env.pool)
-        .await
-        .unwrap();
-        let flow = env
-            .flow("By api", settings(json!({"type": "api"}), once()))
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            env.people(MAX_ENROLL_PEOPLE as i32, "a").await;
+            let last: Uuid = sqlx::query_scalar(
+                "SELECT id FROM people WHERE workspace_id = $1 ORDER BY id DESC LIMIT 1",
+            )
+            .bind(env.ws.as_uuid())
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+            let flow = env
+                .flow("By api", settings(json!({"type": "api"}), once()))
+                .await;
+            let trace = TraceContext::root(Cause::api("req"));
+            // The last person of the page entered before, so the page refuses them: no insert locks
+            // their row.
+            env.run(
+                &EnrollJobPayload {
+                    workspace: env.ws,
+                    flow,
+                    version: None,
+                    trigger: TriggerKind::Api,
+                    work: EnrollWork::People(vec![(last, Uuid::now_v7())]),
+                },
+                &trace,
+            )
             .await;
-        let trace = TraceContext::root(Cause::api("req"));
-        // The last person of the page entered before, so the page refuses them: no insert locks
-        // their row.
-        env.run(
-            &EnrollJobPayload {
+            env.end_enrollments(flow).await;
+            let page = EnrollJobPayload {
                 workspace: env.ws,
                 flow,
                 version: None,
                 trigger: TriggerKind::Api,
-                work: EnrollWork::People(vec![(last, Uuid::now_v7())]),
-            },
-            &trace,
-        )
-        .await;
-        env.end_enrollments(flow).await;
-        let page = EnrollJobPayload {
-            workspace: env.ws,
-            flow,
-            version: None,
-            trigger: TriggerKind::Api,
-            work: EnrollWork::Audience {
-                source: AudienceSource::Everyone,
-                occurrence: Some(Uuid::now_v7()),
-                after: None,
-                entered_by: None,
-            },
-        };
-        enqueue(&env.pool, &page.job(&trace, "test:page".into()))
+                work: EnrollWork::Audience {
+                    source: AudienceSource::Everyone,
+                    occurrence: Some(Uuid::now_v7()),
+                    after: None,
+                    entered_by: None,
+                },
+            };
+            enqueue(&env.pool, &page.job(&trace, "test:page".into()))
+                .await
+                .unwrap();
+
+            // The erasure holds the person (and has stripped the queue) while the page runs.
+            let mut erasure = zirv_flow_store::begin(&env.pool).await.unwrap();
+            zirv_flow_store::delete_person(
+                &mut erasure,
+                env.ws,
+                last,
+                zirv_flow_store::DeleteReason::Erasure,
+                &trace,
+            )
             .await
             .unwrap();
-
-        // The erasure holds the person (and has stripped the queue) while the page runs.
-        let mut erasure = zirv_flow_store::begin(&env.pool).await.unwrap();
-        zirv_flow_store::delete_person(
-            &mut erasure,
-            env.ws,
-            last,
-            zirv_flow_store::DeleteReason::Erasure,
-            &trace,
-        )
-        .await
-        .unwrap();
-        let claimed = claim_job(
-            &env.pool,
-            "test",
-            &[ENROLL_JOB_KIND],
-            Duration::from_secs(120),
-            None,
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        let pool = env.pool.clone();
-        let clock = env.clock();
-        let running = tokio::spawn(async move { execute(&pool, &clock, claimed).await.unwrap() });
-        let deadline = Instant::now() + Duration::from_secs(60);
-        loop {
-            let blocked: i64 = env
-                .count(
-                    "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() \
+            let claimed = claim_job(
+                &env.pool,
+                "test",
+                &[ENROLL_JOB_KIND],
+                Duration::from_secs(120),
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let pool = env.pool.clone();
+            let clock = env.clock();
+            let running =
+                tokio::spawn(async move { execute(&pool, &clock, claimed).await.unwrap() });
+            let deadline = Instant::now() + Duration::from_secs(60);
+            loop {
+                let blocked: i64 = env
+                    .count(
+                        "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() \
                        AND cardinality(pg_blocking_pids(pid)) > 0",
-                )
-                .await;
-            if blocked > 0 || running.is_finished() {
-                break;
+                    )
+                    .await;
+                if blocked > 0 || running.is_finished() {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "the page neither ran nor waited");
+                tokio::time::sleep(Duration::from_millis(5)).await;
             }
-            assert!(Instant::now() < deadline, "the page neither ran nor waited");
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        zirv_flow_store::commit(erasure).await.unwrap();
-        running.await.unwrap();
+            zirv_flow_store::commit(erasure).await.unwrap();
+            running.await.unwrap();
 
-        let naming = env
-            .count(&format!(
-                "SELECT count(*) FROM jobs WHERE payload::text LIKE '%{last}%' \
+            let naming = env
+                .count(&format!(
+                    "SELECT count(*) FROM jobs WHERE payload::text LIKE '%{last}%' \
                    OR unique_key LIKE '%{last}%'"
-            ))
-            .await;
-        assert_eq!(naming, 0, "no job names the erased person");
-        assert_eq!(
-            env.count("SELECT count(*) FROM jobs WHERE kind = 'flow.enroll' AND state = 'ready'")
+                ))
+                .await;
+            assert_eq!(naming, 0, "no job names the erased person");
+            assert_eq!(
+                env.count(
+                    "SELECT count(*) FROM jobs WHERE kind = 'flow.enroll' AND state = 'ready'"
+                )
                 .await,
-            1,
-            "the full page still queues the next one"
-        );
+                1,
+                "the full page still queues the next one"
+            );
+        })
+        .await;
     }
 }

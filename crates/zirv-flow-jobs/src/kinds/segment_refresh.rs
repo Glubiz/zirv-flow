@@ -165,6 +165,8 @@ pub(crate) fn sql_query(query: zirv_flow_segments::Query) -> SqlQuery {
 
 #[cfg(test)]
 mod tests {
+    use zirv_flow_store::decision_testing::PERSONAL_DATA;
+
     use std::time::Duration;
 
     use serde_json::json;
@@ -270,7 +272,7 @@ mod tests {
             stream: "contacts".into(),
             record_key: email.into(),
             identifiers: vec![("email".into(), email.into())],
-            traits: json!({"plan": plan}).as_object().cloned().unwrap(),
+            traits: json!({"plan": plan, "first_name": PERSONAL_DATA.first_name, "last_name": PERSONAL_DATA.last_name}).as_object().cloned().unwrap(),
             observed_at: OffsetDateTime::now_utc(),
             trace: TraceContext::root(Cause::api("t")),
         };
@@ -410,87 +412,91 @@ mod tests {
     async fn a_time_window_segment_gains_members_as_the_clock_advances_with_no_new_data(
         pool: PgPool,
     ) {
-        zirv_flow_store::migrate(&pool).await.unwrap();
-        let ws = workspace(&pool).await;
-        define_order_event(&pool, ws).await;
-        let start = OffsetDateTime::now_utc();
-        let start = start
-            .replace_nanosecond(start.microsecond() * 1000)
-            .unwrap();
-        let key = HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction);
-        let ada_order = EventRecord {
-            source_record_id: None,
-            source: "web".into(),
-            identifiers: vec![("email".into(), "ada@example.com".into())],
-            name: "order".into(),
-            properties: json!({"total": 10}).as_object().cloned().unwrap(),
-            timestamp: Some(start - time::Duration::days(20)),
-            received_at: start,
-            message_id: None,
-            trace: TraceContext::root(Cause::api("t")),
-        };
-        zirv_flow_store::apply_event_batch(&pool, ws, &key, &[ada_order])
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            zirv_flow_store::migrate(&pool).await.unwrap();
+            let ws = workspace(&pool).await;
+            define_order_event(&pool, ws).await;
+            let start = OffsetDateTime::now_utc();
+            let start = start
+                .replace_nanosecond(start.microsecond() * 1000)
+                .unwrap();
+            let key =
+                HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction);
+            let ada_order = EventRecord {
+                source_record_id: None,
+                source: "web".into(),
+                identifiers: vec![("email".into(), PERSONAL_DATA.email.into())],
+                name: "order".into(),
+                properties: json!({"total": 10}).as_object().cloned().unwrap(),
+                timestamp: Some(start - time::Duration::days(20)),
+                received_at: start,
+                message_id: None,
+                trace: TraceContext::root(Cause::api("t")),
+            };
+            zirv_flow_store::apply_event_batch(&pool, ws, &key, &[ada_order])
+                .await
+                .unwrap();
+            let ada: Uuid =
+                sqlx::query_scalar("SELECT person_id FROM identities WHERE workspace_id = $1")
+                    .bind(ws.as_uuid())
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            let bob = person(&pool, ws, "bob@example.com", "pro").await;
+            let (clock, handle) = manual(start);
+            let seg = create(
+                &pool,
+                ws,
+                "Lapsed",
+                json!({"not": {"event": "order", "window": {"last": "P30D"}}, "v": 1}),
+                &TraceContext::root(Cause::api("save")),
+            )
+            .await;
+
+            run(
+                &pool,
+                ws,
+                seg.id,
+                "save",
+                TraceContext::root(Cause::api("job")),
+                &clock,
+            )
+            .await;
+            assert_eq!(open(&pool, seg.id).await, [bob]);
+
+            handle.advance(time::Duration::days(11));
+            run(
+                &pool,
+                ws,
+                seg.id,
+                "schedule",
+                TraceContext::root(Cause::schedule(Uuid::new_v4())),
+                &clock,
+            )
+            .await;
+
+            let mut both = vec![ada, bob];
+            both.sort();
+            assert_eq!(open(&pool, seg.id).await, both);
+            let (cause, at): (String, OffsetDateTime) = sqlx::query_as(
+                "SELECT properties ->> 'cause', occurred_at FROM events \
+             WHERE name = 'segment.entered' AND person_id = $1",
+            )
+            .bind(ada)
+            .fetch_one(&pool)
             .await
             .unwrap();
-        let ada: Uuid =
-            sqlx::query_scalar("SELECT person_id FROM identities WHERE workspace_id = $1")
-                .bind(ws.as_uuid())
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        let bob = person(&pool, ws, "bob@example.com", "pro").await;
-        let (clock, handle) = manual(start);
-        let seg = create(
-            &pool,
-            ws,
-            "Lapsed",
-            json!({"not": {"event": "order", "window": {"last": "P30D"}}, "v": 1}),
-            &TraceContext::root(Cause::api("save")),
-        )
+            assert_eq!(cause, "time");
+            assert_eq!(at, start + time::Duration::days(11));
+            let computed: Option<OffsetDateTime> =
+                sqlx::query_scalar("SELECT computed_at FROM segments WHERE id = $1")
+                    .bind(seg.id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(computed, Some(start + time::Duration::days(11)));
+        })
         .await;
-
-        run(
-            &pool,
-            ws,
-            seg.id,
-            "save",
-            TraceContext::root(Cause::api("job")),
-            &clock,
-        )
-        .await;
-        assert_eq!(open(&pool, seg.id).await, [bob]);
-
-        handle.advance(time::Duration::days(11));
-        run(
-            &pool,
-            ws,
-            seg.id,
-            "schedule",
-            TraceContext::root(Cause::schedule(Uuid::new_v4())),
-            &clock,
-        )
-        .await;
-
-        let mut both = vec![ada, bob];
-        both.sort();
-        assert_eq!(open(&pool, seg.id).await, both);
-        let (cause, at): (String, OffsetDateTime) = sqlx::query_as(
-            "SELECT properties ->> 'cause', occurred_at FROM events \
-             WHERE name = 'segment.entered' AND person_id = $1",
-        )
-        .bind(ada)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(cause, "time");
-        assert_eq!(at, start + time::Duration::days(11));
-        let computed: Option<OffsetDateTime> =
-            sqlx::query_scalar("SELECT computed_at FROM segments WHERE id = $1")
-                .bind(seg.id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(computed, Some(start + time::Duration::days(11)));
     }
 
     #[sqlx::test]
@@ -498,207 +504,216 @@ mod tests {
     async fn a_definition_change_keeps_the_saves_trace_and_cause_even_when_a_scheduled_refresh_applies_it(
         pool: PgPool,
     ) {
-        zirv_flow_store::migrate(&pool).await.unwrap();
-        let ws = workspace(&pool).await;
-        define_trait(&pool, ws, "plan").await;
-        let pro = person(&pool, ws, "pro@example.com", "pro").await;
-        let free = person(&pool, ws, "free@example.com", "free").await;
-        let (clock, _) = manual(OffsetDateTime::now_utc());
-        let first_save = TraceContext::root(Cause::api("save-1"));
-        let seg = create(
-            &pool,
-            ws,
-            "Plan",
-            json!({"op": "eq", "trait": "plan", "value": "pro", "v": 1}),
-            &first_save,
-        )
-        .await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            zirv_flow_store::migrate(&pool).await.unwrap();
+            let ws = workspace(&pool).await;
+            define_trait(&pool, ws, "plan").await;
+            let pro = person(&pool, ws, "pro@example.com", "pro").await;
+            let free = person(&pool, ws, "free@example.com", "free").await;
+            let (clock, _) = manual(OffsetDateTime::now_utc());
+            let first_save = TraceContext::root(Cause::api("save-1"));
+            let seg = create(
+                &pool,
+                ws,
+                "Plan",
+                json!({"op": "eq", "trait": "plan", "value": "pro", "v": 1}),
+                &first_save,
+            )
+            .await;
 
-        run(
-            &pool,
-            ws,
-            seg.id,
-            "save",
-            TraceContext::root(Cause::api("job-1")),
-            &clock,
-        )
-        .await;
-        assert_eq!(open(&pool, seg.id).await, [pro]);
-        let initial: (String, Uuid) = sqlx::query_as(
+            run(
+                &pool,
+                ws,
+                seg.id,
+                "save",
+                TraceContext::root(Cause::api("job-1")),
+                &clock,
+            )
+            .await;
+            assert_eq!(open(&pool, seg.id).await, [pro]);
+            let initial: (String, Uuid) = sqlx::query_as(
             "SELECT properties ->> 'cause', trace_id FROM events WHERE name = 'segment.entered'",
         )
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(initial, ("initial".into(), first_save.trace_id.as_uuid()));
+            assert_eq!(initial, ("initial".into(), first_save.trace_id.as_uuid()));
 
-        let second_save = TraceContext::root(Cause::api("save-2"));
-        resave(
-            &pool,
-            ws,
-            seg.id,
-            json!({"op": "eq", "trait": "plan", "value": "free", "v": 1}),
-            &second_save,
-        )
-        .await;
-        // A scheduled refresh gets there before the save's own job.
-        let scheduled = TraceContext::root(Cause::schedule(Uuid::new_v4()));
-        run(&pool, ws, seg.id, "schedule", scheduled.clone(), &clock).await;
-        // The save's job then finds nothing left to change.
-        run(&pool, ws, seg.id, "save", second_save.clone(), &clock).await;
+            let second_save = TraceContext::root(Cause::api("save-2"));
+            resave(
+                &pool,
+                ws,
+                seg.id,
+                json!({"op": "eq", "trait": "plan", "value": "free", "v": 1}),
+                &second_save,
+            )
+            .await;
+            // A scheduled refresh gets there before the save's own job.
+            let scheduled = TraceContext::root(Cause::schedule(Uuid::new_v4()));
+            run(&pool, ws, seg.id, "schedule", scheduled.clone(), &clock).await;
+            // The save's job then finds nothing left to change.
+            run(&pool, ws, seg.id, "save", second_save.clone(), &clock).await;
 
-        assert_eq!(open(&pool, seg.id).await, [free]);
-        let changes: Vec<(String, String, Uuid)> = sqlx::query_as(
-            "SELECT name, properties ->> 'cause', trace_id FROM events \
+            assert_eq!(open(&pool, seg.id).await, [free]);
+            let changes: Vec<(String, String, Uuid)> = sqlx::query_as(
+                "SELECT name, properties ->> 'cause', trace_id FROM events \
              WHERE name LIKE 'segment.%' AND trace_id = $1 ORDER BY name",
-        )
-        .bind(second_save.trace_id.as_uuid())
-        .fetch_all(&pool)
-        .await
-        .unwrap();
-        let expected = second_save.trace_id.as_uuid();
-        assert_eq!(
-            changes,
-            [
-                (
-                    "segment.entered".into(),
-                    "definition_change".into(),
-                    expected
-                ),
-                (
-                    "segment.exited".into(),
-                    "definition_change".into(),
-                    expected
-                ),
-            ]
-        );
-        let (records, _) = zirv_flow_store::list_trace(&pool, ws, second_save.trace_id, 10)
+            )
+            .bind(second_save.trace_id.as_uuid())
+            .fetch_all(&pool)
             .await
             .unwrap();
-        assert_eq!(records.len(), 2);
-        assert!(records.iter().all(|record| {
-            record.cause.kind == zirv_flow_core::CauseKind::DefinitionChange
-                && record.reason.as_deref() == Some("definition_change")
-        }));
-        let (computed, count): (Option<i32>, i32) =
-            sqlx::query_as("SELECT computed_version, member_count FROM segments WHERE id = $1")
-                .bind(seg.id)
-                .fetch_one(&pool)
+            let expected = second_save.trace_id.as_uuid();
+            assert_eq!(
+                changes,
+                [
+                    (
+                        "segment.entered".into(),
+                        "definition_change".into(),
+                        expected
+                    ),
+                    (
+                        "segment.exited".into(),
+                        "definition_change".into(),
+                        expected
+                    ),
+                ]
+            );
+            let (records, _) = zirv_flow_store::list_trace(&pool, ws, second_save.trace_id, 10)
                 .await
                 .unwrap();
-        assert_eq!((computed, count), (Some(2), 1));
+            assert_eq!(records.len(), 2);
+            assert!(records.iter().all(|record| {
+                record.cause.kind == zirv_flow_core::CauseKind::DefinitionChange
+                    && record.reason.as_deref() == Some("definition_change")
+            }));
+            let (computed, count): (Option<i32>, i32) =
+                sqlx::query_as("SELECT computed_version, member_count FROM segments WHERE id = $1")
+                    .bind(seg.id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!((computed, count), (Some(2), 1));
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_manual_refresh_carries_the_manual_cause_and_the_requests_trace(pool: PgPool) {
-        zirv_flow_store::migrate(&pool).await.unwrap();
-        let ws = workspace(&pool).await;
-        define_trait(&pool, ws, "plan").await;
-        let (clock, _) = manual(OffsetDateTime::now_utc());
-        let seg = create(
-            &pool,
-            ws,
-            "Plan",
-            json!({"op": "eq", "trait": "plan", "value": "pro", "v": 1}),
-            &TraceContext::root(Cause::api("save")),
-        )
-        .await;
-        run(
-            &pool,
-            ws,
-            seg.id,
-            "save",
-            TraceContext::root(Cause::api("job")),
-            &clock,
-        )
-        .await;
-        let pro = person(&pool, ws, "pro@example.com", "pro").await;
-        let request = TraceContext::root(Cause::manual(UserId::from_uuid(Uuid::new_v4())));
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            zirv_flow_store::migrate(&pool).await.unwrap();
+            let ws = workspace(&pool).await;
+            define_trait(&pool, ws, "plan").await;
+            let (clock, _) = manual(OffsetDateTime::now_utc());
+            let seg = create(
+                &pool,
+                ws,
+                PERSONAL_DATA.segment_name,
+                json!({"op": "eq", "trait": "plan", "value": "pro", "v": 1}),
+                &TraceContext::root(Cause::api("save")),
+            )
+            .await;
+            run(
+                &pool,
+                ws,
+                seg.id,
+                "save",
+                TraceContext::root(Cause::api("job")),
+                &clock,
+            )
+            .await;
+            let pro = person(&pool, ws, "pro@example.com", "pro").await;
+            let request = TraceContext::root(Cause::manual(UserId::from_uuid(Uuid::new_v4())));
 
-        run(&pool, ws, seg.id, "manual", request.clone(), &clock).await;
+            run(&pool, ws, seg.id, "manual", request.clone(), &clock).await;
 
-        assert_eq!(open(&pool, seg.id).await, [pro]);
-        let (cause, trace): (String, Uuid) = sqlx::query_as(
+            assert_eq!(open(&pool, seg.id).await, [pro]);
+            let (cause, trace): (String, Uuid) = sqlx::query_as(
             "SELECT properties ->> 'cause', trace_id FROM events WHERE name = 'segment.entered'",
         )
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(
-            (cause, trace),
-            ("manual".into(), request.trace_id.as_uuid())
-        );
-        let (records, _) = zirv_flow_store::list_trace(&pool, ws, request.trace_id, 10)
-            .await
-            .unwrap();
-        assert_eq!(records[0].cause, request.cause);
+            assert_eq!(
+                (cause, trace),
+                ("manual".into(), request.trace_id.as_uuid())
+            );
+            let (records, _) = zirv_flow_store::list_trace(&pool, ws, request.trace_id, 10)
+                .await
+                .unwrap();
+            assert_eq!(records[0].cause, request.cause);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_refresh_records_its_duration_and_how_many_people_it_moved(pool: PgPool) {
-        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
-        let _guard = ::metrics::set_default_local_recorder(&recorder);
-        zirv_flow_store::migrate(&pool).await.unwrap();
-        let ws = workspace(&pool).await;
-        define_trait(&pool, ws, "plan").await;
-        let (clock, _) = manual(OffsetDateTime::now_utc());
-        let seg = create(
-            &pool,
-            ws,
-            "Plan",
-            json!({"op": "eq", "trait": "plan", "value": "pro", "v": 1}),
-            &TraceContext::root(Cause::api("save")),
-        )
-        .await;
-        person(&pool, ws, "pro@example.com", "pro").await;
-        person(&pool, ws, "other@example.com", "pro").await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+            let handle = recorder.handle();
+            let _guard = ::metrics::set_default_local_recorder(&recorder);
+            zirv_flow_store::migrate(&pool).await.unwrap();
+            let ws = workspace(&pool).await;
+            define_trait(&pool, ws, "plan").await;
+            let (clock, _) = manual(OffsetDateTime::now_utc());
+            let seg = create(
+                &pool,
+                ws,
+                "Plan",
+                json!({"op": "eq", "trait": "plan", "value": "pro", "v": 1}),
+                &TraceContext::root(Cause::api("save")),
+            )
+            .await;
+            person(&pool, ws, "pro@example.com", "pro").await;
+            person(&pool, ws, "other@example.com", "pro").await;
 
-        run(
-            &pool,
-            ws,
-            seg.id,
-            "save",
-            TraceContext::root(Cause::api("job")),
-            &clock,
-        )
-        .await;
-        run(
-            &pool,
-            ws,
-            seg.id,
-            "schedule",
-            TraceContext::root(Cause::api("job")),
-            &clock,
-        )
-        .await;
+            run(
+                &pool,
+                ws,
+                seg.id,
+                "save",
+                TraceContext::root(Cause::api("job")),
+                &clock,
+            )
+            .await;
+            run(
+                &pool,
+                ws,
+                seg.id,
+                "schedule",
+                TraceContext::root(Cause::api("job")),
+                &clock,
+            )
+            .await;
 
-        let output = handle.render();
-        let sample = |name: &str| {
-            output.lines().find_map(|line| {
-                line.strip_prefix(name)?
-                    .strip_prefix(' ')?
-                    .parse::<f64>()
-                    .ok()
-            })
-        };
-        assert_eq!(
-            sample("zirv_flow_segment_refresh_seconds_count"),
-            Some(2.0),
-            "{output}"
-        );
-        assert_eq!(
-            sample("zirv_flow_segment_refresh_people_count"),
-            Some(2.0),
-            "{output}"
-        );
-        assert_eq!(
-            sample("zirv_flow_segment_refresh_people_sum"),
-            Some(2.0),
-            "{output}"
-        );
+            let output = handle.render();
+            let sample = |name: &str| {
+                output.lines().find_map(|line| {
+                    line.strip_prefix(name)?
+                        .strip_prefix(' ')?
+                        .parse::<f64>()
+                        .ok()
+                })
+            };
+            assert_eq!(
+                sample("zirv_flow_segment_refresh_seconds_count"),
+                Some(2.0),
+                "{output}"
+            );
+            assert_eq!(
+                sample("zirv_flow_segment_refresh_people_count"),
+                Some(2.0),
+                "{output}"
+            );
+            assert_eq!(
+                sample("zirv_flow_segment_refresh_people_sum"),
+                Some(2.0),
+                "{output}"
+            );
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -706,111 +721,138 @@ mod tests {
     async fn a_definition_that_no_longer_compiles_leaves_the_members_and_records_a_failure(
         pool: PgPool,
     ) {
-        zirv_flow_store::migrate(&pool).await.unwrap();
-        let ws = workspace(&pool).await;
-        define_trait(&pool, ws, "plan").await;
-        let pro = person(&pool, ws, "pro@example.com", "pro").await;
-        let (clock, _) = manual(OffsetDateTime::now_utc());
-        let seg = create(
-            &pool,
-            ws,
-            "Plan",
-            json!({"op": "eq", "trait": "plan", "value": "pro", "v": 1}),
-            &TraceContext::root(Cause::api("save")),
-        )
-        .await;
-        run(
-            &pool,
-            ws,
-            seg.id,
-            "save",
-            TraceContext::root(Cause::api("job")),
-            &clock,
-        )
-        .await;
-        zirv_flow_store::update_trait_definition(
-            &pool,
-            ws,
-            "plan",
-            &TraitDefinitionUpdate {
-                archived: Some(true),
-                ..TraitDefinitionUpdate::default()
-            },
-        )
-        .await
-        .unwrap();
-        let job = TraceContext::root(Cause::schedule(Uuid::new_v4()));
-
-        run(&pool, ws, seg.id, "schedule", job.clone(), &clock).await;
-
-        assert_eq!(open(&pool, seg.id).await, [pro]);
-        let (records, _) = zirv_flow_store::list_trace(&pool, ws, job.trace_id, 10)
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            zirv_flow_store::migrate(&pool).await.unwrap();
+            let ws = workspace(&pool).await;
+            define_trait(&pool, ws, "plan").await;
+            let pro = person(&pool, ws, "pro@example.com", "pro").await;
+            let (clock, _) = manual(OffsetDateTime::now_utc());
+            let seg = create(
+                &pool,
+                ws,
+                "Plan",
+                json!({"op": "eq", "trait": "plan", "value": "pro", "v": 1}),
+                &TraceContext::root(Cause::api("save")),
+            )
+            .await;
+            run(
+                &pool,
+                ws,
+                seg.id,
+                "save",
+                TraceContext::root(Cause::api("job")),
+                &clock,
+            )
+            .await;
+            zirv_flow_store::update_trait_definition(
+                &pool,
+                ws,
+                "plan",
+                &TraitDefinitionUpdate {
+                    archived: Some(true),
+                    ..TraitDefinitionUpdate::default()
+                },
+            )
             .await
             .unwrap();
-        assert_eq!(records.len(), 1);
-        assert_eq!(
-            (records[0].outcome.as_str(), records[0].reason.as_deref()),
-            ("failed", Some("definition_invalid"))
-        );
+            let job = TraceContext::root(Cause::schedule(Uuid::new_v4()));
+
+            run(&pool, ws, seg.id, "schedule", job.clone(), &clock).await;
+
+            assert_eq!(open(&pool, seg.id).await, [pro]);
+            let (records, _) = zirv_flow_store::list_trace(&pool, ws, job.trace_id, 10)
+                .await
+                .unwrap();
+            assert_eq!(records.len(), 1);
+            assert_eq!(
+                (records[0].outcome.as_str(), records[0].reason.as_deref()),
+                ("failed", Some("definition_invalid"))
+            );
+
+            zirv_flow_store::decision_testing::assert_fixture(
+                &pool,
+                ws,
+                &job,
+                ("segment.refresh", "failed", Some("definition_invalid")),
+                json!({"segment": seg.id}),
+            )
+            .await;
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_archived_segment_is_skipped_with_a_decision_and_changes_nothing(pool: PgPool) {
-        zirv_flow_store::migrate(&pool).await.unwrap();
-        let ws = workspace(&pool).await;
-        define_trait(&pool, ws, "plan").await;
-        person(&pool, ws, "pro@example.com", "pro").await;
-        let (clock, _) = manual(OffsetDateTime::now_utc());
-        let seg = create(
-            &pool,
-            ws,
-            "Plan",
-            json!({"op": "eq", "trait": "plan", "value": "pro", "v": 1}),
-            &TraceContext::root(Cause::api("save")),
-        )
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            zirv_flow_store::migrate(&pool).await.unwrap();
+            let ws = workspace(&pool).await;
+            define_trait(&pool, ws, "plan").await;
+            person(&pool, ws, "pro@example.com", "pro").await;
+            let (clock, _) = manual(OffsetDateTime::now_utc());
+            let seg = create(
+                &pool,
+                ws,
+                "Plan",
+                json!({"op": "eq", "trait": "plan", "value": "pro", "v": 1}),
+                &TraceContext::root(Cause::api("save")),
+            )
+            .await;
+            let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+            zirv_flow_store::lock_segments(&mut tx, ws).await.unwrap();
+            zirv_flow_store::archive_segment(&mut tx, ws, seg.id)
+                .await
+                .unwrap();
+            zirv_flow_store::commit(tx).await.unwrap();
+            let job = TraceContext::root(Cause::schedule(Uuid::new_v4()));
+
+            run(&pool, ws, seg.id, "schedule", job.clone(), &clock).await;
+
+            assert!(open(&pool, seg.id).await.is_empty());
+            let (records, _) = zirv_flow_store::list_trace(&pool, ws, job.trace_id, 10)
+                .await
+                .unwrap();
+            assert_eq!(
+                (records[0].outcome.as_str(), records[0].reason.as_deref()),
+                ("skipped", Some("archived_or_gone"))
+            );
+
+            zirv_flow_store::decision_testing::assert_fixture(
+                &pool,
+                ws,
+                &job,
+                ("segment.refresh", "skipped", Some("archived_or_gone")),
+                json!({"segment": seg.id}),
+            )
+            .await;
+        })
         .await;
-        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
-        zirv_flow_store::lock_segments(&mut tx, ws).await.unwrap();
-        zirv_flow_store::archive_segment(&mut tx, ws, seg.id)
-            .await
-            .unwrap();
-        zirv_flow_store::commit(tx).await.unwrap();
-        let job = TraceContext::root(Cause::schedule(Uuid::new_v4()));
-
-        run(&pool, ws, seg.id, "schedule", job.clone(), &clock).await;
-
-        assert!(open(&pool, seg.id).await.is_empty());
-        let (records, _) = zirv_flow_store::list_trace(&pool, ws, job.trace_id, 10)
-            .await
-            .unwrap();
-        assert_eq!(
-            (records[0].outcome.as_str(), records[0].reason.as_deref()),
-            ("skipped", Some("archived_or_gone"))
-        );
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_job_context_reads_the_clock_it_was_given_and_the_database_by_default(pool: PgPool) {
-        zirv_flow_store::migrate(&pool).await.unwrap();
-        let mut job = NewJob::new("a.kind", TraceContext::root(Cause::api("r")));
-        job.unique_key = Some("k".into());
-        zirv_flow_store::enqueue(&pool, &job).await.unwrap();
-        let claimed =
-            zirv_flow_store::claim_job(&pool, "w", &["a.kind"], Duration::from_secs(30), None)
-                .await
-                .unwrap()
-                .unwrap();
-        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
-        let at = OffsetDateTime::UNIX_EPOCH + time::Duration::days(3);
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            zirv_flow_store::migrate(&pool).await.unwrap();
+            let mut job = NewJob::new("a.kind", TraceContext::root(Cause::api("r")));
+            job.unique_key = Some("k".into());
+            zirv_flow_store::enqueue(&pool, &job).await.unwrap();
+            let claimed =
+                zirv_flow_store::claim_job(&pool, "w", &["a.kind"], Duration::from_secs(30), None)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+            let at = OffsetDateTime::UNIX_EPOCH + time::Duration::days(3);
 
-        let ctx = JobContext::new(&mut tx, &claimed);
-        assert!(matches!(ctx.clock(), Clock::Database));
-        let mut ctx = ctx.with_clock(Clock::Manual(ManualClock::new(at)));
-        let clock = ctx.clock().clone();
+            let ctx = JobContext::new(&mut tx, &claimed);
+            assert!(matches!(ctx.clock(), Clock::Database));
+            let mut ctx = ctx.with_clock(Clock::Manual(ManualClock::new(at)));
+            let clock = ctx.clock().clone();
 
-        assert_eq!(clock.now(ctx.conn()).await.unwrap(), at);
+            assert_eq!(clock.now(ctx.conn()).await.unwrap(), at);
+        })
+        .await;
     }
 
     /// The slot lock comes before the segment lock: while a retire holds the slot lock, a refresh
@@ -820,35 +862,38 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_refresh_waiting_for_the_slot_lock_holds_no_segment_lock(pool: PgPool) {
-        zirv_flow_store::migrate(&pool).await.unwrap();
-        let ws = workspace(&pool).await;
-        define_trait(&pool, ws, "plan").await;
-        let (clock, _) = manual(OffsetDateTime::now_utc());
-        let seg = create(
-            &pool,
-            ws,
-            "Plan",
-            json!({"op": "eq", "trait": "plan", "value": "pro", "v": 1}),
-            &TraceContext::root(Cause::api("save")),
-        )
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            zirv_flow_store::migrate(&pool).await.unwrap();
+            let ws = workspace(&pool).await;
+            define_trait(&pool, ws, "plan").await;
+            let (clock, _) = manual(OffsetDateTime::now_utc());
+            let seg = create(
+                &pool,
+                ws,
+                "Plan",
+                json!({"op": "eq", "trait": "plan", "value": "pro", "v": 1}),
+                &TraceContext::root(Cause::api("save")),
+            )
+            .await;
+
+            let retire = crate::kinds::slot_order::hold_slot_lock_exclusively(&pool, ws).await;
+            let job = {
+                let pool = pool.clone();
+                let trace = TraceContext::root(Cause::api("manual"));
+                tokio::spawn(async move { run(&pool, ws, seg.id, "manual", trace, &clock).await })
+            };
+            tokio::time::sleep(Duration::from_millis(700)).await;
+
+            assert!(
+                crate::kinds::slot_order::segment_lock_is_free(&pool, seg.id).await,
+                "the refresh took the segment lock before the slot lock"
+            );
+            zirv_flow_store::commit(retire).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(20), job)
+                .await
+                .expect("the refresh finishes once the slot lock is free")
+                .unwrap();
+        })
         .await;
-
-        let retire = crate::kinds::slot_order::hold_slot_lock_exclusively(&pool, ws).await;
-        let job = {
-            let pool = pool.clone();
-            let trace = TraceContext::root(Cause::api("manual"));
-            tokio::spawn(async move { run(&pool, ws, seg.id, "manual", trace, &clock).await })
-        };
-        tokio::time::sleep(Duration::from_millis(700)).await;
-
-        assert!(
-            crate::kinds::slot_order::segment_lock_is_free(&pool, seg.id).await,
-            "the refresh took the segment lock before the slot lock"
-        );
-        zirv_flow_store::commit(retire).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(20), job)
-            .await
-            .expect("the refresh finishes once the slot lock is free")
-            .unwrap();
     }
 }

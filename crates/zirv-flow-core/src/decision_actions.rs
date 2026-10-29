@@ -7,7 +7,7 @@
 //! separate registry for a different log.
 //!
 //! The reason of a row is one of three things: none, a fixed code, or a detail (see [`Reason`]).
-//! A detail row stands for an outcome whose reason is a code or text that the code that decided
+//! A detail row stands for an outcome whose reason is a code that the code that decided
 //! chose at run time, such as a gate name or a provider error class.
 
 use crate::CauseKind;
@@ -20,7 +20,7 @@ pub enum Reason {
     /// The record always carries this reason code.
     Fixed(&'static str),
     /// The record carries a reason the deciding code picked at run time, from a closed set it
-    /// owns (a gate, a refusal code, a source) or a static diagnostic text. The text names what
+    /// owns (a gate, a refusal code, a source) as a static code. The text names what
     /// the reason ranges over. Never a value from a person's data.
     Detail(&'static str),
 }
@@ -119,6 +119,17 @@ const MESSAGE: &[&str] = &[
     "event",
     "flow",
 ];
+const SEND_GATE: &[&str] = &[
+    "message",
+    "enrollment",
+    "person",
+    "template",
+    "destination",
+    "event",
+    "flow",
+    "change",
+    "rule",
+];
 const CALL: &[&str] = &["enrollment", "person", "event", "flow", "destination"];
 const FORWARD: &[&str] = &["destination", "rule", "event", "outbox"];
 
@@ -184,7 +195,7 @@ registry! {
     FLOW_ENROLL_SKIPPED: "flow.enroll", "skipped", Reason::Detail("why the person was not enrolled"), ANY, &["flow", "person"];
     FLOW_ENROLLMENT_COMPLETED: "flow.enrollment", "completed", Reason::None, ANY, FLOW;
     FLOW_ENROLLMENT_EXITED: "flow.enrollment", "exited", Reason::Detail("why the enrollment ended"), ANY, FLOW;
-    FLOW_ENROLLMENT_FAILED: "flow.enrollment", "failed", Reason::Detail("the failure text"), ANY, FLOW;
+    FLOW_ENROLLMENT_FAILED: "flow.enrollment", "failed", Reason::Detail("the failure code"), ANY, FLOW;
     FLOW_ENROLLMENT_HELD: "flow.enrollment", "held", Reason::Fixed("flow_paused"), ANY, FLOW;
     FLOW_ENROLLMENT_RESUMED: "flow.enrollment", "resumed", Reason::Fixed("flow_resumed"), ANY, FLOW;
     FLOW_ENROLLMENT_RETRIED: "flow.enrollment", "retried", Reason::Fixed("operator"), OPERATOR, FLOW;
@@ -192,7 +203,7 @@ registry! {
     FLOW_STEP_DONE: "flow.step", "done", Reason::Detail("the node type"), ANY, FLOW;
     FLOW_STEP_ENQUEUED: "flow.step", "enqueued", Reason::Detail("the kind of work queued"), ANY, FLOW;
     FLOW_STEP_WAITING: "flow.step", "waiting", Reason::Detail("the node type, or the time zone fallback"), ANY, FLOW;
-    FLOW_STEP_FAILED: "flow.step", "failed", Reason::Detail("the failure text"), ANY, FLOW;
+    FLOW_STEP_FAILED: "flow.step", "failed", Reason::Detail("the failure code"), ANY, FLOW;
     FLOW_WAKE_EVENT: "flow.wake", "event", Reason::None, ANY, FLOW;
     FLOW_WAKE_TIMEOUT: "flow.wake", "timeout", Reason::None, ANY, FLOW;
     FLOW_WAKE_TIMER: "flow.wake", "timer", Reason::None, ANY, FLOW;
@@ -215,8 +226,8 @@ registry! {
     FLOW_BRANCH_CONDITION_MATCHED: "flow.branch.condition", "matched", Reason::Detail("the case"), ANY, FLOW;
     FLOW_BRANCH_CONDITION_UNMATCHED: "flow.branch.condition", "unmatched", Reason::Detail("the case"), ANY, FLOW;
 
-    SEND_GATE_PASSED: "send.gate", "passed", Reason::Detail("the gate"), ANY, MESSAGE;
-    SEND_GATE_BLOCKED: "send.gate", "blocked", Reason::Detail("the gate"), ANY, MESSAGE;
+    SEND_GATE_PASSED: "send.gate", "passed", Reason::Detail("the gate"), ANY, SEND_GATE;
+    SEND_GATE_BLOCKED: "send.gate", "blocked", Reason::Detail("the gate"), ANY, SEND_GATE;
     MESSAGE_SEND_SENT: "message.send", "sent", Reason::Detail("the send code"), ANY, MESSAGE;
     MESSAGE_SEND_SKIPPED: "message.send", "skipped", Reason::Detail("the gate that stopped it"), ANY, MESSAGE;
     MESSAGE_SEND_FAILED: "message.send", "failed", Reason::Detail("the failure code"), ANY, MESSAGE;
@@ -242,16 +253,16 @@ registry! {
 
     SYNC_RECORD_APPLIED: "sync.record", "applied", Reason::None, SYNC, &["person", "source_record", "event"];
     SYNC_RECORD_DELETED: "sync.record", "deleted", Reason::Detail("why the record was deleted"), SYNC, &["source_record"];
-    SYNC_RECORD_REJECTED: "sync.record", "rejected", Reason::Detail("the refusal code"), SYNC, &["source_record", "reject", "person"];
+    SYNC_RECORD_REJECTED: "sync.record", "rejected", Reason::Detail("the refusal code"), SYNC, &["source_record", "ingest_reject", "person"];
     SEGMENT_ENTERED: "segment.entered", "entered", Reason::Detail("the cause of the membership change"), ANY, &["segment", "person"];
     SEGMENT_EXITED: "segment.exited", "exited", Reason::Detail("the cause of the membership change"), ANY, &["segment", "person"];
     SEGMENT_REFRESH_SKIPPED: "segment.refresh", "skipped", Reason::Fixed("archived_or_gone"), ANY, &["segment"];
     SEGMENT_REFRESH_FAILED: "segment.refresh", "failed", Reason::Fixed("definition_invalid"), ANY, &["segment"];
     SEGMENT_REEVALUATE_FAILED: "segment.reevaluate", "failed", Reason::Fixed("definition_invalid"), ANY, &["segment"];
 
-    JOB_ATTEMPT_FAILED: "job.attempt", "failed", Reason::Detail("the error text"), ANY, &[];
-    JOB_ATTEMPT_EXHAUSTED: "job.attempt", "exhausted", Reason::Detail("the error text"), ANY, &[];
-    JOB_ATTEMPT_LEASE_EXPIRED: "job.attempt", "lease_expired", Reason::Detail("the lease text"), ANY, &[];
+    JOB_ATTEMPT_FAILED: "job.attempt", "failed", Reason::Detail("the error code"), ANY, &[];
+    JOB_ATTEMPT_EXHAUSTED: "job.attempt", "exhausted", Reason::Detail("the error code"), ANY, &[];
+    JOB_ATTEMPT_LEASE_EXPIRED: "job.attempt", "lease_expired", Reason::Detail("the lease code"), ANY, &[];
     JOB_RETRY_REQUEUED: "job.retry", "requeued", Reason::None, &[CauseKind::Manual], &[];
 }
 

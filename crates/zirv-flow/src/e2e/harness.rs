@@ -646,11 +646,22 @@ impl World {
     /// email. Returns their id.
     #[cfg(test)]
     pub(super) async fn subscribed_person(&self, address: &str) -> Uuid {
+        self.subscribed_person_with_identifiers(json!({
+            "email": address,
+            "phone": zirv_flow_store::decision_testing::PERSONAL_DATA.phone,
+            "external:trace_canary": zirv_flow_store::decision_testing::PERSONAL_DATA.external_id
+        }))
+        .await
+    }
+
+    #[cfg(test)]
+    pub(super) async fn subscribed_person_with_identifiers(&self, identifiers: Value) -> Uuid {
         let identify = call(
             &self.router,
             "POST",
             "/api/v1/ingest/identify",
-            Some(json!({"identifiers": {"email": address}})),
+            Some(json!({"identifiers": identifiers,
+                "traits": zirv_flow_store::decision_testing::PERSONAL_DATA.traits()})),
             Some(&self.ingest),
         )
         .await;
@@ -679,7 +690,8 @@ impl World {
             "/api/v1/ingest/track",
             Some(
                 json!({"identifiers": {"email": address}, "event": "order_placed",
-                        "messageId": "order-1", "timestamp": at}),
+                        "messageId": "order-1", "timestamp": at,
+                        "properties": zirv_flow_store::decision_testing::PERSONAL_DATA.properties()}),
             ),
             Some(&self.ingest),
         )

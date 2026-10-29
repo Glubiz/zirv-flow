@@ -150,6 +150,8 @@ fn parse(payload: &Value) -> Result<(WorkspaceId, Uuid), JobError> {
 
 #[cfg(test)]
 mod tests {
+    use zirv_flow_store::decision_testing::PERSONAL_DATA;
+
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -225,7 +227,7 @@ mod tests {
                 source: "crm".into(),
                 stream: "s".into(),
                 record_key: "1".into(),
-                identifiers: vec![("email".into(), "ada@example.com".into())],
+                identifiers: vec![("email".into(), PERSONAL_DATA.email.into())],
                 traits: json!({"plan": "pro"}).as_object().cloned().unwrap(),
                 observed_at: datetime!(2026-01-01 00:00 UTC),
                 trace: trace.clone(),
@@ -292,71 +294,80 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_job_writes_the_ledger_file_before_it_returns(pool: PgPool) {
-        let key = identifier_key();
-        let (ws, _, request) = pending_request(&pool, &key).await;
-        let dir = TempDir::new();
-        let claimed = claim(&pool).await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let key = identifier_key();
+            let (ws, _, request) = pending_request(&pool, &key).await;
+            let dir = TempDir::new();
+            let claimed = claim(&pool).await;
 
-        run_once(&pool, &claimed, &key, Some(&dir.0), true)
-            .await
-            .unwrap();
+            run_once(&pool, &claimed, &key, Some(&dir.0), true)
+                .await
+                .unwrap();
 
-        assert_eq!(
-            dir.files(),
-            [format!("{}-{}.json", ws.as_uuid(), request.id)]
-        );
-        let entries = zirv_flow_store::read_ledger_dir(&dir.0).unwrap();
-        assert_eq!(entries[0].id, request.id);
-        assert_eq!(entries[0].identifier_kinds, ["email"]);
-        assert_eq!(
-            status(&pool, ws, request.id).await,
-            ErasureStatus::Completed
-        );
+            assert_eq!(
+                dir.files(),
+                [format!("{}-{}.json", ws.as_uuid(), request.id)]
+            );
+            let entries = zirv_flow_store::read_ledger_dir(&dir.0).unwrap();
+            assert_eq!(entries[0].id, request.id);
+            assert_eq!(entries[0].identifier_kinds, ["email"]);
+            assert_eq!(
+                status(&pool, ws, request.id).await,
+                ErasureStatus::Completed
+            );
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn without_a_ledger_dir_the_job_still_completes(pool: PgPool) {
-        let key = identifier_key();
-        let (ws, _, request) = pending_request(&pool, &key).await;
-        let claimed = claim(&pool).await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let key = identifier_key();
+            let (ws, _, request) = pending_request(&pool, &key).await;
+            let claimed = claim(&pool).await;
 
-        run_once(&pool, &claimed, &key, None, true).await.unwrap();
+            run_once(&pool, &claimed, &key, None, true).await.unwrap();
 
-        assert_eq!(
-            status(&pool, ws, request.id).await,
-            ErasureStatus::Completed
-        );
+            assert_eq!(
+                status(&pool, ws, request.id).await,
+                ErasureStatus::Completed
+            );
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_unwritable_directory_fails_the_job_and_leaves_the_request_pending(pool: PgPool) {
-        let key = identifier_key();
-        let (ws, person, request) = pending_request(&pool, &key).await;
-        let dir = TempDir::new();
-        // A directory that is really a file, and one that is missing.
-        let file = dir.0.join("plain-file");
-        std::fs::write(&file, b"x").unwrap();
-        let claimed = claim(&pool).await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let key = identifier_key();
+            let (ws, person, request) = pending_request(&pool, &key).await;
+            let dir = TempDir::new();
+            // A directory that is really a file, and one that is missing.
+            let file = dir.0.join("plain-file");
+            std::fs::write(&file, b"x").unwrap();
+            let claimed = claim(&pool).await;
 
-        for bad in [file, dir.0.join("absent")] {
-            let error = run_once(&pool, &claimed, &key, Some(&bad), true)
-                .await
-                .unwrap_err();
-            assert_eq!(
-                error.message(),
-                "the erasure ledger file could not be written"
+            for bad in [file, dir.0.join("absent")] {
+                let error = run_once(&pool, &claimed, &key, Some(&bad), true)
+                    .await
+                    .unwrap_err();
+                assert_eq!(
+                    error.message(),
+                    "the erasure ledger file could not be written"
+                );
+            }
+
+            assert_eq!(status(&pool, ws, request.id).await, ErasureStatus::Pending);
+            assert!(
+                zirv_flow_store::find_person(&pool, ws, person)
+                    .await
+                    .unwrap()
+                    .is_some()
             );
-        }
-
-        assert_eq!(status(&pool, ws, request.id).await, ErasureStatus::Pending);
-        assert!(
-            zirv_flow_store::find_person(&pool, ws, person)
-                .await
-                .unwrap()
-                .is_some()
-        );
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -364,27 +375,30 @@ mod tests {
     async fn a_retry_after_a_crash_between_rename_and_commit_finds_the_file_and_succeeds(
         pool: PgPool,
     ) {
-        let key = identifier_key();
-        let (ws, _, request) = pending_request(&pool, &key).await;
-        let dir = TempDir::new();
-        let claimed = claim(&pool).await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let key = identifier_key();
+            let (ws, _, request) = pending_request(&pool, &key).await;
+            let dir = TempDir::new();
+            let claimed = claim(&pool).await;
 
-        // The file is renamed into place, then the transaction is dropped uncommitted.
-        run_once(&pool, &claimed, &key, Some(&dir.0), false)
-            .await
-            .unwrap();
-        assert_eq!(dir.files().len(), 1);
-        assert_eq!(status(&pool, ws, request.id).await, ErasureStatus::Pending);
+            // The file is renamed into place, then the transaction is dropped uncommitted.
+            run_once(&pool, &claimed, &key, Some(&dir.0), false)
+                .await
+                .unwrap();
+            assert_eq!(dir.files().len(), 1);
+            assert_eq!(status(&pool, ws, request.id).await, ErasureStatus::Pending);
 
-        run_once(&pool, &claimed, &key, Some(&dir.0), true)
-            .await
-            .unwrap();
+            run_once(&pool, &claimed, &key, Some(&dir.0), true)
+                .await
+                .unwrap();
 
-        assert_eq!(dir.files().len(), 1);
-        assert_eq!(
-            status(&pool, ws, request.id).await,
-            ErasureStatus::Completed
-        );
+            assert_eq!(dir.files().len(), 1);
+            assert_eq!(
+                status(&pool, ws, request.id).await,
+                ErasureStatus::Completed
+            );
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -392,56 +406,62 @@ mod tests {
     async fn the_job_of_a_request_merged_from_its_file_succeeds_and_leaves_the_file_as_it_was(
         pool: PgPool,
     ) {
-        let key = identifier_key();
-        let (ws, _, request) = pending_request(&pool, &key).await;
-        let dir = TempDir::new();
-        let claimed = claim(&pool).await;
-        // The file exists, the transaction never committed: the row is pending, as in a backup.
-        run_once(&pool, &claimed, &key, Some(&dir.0), false)
-            .await
-            .unwrap();
-        let name = format!("{}-{}.json", ws.as_uuid(), request.id);
-        let before = std::fs::read(dir.0.join(&name)).unwrap();
-        let entries = zirv_flow_store::read_ledger_dir(&dir.0).unwrap();
-        let merged = zirv_flow_store::merge_ledger_entries(&pool, &entries)
-            .await
-            .unwrap();
-        assert_eq!(merged.merged, 1);
-        assert_eq!(
-            status(&pool, ws, request.id).await,
-            ErasureStatus::Completed
-        );
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let key = identifier_key();
+            let (ws, _, request) = pending_request(&pool, &key).await;
+            let dir = TempDir::new();
+            let claimed = claim(&pool).await;
+            // The file exists, the transaction never committed: the row is pending, as in a backup.
+            run_once(&pool, &claimed, &key, Some(&dir.0), false)
+                .await
+                .unwrap();
+            let name = format!("{}-{}.json", ws.as_uuid(), request.id);
+            let before = std::fs::read(dir.0.join(&name)).unwrap();
+            let entries = zirv_flow_store::read_ledger_dir(&dir.0).unwrap();
+            let merged = zirv_flow_store::merge_ledger_entries(&pool, &entries)
+                .await
+                .unwrap();
+            assert_eq!(merged.merged, 1);
+            assert_eq!(
+                status(&pool, ws, request.id).await,
+                ErasureStatus::Completed
+            );
 
-        run_once(&pool, &claimed, &key, Some(&dir.0), true)
-            .await
-            .unwrap();
+            run_once(&pool, &claimed, &key, Some(&dir.0), true)
+                .await
+                .unwrap();
 
-        assert_eq!(std::fs::read(dir.0.join(&name)).unwrap(), before);
-        assert_eq!(dir.files(), [name]);
+            assert_eq!(std::fs::read(dir.0.join(&name)).unwrap(), before);
+            assert_eq!(dir.files(), [name]);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_different_file_of_the_same_name_fails_the_job(pool: PgPool) {
-        let key = identifier_key();
-        let (ws, _, request) = pending_request(&pool, &key).await;
-        let dir = TempDir::new();
-        std::fs::write(
-            dir.0.join(format!("{}-{}.json", ws.as_uuid(), request.id)),
-            b"{}",
-        )
-        .unwrap();
-        let claimed = claim(&pool).await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let key = identifier_key();
+            let (ws, _, request) = pending_request(&pool, &key).await;
+            let dir = TempDir::new();
+            std::fs::write(
+                dir.0.join(format!("{}-{}.json", ws.as_uuid(), request.id)),
+                b"{}",
+            )
+            .unwrap();
+            let claimed = claim(&pool).await;
 
-        let error = run_once(&pool, &claimed, &key, Some(&dir.0), true)
-            .await
-            .unwrap_err();
+            let error = run_once(&pool, &claimed, &key, Some(&dir.0), true)
+                .await
+                .unwrap_err();
 
-        assert_eq!(
-            error.message(),
-            "the erasure ledger file of this request is invalid"
-        );
-        assert_eq!(status(&pool, ws, request.id).await, ErasureStatus::Pending);
+            assert_eq!(
+                error.message(),
+                "the erasure ledger file of this request is invalid"
+            );
+            assert_eq!(status(&pool, ws, request.id).await, ErasureStatus::Pending);
+        })
+        .await;
     }
 
     async fn add_second_email(pool: &PgPool, ws: WorkspaceId) {
@@ -453,7 +473,7 @@ mod tests {
                 stream: "s".into(),
                 record_key: "1".into(),
                 identifiers: vec![
-                    ("email".into(), "ada@example.com".into()),
+                    ("email".into(), PERSONAL_DATA.email.into()),
                     ("email".into(), "ada.l@example.com".into()),
                 ],
                 traits: json!({"plan": "pro"}).as_object().cloned().unwrap(),
@@ -478,31 +498,34 @@ mod tests {
     async fn a_retry_after_the_person_gained_an_identity_succeeds_and_file_and_row_hold_the_union(
         pool: PgPool,
     ) {
-        let key = identifier_key();
-        let (ws, _, request) = pending_request(&pool, &key).await;
-        let dir = TempDir::new();
-        let claimed = claim(&pool).await;
-        run_once(&pool, &claimed, &key, Some(&dir.0), false)
-            .await
-            .unwrap();
-        assert_eq!(
-            zirv_flow_store::read_ledger_dir(&dir.0).unwrap()[0]
-                .identifier_hashes
-                .len(),
-            1
-        );
-        add_second_email(&pool, ws).await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let key = identifier_key();
+            let (ws, _, request) = pending_request(&pool, &key).await;
+            let dir = TempDir::new();
+            let claimed = claim(&pool).await;
+            run_once(&pool, &claimed, &key, Some(&dir.0), false)
+                .await
+                .unwrap();
+            assert_eq!(
+                zirv_flow_store::read_ledger_dir(&dir.0).unwrap()[0]
+                    .identifier_hashes
+                    .len(),
+                1
+            );
+            add_second_email(&pool, ws).await;
 
-        run_once(&pool, &claimed, &key, Some(&dir.0), true)
-            .await
-            .unwrap();
+            run_once(&pool, &claimed, &key, Some(&dir.0), true)
+                .await
+                .unwrap();
 
-        let files = zirv_flow_store::read_ledger_dir(&dir.0).unwrap();
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].identifier_hashes.len(), 2);
-        let row = row_entry(&pool, ws, request.id).await;
-        assert!(row.same_lists(&files[0]));
-        assert_eq!(row, files[0]);
+            let files = zirv_flow_store::read_ledger_dir(&dir.0).unwrap();
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].identifier_hashes.len(), 2);
+            let row = row_entry(&pool, ws, request.id).await;
+            assert!(row.same_lists(&files[0]));
+            assert_eq!(row, files[0]);
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -510,34 +533,37 @@ mod tests {
     async fn a_restored_pending_row_whose_job_runs_before_any_replay_keeps_the_files_extra_hashes(
         pool: PgPool,
     ) {
-        let key = identifier_key();
-        let (ws, _, request) = pending_request(&pool, &key).await;
-        let dir = TempDir::new();
-        let claimed = claim(&pool).await;
-        run_once(&pool, &claimed, &key, Some(&dir.0), false)
-            .await
-            .unwrap();
-        // The authoritative file knows a hash and a person the restored row does not.
-        let mut file = zirv_flow_store::read_ledger_dir(&dir.0).unwrap().remove(0);
-        let extra_person = Uuid::now_v7();
-        file.identifier_hashes.push("07".repeat(32));
-        file.identifier_kinds.push("email".to_owned());
-        file.person_ids.push(extra_person);
-        std::fs::write(
-            dir.0.join(file.file_name()),
-            serde_json::to_vec_pretty(&file).unwrap(),
-        )
-        .unwrap();
-
-        run_once(&pool, &claimed, &key, Some(&dir.0), true)
-            .await
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let key = identifier_key();
+            let (ws, _, request) = pending_request(&pool, &key).await;
+            let dir = TempDir::new();
+            let claimed = claim(&pool).await;
+            run_once(&pool, &claimed, &key, Some(&dir.0), false)
+                .await
+                .unwrap();
+            // The authoritative file knows a hash and a person the restored row does not.
+            let mut file = zirv_flow_store::read_ledger_dir(&dir.0).unwrap().remove(0);
+            let extra_person = Uuid::now_v7();
+            file.identifier_hashes.push("07".repeat(32));
+            file.identifier_kinds.push("email".to_owned());
+            file.person_ids.push(extra_person);
+            std::fs::write(
+                dir.0.join(file.file_name()),
+                serde_json::to_vec_pretty(&file).unwrap(),
+            )
             .unwrap();
 
-        let files = zirv_flow_store::read_ledger_dir(&dir.0).unwrap();
-        assert!(files[0].identifier_hashes.contains(&"07".repeat(32)));
-        assert!(files[0].person_ids.contains(&extra_person));
-        let row = row_entry(&pool, ws, request.id).await;
-        assert!(row.same_lists(&files[0]));
+            run_once(&pool, &claimed, &key, Some(&dir.0), true)
+                .await
+                .unwrap();
+
+            let files = zirv_flow_store::read_ledger_dir(&dir.0).unwrap();
+            assert!(files[0].identifier_hashes.contains(&"07".repeat(32)));
+            assert!(files[0].person_ids.contains(&extra_person));
+            let row = row_entry(&pool, ws, request.id).await;
+            assert!(row.same_lists(&files[0]));
+        })
+        .await;
     }
 
     async fn run_claimed(pool: &PgPool, key: Option<Arc<HmacKey>>) -> Result<(), JobError> {
@@ -565,105 +591,119 @@ mod tests {
     async fn the_job_erases_the_person_suppresses_the_email_and_completes_the_request(
         pool: PgPool,
     ) {
-        zirv_flow_store::migrate(&pool).await.unwrap();
-        let name = WorkspaceName::parse("ours").unwrap();
-        let ws = zirv_flow_store::create_workspace(&pool, &name, &Slug::parse("ours").unwrap())
-            .await
-            .unwrap()
-            .id;
-        let trace = TraceContext::root(Cause::api("t"));
-        let outcomes = apply_profile_batch(
-            &pool,
-            ws,
-            &[ProfileRecord {
-                source: "crm".into(),
-                stream: "s".into(),
-                record_key: "1".into(),
-                identifiers: vec![("email".into(), "ada@example.com".into())],
-                traits: json!({"plan": "pro"}).as_object().cloned().unwrap(),
-                observed_at: datetime!(2026-01-01 00:00 UTC),
-                trace: trace.clone(),
-            }],
-        )
-        .await
-        .unwrap();
-        let ProfileOutcome::Applied { person_id, .. } = outcomes[0] else {
-            panic!("not applied");
-        };
-        let key = Arc::new(
-            HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Identifier),
-        );
-        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
-        let request = zirv_flow_store::request_erasure(&mut tx, ws, person_id, &key, None, &trace)
-            .await
-            .unwrap()
-            .unwrap();
-        zirv_flow_store::commit(tx).await.unwrap();
-
-        run_claimed(&pool, Some(key.clone())).await.unwrap();
-
-        assert!(
-            zirv_flow_store::find_person(&pool, ws, person_id)
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            zirv_flow_store::migrate(&pool).await.unwrap();
+            let name = WorkspaceName::parse("ours").unwrap();
+            let ws = zirv_flow_store::create_workspace(&pool, &name, &Slug::parse("ours").unwrap())
                 .await
                 .unwrap()
-                .is_none()
-        );
-        let hash = zirv_flow_core::people::identifier_hash(
-            &key,
-            &zirv_flow_core::people::Identifier::parse("email", "ada@example.com").unwrap(),
-        );
-        assert!(
-            zirv_flow_store::is_suppressed(&pool, ws, &hash)
+                .id;
+            let trace = TraceContext::root(Cause::api("t"));
+            let outcomes = apply_profile_batch(
+                &pool,
+                ws,
+                &[ProfileRecord {
+                    source: "crm".into(),
+                    stream: "s".into(),
+                    record_key: "1".into(),
+                    identifiers: vec![("email".into(), PERSONAL_DATA.email.into())],
+                    traits: json!({"plan": "pro"}).as_object().cloned().unwrap(),
+                    observed_at: datetime!(2026-01-01 00:00 UTC),
+                    trace: trace.clone(),
+                }],
+            )
+            .await
+            .unwrap();
+            let ProfileOutcome::Applied { person_id, .. } = outcomes[0] else {
+                panic!("not applied");
+            };
+            let key = Arc::new(
+                HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Identifier),
+            );
+            let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+            let request =
+                zirv_flow_store::request_erasure(&mut tx, ws, person_id, &key, None, &trace)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            zirv_flow_store::commit(tx).await.unwrap();
+
+            run_claimed(&pool, Some(key.clone())).await.unwrap();
+
+            assert!(
+                zirv_flow_store::find_person(&pool, ws, person_id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            let hash = zirv_flow_core::people::identifier_hash(
+                &key,
+                &zirv_flow_core::people::Identifier::parse("email", PERSONAL_DATA.email).unwrap(),
+            );
+            assert!(
+                zirv_flow_store::is_suppressed(&pool, ws, &hash)
+                    .await
+                    .unwrap()
+            );
+            let stored = zirv_flow_store::find_erasure_request(&pool, ws, request.id)
                 .await
                 .unwrap()
-        );
-        let stored = zirv_flow_store::find_erasure_request(&pool, ws, request.id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(stored.status, ErasureStatus::Completed);
+                .unwrap();
+            assert_eq!(stored.status, ErasureStatus::Completed);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_request_that_does_not_exist_fails_the_job_with_a_fixed_message(pool: PgPool) {
-        zirv_flow_store::migrate(&pool).await.unwrap();
-        let name = WorkspaceName::parse("ours").unwrap();
-        let ws = zirv_flow_store::create_workspace(&pool, &name, &Slug::parse("ours").unwrap())
-            .await
-            .unwrap()
-            .id;
-        let mut job =
-            zirv_flow_store::NewJob::new(PrivacyErase::KIND, TraceContext::root(Cause::api("t")));
-        job.workspace_id = Some(ws);
-        job.payload = json!({"workspace_id": ws, "request_id": Uuid::now_v7()});
-        zirv_flow_store::enqueue(&pool, &job).await.unwrap();
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            zirv_flow_store::migrate(&pool).await.unwrap();
+            let name = WorkspaceName::parse("ours").unwrap();
+            let ws = zirv_flow_store::create_workspace(&pool, &name, &Slug::parse("ours").unwrap())
+                .await
+                .unwrap()
+                .id;
+            let mut job = zirv_flow_store::NewJob::new(
+                PrivacyErase::KIND,
+                TraceContext::root(Cause::api("t")),
+            );
+            job.workspace_id = Some(ws);
+            job.payload = json!({"workspace_id": ws, "request_id": Uuid::now_v7()});
+            zirv_flow_store::enqueue(&pool, &job).await.unwrap();
 
-        let key = Arc::new(
-            HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Identifier),
-        );
-        let error = run_claimed(&pool, Some(key.clone())).await.unwrap_err();
+            let key = Arc::new(
+                HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Identifier),
+            );
+            let error = run_claimed(&pool, Some(key.clone())).await.unwrap_err();
 
-        assert_eq!(error.message(), "the erasure request does not exist");
+            assert_eq!(error.message(), "the erasure request does not exist");
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn without_the_identifier_key_the_job_fails_and_erases_nothing(pool: PgPool) {
-        zirv_flow_store::migrate(&pool).await.unwrap();
-        let name = WorkspaceName::parse("ours").unwrap();
-        let ws = zirv_flow_store::create_workspace(&pool, &name, &Slug::parse("ours").unwrap())
-            .await
-            .unwrap()
-            .id;
-        let mut job =
-            zirv_flow_store::NewJob::new(PrivacyErase::KIND, TraceContext::root(Cause::api("t")));
-        job.workspace_id = Some(ws);
-        job.payload = json!({"workspace_id": ws, "request_id": Uuid::now_v7()});
-        zirv_flow_store::enqueue(&pool, &job).await.unwrap();
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            zirv_flow_store::migrate(&pool).await.unwrap();
+            let name = WorkspaceName::parse("ours").unwrap();
+            let ws = zirv_flow_store::create_workspace(&pool, &name, &Slug::parse("ours").unwrap())
+                .await
+                .unwrap()
+                .id;
+            let mut job = zirv_flow_store::NewJob::new(
+                PrivacyErase::KIND,
+                TraceContext::root(Cause::api("t")),
+            );
+            job.workspace_id = Some(ws);
+            job.payload = json!({"workspace_id": ws, "request_id": Uuid::now_v7()});
+            zirv_flow_store::enqueue(&pool, &job).await.unwrap();
 
-        let error = run_claimed(&pool, None).await.unwrap_err();
+            let error = run_claimed(&pool, None).await.unwrap_err();
 
-        assert_eq!(error.message(), "the worker has no master key");
+            assert_eq!(error.message(), "the worker has no master key");
+        })
+        .await;
     }
 }

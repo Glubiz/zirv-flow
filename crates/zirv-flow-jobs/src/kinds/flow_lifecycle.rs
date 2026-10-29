@@ -190,64 +190,72 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_paused_flow_holds_a_due_timer_and_resume_runs_it_once(pool: PgPool) {
-        let env = Env::new(pool).await;
-        let flow = env.flow("Wait", parked()).await;
-        let id = parked_person(&env, flow, "ada@example.com").await;
-        let before = env.enrollment(id).await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            let flow = env.flow("Wait", parked()).await;
+            let id = parked_person(&env, flow, "ada@example.com").await;
+            let before = env.enrollment(id).await;
 
-        env.pause(flow).await;
-        env.advance(3601);
-        env.run_due().await;
-        let held = env.enrollment(id).await;
-        // The same timer delivered again, by another job, changes nothing and records nothing.
-        let payload = StepJobPayload {
-            workspace: env.ws,
-            enrollment: id,
-            state_version: before.state_version,
-            input: StepJobInput::Wake,
-        };
-        enqueue(
-            &env.pool,
-            &payload.job(&before.trace, None, "again".to_owned()),
-        )
-        .await
-        .unwrap();
-        env.run_due().await;
+            env.pause(flow).await;
+            env.advance(3601);
+            env.run_due().await;
+            let held = env.enrollment(id).await;
+            // The same timer delivered again, by another job, changes nothing and records nothing.
+            let payload = StepJobPayload {
+                workspace: env.ws,
+                enrollment: id,
+                state_version: before.state_version,
+                input: StepJobInput::Wake,
+            };
+            enqueue(
+                &env.pool,
+                &payload.job(&before.trace, None, "again".to_owned()),
+            )
+            .await
+            .unwrap();
+            env.run_due().await;
 
-        assert_eq!(held.status, EnrollmentStatus::Held);
-        assert_eq!(
-            (held.node.as_str(), held.state_version),
-            ("w", before.state_version),
-            "a held enrollment keeps its node and version"
-        );
-        assert_eq!(held.resume_input, Some(json!({"input": "wake"})));
-        assert_eq!(env.enrollment(id).await.status, EnrollmentStatus::Held);
-        assert_eq!(
-            ended_nodes(&env, "end").await,
-            0,
-            "nothing ran while paused"
-        );
-        assert_eq!(decisions_of(&env, &before.trace, "held").await, 1);
+            assert_eq!(held.status, EnrollmentStatus::Held);
+            assert_eq!(
+                (held.node.as_str(), held.state_version),
+                ("w", before.state_version),
+                "a held enrollment keeps its node and version"
+            );
+            assert_eq!(held.resume_input, Some(json!({"input": "wake"})));
+            assert_eq!(env.enrollment(id).await.status, EnrollmentStatus::Held);
+            assert_eq!(
+                ended_nodes(&env, "end").await,
+                0,
+                "nothing ran while paused"
+            );
+            assert_eq!(decisions_of(&env, &before.trace, "held").await, 1);
 
-        let trace = env.resume(flow).await;
-        assert_eq!(lifecycle_jobs(&env).await, 1);
-        let resumed = env.enrollment(id).await;
-        assert_eq!(resumed.status, EnrollmentStatus::Waiting);
-        assert!(resumed.resume_input.is_none());
-        env.run_due().await;
+            let trace = env.resume(flow).await;
+            assert_eq!(lifecycle_jobs(&env).await, 1);
+            let resumed = env.enrollment(id).await;
+            assert_eq!(resumed.status, EnrollmentStatus::Waiting);
+            assert!(resumed.resume_input.is_none());
+            env.run_due().await;
 
-        let done = env.enrollment(id).await;
-        assert_eq!(done.status, EnrollmentStatus::Completed);
-        assert_eq!(ended_nodes(&env, "end").await, 1, "the timer ran once");
-        assert_eq!(decisions_of(&env, &trace, "resumed").await, 1);
-        let cause: String = sqlx::query_scalar(
-            "SELECT cause_kind FROM decision_records WHERE trace_id = $1 AND outcome = 'resumed'",
-        )
-        .bind(trace.trace_id.as_uuid())
-        .fetch_one(&env.pool)
-        .await
-        .unwrap();
-        assert_eq!(cause, "manual");
+            let done = env.enrollment(id).await;
+            assert_eq!(done.status, EnrollmentStatus::Completed);
+            assert_eq!(ended_nodes(&env, "end").await, 1, "the timer ran once");
+            assert_eq!(decisions_of(&env, &trace, "resumed").await, 1);
+            let cause: String = sqlx::query_scalar(
+                "SELECT cause_kind FROM decision_records WHERE trace_id = $1 AND outcome = 'resumed'",
+            )
+            .bind(trace.trace_id.as_uuid())
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+            assert_eq!(cause, "manual");
+
+            let subjects = json!({"flow": flow, "enrollment": id, "person": before.person_id, "version": 1, "node": "w"});
+            zirv_flow_store::decision_testing::assert_fixture(&env.pool, env.ws, &before.trace,
+                ("flow.enrollment", "held", Some("flow_paused")), subjects.clone()).await;
+            zirv_flow_store::decision_testing::assert_fixture(&env.pool, env.ws, &trace,
+                ("flow.enrollment", "resumed", Some("flow_resumed")), subjects).await;
+        }).await;
     }
 
     #[sqlx::test]

@@ -625,6 +625,8 @@ pub fn decision_cause_kind(cause: MembershipCause, job_trace: &TraceContext) -> 
 
 #[cfg(test)]
 mod tests {
+    use crate::decision_testing::PERSONAL_DATA;
+
     use hashbrown::HashSet;
     use serde_json::Value;
     use sqlx::PgPool;
@@ -811,62 +813,67 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_refresh_leaves_no_prepared_statement_on_its_connection(pool: PgPool) {
-        let ws = workspace(&pool, "one").await;
-        let seg = segment(&pool, ws, "Pros", 60).await;
-        person(&pool, ws, "ada@example.com", "pro").await;
-        let job = job_trace();
-        let cause = MembershipCause::Initial;
-        let trace = membership_trace(cause, &job, seg.id, Uuid::new_v4());
-        let mut tx = begin(&pool).await.unwrap();
-        lock_segment_refresh(&mut tx, seg.id).await.unwrap();
-        apply_refresh(
-            &mut tx,
-            &RefreshApply {
-                workspace: ws,
-                segment: seg.id,
-                version: 1,
-                members: &plan_query("pro"),
-                now: NOW,
-                cause,
-                trace: &trace,
-                job: (Uuid::new_v4(), 1),
-                job_trace: &job,
-            },
-        )
-        .await
-        .unwrap();
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            let seg = segment(&pool, ws, "Pros", 60).await;
+            person(&pool, ws, PERSONAL_DATA.email, "pro").await;
+            let job = job_trace();
+            let cause = MembershipCause::Initial;
+            let trace = membership_trace(cause, &job, seg.id, Uuid::new_v4());
+            let mut tx = begin(&pool).await.unwrap();
+            lock_segment_refresh(&mut tx, seg.id).await.unwrap();
+            apply_refresh(
+                &mut tx,
+                &RefreshApply {
+                    workspace: ws,
+                    segment: seg.id,
+                    version: 1,
+                    members: &plan_query("pro"),
+                    now: NOW,
+                    cause,
+                    trace: &trace,
+                    job: (Uuid::new_v4(), 1),
+                    job_trace: &job,
+                },
+            )
+            .await
+            .unwrap();
 
-        // The refresh statement is compiled per segment, so it must be planned on every run.
-        let kept: Vec<String> = sqlx::query_scalar(
+            // The refresh statement is compiled per segment, so it must be planned on every run.
+            let kept: Vec<String> = sqlx::query_scalar(
             "SELECT statement FROM pg_prepared_statements WHERE statement LIKE '%FROM people p%'",
         )
         .persistent(false)
         .fetch_all(&mut *tx)
         .await
         .unwrap();
-        assert!(kept.is_empty(), "kept prepared statements: {kept:?}");
+            assert!(kept.is_empty(), "kept prepared statements: {kept:?}");
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_refresh_enters_and_exits_people_with_events_decisions_and_counts(pool: PgPool) {
-        let ws = workspace(&pool, "one").await;
-        let seg = segment(&pool, ws, "Pros", 60).await;
-        let ada = person(&pool, ws, "ada@example.com", "pro").await;
-        let bob = person(&pool, ws, "bob@example.com", "pro").await;
-        let cy = person(&pool, ws, "cy@example.com", "free").await;
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            let seg = segment(&pool, ws, "Pros", 60).await;
+            let ada = person(&pool, ws, PERSONAL_DATA.email, "pro").await;
+            let bob = person(&pool, ws, "bob@example.com", "pro").await;
+            let cy = person(&pool, ws, "cy@example.com", "free").await;
 
-        let (first, trace) = refresh(&pool, ws, seg.id, "pro", MembershipCause::Initial, NOW).await;
+            let (first, trace) =
+                refresh(&pool, ws, seg.id, "pro", MembershipCause::Initial, NOW).await;
 
-        assert_eq!(
-            first,
-            RefreshOutcome {
-                entered: 2,
-                exited: 0
-            }
-        );
-        assert_eq!(open_people(&pool, seg.id).await, HashSet::from([ada, bob]));
-        let (computed_version, computed_at, count): (Option<i32>, Option<OffsetDateTime>, i32) =
+            assert_eq!(
+                first,
+                RefreshOutcome {
+                    entered: 2,
+                    exited: 0
+                }
+            );
+            assert_eq!(open_people(&pool, seg.id).await, HashSet::from([ada, bob]));
+            let (computed_version, computed_at, count): (Option<i32>, Option<OffsetDateTime>, i32) =
             sqlx::query_as(
                 "SELECT computed_version, computed_at, member_count FROM segments WHERE id = $1",
             )
@@ -874,69 +881,69 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(
-            (computed_version, computed_at, count),
-            (Some(1), Some(NOW), 2)
-        );
-        let events: Vec<(String, String, Value, Uuid, OffsetDateTime)> = sqlx::query_as(
-            "SELECT name, source, properties, trace_id, occurred_at FROM events \
+            assert_eq!(
+                (computed_version, computed_at, count),
+                (Some(1), Some(NOW), 2)
+            );
+            let events: Vec<(String, String, Value, Uuid, OffsetDateTime)> = sqlx::query_as(
+                "SELECT name, source, properties, trace_id, occurred_at FROM events \
              WHERE name LIKE 'segment.%' ORDER BY person_id",
-        )
-        .fetch_all(&pool)
-        .await
-        .unwrap();
-        assert_eq!(events.len(), 2);
-        for (name, source, properties, trace_id, occurred_at) in &events {
-            assert_eq!(
-                (name.as_str(), source.as_str()),
-                ("segment.entered", "segments")
-            );
-            assert_eq!(
-                *properties,
-                serde_json::json!({"segment_id": seg.id, "version": 1, "cause": "initial"})
-            );
-            assert_eq!(*trace_id, trace.trace_id.as_uuid());
-            assert_eq!(*occurred_at, NOW);
-        }
-
-        // A repeat changes nothing. Bob leaves the plan and Cy joins it.
-        let (repeat, _) = refresh(&pool, ws, seg.id, "pro", MembershipCause::Time, NOW).await;
-        assert_eq!(
-            repeat,
-            RefreshOutcome {
-                entered: 0,
-                exited: 0
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(events.len(), 2);
+            for (name, source, properties, trace_id, occurred_at) in &events {
+                assert_eq!(
+                    (name.as_str(), source.as_str()),
+                    ("segment.entered", "segments")
+                );
+                assert_eq!(
+                    *properties,
+                    serde_json::json!({"segment_id": seg.id, "version": 1, "cause": "initial"})
+                );
+                assert_eq!(*trace_id, trace.trace_id.as_uuid());
+                assert_eq!(*occurred_at, NOW);
             }
-        );
-        sqlx::query("UPDATE people SET traits = '{\"plan\":\"free\"}' WHERE id = $1")
-            .bind(bob)
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("UPDATE people SET traits = '{\"plan\":\"pro\"}' WHERE id = $1")
-            .bind(cy)
-            .execute(&pool)
-            .await
-            .unwrap();
-        let later = NOW + time::Duration::hours(1);
-        let (change, trace) =
-            refresh(&pool, ws, seg.id, "pro", MembershipCause::DataChange, later).await;
 
-        assert_eq!(
-            change,
-            RefreshOutcome {
-                entered: 1,
-                exited: 1
-            }
-        );
-        assert_eq!(open_people(&pool, seg.id).await, HashSet::from([ada, cy]));
-        let count: i32 = sqlx::query_scalar("SELECT member_count FROM segments WHERE id = $1")
-            .bind(seg.id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(count, 2);
-        let closed: (OffsetDateTime, Uuid, String, i32) = sqlx::query_as(
+            // A repeat changes nothing. Bob leaves the plan and Cy joins it.
+            let (repeat, _) = refresh(&pool, ws, seg.id, "pro", MembershipCause::Time, NOW).await;
+            assert_eq!(
+                repeat,
+                RefreshOutcome {
+                    entered: 0,
+                    exited: 0
+                }
+            );
+            sqlx::query("UPDATE people SET traits = '{\"plan\":\"free\"}' WHERE id = $1")
+                .bind(bob)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("UPDATE people SET traits = '{\"plan\":\"pro\"}' WHERE id = $1")
+                .bind(cy)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let later = NOW + time::Duration::hours(1);
+            let (change, trace) =
+                refresh(&pool, ws, seg.id, "pro", MembershipCause::DataChange, later).await;
+
+            assert_eq!(
+                change,
+                RefreshOutcome {
+                    entered: 1,
+                    exited: 1
+                }
+            );
+            assert_eq!(open_people(&pool, seg.id).await, HashSet::from([ada, cy]));
+            let count: i32 = sqlx::query_scalar("SELECT member_count FROM segments WHERE id = $1")
+                .bind(seg.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(count, 2);
+            let closed: (OffsetDateTime, Uuid, String, i32) = sqlx::query_as(
             "SELECT exited_at, exited_trace_id, exited_cause, exited_version FROM segment_members \
              WHERE person_id = $1 AND segment_id = $2",
         )
@@ -945,102 +952,111 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(
-            closed,
-            (later, trace.trace_id.as_uuid(), "data_change".into(), 1)
-        );
-        let (records, _) = list_trace(&pool, ws, trace.trace_id, 10).await.unwrap();
-        let mut actions: Vec<(String, String, Option<String>)> = records
-            .iter()
-            .map(|r| (r.action.clone(), r.outcome.clone(), r.reason.clone()))
-            .collect();
-        actions.sort();
-        assert_eq!(
-            actions,
-            [
-                (
-                    "segment.entered".into(),
-                    "entered".into(),
-                    Some("data_change".into())
-                ),
-                (
-                    "segment.exited".into(),
-                    "exited".into(),
-                    Some("data_change".into())
-                ),
-            ]
-        );
-        assert!(
-            records
+            assert_eq!(
+                closed,
+                (later, trace.trace_id.as_uuid(), "data_change".into(), 1)
+            );
+            let (records, _) = list_trace(&pool, ws, trace.trace_id, 10).await.unwrap();
+            let mut actions: Vec<(String, String, Option<String>)> = records
                 .iter()
-                .all(|r| r.cause == trace.cause && r.attempt == Some(1))
-        );
-        let exited_event: String = sqlx::query_scalar(
-            "SELECT properties ->> 'cause' FROM events WHERE name = 'segment.exited'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(exited_event, "data_change");
+                .map(|r| (r.action.clone(), r.outcome.clone(), r.reason.clone()))
+                .collect();
+            actions.sort();
+            assert_eq!(
+                actions,
+                [
+                    (
+                        "segment.entered".into(),
+                        "entered".into(),
+                        Some("data_change".into())
+                    ),
+                    (
+                        "segment.exited".into(),
+                        "exited".into(),
+                        Some("data_change".into())
+                    ),
+                ]
+            );
+            assert!(
+                records
+                    .iter()
+                    .all(|r| r.cause == trace.cause && r.attempt == Some(1))
+            );
+            let exited_event: String = sqlx::query_scalar(
+                "SELECT properties ->> 'cause' FROM events WHERE name = 'segment.exited'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(exited_event, "data_change");
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_segment_events_never_mark_a_person_changed(pool: PgPool) {
-        let ws = workspace(&pool, "one").await;
-        let seg = segment(&pool, ws, "Pros", 60).await;
-        person(&pool, ws, "ada@example.com", "pro").await;
-        sqlx::query("DELETE FROM person_changes")
-            .execute(&pool)
-            .await
-            .unwrap();
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            let seg = segment(&pool, ws, "Pros", 60).await;
+            person(&pool, ws, PERSONAL_DATA.email, "pro").await;
+            sqlx::query("DELETE FROM person_changes")
+                .execute(&pool)
+                .await
+                .unwrap();
 
-        refresh(&pool, ws, seg.id, "pro", MembershipCause::Initial, NOW).await;
-        sqlx::query("UPDATE people SET traits = '{}'")
-            .execute(&pool)
-            .await
-            .unwrap();
-        refresh(&pool, ws, seg.id, "pro", MembershipCause::Time, NOW).await;
+            refresh(&pool, ws, seg.id, "pro", MembershipCause::Initial, NOW).await;
+            sqlx::query("UPDATE people SET traits = '{}'")
+                .execute(&pool)
+                .await
+                .unwrap();
+            refresh(&pool, ws, seg.id, "pro", MembershipCause::Time, NOW).await;
 
-        let events: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM events WHERE name LIKE 'segment.%'")
+            let events: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM events WHERE name LIKE 'segment.%'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            let changes: i64 = sqlx::query_scalar("SELECT count(*) FROM person_changes")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        let changes: i64 = sqlx::query_scalar("SELECT count(*) FROM person_changes")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!((events, changes), (2, 0));
+            assert_eq!((events, changes), (2, 0));
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn another_workspaces_people_and_rows_are_never_touched(pool: PgPool) {
-        let one = workspace(&pool, "one").await;
-        let two = workspace(&pool, "two").await;
-        let seg = segment(&pool, one, "Pros", 60).await;
-        let other_seg = segment(&pool, two, "Pros", 60).await;
-        person(&pool, one, "ada@example.com", "pro").await;
-        let foreign = person(&pool, two, "ada@example.com", "pro").await;
-        refresh(
-            &pool,
-            two,
-            other_seg.id,
-            "pro",
-            MembershipCause::Initial,
-            NOW,
-        )
+        crate::decision_testing::checked(pool, |pool| async move {
+            let one = workspace(&pool, "one").await;
+            let two = workspace(&pool, "two").await;
+            let seg = segment(&pool, one, "Pros", 60).await;
+            let other_seg = segment(&pool, two, "Pros", 60).await;
+            person(&pool, one, PERSONAL_DATA.email, "pro").await;
+            let foreign = person(&pool, two, PERSONAL_DATA.email, "pro").await;
+            refresh(
+                &pool,
+                two,
+                other_seg.id,
+                "pro",
+                MembershipCause::Initial,
+                NOW,
+            )
+            .await;
+
+            let (outcome, _) =
+                refresh(&pool, one, seg.id, "pro", MembershipCause::Initial, NOW).await;
+
+            assert_eq!(outcome.entered, 1);
+            assert_eq!(
+                open_people(&pool, other_seg.id).await,
+                HashSet::from([foreign])
+            );
+            assert!(!open_people(&pool, seg.id).await.contains(&foreign));
+        })
         .await;
-
-        let (outcome, _) = refresh(&pool, one, seg.id, "pro", MembershipCause::Initial, NOW).await;
-
-        assert_eq!(outcome.entered, 1);
-        assert_eq!(
-            open_people(&pool, other_seg.id).await,
-            HashSet::from([foreign])
-        );
-        assert!(!open_people(&pool, seg.id).await.contains(&foreign));
     }
 
     #[sqlx::test]
@@ -1048,10 +1064,11 @@ mod tests {
     async fn a_change_enqueues_a_dependent_refresh_in_the_same_transaction_and_a_rollback_none(
         pool: PgPool,
     ) {
+        crate::decision_testing::checked(pool, |pool| async move {
         let ws = workspace(&pool, "one").await;
         let base = segment(&pool, ws, "B", 60).await;
         let above = segment_referencing(&pool, ws, "A", base.id).await;
-        person(&pool, ws, "ada@example.com", "pro").await;
+        person(&pool, ws, PERSONAL_DATA.email, "pro").await;
         // The saves queued their own refreshes; only the dependent ones are looked at here.
         sqlx::query("DELETE FROM jobs")
             .execute(&pool)
@@ -1117,67 +1134,72 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(after, 0);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn two_refreshes_of_one_segment_serialize_on_its_lock(pool: PgPool) {
-        let ws = workspace(&pool, "one").await;
-        let seg = segment(&pool, ws, "Pros", 60).await;
-        let other = segment(&pool, ws, "Other", 60).await;
-        person(&pool, ws, "ada@example.com", "pro").await;
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            let seg = segment(&pool, ws, "Pros", 60).await;
+            let other = segment(&pool, ws, "Other", 60).await;
+            person(&pool, ws, PERSONAL_DATA.email, "pro").await;
 
-        let mut first = begin(&pool).await.unwrap();
-        lock_segment_refresh(&mut first, seg.id).await.unwrap();
-        // Another segment's refresh is not held up.
-        let mut unrelated = begin(&pool).await.unwrap();
-        lock_segment_refresh(&mut unrelated, other.id)
-            .await
-            .unwrap();
-        drop(unrelated);
+            let mut first = begin(&pool).await.unwrap();
+            lock_segment_refresh(&mut first, seg.id).await.unwrap();
+            // Another segment's refresh is not held up.
+            let mut unrelated = begin(&pool).await.unwrap();
+            lock_segment_refresh(&mut unrelated, other.id)
+                .await
+                .unwrap();
+            drop(unrelated);
 
-        let second_pool = pool.clone();
-        let id = seg.id;
-        let second = tokio::spawn(async move {
-            let mut tx = begin(&second_pool).await.unwrap();
-            lock_segment_refresh(&mut tx, id).await.unwrap();
-            // Past the lock it sees what the first refresh committed.
-            let open: i64 = sqlx::query_scalar(
+            let second_pool = pool.clone();
+            let id = seg.id;
+            let second = tokio::spawn(async move {
+                let mut tx = begin(&second_pool).await.unwrap();
+                lock_segment_refresh(&mut tx, id).await.unwrap();
+                // Past the lock it sees what the first refresh committed.
+                let open: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM segment_members WHERE segment_id = $1 AND exited_at IS NULL",
             )
             .bind(id)
             .fetch_one(&mut *tx)
             .await
             .unwrap();
-            open
-        });
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        assert!(
-            !second.is_finished(),
-            "the second refresh must wait for the first"
-        );
+                open
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            assert!(
+                !second.is_finished(),
+                "the second refresh must wait for the first"
+            );
 
-        let job = job_trace();
-        let trace = membership_trace(MembershipCause::Initial, &job, seg.id, Uuid::new_v4());
-        apply_refresh(
-            &mut first,
-            &RefreshApply {
-                workspace: ws,
-                segment: seg.id,
-                version: 1,
-                members: &plan_query("pro"),
-                now: NOW,
-                cause: MembershipCause::Initial,
-                trace: &trace,
-                job: (Uuid::new_v4(), 1),
-                job_trace: &job,
-            },
-        )
-        .await
-        .unwrap();
-        commit(first).await.unwrap();
+            let job = job_trace();
+            let trace = membership_trace(MembershipCause::Initial, &job, seg.id, Uuid::new_v4());
+            apply_refresh(
+                &mut first,
+                &RefreshApply {
+                    workspace: ws,
+                    segment: seg.id,
+                    version: 1,
+                    members: &plan_query("pro"),
+                    now: NOW,
+                    cause: MembershipCause::Initial,
+                    trace: &trace,
+                    job: (Uuid::new_v4(), 1),
+                    job_trace: &job,
+                },
+            )
+            .await
+            .unwrap();
+            commit(first).await.unwrap();
 
-        assert_eq!(second.await.unwrap(), 1);
+            assert_eq!(second.await.unwrap(), 1);
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -1185,17 +1207,18 @@ mod tests {
     async fn the_segment_events_reach_the_forwarding_outbox_in_the_passes_transaction(
         pool: PgPool,
     ) {
-        use crate::forwarding::support::{
-            add_rule, destination_in, forward_jobs, outbox_rows, payloads,
-        };
+        crate::decision_testing::checked(pool, |pool| async move {
+            use crate::forwarding::support::{
+                add_rule, destination_in, forward_jobs, outbox_rows, payloads,
+            };
 
-        let ws = workspace(&pool, "one").await;
-        let seg = segment(&pool, ws, "Pros", 60).await;
-        person(&pool, ws, "ada@example.com", "pro").await;
-        person(&pool, ws, "bob@example.com", "pro").await;
-        person(&pool, ws, "cy@example.com", "free").await;
-        let sink = destination_in(&pool, ws).await;
-        add_rule(
+            let ws = workspace(&pool, "one").await;
+            let seg = segment(&pool, ws, "Pros", 60).await;
+            person(&pool, ws, PERSONAL_DATA.email, "pro").await;
+            person(&pool, ws, "bob@example.com", "pro").await;
+            person(&pool, ws, "cy@example.com", "free").await;
+            let sink = destination_in(&pool, ws).await;
+            add_rule(
             &pool,
             ws,
             sink,
@@ -1204,47 +1227,49 @@ mod tests {
             serde_json::json!({"segment": {"from": "event.properties", "pointer": "/segment_id"}}),
         )
         .await;
-        let job = job_trace();
-        let cause = MembershipCause::Initial;
-        let trace = membership_trace(cause, &job, seg.id, Uuid::new_v4());
+            let job = job_trace();
+            let cause = MembershipCause::Initial;
+            let trace = membership_trace(cause, &job, seg.id, Uuid::new_v4());
 
-        let mut tx = begin(&pool).await.unwrap();
-        lock_segment_refresh(&mut tx, seg.id).await.unwrap();
-        let apply = RefreshApply {
-            workspace: ws,
-            segment: seg.id,
-            version: 1,
-            members: &plan_query("pro"),
-            now: NOW,
-            cause,
-            trace: &trace,
-            job: (Uuid::new_v4(), 1),
-            job_trace: &job,
-        };
-        apply_refresh(&mut tx, &apply).await.unwrap();
-        tx.rollback().await.unwrap();
-        assert_eq!(
-            (outbox_rows(&pool, ws).await, forward_jobs(&pool).await),
-            (0, 0)
-        );
+            let mut tx = begin(&pool).await.unwrap();
+            lock_segment_refresh(&mut tx, seg.id).await.unwrap();
+            let apply = RefreshApply {
+                workspace: ws,
+                segment: seg.id,
+                version: 1,
+                members: &plan_query("pro"),
+                now: NOW,
+                cause,
+                trace: &trace,
+                job: (Uuid::new_v4(), 1),
+                job_trace: &job,
+            };
+            apply_refresh(&mut tx, &apply).await.unwrap();
+            tx.rollback().await.unwrap();
+            assert_eq!(
+                (outbox_rows(&pool, ws).await, forward_jobs(&pool).await),
+                (0, 0)
+            );
 
-        refresh(&pool, ws, seg.id, "pro", cause, NOW).await;
-        assert_eq!(
-            payloads(&pool, ws).await,
-            vec![serde_json::json!({"segment": seg.id.to_string()}); 2]
-        );
-        assert_eq!(forward_jobs(&pool).await, 1);
+            refresh(&pool, ws, seg.id, "pro", cause, NOW).await;
+            assert_eq!(
+                payloads(&pool, ws).await,
+                vec![serde_json::json!({"segment": seg.id.to_string()}); 2]
+            );
+            assert_eq!(forward_jobs(&pool).await, 1);
 
-        // The exits of the next pass have no rule: nothing more is copied.
-        refresh(
-            &pool,
-            ws,
-            seg.id,
-            "nobody",
-            MembershipCause::Time,
-            NOW + time::Duration::hours(1),
-        )
+            // The exits of the next pass have no rule: nothing more is copied.
+            refresh(
+                &pool,
+                ws,
+                seg.id,
+                "nobody",
+                MembershipCause::Time,
+                NOW + time::Duration::hours(1),
+            )
+            .await;
+            assert_eq!(outbox_rows(&pool, ws).await, 2);
+        })
         .await;
-        assert_eq!(outbox_rows(&pool, ws).await, 2);
     }
 }

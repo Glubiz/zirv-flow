@@ -428,9 +428,10 @@ mod tests {
     async fn sent(pool: &PgPool, ws: WorkspaceId, hash: Option<[u8; 32]>) -> Sent {
         let person = Uuid::now_v7();
         let destination = Uuid::now_v7();
-        sqlx::query("INSERT INTO people (id, workspace_id, traits) VALUES ($1, $2, '{}')")
+        sqlx::query("INSERT INTO people (id, workspace_id, traits) VALUES ($1, $2, $3)")
             .bind(person)
             .bind(ws.as_uuid())
+            .bind(json!(crate::decision_testing::PERSONAL_DATA.traits()))
             .execute(pool)
             .await
             .unwrap();
@@ -522,6 +523,7 @@ mod tests {
     async fn a_hard_bounce_writes_the_event_and_suppresses_the_stored_hash_in_the_organization(
         pool: PgPool,
     ) {
+        crate::decision_testing::checked(pool, |pool| async move {
         let ws = workspace(&pool, "fb-hard").await;
         let other = workspace(&pool, "fb-other").await;
         let hash = [9_u8; 32];
@@ -563,11 +565,14 @@ mod tests {
             count(&pool, "SELECT count(*) FROM suppressions WHERE scope = 'organization' AND reason = 'hard_bounce' AND source = 'feedback'").await,
             1
         );
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_complaint_suppresses_only_its_workspace(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
         let ws = workspace(&pool, "fb-complaint").await;
         let other = workspace(&pool, "fb-complaint-other").await;
         let hash = [4_u8; 32];
@@ -594,47 +599,53 @@ mod tests {
             count(&pool, "SELECT count(*) FROM suppressions WHERE scope = 'workspace' AND reason = 'complaint'").await,
             1
         );
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_delivery_and_a_soft_bounce_suppress_nobody(pool: PgPool) {
-        let ws = workspace(&pool, "fb-soft").await;
-        let sent = sent(&pool, ws, Some([1_u8; 32])).await;
-        let trace = trace();
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "fb-soft").await;
+            let sent = sent(&pool, ws, Some([1_u8; 32])).await;
+            let trace = trace();
 
-        for (event, id) in [
-            (FeedbackEvent::Delivered, "a"),
-            (FeedbackEvent::BouncedSoft, "b"),
-        ] {
-            let outcome =
-                record_provider_feedback(&pool, &feedback(ws, &sent, event, Some(id), &trace))
-                    .await
-                    .unwrap();
-            assert!(matches!(
-                outcome,
-                FeedbackOutcome::Recorded {
-                    suppression: SuppressionMade::NotAsked,
-                    ..
-                }
-            ));
-        }
+            for (event, id) in [
+                (FeedbackEvent::Delivered, "a"),
+                (FeedbackEvent::BouncedSoft, "b"),
+            ] {
+                let outcome =
+                    record_provider_feedback(&pool, &feedback(ws, &sent, event, Some(id), &trace))
+                        .await
+                        .unwrap();
+                assert!(matches!(
+                    outcome,
+                    FeedbackOutcome::Recorded {
+                        suppression: SuppressionMade::NotAsked,
+                        ..
+                    }
+                ));
+            }
 
-        assert_eq!(count(&pool, "SELECT count(*) FROM suppressions").await, 0);
-        assert_eq!(count(&pool, "SELECT count(*) FROM events").await, 2);
-        assert_eq!(
-            count(
-                &pool,
-                "SELECT count(*) FROM events WHERE properties ->> 'kind' = 'soft'"
-            )
-            .await,
-            1
-        );
+            assert_eq!(count(&pool, "SELECT count(*) FROM suppressions").await, 0);
+            assert_eq!(count(&pool, "SELECT count(*) FROM events").await, 2);
+            assert_eq!(
+                count(
+                    &pool,
+                    "SELECT count(*) FROM events WHERE properties ->> 'kind' = 'soft'"
+                )
+                .await,
+                1
+            );
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_message_without_a_stored_hash_writes_the_event_but_suppresses_nobody(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
         let ws = workspace(&pool, "fb-null").await;
         let sent = sent(&pool, ws, None).await;
         // The person's current address must not be used as a fallback.
@@ -663,6 +674,8 @@ mod tests {
             count(&pool, "SELECT count(*) FROM decision_records WHERE action = 'suppression.feedback' AND outcome = 'unable' AND reason = 'address_hash_missing'").await,
             1
         );
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -670,80 +683,87 @@ mod tests {
     async fn a_provider_retry_of_the_same_feedback_writes_one_event_and_counts_the_repeat(
         pool: PgPool,
     ) {
-        let ws = workspace(&pool, "fb-dup").await;
-        let sent = sent(&pool, ws, Some([2_u8; 32])).await;
-        let trace = trace();
-        let first = feedback(ws, &sent, FeedbackEvent::BouncedHard, Some("e-7"), &trace);
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "fb-dup").await;
+            let sent = sent(&pool, ws, Some([2_u8; 32])).await;
+            let trace = trace();
+            let first = feedback(ws, &sent, FeedbackEvent::BouncedHard, Some("e-7"), &trace);
 
-        let one = record_provider_feedback(&pool, &first).await.unwrap();
-        let again = record_provider_feedback(&pool, &first).await.unwrap();
-        let other_id = record_provider_feedback(
-            &pool,
-            &feedback(ws, &sent, FeedbackEvent::BouncedHard, Some("e-8"), &trace),
-        )
-        .await
-        .unwrap();
-
-        assert!(matches!(one, FeedbackOutcome::Recorded { .. }));
-        assert_eq!(again, FeedbackOutcome::Duplicate);
-        assert!(
-            matches!(other_id, FeedbackOutcome::Recorded { .. }),
-            "another provider event id is another event"
-        );
-        assert_eq!(count(&pool, "SELECT count(*) FROM events").await, 2);
-        assert_eq!(
-            count(
+            let one = record_provider_feedback(&pool, &first).await.unwrap();
+            let again = record_provider_feedback(&pool, &first).await.unwrap();
+            let other_id = record_provider_feedback(
                 &pool,
-                "SELECT duplicates::bigint FROM event_dedupe WHERE message_id LIKE '%e-7'"
+                &feedback(ws, &sent, FeedbackEvent::BouncedHard, Some("e-8"), &trace),
             )
-            .await,
-            1
-        );
-        assert_eq!(count(&pool, "SELECT count(*) FROM suppressions").await, 1);
+            .await
+            .unwrap();
+
+            assert!(matches!(one, FeedbackOutcome::Recorded { .. }));
+            assert_eq!(again, FeedbackOutcome::Duplicate);
+            assert!(
+                matches!(other_id, FeedbackOutcome::Recorded { .. }),
+                "another provider event id is another event"
+            );
+            assert_eq!(count(&pool, "SELECT count(*) FROM events").await, 2);
+            assert_eq!(
+                count(
+                    &pool,
+                    "SELECT duplicates::bigint FROM event_dedupe WHERE message_id LIKE '%e-7'"
+                )
+                .await,
+                1
+            );
+            assert_eq!(count(&pool, "SELECT count(*) FROM suppressions").await, 1);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_retry_for_a_person_who_is_gone_writes_one_set_of_decisions(pool: PgPool) {
-        let ws = workspace(&pool, "fb-gone").await;
-        let sent = sent(&pool, ws, Some([4_u8; 32])).await;
-        let survivor = Uuid::now_v7();
-        sqlx::query("INSERT INTO people (id, workspace_id, traits) VALUES ($1, $2, '{}')")
-            .bind(survivor)
-            .bind(ws.as_uuid())
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("UPDATE people SET merged_into = $1 WHERE id = $2")
-            .bind(survivor)
-            .bind(sent.person)
-            .execute(&pool)
-            .await
-            .unwrap();
-        let trace = trace();
-        let hard = feedback(ws, &sent, FeedbackEvent::BouncedHard, Some("e-1"), &trace);
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "fb-gone").await;
+            let sent = sent(&pool, ws, Some([4_u8; 32])).await;
+            let survivor = Uuid::now_v7();
+            sqlx::query("INSERT INTO people (id, workspace_id, traits) VALUES ($1, $2, $3)")
+                .bind(survivor)
+                .bind(ws.as_uuid())
+                .bind(json!(crate::decision_testing::PERSONAL_DATA.traits()))
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("UPDATE people SET merged_into = $1 WHERE id = $2")
+                .bind(survivor)
+                .bind(sent.person)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let trace = trace();
+            let hard = feedback(ws, &sent, FeedbackEvent::BouncedHard, Some("e-1"), &trace);
 
-        let first = record_provider_feedback(&pool, &hard).await.unwrap();
-        let decisions = count(&pool, "SELECT count(*) FROM decision_records").await;
-        let again = record_provider_feedback(&pool, &hard).await.unwrap();
+            let first = record_provider_feedback(&pool, &hard).await.unwrap();
+            let decisions = count(&pool, "SELECT count(*) FROM decision_records").await;
+            let again = record_provider_feedback(&pool, &hard).await.unwrap();
 
-        assert!(matches!(
-            first,
-            FeedbackOutcome::Recorded { event: None, .. }
-        ));
-        assert_eq!(again, FeedbackOutcome::Duplicate);
-        assert!(decisions > 0);
-        assert_eq!(
-            count(&pool, "SELECT count(*) FROM decision_records").await,
-            decisions,
-            "the retry appends no decision"
-        );
-        assert_eq!(count(&pool, "SELECT count(*) FROM events").await, 0);
-        assert_eq!(count(&pool, "SELECT count(*) FROM suppressions").await, 1);
-        assert_eq!(
-            count(&pool, "SELECT duplicates::bigint FROM event_dedupe").await,
-            1
-        );
+            assert!(matches!(
+                first,
+                FeedbackOutcome::Recorded { event: None, .. }
+            ));
+            assert_eq!(again, FeedbackOutcome::Duplicate);
+            assert!(decisions > 0);
+            assert_eq!(
+                count(&pool, "SELECT count(*) FROM decision_records").await,
+                decisions,
+                "the retry appends no decision"
+            );
+            assert_eq!(count(&pool, "SELECT count(*) FROM events").await, 0);
+            assert_eq!(count(&pool, "SELECT count(*) FROM suppressions").await, 1);
+            assert_eq!(
+                count(&pool, "SELECT duplicates::bigint FROM event_dedupe").await,
+                1
+            );
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -751,66 +771,74 @@ mod tests {
     async fn an_unknown_message_another_workspace_or_another_destination_writes_nothing(
         pool: PgPool,
     ) {
-        let ws = workspace(&pool, "fb-unknown").await;
-        let other = workspace(&pool, "fb-unknown-other").await;
-        let sent = sent(&pool, ws, Some([3_u8; 32])).await;
-        let trace = trace();
-        let mut ghost = feedback(ws, &sent, FeedbackEvent::BouncedHard, None, &trace);
-        ghost.message = Uuid::now_v7();
-        let mut elsewhere = feedback(other, &sent, FeedbackEvent::BouncedHard, None, &trace);
-        elsewhere.destination = sent.destination;
-        let mut wrong_destination = feedback(ws, &sent, FeedbackEvent::BouncedHard, None, &trace);
-        wrong_destination.destination = Uuid::now_v7();
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "fb-unknown").await;
+            let other = workspace(&pool, "fb-unknown-other").await;
+            let sent = sent(&pool, ws, Some([3_u8; 32])).await;
+            let trace = trace();
+            let mut ghost = feedback(ws, &sent, FeedbackEvent::BouncedHard, None, &trace);
+            ghost.message = Uuid::now_v7();
+            let mut elsewhere = feedback(other, &sent, FeedbackEvent::BouncedHard, None, &trace);
+            elsewhere.destination = sent.destination;
+            let mut wrong_destination =
+                feedback(ws, &sent, FeedbackEvent::BouncedHard, None, &trace);
+            wrong_destination.destination = Uuid::now_v7();
 
-        for case in [ghost, elsewhere, wrong_destination] {
-            assert_eq!(
-                record_provider_feedback(&pool, &case).await.unwrap(),
-                FeedbackOutcome::UnknownMessage
-            );
-        }
+            for case in [ghost, elsewhere, wrong_destination] {
+                assert_eq!(
+                    record_provider_feedback(&pool, &case).await.unwrap(),
+                    FeedbackOutcome::UnknownMessage
+                );
+            }
 
-        for table in ["events", "suppressions", "decision_records", "event_dedupe"] {
-            assert_eq!(
-                count(&pool, &format!("SELECT count(*) FROM {table}")).await,
-                0,
-                "{table}"
-            );
-        }
+            for table in ["events", "suppressions", "decision_records", "event_dedupe"] {
+                assert_eq!(
+                    count(&pool, &format!("SELECT count(*) FROM {table}")).await,
+                    0,
+                    "{table}"
+                );
+            }
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_decision_sits_under_the_enrollments_trace_with_its_original_cause(pool: PgPool) {
-        let ws = workspace(&pool, "fb-trace").await;
-        let sent = sent(&pool, ws, Some([5_u8; 32])).await;
-        let fallback = trace();
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "fb-trace").await;
+            let sent = sent(&pool, ws, Some([5_u8; 32])).await;
+            let fallback = trace();
 
-        record_provider_feedback(
-            &pool,
-            &feedback(ws, &sent, FeedbackEvent::Complained, None, &fallback),
-        )
-        .await
-        .unwrap();
+            record_provider_feedback(
+                &pool,
+                &feedback(ws, &sent, FeedbackEvent::Complained, None, &fallback),
+            )
+            .await
+            .unwrap();
 
-        // The enrollment is gone in this fixture: the fallback trace is used.
-        let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
-            "SELECT trace_id, action, cause_kind FROM decision_records ORDER BY action",
-        )
-        .fetch_all(&pool)
-        .await
-        .unwrap();
-        assert_eq!(rows.len(), 2);
-        assert!(
-            rows.iter()
-                .all(|(trace, ..)| *trace == fallback.trace_id.as_uuid())
-        );
-        assert_eq!(rows[0].1, "message.feedback");
-        assert_eq!(rows[1].1, "suppression.feedback");
+            // The enrollment is gone in this fixture: the fallback trace is used.
+            let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
+                "SELECT trace_id, action, cause_kind FROM decision_records ORDER BY action",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(rows.len(), 2);
+            assert!(
+                rows.iter()
+                    .all(|(trace, ..)| *trace == fallback.trace_id.as_uuid())
+            );
+            assert_eq!(rows[0].1, "message.feedback");
+            assert_eq!(rows[1].1, "suppression.feedback");
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn nothing_in_a_row_event_or_decision_holds_an_address(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
         let ws = workspace(&pool, "fb-noleak").await;
         let sent = sent(&pool, ws, Some([6_u8; 32])).await;
         let trace = trace();
@@ -834,6 +862,8 @@ mod tests {
                 .unwrap();
             assert!(!text.contains('@'), "{sql}: {text}");
         }
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -841,52 +871,145 @@ mod tests {
     async fn the_feedback_event_reaches_the_forwarding_outbox_only_when_the_whole_write_commits(
         pool: PgPool,
     ) {
-        use crate::forwarding::support::{
-            add_rule, destination_in, forward_jobs, outbox_rows, payloads,
-        };
+        crate::decision_testing::checked(pool, |pool| async move {
+            use crate::forwarding::support::{
+                add_rule, destination_in, forward_jobs, outbox_rows, payloads,
+            };
 
-        let ws = workspace(&pool, "fb-fwd").await;
-        let sink = destination_in(&pool, ws).await;
-        add_rule(
-            &pool,
-            ws,
-            sink,
-            "email.bounced",
-            json!([]),
-            json!({"kind": {"from": "event.properties", "pointer": "/kind"}}),
-        )
-        .await;
-        let sent = sent(&pool, ws, Some([9_u8; 32])).await;
-        let trace = trace();
-        let hard = feedback(ws, &sent, FeedbackEvent::BouncedHard, Some("e-1"), &trace);
-        // The suppression is written after the event: failing it rolls the whole write back.
-        sqlx::query(
-            "CREATE FUNCTION refuse_suppression() RETURNS trigger LANGUAGE plpgsql AS \
+            let ws = workspace(&pool, "fb-fwd").await;
+            let sink = destination_in(&pool, ws).await;
+            add_rule(
+                &pool,
+                ws,
+                sink,
+                "email.bounced",
+                json!([]),
+                json!({"kind": {"from": "event.properties", "pointer": "/kind"}}),
+            )
+            .await;
+            let sent = sent(&pool, ws, Some([9_u8; 32])).await;
+            let trace = trace();
+            let hard = feedback(ws, &sent, FeedbackEvent::BouncedHard, Some("e-1"), &trace);
+            // The suppression is written after the event: failing it rolls the whole write back.
+            sqlx::query(
+                "CREATE FUNCTION refuse_suppression() RETURNS trigger LANGUAGE plpgsql AS \
              $$ BEGIN RAISE EXCEPTION 'refused'; END $$",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "CREATE TRIGGER refuse BEFORE INSERT ON suppressions \
-             FOR EACH ROW EXECUTE FUNCTION refuse_suppression()",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        assert!(record_provider_feedback(&pool, &hard).await.is_err());
-        assert_eq!(
-            (outbox_rows(&pool, ws).await, forward_jobs(&pool).await),
-            (0, 0)
-        );
-
-        sqlx::query("DROP TRIGGER refuse ON suppressions")
+            )
             .execute(&pool)
             .await
             .unwrap();
-        record_provider_feedback(&pool, &hard).await.unwrap();
-        assert_eq!(payloads(&pool, ws).await, [json!({"kind": "hard"})]);
-        assert_eq!(forward_jobs(&pool).await, 1);
+            sqlx::query(
+                "CREATE TRIGGER refuse BEFORE INSERT ON suppressions \
+             FOR EACH ROW EXECUTE FUNCTION refuse_suppression()",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            assert!(record_provider_feedback(&pool, &hard).await.is_err());
+            assert_eq!(
+                (outbox_rows(&pool, ws).await, forward_jobs(&pool).await),
+                (0, 0)
+            );
+
+            sqlx::query("DROP TRIGGER refuse ON suppressions")
+                .execute(&pool)
+                .await
+                .unwrap();
+            record_provider_feedback(&pool, &hard).await.unwrap();
+            assert_eq!(payloads(&pool, ws).await, [json!({"kind": "hard"})]);
+            assert_eq!(forward_jobs(&pool).await, 1);
+        })
+        .await;
+    }
+
+    async fn feedback_fixture(
+        pool: PgPool,
+        event: FeedbackEvent,
+        reason: &str,
+        suppression: Option<&str>,
+    ) {
+        let ws = workspace(&pool, "feedback-fixture").await;
+        let sent = sent(&pool, ws, Some([9; 32])).await;
+        let trace = trace();
+        let outcome =
+            record_provider_feedback(&pool, &feedback(ws, &sent, event, Some("fixture"), &trace))
+                .await
+                .unwrap();
+        let FeedbackOutcome::Recorded {
+            event: Some(event), ..
+        } = outcome
+        else {
+            panic!("{outcome:?}");
+        };
+        let enrollment: Uuid =
+            sqlx::query_scalar("SELECT enrollment_id FROM messages WHERE id = $1")
+                .bind(sent.message)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let subjects = json!({"message": sent.message, "person": sent.person,
+            "enrollment": enrollment, "destination": sent.destination});
+        let mut feedback_subjects = subjects.clone();
+        feedback_subjects["event"] = json!(event);
+        crate::decision_testing::assert_fixture(
+            &pool,
+            ws,
+            &trace,
+            ("message.feedback", "recorded", Some(reason)),
+            feedback_subjects,
+        )
+        .await;
+        if let Some(reason) = suppression {
+            crate::decision_testing::assert_fixture(
+                &pool,
+                ws,
+                &trace,
+                ("suppression.feedback", "added", Some(reason)),
+                subjects,
+            )
+            .await;
+        } else {
+            assert_eq!(count(&pool, "SELECT count(*) FROM suppressions").await, 0);
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn message_feedback_bounced_hard(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            feedback_fixture(
+                pool,
+                FeedbackEvent::BouncedHard,
+                "bounced_hard",
+                Some("organization_hard_bounce"),
+            )
+            .await;
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn message_feedback_bounced_soft(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            feedback_fixture(pool, FeedbackEvent::BouncedSoft, "bounced_soft", None).await;
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn message_feedback_complained(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            feedback_fixture(
+                pool,
+                FeedbackEvent::Complained,
+                "complained",
+                Some("workspace_complaint"),
+            )
+            .await;
+        })
+        .await;
     }
 }
