@@ -1085,6 +1085,12 @@ mod tests {
     ) {
         crate::decision_testing::checked(pool, |pool| async move {
             let ws = workspace(&pool, "one").await;
+            crate::segments::tests_support::segment_reading(
+                &pool,
+                ws,
+                zirv_flow_core::segment::ChangeClasses::CONSENT,
+            )
+            .await;
             let ada = person(&pool, ws, PERSONAL_DATA.email).await;
             let trace = TraceContext::root(Cause::api("consent"));
             let change = change(ada, None, ConsentStatus::Subscribed, T1);

@@ -139,7 +139,8 @@ impl std::error::Error for SegmentError {}
 
 /// Takes the workspace's segments lock for the rest of the transaction. Take it before reading
 /// the catalog or the reference graph for a write, so two saves cannot each miss the other's
-/// edge.
+/// edge. Writers of person changes take its shared form before reading dependency classes,
+/// so a save's initial full refresh cannot overtake a writer that skipped its marks.
 pub async fn lock_segments(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -191,6 +192,7 @@ pub async fn create_segment(
     created_by: Option<UserId>,
     trace: &TraceContext,
 ) -> Result<(Segment, SegmentVersion), StoreError> {
+    lock_segments(connection, workspace).await?;
     let segment: Segment = sqlx::query_as(concat!(
         "INSERT INTO segments (id, workspace_id, name, description, current_version, \
             cadence_minutes, created_by) VALUES ($1, $2, $3, $4, 1, $5, $6) RETURNING ",
@@ -230,6 +232,7 @@ pub async fn update_segment(
     updated_by: Option<UserId>,
     trace: &TraceContext,
 ) -> Result<(Segment, Option<SegmentVersion>), SegmentError> {
+    lock_segments(connection, workspace).await?;
     let held = lock_segment_row(connection, workspace, id).await?;
     if held.archived_at.is_some() {
         return Err(SegmentError::Archived);

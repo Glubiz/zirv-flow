@@ -1593,6 +1593,12 @@ mod tests {
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_replay_that_stores_an_event_requests_the_reevaluation_it_marked(pool: PgPool) {
         let (ws, reject) = rejected(&pool).await;
+        crate::segments::tests_support::segment_reading(
+            &pool,
+            ws,
+            zirv_flow_core::segment::ChangeClasses::EVENTS,
+        )
+        .await;
         fix_the_schema(&pool, ws).await;
         sqlx::query("DELETE FROM jobs WHERE kind = 'segment.reevaluate'")
             .execute(&pool)

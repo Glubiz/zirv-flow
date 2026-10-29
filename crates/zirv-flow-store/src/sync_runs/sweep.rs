@@ -714,6 +714,12 @@ mod tests {
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_sweep_that_removes_records_requests_the_reevaluation_it_marked(pool: PgPool) {
         let fx = second_run(&pool, 2).await;
+        crate::segments::tests_support::segment_reading(
+            &pool,
+            fx.ws,
+            zirv_flow_core::segment::ChangeClasses::from_bits(63),
+        )
+        .await;
         let source = fx.source_id.to_string();
         sqlx::query("DELETE FROM person_changes")
             .execute(&pool)

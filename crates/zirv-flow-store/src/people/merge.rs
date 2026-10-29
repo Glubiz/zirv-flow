@@ -526,6 +526,12 @@ mod tests {
     async fn an_anonymous_person_is_merged_into_the_identified_one(pool: PgPool) {
         crate::decision_testing::checked(pool, |pool| async move {
             let ws = workspace(&pool, "one").await;
+            crate::segments::tests_support::segment_reading(
+                &pool,
+                ws,
+                zirv_flow_core::segment::ChangeClasses::MERGE,
+            )
+            .await;
             let identified = apply_one(
                 &pool,
                 ws,

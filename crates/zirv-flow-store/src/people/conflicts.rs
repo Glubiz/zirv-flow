@@ -553,6 +553,12 @@ mod tests {
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn moving_an_identifier_marks_both_people_in_the_identifiers_class(pool: PgPool) {
         let ws = workspace(&pool).await;
+        crate::segments::tests_support::segment_reading(
+            &pool,
+            ws,
+            zirv_flow_core::segment::ChangeClasses::IDENTIFIERS,
+        )
+        .await;
         let (one, two, conflict) = blocked(&pool, ws).await;
         sqlx::query("DELETE FROM person_changes")
             .execute(&pool)

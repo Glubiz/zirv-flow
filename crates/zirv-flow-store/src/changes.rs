@@ -1,10 +1,10 @@
 //! The dirty set (architecture 7.1 and 8.4): `person_changes`, one row per person whose data
-//! changed since a pass last looked. A writer marks the people it changed in its own
+//! changed since a pass last looked. A writer marks changes read by a live segment in its own
 //! transaction, with what changed and the trace and cause of the change, and asks for a
 //! `segment.reevaluate` job. The job claims the marks with [`claim_dirty`].
 
 use serde_json::json;
-use sqlx::{PgConnection, PgPool};
+use sqlx::{Connection, PgConnection, PgPool};
 use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::segment::ChangeClasses;
@@ -29,8 +29,8 @@ pub struct DirtyPerson {
 
 /// Marks `people` changed in `classes`, in the caller's transaction. Marks coalesce per person:
 /// the classes are OR-ed, the latest trace and cause win, `late_from` takes the earliest value
-/// and `changed_at` keeps the first mark's time. It only upserts; the transaction's owner calls
-/// [`enqueue_reevaluate`] once before it commits.
+/// and `changed_at` keeps the first mark's time. Classes no live segment reads are skipped;
+/// the transaction's owner calls [`request_reevaluation`] once before it commits.
 pub(crate) async fn mark_people(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -46,25 +46,71 @@ pub(crate) async fn mark_people(
     let mut sorted = people.to_vec();
     sorted.sort_unstable();
     sorted.dedup();
-    sqlx::query(
-        "INSERT INTO person_changes \
+    loop {
+        // Cache in transaction-local state so record paths and savepoints share one lookup.
+        // A workspace-keyed map also handles transactions that write more than one workspace.
+        let (readers, _): (Option<i16>, Option<String>) = sqlx::query_as(
+            "WITH readers AS MATERIALIZED ( \
+             SELECT (NULLIF(current_setting('zirv_flow.change_readers', true), '')::jsonb \
+                     ->> $1::text)::smallint AS classes), marked AS ( \
+         INSERT INTO person_changes \
             (workspace_id, person_id, classes, trace_id, cause_kind, cause_id, late_from) \
          SELECT $1, p.person_id, $3, $4, $5, $6, $7 \
-         FROM unnest($2::uuid[]) WITH ORDINALITY AS p(person_id, n) ORDER BY p.n \
+         FROM unnest($2::uuid[]) WITH ORDINALITY AS p(person_id, n) \
+         WHERE ((SELECT classes FROM readers) & $3::smallint) <> 0 ORDER BY p.n \
          ON CONFLICT (workspace_id, person_id) DO UPDATE SET \
              classes = person_changes.classes | EXCLUDED.classes, \
              trace_id = EXCLUDED.trace_id, cause_kind = EXCLUDED.cause_kind, \
              cause_id = EXCLUDED.cause_id, \
-             late_from = LEAST(person_changes.late_from, EXCLUDED.late_from)",
+             late_from = LEAST(person_changes.late_from, EXCLUDED.late_from) RETURNING 1), \
+         marked_workspaces AS ( \
+             SELECT COALESCE(NULLIF(current_setting('zirv_flow.marked_workspaces', true), '')::jsonb, \
+                             '[]') AS workspaces) \
+         SELECT readers.classes, \
+             CASE WHEN NOT (workspaces ? $1::text) AND EXISTS (SELECT 1 FROM marked) THEN \
+                 set_config('zirv_flow.marked_workspaces', \
+                            (workspaces || jsonb_build_array($1::text))::text, true) END \
+         FROM readers CROSS JOIN marked_workspaces",
+        )
+        .bind(workspace.as_uuid())
+        .bind(&sorted)
+        .bind(i16::from(classes.bits()))
+        .bind(trace.trace_id.as_uuid())
+        .bind(trace.cause.kind.as_str())
+        .bind(&trace.cause.id)
+        .bind(late_from)
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
+        if readers.is_some() {
+            return Ok(());
+        }
+        cache_change_readers(connection, workspace).await?;
+    }
+}
+
+/// Load once outside a batch's record savepoints, so rolling back a bad row keeps its cache
+/// and lock. Single-record writers initialize lazily in `mark_people`.
+pub(crate) async fn cache_change_readers(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+) -> Result<(), StoreError> {
+    if !connection.is_in_transaction() {
+        return Err(StoreError::query(sqlx::Error::Protocol(
+            "person changes require a transaction".into(),
+        )));
+    }
+    // The shared lock holds saves until this batch commits; their queued full refresh
+    // starts after the save commits and therefore sees every person whose mark we skip.
+    let readers = crate::segments::active_change_classes(connection, workspace).await?;
+    sqlx::query(
+        "SELECT set_config('zirv_flow.change_readers', \
+         (COALESCE(NULLIF(current_setting('zirv_flow.change_readers', true), '')::jsonb, '{}') \
+          || jsonb_build_object($1::text, $2::smallint))::text, true)",
     )
     .bind(workspace.as_uuid())
-    .bind(&sorted)
-    .bind(i16::from(classes.bits()))
-    .bind(trace.trace_id.as_uuid())
-    .bind(trace.cause.kind.as_str())
-    .bind(&trace.cause.id)
-    .bind(late_from)
-    .execute(&mut *connection)
+    .bind(i16::from(readers.bits()))
+    .execute(connection)
     .await
     .map_err(StoreError::query)?;
     Ok(())
@@ -82,8 +128,8 @@ pub(crate) async fn mark_person(
     mark_people(connection, workspace, &[person], classes, trace, late_from).await
 }
 
-/// Enqueues the workspace's `segment.reevaluate`, once per transaction that marked anyone. A
-/// no-op while one is ready or running (its unique key).
+/// Enqueues the workspace's `segment.reevaluate`. A no-op while one is ready or running (its
+/// unique key).
 ///
 /// This only buys latency. Correctness never depends on it: a mark that no request follows (a
 /// path that missed the call, a request that rolled back, a mark made after the job's last
@@ -111,6 +157,17 @@ pub(crate) async fn request_reevaluation(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
 ) -> Result<(), StoreError> {
+    let marked: bool = sqlx::query_scalar(
+        "SELECT COALESCE(NULLIF(current_setting('zirv_flow.marked_workspaces', true), '')::jsonb \
+                         ? $1::text, false)",
+    )
+    .bind(workspace.as_uuid())
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    if !marked {
+        return Ok(());
+    }
     let trace = TraceContext::root(Cause::from_stored(
         CauseKind::Api,
         "segment.reevaluate".to_owned(),
@@ -261,6 +318,288 @@ mod tests {
         claimed
     }
 
+    async fn save_reader(connection: &mut PgConnection, ws: WorkspaceId, existing: Option<Uuid>) {
+        let content = crate::NewSegmentVersion {
+            definition: json!({"v": 1, "event": "seen"}),
+            normalized: json!({"v": 1, "event": "seen"}),
+            deps: json!({"classes": ChangeClasses::EVENTS.bits(), "segments": []}),
+            time_sensitive: false,
+        };
+        if let Some(id) = existing {
+            crate::update_segment(
+                connection,
+                ws,
+                id,
+                &crate::SegmentPatch {
+                    version: Some(content),
+                    ..Default::default()
+                },
+                None,
+                &trace(Cause::api("t")),
+            )
+            .await
+            .unwrap();
+        } else {
+            crate::create_segment(
+                connection,
+                ws,
+                &crate::NewSegment {
+                    id: Uuid::now_v7(),
+                    name: "Event reader".into(),
+                    description: String::new(),
+                    cadence_minutes: 60,
+                },
+                &content,
+                None,
+                &trace(Cause::api("t")),
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    async fn wait_for_advisory_waiter<T>(
+        pool: &PgPool,
+        holder: i32,
+        task: &tokio::task::JoinHandle<T>,
+    ) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' \
+                     AND NOT granted AND $1 = ANY(pg_blocking_pids(pid)))",
+                )
+                .bind(holder)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+                if waiting {
+                    return;
+                }
+                assert!(
+                    !task.is_finished(),
+                    "the writer passed the activation guard"
+                );
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the competing transaction must wait on the advisory lock");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn activation_waits_for_a_transaction_that_skipped_its_marks(pool: PgPool) {
+        for update in [false, true] {
+            let ws = workspace(&pool, if update { "update" } else { "create" }).await;
+            let existing = if update {
+                Some(
+                    crate::segments::tests_support::segment_reading(
+                        &pool,
+                        ws,
+                        ChangeClasses::TRAITS,
+                    )
+                    .await
+                    .id,
+                )
+            } else {
+                None
+            };
+            sqlx::query("DELETE FROM jobs WHERE workspace_id = $1 AND kind = 'segment.refresh'")
+                .bind(ws.as_uuid())
+                .execute(&pool)
+                .await
+                .unwrap();
+            let one = person(&pool, ws).await;
+            let mut batch = begin(&pool).await.unwrap();
+            let holder: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *batch)
+                .await
+                .unwrap();
+            mark_people(
+                &mut batch,
+                ws,
+                &[one],
+                ChangeClasses::EVENTS,
+                &trace(Cause::api("t")),
+                None,
+            )
+            .await
+            .unwrap();
+            let marks: i64 = sqlx::query_scalar("SELECT count(*) FROM person_changes")
+                .fetch_one(&mut *batch)
+                .await
+                .unwrap();
+            assert_eq!(marks, 0);
+            let mut activation = begin(&pool).await.unwrap();
+            let task = tokio::spawn(async move {
+                save_reader(&mut activation, ws, existing).await;
+                commit(activation).await.unwrap();
+            });
+
+            wait_for_advisory_waiter(&pool, holder, &task).await;
+            let visible: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM jobs WHERE workspace_id = $1 AND kind = 'segment.refresh'",
+            )
+            .bind(ws.as_uuid())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                visible, 0,
+                "the initial refresh cannot run before the skipped batch commits"
+            );
+            commit(batch).await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(10), task)
+                .await
+                .unwrap()
+                .unwrap();
+            let visible: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM jobs WHERE workspace_id = $1 AND kind = 'segment.refresh'",
+            )
+            .bind(ws.as_uuid())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(visible, 1);
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_writer_waiting_for_activation_reads_the_committed_dependency_classes(pool: PgPool) {
+        let ws = workspace(&pool, "ours").await;
+        let one = person(&pool, ws).await;
+        let mut activation = begin(&pool).await.unwrap();
+        let holder: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *activation)
+            .await
+            .unwrap();
+        save_reader(&mut activation, ws, None).await;
+        let mut batch = begin(&pool).await.unwrap();
+        let task = tokio::spawn(async move {
+            mark_people(
+                &mut batch,
+                ws,
+                &[one],
+                ChangeClasses::EVENTS,
+                &trace(Cause::api("t")),
+                None,
+            )
+            .await
+            .unwrap();
+            request_reevaluation(&mut batch, ws).await.unwrap();
+            commit(batch).await.unwrap();
+        });
+
+        wait_for_advisory_waiter(&pool, holder, &task).await;
+        commit(activation).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), task)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let marks = claim(&pool, ws, 10).await;
+        assert_eq!(marks.len(), 1);
+        assert_eq!(marks[0].classes, ChangeClasses::EVENTS);
+        let jobs: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = 'segment.reevaluate'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(jobs, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_reader_cache_is_workspace_scoped_and_cleared_by_commit_and_rollback(pool: PgPool) {
+        let one = workspace(&pool, "one").await;
+        let two = workspace(&pool, "two").await;
+        let a = person(&pool, one).await;
+        let b = person(&pool, two).await;
+        crate::segments::tests_support::segment_reading(&pool, two, ChangeClasses::EVENTS).await;
+        let mut connection = pool.acquire().await.unwrap();
+        assert!(
+            cache_change_readers(&mut connection, one).await.is_err(),
+            "the cache requires a transaction"
+        );
+        for commit in [false, true] {
+            let mut tx = connection.begin().await.unwrap();
+            cache_change_readers(&mut tx, two).await.unwrap();
+            let mut savepoint = tx.begin().await.unwrap();
+            mark_people(
+                &mut savepoint,
+                two,
+                &[b],
+                ChangeClasses::EVENTS,
+                &trace(Cause::api("t")),
+                None,
+            )
+            .await
+            .unwrap();
+            savepoint.rollback().await.unwrap();
+            request_reevaluation(&mut tx, two).await.unwrap();
+            let jobs: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = 'segment.reevaluate'")
+                    .fetch_one(&mut *tx)
+                    .await
+                    .unwrap();
+            assert_eq!(jobs, 0, "a rolled-back mark must not request reevaluation");
+            for (ws, person) in [(one, a), (two, b), (one, a)] {
+                mark_people(
+                    &mut tx,
+                    ws,
+                    &[person],
+                    ChangeClasses::EVENTS,
+                    &trace(Cause::api("t")),
+                    None,
+                )
+                .await
+                .unwrap();
+            }
+            let marked: Vec<Uuid> = sqlx::query_scalar("SELECT person_id FROM person_changes")
+                .fetch_all(&mut *tx)
+                .await
+                .unwrap();
+            assert_eq!(marked, [b]);
+            if commit {
+                tx.commit().await.unwrap();
+            } else {
+                tx.rollback().await.unwrap();
+            }
+            let cleared: bool = sqlx::query_scalar(
+                "SELECT NULLIF(current_setting('zirv_flow.change_readers', true), '') IS NULL \
+                 AND NULLIF(current_setting('zirv_flow.marked_workspaces', true), '') IS NULL",
+            )
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+            assert!(cleared);
+        }
+        crate::segments::tests_support::segment_reading(&pool, one, ChangeClasses::EVENTS).await;
+        let mut tx = connection.begin().await.unwrap();
+        mark_people(
+            &mut tx,
+            one,
+            &[a],
+            ChangeClasses::EVENTS,
+            &trace(Cause::api("t")),
+            None,
+        )
+        .await
+        .unwrap();
+        let marked: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM person_changes WHERE person_id = $1")
+                .bind(a)
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+        assert_eq!(
+            marked, 1,
+            "a reused connection must see a newly activated segment"
+        );
+    }
+
     #[test]
     fn a_stored_cause_that_is_incomplete_or_unknown_has_no_trace() {
         let id = Uuid::from_u128(1);
@@ -279,6 +618,12 @@ mod tests {
         pool: PgPool,
     ) {
         let ws = workspace(&pool, "ours").await;
+        crate::segments::tests_support::segment_reading(
+            &pool,
+            ws,
+            zirv_flow_core::segment::ChangeClasses::from_bits(63),
+        )
+        .await;
         let one = person(&pool, ws).await;
         let first = trace(Cause::api("first"));
         let second = trace(Cause::event(Uuid::from_u128(9)));
@@ -317,6 +662,12 @@ mod tests {
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn re_marking_keeps_the_first_changed_at(pool: PgPool) {
         let ws = workspace(&pool, "ours").await;
+        crate::segments::tests_support::segment_reading(
+            &pool,
+            ws,
+            zirv_flow_core::segment::ChangeClasses::from_bits(63),
+        )
+        .await;
         let one = person(&pool, ws).await;
         mark(
             &pool,
@@ -359,6 +710,12 @@ mod tests {
         pool: PgPool,
     ) {
         let ws = workspace(&pool, "ours").await;
+        crate::segments::tests_support::segment_reading(
+            &pool,
+            ws,
+            zirv_flow_core::segment::ChangeClasses::from_bits(63),
+        )
+        .await;
         let (one, two) = (person(&pool, ws).await, person(&pool, ws).await);
         let a = trace(Cause::api("a"));
         mark(&pool, ws, &[one, two], ChangeClasses::TRAITS, &a, None).await;
@@ -384,6 +741,12 @@ mod tests {
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn concurrent_claims_take_disjoint_people_oldest_first(pool: PgPool) {
         let ws = workspace(&pool, "ours").await;
+        crate::segments::tests_support::segment_reading(
+            &pool,
+            ws,
+            zirv_flow_core::segment::ChangeClasses::TRAITS,
+        )
+        .await;
         let mut people = Vec::new();
         for _ in 0..6 {
             people.push(person(&pool, ws).await);
@@ -417,6 +780,12 @@ mod tests {
             workspace(&pool, "busy").await,
             workspace(&pool, "idle").await,
         );
+        crate::segments::tests_support::segment_reading(
+            &pool,
+            busy,
+            zirv_flow_core::segment::ChangeClasses::TRAITS,
+        )
+        .await;
         let (one, two) = (person(&pool, busy).await, person(&pool, busy).await);
         mark(
             &pool,
@@ -445,6 +814,12 @@ mod tests {
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_mark_enqueues_nothing_and_a_request_is_one_job_per_workspace(pool: PgPool) {
         let ws = workspace(&pool, "ours").await;
+        crate::segments::tests_support::segment_reading(
+            &pool,
+            ws,
+            zirv_flow_core::segment::ChangeClasses::TRAITS,
+        )
+        .await;
         let (one, two) = (person(&pool, ws).await, person(&pool, ws).await);
         let a = trace(Cause::api("a"));
         mark(&pool, ws, &[one, two], ChangeClasses::TRAITS, &a, None).await;

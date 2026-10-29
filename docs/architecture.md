@@ -414,8 +414,9 @@ As built (consent, topics and suppressions):
 Every path ends in **apply-batch**, one transaction per batch (default 500
 records): normalize identifiers; resolve or create the person (merging if
 needed); upsert ledger contributions and recompute affected traits; insert
-events with dedupe; write coalesced dirty marks (`person_changes`); enqueue
-follow-ups (segment re-evaluation, event triggers, event-wait wakeups); commit
+events with dedupe; write coalesced dirty marks (`person_changes`) when a live
+segment reads the changed class; enqueue follow-ups (segment re-evaluation for
+relevant marks, event triggers, event-wait wakeups); commit
 the stream checkpoint. Customer-event schema validation, redaction, reject
 handling, lateness and trace propagation are defined once in section 12 and
 used by every ingestion path.
@@ -426,6 +427,9 @@ on conflict, so repeated marks coalesce and keep every class that changed. A mar
 `segment.reevaluate` claimed a row re-inserts it (8.4). `segment.*` events never mark a person
 dirty: a membership change reaches dependent segments through topological evaluation, not
 through the dirty set. A mark carries the trace and cause of the latest change, which the entries and exits it causes continue; the writer's transaction enqueues `segment.reevaluate` once, only to cut latency.
+The live dependency classes are read once per workspace and transaction, using the
+workspace's segment index, and cached in transaction-local state. With no matching reader,
+the writer adds neither marks nor a re-evaluation request.
 
 As built (identify / track ingestion): `POST /api/v1/ingest/{identify,track,batch}` validate
 structure, charge the key's in-process token bucket (items, per `serve` process), and append
@@ -962,6 +966,10 @@ classes intersect the batch's combined classes, plus their transitive segment de
 topological order, with `person_id = ANY(batch)`. Name-level filtering (event names, trait
 keys) is an optimization, made only if the M4 benchmark misses.
 **Safety net and pending segments.** The scheduler leader enqueues `segment.reevaluate` for any workspace whose oldest mark is more than 2 s old, so correctness never depends on a writer's enqueue, and it publishes the dirty backlog and age. A pass skips a segment whose `computed_version` is null or differs from `current_version`: its pending full refresh covers everyone.
+Writers hold the shared workspace segment advisory lock while deciding which marks to skip;
+creates and saves hold it exclusively. The dependency read uses a fresh snapshot after the lock
+wait. A save therefore commits after earlier skipped batches, and its transactionally queued
+full refresh evaluates everyone after that commit, including those batches' people.
 
 ## 9. Flow engine
 

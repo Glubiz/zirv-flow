@@ -1201,6 +1201,12 @@ mod tests {
         pool: PgPool,
     ) {
         let ws = workspace(&pool, "one").await;
+        crate::segments::tests_support::segment_reading(
+            &pool,
+            ws,
+            zirv_flow_core::segment::ChangeClasses::LISTS,
+        )
+        .await;
         let list = create_list(&pool, ws, "VIPs", "", None).await.unwrap().id;
         let ada = person(&pool, ws, "1", &[("email", "ada@example.com")]).await;
         let bob = person(&pool, ws, "2", &[("email", "bob@example.com")]).await;

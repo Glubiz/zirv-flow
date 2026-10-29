@@ -686,6 +686,7 @@ pub async fn drain_batch(
     limit: i64,
 ) -> Result<DrainOutcome, StoreError> {
     let mut tx = begin(pool).await?;
+    crate::changes::cache_change_readers(&mut tx, workspace).await?;
     let (rows, more) = take_rows(&mut tx, workspace, shard, limit).await?;
     let hooks = HookConfigs::load(&mut tx, workspace, &rows).await?;
     lock_contact_rows(&mut tx, workspace, &rows).await?;
@@ -746,6 +747,7 @@ pub async fn drain_batch_singly(
     limit: i64,
 ) -> Result<DrainOutcome, StoreError> {
     let mut tx = begin(pool).await?;
+    crate::changes::cache_change_readers(&mut tx, workspace).await?;
     let (rows, more) = take_rows(&mut tx, workspace, shard, limit).await?;
     let hooks = HookConfigs::load(&mut tx, workspace, &rows).await?;
     lock_contact_rows(&mut tx, workspace, &rows).await?;
@@ -1267,6 +1269,130 @@ mod tests {
         .await;
     }
 
+    async fn dirty_and_reevaluation_count(pool: &PgPool, ws: WorkspaceId) -> (i64, i64) {
+        sqlx::query_as(
+            "SELECT (SELECT count(*) FROM person_changes WHERE workspace_id = $1), \
+                    (SELECT count(*) FROM jobs WHERE workspace_id = $1 AND kind = 'segment.reevaluate')",
+        )
+        .bind(ws.as_uuid())
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_drain_without_active_segments_writes_no_marks_or_reevaluation_job(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            for singly in [false, true] {
+                let ws = workspace(&pool, if singly { "singly" } else { "batch" }).await;
+                append(
+                    &pool,
+                    ws,
+                    &TraceContext::root(Cause::api("req")),
+                    &[
+                        identify("u1", "identify-1", json!({"plan": "pro"})),
+                        track("u1", "track-1", "seen", json!({})),
+                    ],
+                )
+                .await;
+
+                let outcome = if singly {
+                    drain_batch_singly(&pool, ws, Shard::ALL, &key(), 500).await
+                } else {
+                    drain_batch(&pool, ws, Shard::ALL, &key(), 500).await
+                }
+                .unwrap();
+
+                assert_eq!(outcome.rows, 2);
+                assert_eq!(outcome.applied[&("identify", "valid")], 1);
+                assert_eq!(outcome.applied[&("track", "unplanned")], 1);
+                assert_eq!(dirty_and_reevaluation_count(&pool, ws).await, (0, 0));
+            }
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_drain_with_matching_segment_classes_keeps_marks_and_reevaluation(pool: PgPool) {
+        use zirv_flow_core::segment::ChangeClasses;
+
+        crate::decision_testing::checked(pool, |pool| async move {
+            let classes =
+                ChangeClasses::TRAITS | ChangeClasses::EVENTS | ChangeClasses::IDENTIFIERS;
+            for singly in [false, true] {
+                let ws = workspace(&pool, if singly { "singly" } else { "batch" }).await;
+                crate::segments::tests_support::segment_reading(&pool, ws, classes).await;
+                append(
+                    &pool,
+                    ws,
+                    &TraceContext::root(Cause::api("req")),
+                    &[
+                        identify("u1", "identify-1", json!({"plan": "pro"})),
+                        track("u1", "track-1", "seen", json!({})),
+                    ],
+                )
+                .await;
+
+                let outcome = if singly {
+                    drain_batch_singly(&pool, ws, Shard::ALL, &key(), 500).await
+                } else {
+                    drain_batch(&pool, ws, Shard::ALL, &key(), 500).await
+                }
+                .unwrap();
+
+                assert_eq!(outcome.rows, 2);
+                assert_eq!(dirty_and_reevaluation_count(&pool, ws).await, (1, 1));
+                let marked: i16 = sqlx::query_scalar(
+                    "SELECT classes FROM person_changes WHERE workspace_id = $1",
+                )
+                .bind(ws.as_uuid())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                assert_eq!(marked, i16::from(classes.bits()));
+            }
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_drain_ignores_archived_other_workspace_and_unrelated_segment_readers(pool: PgPool) {
+        use crate::segments::tests_support::segment_reading;
+        use zirv_flow_core::segment::ChangeClasses;
+
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            let other = workspace(&pool, "other").await;
+            segment_reading(&pool, other, ChangeClasses::EVENTS).await;
+            segment_reading(&pool, ws, ChangeClasses::TRAITS).await;
+            let archived = segment_reading(&pool, ws, ChangeClasses::EVENTS).await;
+            let mut tx = begin(&pool).await.unwrap();
+            crate::lock_segments(&mut tx, ws).await.unwrap();
+            crate::archive_segment(&mut tx, ws, archived.id)
+                .await
+                .unwrap();
+            commit(tx).await.unwrap();
+            append(
+                &pool,
+                ws,
+                &TraceContext::root(Cause::api("req")),
+                &[track("u1", "track-1", "seen", json!({}))],
+            )
+            .await;
+
+            let outcome = drain_batch(&pool, ws, Shard::ALL, &key(), 500)
+                .await
+                .unwrap();
+
+            assert_eq!(outcome.applied[&("track", "unplanned")], 1);
+            assert_eq!(dirty_and_reevaluation_count(&pool, ws).await, (0, 0));
+        })
+        .await;
+    }
+
     async fn wal_lsn(pool: &PgPool) -> String {
         sqlx::query_scalar("SELECT pg_current_wal_lsn()::text")
             .fetch_one(pool)
@@ -1697,6 +1823,12 @@ mod tests {
     async fn replaying_the_same_batch_leaves_the_database_identical(pool: PgPool) {
         crate::decision_testing::checked(pool, |pool| async move {
             let ws = workspace(&pool, "ours").await;
+            crate::segments::tests_support::segment_reading(
+                &pool,
+                ws,
+                zirv_flow_core::segment::ChangeClasses::from_bits(63),
+            )
+            .await;
             crate::set_event_policy(
                 &pool,
                 ws,

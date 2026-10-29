@@ -113,6 +113,12 @@ mod tests {
         let name = WorkspaceName::parse("one").unwrap();
         let slug = Slug::parse("one").unwrap();
         let ws = create_workspace(&pool, &name, &slug).await.unwrap().id;
+        crate::segments::tests_support::segment_reading(
+            &pool,
+            ws,
+            zirv_flow_core::segment::ChangeClasses::TRAITS,
+        )
+        .await;
         let record = ProfileRecord {
             source: "crm".into(),
             stream: "contacts".into(),
@@ -216,6 +222,12 @@ mod tests {
         let name = WorkspaceName::parse("one").unwrap();
         let slug = Slug::parse("one").unwrap();
         let ws = create_workspace(&pool, &name, &slug).await.unwrap().id;
+        crate::segments::tests_support::segment_reading(
+            &pool,
+            ws,
+            zirv_flow_core::segment::ChangeClasses::EVENTS,
+        )
+        .await;
         let record = |event: &str, message_id: &str| EventRecord {
             source_record_id: None,
             source: "web".into(),
