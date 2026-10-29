@@ -191,7 +191,7 @@ describe("the source wizard", () => {
     await user.click(await screen.findByRole("button", { name: "Choose PostgreSQL" }));
     expect(screen.getByRole("link", { name: "How to create one" })).toHaveAttribute(
       "href",
-      "https://github.com/Glubiz/zirv-flow#database-sources",
+      "https://github.com/Glubiz/zirv-flow/blob/main/docs/guide/sources.md#database-sources",
     );
     expect(screen.getByText("No queries")).toBeInTheDocument();
     await user.type(screen.getByLabelText("Name"), "Warehouse");

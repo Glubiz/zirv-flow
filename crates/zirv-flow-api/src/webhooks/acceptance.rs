@@ -356,7 +356,7 @@ mod tests {
             .into_bytes()
     }
 
-    /// The headers of a request signed as the README documents: `X-Zirv-Timestamp` and
+    /// The headers of a request signed as the sources guide documents: `X-Zirv-Timestamp` and
     /// `X-Zirv-Signature: sha256=<hmac of "{timestamp}.{body}">`.
     fn signed(secret: &str, timestamp: i64, body: &[u8]) -> Vec<(String, String)> {
         vec![

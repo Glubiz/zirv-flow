@@ -558,15 +558,15 @@ mod tests {
         assert!(!check_header_name(&"a".repeat(65)));
     }
 
-    /// The README's example: `crates/.../README.md` documents this secret, timestamp, body and
+    /// The sources guide example: `docs/guide/sources.md` documents this secret, timestamp, body and
     /// digest, so the example works as written.
     #[test]
     fn the_documented_example_has_the_documented_digest() {
         let body = br#"{"id":"order-1","email":"ada@example.com"}"#;
         let digest = sign(b"zfwh_example", Some(1_700_000_000), body);
-        assert_eq!(digest, README_EXAMPLE_DIGEST);
+        assert_eq!(digest, GUIDE_EXAMPLE_DIGEST);
     }
 
-    const README_EXAMPLE_DIGEST: &str =
+    const GUIDE_EXAMPLE_DIGEST: &str =
         "c8447361d430f2281aef6579aec897c4930f3d15af1920d3da1f83ff8e4f4d56";
 }

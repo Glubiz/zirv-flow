@@ -28,7 +28,7 @@ const MAX_NAME_CHARS = 128;
 
 /** The source types that read a database, which the setup guide covers. */
 const DATABASE_KINDS = ["postgres", "mysql"];
-const DATABASE_GUIDE = "https://github.com/Glubiz/zirv-flow#database-sources";
+const DATABASE_GUIDE = "https://github.com/Glubiz/zirv-flow/blob/main/docs/guide/sources.md#database-sources";
 
 export function NewSourcePage() {
   const { ws = "" } = useParams();
