@@ -137,7 +137,7 @@ and erasure working from the start.
 **Scope.**
 - **Schema.** People, identities, source-record ledger, field registry (types, precedence); events in monthly partitions with a default partition and maintenance; versioned event schema registry; ingest rejects; lists; consent with history; topics; suppressions (HMAC); the `person_changes` dirty set.
 - **Apply-batch.** Normalization, identity resolution with per-kind rules and recorded conflicts, merges (survivor rules and re-point job), trait precedence, client-`messageId` event dedupe, late-event and future-timestamp handling, ingest redaction, dirty marks.
-- **Ingestion API.** `identify`, `track`, `batch` with ingestion keys, size and per-key rate limits, `ingest_inbox` and drain workers. HTTP only in v1 (OQ-20): the README and OpenAPI document each endpoint with curl and `fetch` examples.
+- **Ingestion API.** `identify`, `track`, `batch` with ingestion keys, size and per-key rate limits, `ingest_inbox` and drain workers. HTTP only in v1 (OQ-20): docs/people.md ("Ingestion") and OpenAPI document each endpoint with curl and `fetch` examples.
 - **Event governance.** Immutable schema versions with typed properties, required fields, enums, descriptions and per-property PII flags; per-event `allow`/`warn`/`block`; workspace policy for draft-schema or reject on unplanned names; visible flagged events and rejects with masked samples; replay after a schema fix; per-name retention overrides. PII properties are masked without `view_pii`; the owner and Admin imply it, while Publisher, Editor and Viewer memberships need an explicit grant (architecture 16.2, ruling ca362e00).
 - **Event investigation.** Workspace/source SSE debugger with filters, validation results and PII masking; explorer filters by name, typed properties, time and person, with counts, breakdowns, CSV and statement timeouts; unified person timeline.
 - **Causality.** Decision records for event acceptance/rejection, merge, consent and trait change, with propagated trace ids and typed causes; API and timeline links to trace trees.
@@ -177,7 +177,7 @@ checkpoints, deletion detection and freshness marketers can see.
 - **Egress policy** (SSRF protection) for all outbound connections: HTTP, databases, Kafka and AI providers.
 - **Built-in sources.** PostgreSQL and MySQL (tables, or queries with a cursor column); CSV/JSON files over HTTPS.
 - **HTTP manifest v1.** Schema and validation; auth, pagination, incremental cursor, field mapping, delete signal; UI editor and validator; reference manifests tested against a mock server.
-- **Inbound webhooks.** Generic, with signature verification and mapping. Done (#90): README "Inbound webhooks".
+- **Inbound webhooks.** Generic, with signature verification and mapping. Done (#90): docs/guide/sources.md "Inbound webhooks".
 - **Kafka source.** Topic streams mapped to contacts, events or lists; offsets stored as the checkpoint in the apply-batch transaction; tombstones delete; failed messages become rejects; consumer lag as freshness; SASL/TLS credentials encrypted (architecture 7.6).
 - **Sync runs.** Schedules, manual run, cancel; state machine with lease heartbeat and checkpoint resume; full-refresh mark and sweep; reconciliation runs for incremental streams without a delete signal; reject threshold.
 - **Mapping UI.** Stream to people, events or lists; identifier and trait mapping; bounded transforms; preview on sample records.

@@ -4,7 +4,7 @@
 # interval and how quickly your team can respond; a page that fires too often gets ignored.
 #
 # Every alert carries a `runbook` annotation that points at its section in
-# docs/operations/runbooks.md. The series are the `zirv_flow_` ones in the README metric table.
+# docs/operations/runbooks.md. The series are the `zirv_flow_` ones in the metric table of docs/operations/runtime.md.
 # The queue, freshness, destination, dirty-set and timer gauges are published by the scheduler
 # leader, so scrape every process and alert on the series, not on one instance.
 #

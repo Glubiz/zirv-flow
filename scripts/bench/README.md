@@ -41,7 +41,7 @@ containers are `zirv-flow-bench-<service>-1`.
 
 ## 2. Create the `ingest` API key
 
-There is no CLI for API keys; they are created over the API by a signed-in workspace admin (README,
+There is no CLI for API keys; they are created over the API by a signed-in workspace admin (docs/people.md,
 "Ingestion"). The CLI creates the owner (the password is one line of standard input), then:
 
 ```sh
