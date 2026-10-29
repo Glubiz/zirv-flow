@@ -2727,6 +2727,9 @@ shown in the Map dialog and the manifest editor.
 
 ### 16.1 Trust boundaries
 
+The [threat model](threat-model.md) maps each boundary below to controls, named tests and
+accepted risks.
+
 | Boundary | Threat | Control |
 |----------|--------|---------|
 | Browser to `serve` | Session theft, CSRF, XSS | HttpOnly SameSite cookies, CSRF tokens, CSP without inline scripts |
@@ -2734,10 +2737,10 @@ shown in the Map dialog and the manifest editor.
 | Tracking, unsubscribe | Enumeration, forged unsubscribes, open redirect | HMAC tokens, no personal data in URLs, recorded-link allowlist |
 | Outbound HTTP | SSRF into internal networks or cloud metadata | Egress policy checked after DNS resolution and bound to the connection: deny loopback, private, link-local, metadata ranges unless allowlisted |
 | Templates | Injection, resource exhaustion | MiniJinja sandbox, fuel and output limits |
-| Rich text in blocks | Script or markup injection into emails and the builder | Allowlist sanitizer (tags, attributes, URL schemes) on save and on render |
+| Rich text in blocks | Script or markup injection into emails and the builder | Allowlist validation (tags, attributes, URL schemes) when saving; sanitizer on render. Invalid drafts may be saved for editing; blocking issues prevent publication. |
 | Preview of marketer HTML | Raw HTML block or code mode running script in the app | Shown only in a sandboxed iframe without `allow-scripts` or same-origin, with its own CSP; never rendered unsandboxed in the app. It is the marketer's own content, so it is not sanitized for the email itself. |
 | Asset uploads | Disguised files, SVG script, storage exhaustion | Type sniffed from the bytes, raster allowlist (no SVG), size and quota limits, `nosniff`, served from `/a/` only |
-| Test sends | Use as an open relay | Recipients limited to members' verified addresses or a workspace allowlist; rate-limited |
+| Test sends | Use as an open relay | Recipients limited to members' account addresses or a workspace allowlist; rate-limited |
 | Segment builder | SQL injection | AST only, bind parameters, registry-only identifiers, no raw SQL in v1 |
 | LLM provider egress | Personal data disclosure, SSRF, unapproved model | Provider/model/base-URL allowlist, common egress policy after DNS resolution, schema-only context by default, workspace PII opt-in |
 | Assistant context and output | Prompt injection in stored or pasted data; structurally valid unsafe output | Treat context as data, fixed read/draft tool registry, per-call RBAC and workspace checks, deterministic semantic validators, bounded repair |
@@ -2794,7 +2797,7 @@ bootstrap hosts, every broker the metadata names and every reconnect.
   comes from operator configuration; its discovery document supplies the trusted token and JWKS
   endpoints. Request-supplied authorization codes, PKCE verifiers and nonces cannot replace those
   endpoints, and HTTP redirects are disabled. The identity regression test pins this boundary;
-  the full threat-model inventory is tracked in #391.
+  the [threat model](threat-model.md#accepted-risks) records the exception.
 
 ### 16.2 Secrets, RBAC, audit
 
