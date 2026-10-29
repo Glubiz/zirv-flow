@@ -30,7 +30,7 @@ async function nav(page: Page, name: string): Promise<void> {
   await page.getByRole("navigation", { name: "Main", exact: true }).getByRole("link", { name, exact: true }).click();
 }
 
-async function receipt(index: number, subject: string): Promise<Message> {
+async function receipt(page: Page, index: number, subject: string): Promise<Message> {
   await expect.poll(() => captured().length, { timeout: 90_000 }).toBe(index + 1);
   const message = captured()[index];
   if (!message) throw new Error("The SMTP sink has no captured message.");
@@ -40,8 +40,14 @@ async function receipt(index: number, subject: string): Promise<Message> {
     expect(part).toContain("Our spring collection is here.");
     expect(part).toContain(ADDRESS);
     expect(part).toContain("Unsubscribe");
-    expect(part).toContain("https://localhost:8443/u/");
   }
+  const unsubscribe = message.text.match(/https:\/\/localhost:8443\/u\/[A-Za-z0-9_-]+/)?.[0];
+  if (!unsubscribe) throw new Error("The text part has no unsubscribe URL on the configured public base.");
+  const links = await page.evaluate((html) => {
+    const parsed = new DOMParser().parseFromString(html, "text/html");
+    return Array.from(parsed.querySelectorAll("a[href]"), (anchor) => anchor.getAttribute("href"));
+  }, message.html);
+  expect(links).toContain(unsubscribe);
   return message;
 }
 
@@ -235,7 +241,7 @@ test("getting started on a clean Compose stack", async ({ page, request }) => {
     expect(captured()).toHaveLength(0);
     await page.getByRole("button", { name: "Send 1 test", exact: true }).click();
     await expect(page.getByRole("status", { name: "Results" })).toContainText("Queued");
-    return receipt(0, "[TEST] Spring is here");
+    return receipt(page, 0, "[TEST] Spring is here");
   });
 
   await test.step("7. Build and dry-run the flow without sending", async () => {
@@ -286,7 +292,7 @@ test("getting started on a clean Compose stack", async ({ page, request }) => {
     await expect(page.getByRole("dialog")).toContainText("1 person in Newsletter readers");
     await page.getByRole("dialog").getByRole("button", { name: "Publish version 1", exact: true }).click();
     await expect(page.getByRole("dialog")).toBeHidden();
-    const flowMessage = await receipt(1, "Spring is here");
+    const flowMessage = await receipt(page, 1, "Spring is here");
     await expect(async () => {
       await page.reload();
       await page.getByRole("tab", { name: "Enrollments", exact: true }).click();
