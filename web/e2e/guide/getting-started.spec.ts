@@ -48,8 +48,6 @@ async function receipt(index: number, subject: string): Promise<Message> {
 test("getting started on a clean Compose stack", async ({ page, request }) => {
   let profileUrl = "";
   let templateUrl = "";
-  let testMessage: Message | undefined;
-  let flowMessage: Message | undefined;
 
   await test.step("1. Claim the instance through setup", async () => {
     const token = readFileSync(scratch("setup-token"), "utf8").trim();
@@ -170,7 +168,7 @@ test("getting started on a clean Compose stack", async ({ page, request }) => {
     const credential = page.getByRole("dialog", { name: "New credential for SMTP" });
     await credential.getByLabel("Host", { exact: true }).fill("fixture");
     await credential.getByLabel("Port", { exact: true }).fill("2525");
-    await credential.getByLabel("TLS mode", { exact: true }).selectOption("tls");
+    await credential.getByLabel("TLS mode", { exact: true }).fill("tls");
     await credential.getByLabel("Username", { exact: true }).fill("drill");
     await credential.getByLabel("Password", { exact: true }).fill("drill");
     await credential.getByRole("button", { name: "Create credential" }).click();
@@ -183,7 +181,7 @@ test("getting started on a clean Compose stack", async ({ page, request }) => {
     await expect(page.getByRole("list", { name: "Test inboxes", exact: true })).toContainText("r***@example.com");
   });
 
-  await test.step("6. Build, preview, publish and test-send the newsletter", async () => {
+  const testMessage = await test.step("6. Build, preview, publish and test-send the newsletter", async () => {
     await nav(page, "Templates");
     await page.getByRole("button", { name: "New template" }).first().click();
     await page.getByLabel("Name", { exact: true }).fill(NEWSLETTER);
@@ -227,7 +225,7 @@ test("getting started on a clean Compose stack", async ({ page, request }) => {
     await page.getByRole("button", { name: "Publish…", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Review and publish version 1", exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Publish version 1", exact: true }).first().click();
-    await expect(page.getByRole("heading", { name: "Version 1 is live", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Version 1 is live", exact: true, level: 1 })).toBeVisible();
     await page.goto(templateUrl);
     await page.getByRole("button", { name: "Send a test", exact: true }).click();
     await page.getByRole("group", { name: "Test inboxes" }).getByRole("checkbox", { name: "r***@example.com", exact: true }).check();
@@ -237,7 +235,7 @@ test("getting started on a clean Compose stack", async ({ page, request }) => {
     expect(captured()).toHaveLength(0);
     await page.getByRole("button", { name: "Send 1 test", exact: true }).click();
     await expect(page.getByRole("status", { name: "Results" })).toContainText("Queued");
-    testMessage = await receipt(0, "[TEST] Spring is here");
+    return receipt(0, "[TEST] Spring is here");
   });
 
   await test.step("7. Build and dry-run the flow without sending", async () => {
@@ -288,7 +286,7 @@ test("getting started on a clean Compose stack", async ({ page, request }) => {
     await expect(page.getByRole("dialog")).toContainText("1 person in Newsletter readers");
     await page.getByRole("dialog").getByRole("button", { name: "Publish version 1", exact: true }).click();
     await expect(page.getByRole("dialog")).toBeHidden();
-    flowMessage = await receipt(1, "Spring is here");
+    const flowMessage = await receipt(1, "Spring is here");
     await expect(async () => {
       await page.reload();
       await page.getByRole("tab", { name: "Enrollments", exact: true }).click();
@@ -317,7 +315,6 @@ test("getting started on a clean Compose stack", async ({ page, request }) => {
     ]));
     expect(decisions.some((record) => record.action === "flow.step")).toBe(true);
     expect(captured()).toHaveLength(2);
-    if (!testMessage || !flowMessage) throw new Error("Both SMTP captures are required for evidence.");
     const summary = process.env.GITHUB_STEP_SUMMARY;
     if (!summary) throw new Error("GITHUB_STEP_SUMMARY is required.");
     const names = [...new Set(decisions.map(({ action, outcome }) => `${action} → ${outcome}`))];

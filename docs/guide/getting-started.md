@@ -138,9 +138,11 @@ sink is a test fixture only.
    **From address** on that domain. **Reply-to (optional)** can be left empty.
    Choose **Add the identity** and check that it says **Can send**.
 3. Open **Destinations**, choose **New destination**, and select **SMTP** as the
-   **Type**. Name it *Newsletter capture*. Choose or create its credential with
-   **Host**, **Port**, **TLS mode**, **Username** and **Password** from the capture
-   server. For a private certificate authority, paste its PEM into
+   **Type**. Name it *Newsletter capture*. Choose an existing credential, or choose
+   **New credential** and enter **Host**, **Port**, **Username** and **Password**
+   from the capture server. In **TLS mode**, type `tls` for implicit TLS or
+   `starttls` for STARTTLS, then choose **Create credential**.
+   For a private certificate authority, paste its PEM into
    **CA certificate (optional)** on the destination form. Choose
    **Create destination**. Use the server address reachable from
    the container; its localhost is the container itself.
