@@ -2,7 +2,7 @@
 //! definition and applies through the profile path of apply-batch inside the caller's
 //! transaction, so the request answers once the data is stored.
 //!
-//! A write takes two advisory locks, in this order: the idempotency key, then the contact. So
+//! After the shared segment guard, a write locks the idempotency key, then the contact. So
 //! two requests that share either one run one after the other, and a repeat sees the first
 //! one's result.
 //!
@@ -10,11 +10,11 @@
 //! so a bulk upsert and a single write of one contact also run one after the other and each
 //! reads the fields the other stored. The lock orders that keep this free of cycles:
 //!
-//! - single write: idempotency lock, contact lock, source record, person;
-//! - drain: inbox rows (`SKIP LOCKED`), contact locks (all of them, sorted by key, before any
-//!   savepoint), source record, people in id order. The drain never waits for a contact lock
+//! - single write: shared segment guard, idempotency lock, contact lock, source record, person;
+//! - drain: shared segment guard, inbox rows (`SKIP LOCKED`), contact locks (sorted by key,
+//!   before any savepoint), source record, people in id order. The drain never waits for a contact lock
 //!   while it holds a record or a person, and never takes one after the first row is applied;
-//! - removing a contribution: source record, person.
+//! - removing a contribution: shared segment guard, slot lock, source record, person.
 //!
 //! Nothing here logs or labels anything with a field or an identifier value.
 
@@ -339,6 +339,7 @@ pub async fn write_contact(
     idempotency: Option<&Idempotency<'_>>,
     trace: &TraceContext,
 ) -> Result<Written, WriteError> {
+    crate::changes::cache_change_readers(connection, workspace).await?;
     validate_contact_key(key).map_err(|_| invalid("key", "invalid_key"))?;
     let mut savepoint = connection.begin().await.map_err(StoreError::query)?;
     if let Some(replay) = begin_write(&mut savepoint, workspace, key, idempotency).await? {
@@ -433,6 +434,7 @@ pub async fn delete_contact(
     idempotency: Option<&Idempotency<'_>>,
     trace: &TraceContext,
 ) -> Result<Written, WriteError> {
+    crate::changes::cache_change_readers(connection, workspace).await?;
     validate_contact_key(key).map_err(|_| invalid("key", "invalid_key"))?;
     let mut savepoint = connection.begin().await.map_err(StoreError::query)?;
     if let Some(replay) = begin_write(&mut savepoint, workspace, key, idempotency).await? {
@@ -497,8 +499,124 @@ pub async fn erase_contact_idempotency(
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use sqlx::PgPool;
 
     use super::*;
+
+    async fn wait_for_guard(pool: &PgPool, waiter: i32, blocker: i32) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE pid = $1 \
+                     AND locktype = 'advisory' AND NOT granted \
+                     AND $2 = ANY(pg_blocking_pids(pid)))",
+                )
+                .bind(waiter)
+                .bind(blocker)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+                if waiting {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the expected transaction must be queued on the segment guard");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_contact_write_behind_a_segment_save_cannot_block_the_drain_holding_its_guard(
+        pool: PgPool,
+    ) {
+        let ws = crate::contacts::tests::defined(&pool, "ours").await;
+        crate::contacts::tests::write(
+            &pool,
+            ws,
+            "one",
+            ContactChange::Create(map(json!({"email": "one@example.com"}))),
+            None,
+        )
+        .await
+        .unwrap();
+        // Hold the drain's first lock, then request its contact lock only after the other
+        // two transactions are queued. This is the drain's production lock order.
+        let mut drain = crate::begin(&pool).await.unwrap();
+        // PostgreSQL can repair a soft deadlock by reordering waiters. Keep its detector
+        // beyond our acquisition deadline so the old cycle cannot pass through that repair.
+        sqlx::query("SET LOCAL deadlock_timeout = '60s'")
+            .execute(&mut *drain)
+            .await
+            .unwrap();
+        crate::cache_change_readers(&mut drain, ws).await.unwrap();
+        let drain_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *drain)
+            .await
+            .unwrap();
+        let mut save = crate::begin(&pool).await.unwrap();
+        sqlx::query("SET LOCAL deadlock_timeout = '60s'")
+            .execute(&mut *save)
+            .await
+            .unwrap();
+        let save_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *save)
+            .await
+            .unwrap();
+        let saver = tokio::spawn(async move {
+            crate::lock_segments(&mut save, ws).await.unwrap();
+            crate::commit(save).await.unwrap();
+        });
+        wait_for_guard(&pool, save_pid, drain_pid).await;
+
+        let mut write = crate::begin(&pool).await.unwrap();
+        sqlx::query("SET LOCAL deadlock_timeout = '60s'")
+            .execute(&mut *write)
+            .await
+            .unwrap();
+        let write_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *write)
+            .await
+            .unwrap();
+        let writer = tokio::spawn(async move {
+            let result = write_contact(
+                &mut write,
+                ws,
+                "one",
+                ContactChange::Replace(map(json!({"email": "one@example.com", "plan": "pro"}))),
+                None,
+                &crate::contacts::tests::trace(),
+            )
+            .await
+            .unwrap();
+            crate::commit(write).await.unwrap();
+            result
+        });
+        wait_for_guard(&pool, write_pid, save_pid).await;
+
+        // Before the fix the contact writer holds this lock while waiting for the save,
+        // which waits for the drain: this acquisition deadlocks or times out.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            lock_contacts(&mut drain, ws, ["one"]),
+        )
+        .await
+        .expect("the queued writer must not hold the contact lock")
+        .unwrap();
+        crate::commit(drain).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), saver)
+            .await
+            .unwrap()
+            .unwrap();
+        let written = tokio::time::timeout(std::time::Duration::from_secs(10), writer)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(written.status, 200);
+        assert!(!written.replayed);
+        assert_eq!(written.contact.unwrap().fields["plan"], "pro");
+    }
 
     fn map(value: Value) -> Map<String, Value> {
         value.as_object().cloned().unwrap()

@@ -558,7 +558,7 @@ pub enum RunEnd {
     LeaseLost,
 }
 
-/// Runs `end` in a transaction that first locks the job's lease, as a batch does, so a worker
+/// Runs `end` in a transaction fenced by the job's lease, as a batch is, so a worker
 /// that lost its lease cannot end the run. `end` returns the stream of the run it ended, and
 /// the stream's freshness records `outcome` in the same transaction; a run that had ended
 /// already records nothing, so a replay changes nothing.

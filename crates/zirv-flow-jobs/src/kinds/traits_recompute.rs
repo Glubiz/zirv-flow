@@ -16,6 +16,7 @@ pub(crate) struct TraitsRecompute;
 
 impl JobKind for TraitsRecompute {
     const KIND: &'static str = "traits.recompute";
+    const NEEDS_CHANGE_READERS: bool = true;
 
     async fn run(&self, ctx: &mut JobContext<'_>, payload: Value) -> Result<(), JobError> {
         let (workspace, key, after) = parse(&payload)?;

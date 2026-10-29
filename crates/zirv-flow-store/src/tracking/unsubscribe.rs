@@ -58,6 +58,7 @@ pub async fn unsubscribe_message(
 ) -> Result<Unsubscribed, StoreError> {
     let mut tx = begin(pool).await?;
     let workspace = message.workspace();
+    crate::changes::cache_change_readers(&mut tx, workspace).await?;
     let trace = message_trace(&mut tx, message, fallback_trace).await?;
     let scoped = (message.topic_id, dimensions_of(&message.dimensions));
     let broadest = (None, Dimensions::new());
@@ -144,6 +145,7 @@ pub async fn save_preferences(
 ) -> Result<PreferencesSaved, StoreError> {
     let mut tx = begin(pool).await?;
     let workspace = message.workspace();
+    crate::changes::cache_change_readers(&mut tx, workspace).await?;
     let trace = message_trace(&mut tx, message, fallback_trace).await?;
     let mut changed = 0;
     for choice in choices {

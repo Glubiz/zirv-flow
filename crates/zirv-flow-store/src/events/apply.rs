@@ -204,6 +204,7 @@ pub(crate) async fn apply_event_record(
     batch: &mut EventBatch,
     record: &EventRecord,
 ) -> Result<EventOutcome, StoreError> {
+    crate::changes::cache_change_readers(connection, workspace).await?;
     let outcome = judge_event_record(connection, workspace, key, batch, record).await?;
     if let EventOutcome::Accepted {
         event_id,

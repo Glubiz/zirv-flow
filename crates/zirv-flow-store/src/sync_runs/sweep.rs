@@ -63,6 +63,7 @@ pub async fn sweep_unreached(
     unit: &SweepUnit<'_>,
 ) -> Result<SweepOutcome, StoreError> {
     let mut tx = begin(pool).await?;
+    crate::changes::cache_change_readers(&mut tx, unit.workspace).await?;
     match fence_run(
         &mut tx,
         unit.workspace,

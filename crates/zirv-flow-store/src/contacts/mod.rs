@@ -2,8 +2,9 @@
 //! synchronous single-contact writes. A contact is a person with a live native source record;
 //! the bulk path goes through the ingestion inbox.
 //!
-//! Lock orders: a single write takes its idempotency lock, then the contact lock, then the
-//! source record and the person; the drain takes its inbox rows, then the contact lock of every
+//! Both writers take the shared segment guard first. A single write then takes its idempotency
+//! lock, the contact lock, the source record and the person; the drain takes its inbox rows,
+//! then the contact lock of every
 //! contact in the batch (sorted, before any row is applied), then the source record and the
 //! people. See `write` for why that cannot cycle.
 

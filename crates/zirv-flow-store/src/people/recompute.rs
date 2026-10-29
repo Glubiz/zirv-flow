@@ -26,7 +26,8 @@ pub async fn recompute_trait_batch(
     trace: &TraceContext,
     job: Option<(Uuid, i32)>,
 ) -> Result<Option<Uuid>, StoreError> {
-    // First, before any row lock: see the lock order in `slots`.
+    crate::changes::cache_change_readers(connection, workspace).await?;
+    // After the segment guard, before any row lock: see the lock order in `slots`.
     super::slots::lock_slots_shared(connection, workspace).await?;
     let people: Vec<Uuid> = sqlx::query_scalar(
         "SELECT DISTINCT person_id FROM source_records \

@@ -63,6 +63,7 @@ pub(super) async fn merge_people(
     losers: &[Uuid],
     trace: &TraceContext,
 ) -> Result<(), StoreError> {
+    crate::changes::cache_change_readers(connection, workspace).await?;
     // A trait writer: the loser's traits are emptied below, so its slots are emptied with them.
     let slots = lock_and_read_writer_slots(connection, workspace).await?;
     lock_lists_for_merge(connection, workspace, losers).await?;

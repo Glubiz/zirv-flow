@@ -76,7 +76,8 @@ pub(crate) async fn resolve_person(
     existing: Option<Uuid>,
     trace: &TraceContext,
 ) -> Result<Resolution, StoreError> {
-    // A merge here writes traits, and a new person is a row lock: the slot lock comes first.
+    crate::changes::cache_change_readers(connection, workspace).await?;
+    // After the segment guard, take the slot lock before a merge or a new person writes traits.
     super::slots::lock_slots_shared(connection, workspace).await?;
     let mut attempt = 0;
     loop {

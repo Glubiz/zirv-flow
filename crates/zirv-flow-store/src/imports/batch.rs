@@ -121,6 +121,7 @@ pub async fn commit_import_batch(
     singly: bool,
 ) -> Result<BatchOutcome, StoreError> {
     let mut tx = begin(pool).await?;
+    crate::changes::cache_change_readers(&mut tx, batch.workspace).await?;
     if !checkpoint_matches(&mut tx, batch, ImportStatus::Running).await? {
         return Ok(BatchOutcome::Superseded);
     }

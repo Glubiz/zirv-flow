@@ -109,6 +109,7 @@ pub async fn set_consent(
     change: &ConsentChange,
     trace: &TraceContext,
 ) -> Result<ConsentOutcome, StoreError> {
+    crate::changes::cache_change_readers(connection, workspace).await?;
     if let Some(topic) = change.topic {
         match find_topic(&mut *connection, workspace, topic).await? {
             Some(found) if found.channel == change.channel => {}

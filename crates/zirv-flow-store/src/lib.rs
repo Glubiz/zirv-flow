@@ -84,8 +84,8 @@ pub use audit::{
     append_audit_once_in, count_audit, list_audit, list_audit_page, purge_audit, stream_audit,
 };
 pub use changes::{
-    DirtyHead, DirtyPerson, REEVALUATE_JOB_KIND, claim_dirty, dirty_backlog, dirty_heads,
-    enqueue_reevaluate,
+    DirtyHead, DirtyPerson, REEVALUATE_JOB_KIND, cache_change_readers, claim_dirty, dirty_backlog,
+    dirty_heads, enqueue_reevaluate,
 };
 pub use clock::{Clock, ManualClock};
 pub use consent::{

@@ -109,6 +109,7 @@ pub async fn resolve_conflict(
     resolution: ConflictResolution,
     trace: &TraceContext,
 ) -> Result<IdentityConflict, ResolveError> {
+    crate::changes::cache_change_readers(connection, workspace).await?;
     let conflict: IdentityConflict = sqlx::query_as(concat!(
         "SELECT ",
         conflict_columns!(),

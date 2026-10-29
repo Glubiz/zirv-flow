@@ -4,12 +4,16 @@
 //! in `people.traits`, so a backfill racing the writers must never leave it stale. The proof is
 //! the lock order:
 //!
-//! - Every transaction that writes `people.traits` (or a slot) takes
+//! - Every transaction that may mark or erase people first calls `cache_change_readers` for
+//!   the shared `segments/<workspace>` guard, before contact, slot, lease or row locks. Nested
+//!   writers reuse that cache; `mark_people` rejects an uninitialized transaction. A queued
+//!   exclusive segment save must never split writers into opposite lock orders.
+//! - Before writing `people.traits` (or a slot), a transaction takes
 //!   `pg_advisory_xact_lock_shared(SLOT_LOCK_CLASS, hashtext(workspace))` in a statement of its
 //!   own, and only then reads the workspace's assignments ([`lock_and_read_writer_slots`]). The
 //!   transaction is READ COMMITTED, so that read takes a fresh snapshot after the lock wait.
 //! - Every change of an assignment (assign, retire, ready, free) takes the exclusive form of the
-//!   same lock first, which waits for every in-flight writer to commit.
+//!   same lock before its row locks, which waits for every in-flight writer to commit.
 //!
 //! So once an assignment commits, every later change of a row also writes the slot, and the
 //! backfill only has to bring the rows that exist to `conv(traits -> key)`. A writer that has no

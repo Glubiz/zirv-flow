@@ -613,6 +613,7 @@ pub async fn replay_rejects(
     }
     for id in ids {
         let mut tx = begin(pool).await?;
+        crate::changes::cache_change_readers(&mut tx, workspace).await?;
         let Some(reject) = load_reject(&mut tx, workspace, *id, true).await? else {
             totals.skipped += 1;
             continue;

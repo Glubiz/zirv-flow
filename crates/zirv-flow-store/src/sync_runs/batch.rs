@@ -200,6 +200,7 @@ pub async fn commit_sync_batch(
     batch: &SyncBatch<'_>,
 ) -> Result<BatchOutcome, StoreError> {
     let mut tx = begin(pool).await?;
+    crate::changes::cache_change_readers(&mut tx, batch.workspace).await?;
     match fence_run(
         &mut tx,
         batch.workspace,

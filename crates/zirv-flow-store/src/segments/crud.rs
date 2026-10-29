@@ -139,8 +139,8 @@ impl std::error::Error for SegmentError {}
 
 /// Takes the workspace's segments lock for the rest of the transaction. Take it before reading
 /// the catalog or the reference graph for a write, so two saves cannot each miss the other's
-/// edge. Writers of person changes take its shared form before reading dependency classes,
-/// so a save's initial full refresh cannot overtake a writer that skipped its marks.
+/// edge. Writers of person changes take its shared form before any other lock and then read
+/// dependency classes, so a save's initial full refresh cannot overtake skipped marks.
 pub async fn lock_segments(
     connection: &mut PgConnection,
     workspace: WorkspaceId,

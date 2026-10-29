@@ -224,8 +224,8 @@ pub enum EraseOutcome {
     NoSuchRequest,
 }
 
-/// Carries an erasure request out, in the caller's transaction. It first locks the workspace's
-/// pending inbox rows and then the group's people, the order a drain uses; an identity insert
+/// Carries an erasure request out, in the caller's transaction. After the shared segment guard,
+/// it locks pending inbox rows before the group's people, the order a drain uses; an identity insert
 /// takes a key-share lock on its person, so a concurrent attach waits for this transaction and
 /// then fails on the foreign key. Then:
 ///
@@ -258,6 +258,7 @@ pub async fn erase_person(
     targets: &[EraseTarget],
     trace: &TraceContext,
 ) -> Result<EraseOutcome, StoreError> {
+    crate::changes::cache_change_readers(connection, workspace).await?;
     let row: Option<LedgerRow> = sqlx::query_as(
         "SELECT person_id, identifier_hashes, identifier_kinds, person_ids, status \
          FROM erasure_requests WHERE workspace_id = $1 AND id = $2 FOR UPDATE",
@@ -433,6 +434,7 @@ pub async fn replay_erasures(
     for id in workspaces {
         let ws = WorkspaceId::from_uuid(id);
         let mut tx = begin(pool).await?;
+        crate::changes::cache_change_readers(&mut tx, ws).await?;
         let entries: Vec<ReplayRow> = sqlx::query_as(
             "SELECT person_id, identifier_hashes, identifier_kinds, person_ids FROM erasure_requests \
              WHERE workspace_id = $1 AND status = 'completed' ORDER BY requested_at, id",

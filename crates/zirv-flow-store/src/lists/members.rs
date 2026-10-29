@@ -275,6 +275,7 @@ pub async fn add_members(
     actor: Option<UserId>,
     trace: &TraceContext,
 ) -> Result<MembershipOutcome, MembershipError> {
+    crate::changes::cache_change_readers(connection, workspace).await?;
     let (targets, mut outcome) = prepare(connection, workspace, list, people).await?;
     let added: Vec<Uuid> = sqlx::query_scalar(
         "INSERT INTO list_members (workspace_id, list_id, person_id, source) \
@@ -315,6 +316,7 @@ pub async fn remove_members(
     actor: Option<UserId>,
     trace: &TraceContext,
 ) -> Result<MembershipOutcome, MembershipError> {
+    crate::changes::cache_change_readers(connection, workspace).await?;
     let (targets, mut outcome) = prepare(connection, workspace, list, people).await?;
     let removed: Vec<Uuid> = sqlx::query_scalar(
         "DELETE FROM list_members \

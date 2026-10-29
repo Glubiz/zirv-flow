@@ -25,6 +25,7 @@ pub(crate) struct PrivacyErase;
 
 impl JobKind for PrivacyErase {
     const KIND: &'static str = zirv_flow_store::ERASE_JOB_KIND;
+    const NEEDS_CHANGE_READERS: bool = true;
 
     async fn run(&self, ctx: &mut JobContext<'_>, payload: Value) -> Result<(), JobError> {
         let (workspace, request) = parse(&payload)?;

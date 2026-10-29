@@ -45,6 +45,7 @@ pub async fn delete_person(
     reason: DeleteReason,
     trace: &TraceContext,
 ) -> Result<bool, StoreError> {
+    crate::changes::cache_change_readers(connection, workspace).await?;
     let Some(current) = current_of(connection, workspace, person).await? else {
         return Ok(false);
     };
