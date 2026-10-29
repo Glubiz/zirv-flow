@@ -169,6 +169,12 @@ release publishes `:<version>` and `:latest`, leaves `:rc` alone, and becomes Gi
 Latest. The OCI version label always contains the full version. Rerunning CD for a
 published candidate keeps the existing release and can retry its image build.
 
+Release checklist: before promoting a candidate, record a green `upgrade-drill` run and its
+counts summary against that published rc image. Dispatch CI with `image_tag` set to the rc's
+version tag; `previous_tag` may pin the previous stable release. A skip does not pass this gate.
+See the [upgrade guide](docs/operations/upgrade.md#upgrade-drill-and-release-gate) for the fixture
+and rollback procedure.
+
 CI compares SemVer precedence, ignoring build metadata: `rc.9 < rc.10 < final`.
 A lower version always fails; equal precedence fails when shipped code changed.
 An rc changelog section starts at the previous reachable SemVer tag; a final section

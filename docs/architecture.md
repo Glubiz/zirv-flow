@@ -3155,7 +3155,7 @@ rows, and the survivor is re-evaluated through its `merge` change class (7.1).
 | Migrations | sqlx, embedded, forward-only. `zirv-flow migrate` explicitly, or guarded `database.migrate_on_start` / `--migrate` under an advisory lock (one migrator). Startup refuses an unknown (newer) schema, and pending migrations when migrating is not enabled. |
 | Packaging | GHCR image (multi-stage, non-root, linux/amd64); `docker-compose.yml` quickstart (`zirv-flow all` + Postgres, health checks, volume). Larger setups: `serve` behind a load balancer, N workers, two schedulers, and a CDN or caching proxy in front of `/a/` image assets. Worker-only and scheduler-only processes serve `/metrics`, `/healthz` and `/readyz` on `ops.bind` (off by default); with `serve` the endpoints stay on `server.bind`. PostgreSQL 16 or newer is required. |
 | Backup and restore | Postgres is the only stateful component: `pg_dump` when small, WAL archiving + point-in-time recovery in production. Back up the master key and config separately. Restore = database, matching binary, erasure replay; the steps are in `docs/operations/backup-restore.md` and rehearsed by `scripts/drill/restore.sh`. |
-| Upgrades (v1) | Back up, stop all roles, `zirv-flow migrate` with the new binary, start. Mixed-version rolling upgrades are OQ-17. |
+| Upgrades (v1) | Back up, stop all roles, `zirv-flow migrate` with the new binary, start. The [upgrade guide](operations/upgrade.md) records the lock decisions and the previous-release CI drill. Rollback restores the backup. Mixed-version rolling upgrades are OQ-17. |
 
 ## 18. Testing strategy
 
@@ -3441,7 +3441,7 @@ they were ruled as their capabilities were added to the plan.
   stays in `jsonb`. `string_list` traits stay in `jsonb`. The promotion is built in the
   segment milestone (M4); until the slots exist the `jsonb_path_ops` index stays, and it is reconsidered once promoted
   traits cover the equality searches. The slots are live (#125): states `backfilling`, `ready` and `retiring`; writers take the shared slot lock before they read the assignments and assignment changes take the exclusive one, so a backfill never leaves a stale value (`people/slots.rs`); the routes are `POST` and `DELETE /traits/{key}/index`.
-  Known limitation: migration 0033 builds its 30 partial indexes in one transaction, which blocks writes to `people` for the build on a populated install; index creation must be revisited before upgrades of populated installations are supported.
+  Known limitation and upgrade decision: keep released migration 0033 and its checksum. Its initial `ALTER TABLE` holds ACCESS EXCLUSIVE on `people` through all 30 partial index builds, blocking reads and writes. Populated upgrades stop all roles and budget the full build when upgrading from before 0033; `v0.187.0` already contains it. No populated build timing is recorded. Rehearse at the installation's row counts before setting the downtime window; see the [lock review](operations/upgrade.md#lock-review-through-0084). This supports stopped upgrades only; online and mixed-version upgrades remain OQ-17.
   Details in [docs/benchmarks/m2-ingestion.md](benchmarks/m2-ingestion.md).
 
 - **OQ-8:** A per-workspace running cap in the claim query
