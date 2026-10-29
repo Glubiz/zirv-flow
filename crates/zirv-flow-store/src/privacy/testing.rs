@@ -115,6 +115,33 @@ fn event(name: &str, message_id: &str, at: Option<OffsetDateTime>) -> EventRecor
 /// - pending inbox rows for the person and for the bystander.
 pub(crate) async fn seed_everything(pool: &PgPool) -> Seeded {
     let ws = workspace(pool, "one").await;
+    // Keep a live trait reader so ingest also seeds the internal person_changes feed.
+    let segment = Uuid::now_v7();
+    let mut tx = begin(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO segments (id, workspace_id, name, current_version, member_count) \
+         VALUES ($1, $2, $3, 1, 2)",
+    )
+    .bind(segment)
+    .bind(ws.as_uuid())
+    .bind(PERSONAL_DATA.segment_name)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO segment_versions (workspace_id, segment_id, version, definition, normalized, \
+            deps, time_sensitive, trace_id) \
+         VALUES ($1, $2, 1, '{}', '{}', $4, false, $3)",
+    )
+    .bind(ws.as_uuid())
+    .bind(segment)
+    .bind(Uuid::now_v7())
+    .bind(json!({"classes": zirv_flow_core::segment::ChangeClasses::TRAITS.bits()}))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    commit(tx).await.unwrap();
+
     let outcomes = apply_profile_batch(
         pool,
         ws,
@@ -365,29 +392,7 @@ pub(crate) async fn seed_everything(pool: &PgPool) -> Seeded {
     .unwrap();
 
     // A segment holding the person and the bystander, and the merged person's closed row.
-    let segment = Uuid::now_v7();
     let mut tx = begin(pool).await.unwrap();
-    sqlx::query(
-        "INSERT INTO segments (id, workspace_id, name, current_version, member_count) \
-         VALUES ($1, $2, $3, 1, 2)",
-    )
-    .bind(segment)
-    .bind(ws.as_uuid())
-    .bind(PERSONAL_DATA.segment_name)
-    .execute(&mut *tx)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO segment_versions (workspace_id, segment_id, version, definition, normalized, \
-            deps, time_sensitive, trace_id) \
-         VALUES ($1, $2, 1, '{}', '{}', '{}', false, $3)",
-    )
-    .bind(ws.as_uuid())
-    .bind(segment)
-    .bind(Uuid::now_v7())
-    .execute(&mut *tx)
-    .await
-    .unwrap();
     for (member, closed) in [(person, false), (bystander, false), (merged, true)] {
         sqlx::query(
             "INSERT INTO segment_members (workspace_id, segment_id, person_id, version, \
