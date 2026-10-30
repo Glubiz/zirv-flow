@@ -48,6 +48,86 @@ compose() {
 }
 pg() { compose exec -T postgres psql -X -q -U zirv -d zirv_flow_m8 -v ON_ERROR_STOP=1 "$@"; }
 
+# compose.m8.yaml fixes these credentials; compose.bench.yaml publishes this host port.
+host_pg_setup() {
+  command -v psql >/dev/null || die 'host psql is required (same host as loadgen, with python3); install the PostgreSQL client'
+  export PGHOST=127.0.0.1 PGPORT=55432 PGUSER=zirv PGDATABASE=zirv_flow_m8 PGPASSWORD=zirv-m8-bench
+  export PGCONNECT_TIMEOUT=10
+}
+host_pg() { psql -X -q -v ON_ERROR_STOP=1 "$@"; }
+
+positive_integer() {
+  [[ "$2" =~ ^[1-9][0-9]*$ ]] && [ "$2" -le 500000000 ] || die "$1 must be an integer in 1..500000000"
+}
+
+track_load() {
+  "${LOADGEN:-$root/target/release/loadgen}" --url http://127.0.0.1:8080 \
+    --key-file "$M4_STATE/loadgen.key" --mode track --rate "$M8_RATE" --duration "$1" \
+    --people "$2" --out "$3"
+}
+
+wait_inbox() {
+  local deadline=$((SECONDS + $1))
+  until [ "$(host_pg -At -c 'SELECT count(*) FROM ingest_inbox')" = 0 ]; do
+    [ "$SECONDS" -lt "$deadline" ] || die 'inbox did not drain before the timeout'
+    sleep 1
+  done
+}
+
+# Keep the Prometheus samples verbatim, including buckets, in the JSON gathered by write_data.
+scrape_metrics() {
+  curl -fsS --connect-timeout 5 --max-time 10 "$1" >"$3.prom"
+  python3 -I - "$2" "$3" <<'PY'
+import json, pathlib, sys
+prefixes, dest = sys.argv[1:]
+lines = [line for line in pathlib.Path(dest + '.prom').read_text().splitlines()
+         if line.startswith(tuple(prefixes.split(',')))]
+pathlib.Path(dest + '.json').write_text(json.dumps({'samples': lines}, indent=2) + '\n')
+PY
+}
+
+start_job_sampler() {
+  [ -f "$m8_dir/sample-job-kinds.sh" ] && [ -f "$m8_dir/job-kinds.sql" ] || die 'per-kind sampler is missing; merge #455 first'
+  bash "$m8_dir/sample-job-kinds.sh" >"$1/job-kinds.csv" 2>"$1/job-kinds.err" &
+  sampler_pid=$!
+}
+
+wait_worker_metrics() {
+  local deadline=$((SECONDS + 60))
+  until curl -fsS --connect-timeout 2 --max-time 5 http://127.0.0.1:9100/metrics >/dev/null 2>&1; do
+    [ "$SECONDS" -lt "$deadline" ] || die 'worker metrics did not become ready'
+    sleep 1
+  done
+}
+
+stop_job_sampler() {
+  local rc=0 lines deadline
+  # Get a sample after completion, even when smoke drains between two sampler ticks.
+  lines="$(wc -l <"$1/job-kinds.csv")"
+  deadline=$((SECONDS + $(python3 -I -c 'import math,sys; print(math.ceil(float(sys.argv[1])) + 30)' "${JOB_KINDS_TICK_S:-5}")))
+  while :; do
+    kill -0 "$sampler_pid" 2>/dev/null || { wait "$sampler_pid" || rc=$?; die "per-kind sampler exited early ($rc); see $1/job-kinds.err"; }
+    [ "$(wc -l <"$1/job-kinds.csv")" -gt "$lines" ] && break
+    [ "$SECONDS" -lt "$deadline" ] || die 'per-kind sampler did not produce a final sample'
+    sleep 1
+  done
+  kill "$sampler_pid"
+  wait "$sampler_pid" || rc=$?
+  sampler_pid=''
+  [ "$rc" = 143 ] || [ "$rc" = 0 ] || die "per-kind sampler failed ($rc); see $1/job-kinds.err"
+  python3 -I - "$1" <<'PY'
+import csv, json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+rows = list(csv.DictReader((path / 'job-kinds.csv').open()))
+if not rows:
+    raise SystemExit('per-kind sampler returned no samples')
+for row in rows:
+    for key in row.keys() - {'t', 'kind'}:
+        row[key] = float(row[key]) if row[key] else None
+(path / 'job-kinds.json').write_text(json.dumps(rows, indent=2) + '\n')
+PY
+}
+
 validate_cpus() {
   python3 -I - "$M8_PG_CPUSET" "$M8_SERVE_CPUSET" "$M8_WORKER_CPUSET" <<'PY'
 import re, sys

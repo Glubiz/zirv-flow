@@ -8,9 +8,12 @@ usage() {
 Usage: bash scripts/bench/m8/run.sh <command>
   up                   Start the isolated bench stack (pre-pulled versioned image)
   seed <name>          SQL seed: people | events | enrollments (resumable)
-  smoke                Separate small stack; all registered benchmarks, 60s load
+  smoke                Separate small stack; 60s ingest, 5s debugger, 3,000 jobs
   ingest | debugger | explorer | jobs | timers | decisions | send | render | segments
   all                  Run all registered benchmarks; note unregistered ones
+  debugger             Watch streams before track load (M8_DEBUGGER_CLIENTS=1; full: 20)
+  jobs                 No-op throughput/fairness, uncapped then M8_JOBS_CAP=4
+  timers               Re-arm waiting seed; measure without and with track load
   --self-test          Shell tests; no Docker or database
   --help               Show this help
 See scripts/bench/README.md section 13 for scale, disk and prebuilt-tool requirements.
@@ -27,9 +30,10 @@ bench_command() {
     segments) cmd=(bash "$root/scripts/bench/m4/measure.sh" all) ;;
     render) cmd=(bash "$root/scripts/bench/m7/render.sh" "$raw") ;;
     send) cmd=(bash "$root/scripts/bench/m6/run.sh" "m8-${raw##*/}") ;;
-    debugger) log 'debugger is not registered; #394 registers it'; return 3 ;;
+    debugger) cmd=(bash "$m8_dir/debugger.sh" "$raw" "$pool") ;;
     explorer) log 'explorer is not registered; #395 registers it'; return 3 ;;
-    jobs | timers) log "$1 is not registered; #396 registers it"; return 3 ;;
+    jobs) cmd=(bash "$m8_dir/jobs.sh" "$raw") ;;
+    timers) cmd=(bash "$m8_dir/timers.sh" "$raw" "$pool") ;;
     decisions) log 'decisions is not registered; #397 adapts ab.sh and registers it'; return 3 ;;
   esac
 }
@@ -150,6 +154,7 @@ run_bench() {
   pool=$((M8_PEOPLE * 2 / 5)); [ "$pool" -le 1000000 ] || pool=1000000
   raw="$M4_STATE/../runs/$bench-$(date -u +%Y%m%dT%H%M%S)-$$"
   bench_command "$bench" || return $?
+  case "$bench" in debugger | jobs | timers) host_pg_setup ;; esac
   validate_cpus
   seed_manifest
   mkdir -p "$raw"
