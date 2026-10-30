@@ -12,6 +12,7 @@ Usage: bash scripts/bench/m8/run.sh <command>
   ingest | debugger | explorer | jobs | timers | decisions | send | render | segments
   all                  Run all registered benchmarks; note unregistered ones
   debugger             Watch streams before track load (M8_DEBUGGER_CLIENTS=1; full: 20)
+  explorer             90-day queries at default/15000 ms, alongside track ingest
   jobs                 No-op throughput/fairness, uncapped then M8_JOBS_CAP=4
   timers               Re-arm waiting seed; measure without and with track load
   --self-test          Shell tests; no Docker or database
@@ -31,7 +32,7 @@ bench_command() {
     render) cmd=(bash "$root/scripts/bench/m7/render.sh" "$raw") ;;
     send) cmd=(bash "$root/scripts/bench/m6/run.sh" "m8-${raw##*/}") ;;
     debugger) cmd=(bash "$m8_dir/debugger.sh" "$raw" "$pool") ;;
-    explorer) log 'explorer is not registered; #395 registers it'; return 3 ;;
+    explorer) cmd=(bash "$m8_dir/explorer.sh" "$raw" "$pool") ;;
     jobs) cmd=(bash "$m8_dir/jobs.sh" "$raw") ;;
     timers) cmd=(bash "$m8_dir/timers.sh" "$raw" "$pool") ;;
     decisions) log 'decisions is not registered; #397 adapts ab.sh and registers it'; return 3 ;;
@@ -154,7 +155,7 @@ run_bench() {
   pool=$((M8_PEOPLE * 2 / 5)); [ "$pool" -le 1000000 ] || pool=1000000
   raw="$M4_STATE/../runs/$bench-$(date -u +%Y%m%dT%H%M%S)-$$"
   bench_command "$bench" || return $?
-  case "$bench" in debugger | jobs | timers) host_pg_setup ;; esac
+  case "$bench" in debugger | explorer | jobs | timers) host_pg_setup ;; esac
   validate_cpus
   seed_manifest
   mkdir -p "$raw"
@@ -206,7 +207,7 @@ main() {
   [ "$1" != smoke ] || { smoke=1; export M8_SMOKE=1; }
   configure
   case "$1" in
-    debugger) host_pg_setup ;;
+    debugger | explorer) host_pg_setup ;;
     jobs | timers | smoke | all) host_pg_setup; require_job_sampler ;;
   esac
   case "$1" in

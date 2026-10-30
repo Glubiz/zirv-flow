@@ -2,6 +2,7 @@
 //! a running instance over HTTP only (plain `http://`; the benchmarks run on localhost) and
 //! writes an ingestion JSON report or debugger receipts for the latency SQL report.
 
+mod explorer;
 mod pacing;
 mod payload;
 mod report;
@@ -247,6 +248,12 @@ async fn run(args: Args) -> Result<(), String> {
 async fn main() -> ExitCode {
     let matches = command().get_matches();
     let result = match matches.subcommand() {
+        Some(("explorer", matches)) => {
+            explorer::run(
+                explorer::Args::from_arg_matches(matches).unwrap_or_else(|error| error.exit()),
+            )
+            .await
+        }
         Some(("debugger", matches)) => {
             sse::run(sse::Args::from_arg_matches(matches).unwrap_or_else(|error| error.exit()))
                 .await
@@ -264,6 +271,7 @@ async fn main() -> ExitCode {
 
 fn command() -> clap::Command {
     Args::command()
+        .subcommand(explorer::Args::command().name("explorer"))
         .subcommand(sse::Args::command().name("debugger"))
         .subcommand_negates_reqs(true)
         .args_conflicts_with_subcommands(true)
@@ -272,6 +280,41 @@ fn command() -> clap::Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_explorer_subcommand_needs_its_seed_window_and_positive_concurrency() {
+        let args = [
+            "loadgen",
+            "explorer",
+            "--url",
+            "http://localhost:8080",
+            "--key-file",
+            "read.key",
+            "--workspace",
+            "workspace",
+            "--person-id",
+            "person",
+            "--to",
+            "2026-10-30T00:00:00Z",
+            "--duration",
+            "60",
+            "--out",
+            "queries.json",
+        ];
+        let matches = command().try_get_matches_from(args).unwrap();
+        let (_, matches) = matches.subcommand().unwrap();
+        assert!(explorer::Args::from_arg_matches(matches).is_ok());
+        assert!(
+            command()
+                .try_get_matches_from(args.into_iter().chain(["--clients", "0"]))
+                .is_err()
+        );
+        assert!(
+            command()
+                .try_get_matches_from(["loadgen", "explorer"])
+                .is_err()
+        );
+    }
 
     #[test]
     fn the_debugger_subcommand_preserves_the_ingestion_cli() {
