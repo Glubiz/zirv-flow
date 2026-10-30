@@ -99,6 +99,30 @@ loadgen --url http://localhost:8080 --key-file bench.key --mode identify|track|b
   `late_dispatch`, `gave_up_after_retries` (still 429 after the last send; these have latency samples),
   `abandoned_requests` (queued retries dropped at the wall-time limit; no sample) and the three latency blocks above (`p50_ms`, `p95_ms`, `p99_ms`, `max_ms`). Only plain `http://` is supported.
 
+### Debugger latency (M8, issue #394)
+
+Start the watcher before ingestion with a workspace API key carrying `read` scope (the ingest
+key above has only `ingest`). Use `--clients 1` or `20`; the stream filters to `source=api`,
+reconnects with `Last-Event-ID`, and honours a 429's `Retry-After`.
+
+```sh
+loadgen debugger --url http://localhost:8080 --key-file read.key --workspace "$ws" \
+  --clients 20 --duration 600 --out receive.jsonl
+psql -X "$DATABASE_URL" -v receive_file="$PWD/receive.jsonl" \
+  -f scripts/bench/m8/debugger-latency.sql
+```
+
+The JSONL holds one `item` per receipt (`client`, nullable `event_id`, `received_at` in UTC Unix
+microseconds), `started`/`finished` clock boundaries and per-client gap/skipped/status summaries.
+Run SQL after the inbox drains, on the watcher's host with `python3` available and stable clocks;
+it fails unless that host's short name matches the `host` in the `started` record, then samples that host around database `now()` and fails if skew plus uncertainty, or the run's wall
+versus monotonic clock step, exceeds 50 ms. Saved boundaries alone cannot establish clock skew.
+SQL reports first-receipt nearest-rank p50/p95/p99/max and delivered share per client and overall:
+distinct client/event pairs divided by clients times stored API events arriving during the run.
+Leave a drain window before watchers stop; non-stored outcomes are excluded from that denominator.
+The target is p95 < 2 s; the 2,000 events/s run and driver registration remain follow-up work.
+The driver scrapes `zirv_flow_debugger_clients` and `zirv_flow_debugger_delivery_seconds`.
+
 ## 4. Applied latency and backlog drain
 
 After a run, once the inbox is empty:
