@@ -60,8 +60,9 @@ positive_integer() {
   [[ "$2" =~ ^[1-9][0-9]*$ ]] && [ "$2" -le 500000000 ] || die "$1 must be an integer in 1..500000000"
 }
 
+# exec replaces the calling process, so a backgrounded call's $! is loadgen itself; run it in ( ) in the foreground.
 track_load() {
-  "${LOADGEN:-$root/target/release/loadgen}" --url http://127.0.0.1:8080 \
+  exec "${LOADGEN:-$root/target/release/loadgen}" --url http://127.0.0.1:8080 \
     --key-file "$M4_STATE/loadgen.key" --mode track --rate "$M8_RATE" --duration "$1" \
     --people "$2" --out "$3"
 }
@@ -87,6 +88,8 @@ PY
 }
 
 require_job_sampler() {
+  local tool
+  for tool in jq curl awk; do command -v "$tool" >/dev/null || die "$tool is required by the per-kind sampler"; done
   [ -f "$m8_dir/sample-job-kinds.sh" ] && [ -f "$m8_dir/job-kinds.sql" ] || die 'per-kind sampler is missing; merge #455 first'
 }
 

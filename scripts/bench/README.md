@@ -466,7 +466,9 @@ requiring a seventeenth, outside the app/PG allocations (`M6_SINK_CPUSET` can ov
 
 Run from the checkout root on a dedicated bench host/CI runner. Runtime prerequisites are Bash,
 Python 3, Docker Compose with `!reset`/`!override` support, jq, curl and GNU coreutils (M6 uses GNU
-`date`). Debugger, jobs and timers also require host `psql`; the other helpers run it inside
+`date`). Debugger, jobs and timers also require host `psql` (jobs and timers also the per-kind sampler);
+`smoke`, `all` and those benches check this before spending time, and `all` runs every bench,
+lists failed ones in its summary and exits non-zero if any failed; the other helpers run it inside
 PostgreSQL. Install CI-produced `loadgen`, `renderbench` and `sendbench`
 executables at `target/release/`, or set `LOADGEN`, `RENDER_BENCH_BIN` and `SENDBENCH` to their paths.
 For send, install the Linux `sendbench` artifact at `.zirv/work/m8/send-tools/linux/sendbench`.
@@ -560,19 +562,26 @@ gap frames, skipped items and clock offset; `receive.jsonl` retains the receipts
 waiting-row templates and re-arms the M8 seed for `noload/` then `loaded/`; the latter adds track
 ingest at `M8_RATE`. `M8_TIMERS_SECONDS=2400` preserves the seed's forty-minute spread,
 `M8_TIMERS_LEAD_SECONDS=600` allows for re-arming, and `M8_DRAIN_SECONDS=3600` bounds the drain
-(smoke: 5/10/60 seconds). A re-arm that overruns its lead rolls back. Each raw scenario holds
+(smoke: 5/10/60 seconds). A re-arm that overruns its lead rolls back; after the worker is ready
+the earliest pending wake must still lie ahead (else the run fails), and `timers.json` records the
+lead left then as `lead_left_at_worker_ready_s`. Each raw scenario holds
 M5 `lateness.json`, `timers.json`, the timer-wake histogram and per-kind job samples. Sets are
 workspace UUIDs, with no M5 burst set. The worker restarts between scenarios, resetting its metrics.
 
 `jobs` queues `M8_JOBS_BUSY=100000` ready `maintenance.noop` jobs in workspace 1 ahead of one in
-workspace 2, first uncapped then with `M8_JOBS_CAP=4` (use `16` to compare another cap, or `unset`
-for only uncapped). It preserves topology concurrency (`BENCH_WORKER_CONCURRENCY=4` by default)
-and records the actual worker environment; a cap at or above total concurrency cannot demonstrate
-cap-induced fairness. `M8_JOBS_LEAD_SECONDS=10` allows sampler startup; `M8_JOBS_TIMEOUT_SECONDS=600`
+workspace 2, first uncapped then with `M8_JOBS_CAP=4` (use `8` to compare another cap, or `unset`
+for only uncapped). It sets the worker concurrency itself with `M8_JOBS_CONCURRENCY=16` (no-op jobs
+are cheap; the topology default of 4 would never let a cap of 4 bind) through the same compose
+override as the cap, records the effective value in `worker.json`, and refuses a cap at or above
+the concurrency. The worker is restored to the topology default afterwards. Leftover no-op rows of
+a run are deleted on every exit path. `M8_JOBS_LEAD_SECONDS=10` allows sampler startup; `M8_JOBS_TIMEOUT_SECONDS=600`
 bounds completion. Raw `cap-*/jobs.json` reports completions/s against 1,000/s, exact quiet claim
 lag from a temporary bench trigger, and the maximum sampled busy running count (fails above the
-cap). `M8_JOBS_TICK_SECONDS=0.2` is the sleep between polls; throughput includes final polling delay
-and samples cannot prove an unsampled peak. The trigger is removed and the base worker restored.
+cap). `M8_JOBS_TICK_SECONDS=1` is the sleep between polls (a 100,000-job run lasts about 100 s, so the
+final polling delay is at most about 1%; smoke's 3,000 jobs are not a measurement); throughput
+includes it and samples cannot prove an unsampled peak. Observer effects: the ready-count poll and
+the sampler's `run_at <= now()` query run during the window and may scan the `run_at` index while
+future wakes are pending; both are named in the `measurement` field of the jobs and timers reports. The trigger is removed and the base worker restored.
 
 Jobs and timers call `m8/sample-job-kinds.sh` and `job-kinds.sql` from #455; merge that dependency
 and select an image emitting its per-kind claim metrics before running. `JOB_KINDS_TICK_S=5`

@@ -173,13 +173,12 @@ run_bench() {
 }
 
 run_all() {
-  local bench raw='' pool=1 reason issue ran=() skipped=()
+  local bench raw='' pool=1 reason issue ran=() skipped=() failed=()
   local cmd=()
   # Each benchmark runs in its own shell so a failed prerequisite cannot disable errexit.
   for bench in "${benches[@]}"; do
     if reason="$(bench_command "$bench" 2>&1)"; then
-      bash "$m8_dir/run.sh" "$bench"
-      ran+=("$bench")
+      if bash "$m8_dir/run.sh" "$bench"; then ran+=("$bench"); else failed+=("$bench"); fi
     else
       issue=''
       [[ "$reason" =~ \#[0-9]+ ]] && issue="${BASH_REMATCH[0]}"
@@ -187,7 +186,8 @@ run_all() {
       skipped+=("$bench${issue:+ ($issue)}")
     fi
   done
-  log "summary: ran: ${ran[*]:-none}; skipped (unregistered): ${skipped[*]:-none}"
+  log "summary: ran: ${ran[*]:-none}; failed: ${failed[*]:-none}; skipped (unregistered): ${skipped[*]:-none}"
+  [ "${#failed[@]}" = 0 ] || return 1
 }
 
 main() {
@@ -205,6 +205,10 @@ main() {
   esac
   [ "$1" != smoke ] || { smoke=1; export M8_SMOKE=1; }
   configure
+  case "$1" in
+    debugger) host_pg_setup ;;
+    jobs | timers | smoke | all) host_pg_setup; require_job_sampler ;;
+  esac
   case "$1" in
     up) up ;;
     seed) seed "$2" ;;

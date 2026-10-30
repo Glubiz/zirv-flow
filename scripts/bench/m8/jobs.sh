@@ -5,29 +5,27 @@
 raw="$1"
 host_pg_setup
 cap="${M8_JOBS_CAP:-4}"
+concurrency="${M8_JOBS_CONCURRENCY:-16}"
 busy="${M8_JOBS_BUSY:-100000}"
 lead="${M8_JOBS_LEAD_SECONDS:-10}"
 timeout="${M8_JOBS_TIMEOUT_SECONDS:-600}"
-tick="${M8_JOBS_TICK_SECONDS:-0.2}"
+tick="${M8_JOBS_TICK_SECONDS:-1}"
 [ -z "${M8_SMOKE:-}" ] || busy=3000
-for name in busy lead timeout; do positive_integer "$name" "${!name}"; done
+for name in busy lead timeout concurrency; do positive_integer "$name" "${!name}"; done
 [ "$cap" = unset ] || positive_integer M8_JOBS_CAP "$cap"
+[ "$cap" = unset ] || [ "$cap" -lt "$concurrency" ] || die "M8_JOBS_CAP ($cap) must be below M8_JOBS_CONCURRENCY ($concurrency): a cap at or above worker concurrency never binds"
 [[ "$tick" =~ ^[0-9]+([.][0-9]+)?$ && "$tick" =~ [1-9] ]] || die 'M8_JOBS_TICK_SECONDS must be positive'
 require_job_sampler
-cid="$(compose ps -q zirv-flow-worker)"
-[ -n "$cid" ] && [[ "$cid" != *$'\n'* ]] || die 'expected the single M8 worker with its published metrics port'
-concurrency="$(docker inspect --format '{{json .Config.Env}}' "$cid" | python3 -I -c '
-import json, sys
-env = dict(item.split("=", 1) for item in json.load(sys.stdin))
-print(env["ZIRV_FLOW_WORKER__CONCURRENCY"])
-')"
-positive_integer worker.concurrency "$concurrency"
-export BENCH_WORKER_CONCURRENCY="$concurrency"
-sampler_pid=''; restore_worker=''; probe=''
+sampler_pid=''; restore_worker=''; probe=''; trace=''
 cleanup() {
   if [ -n "$sampler_pid" ]; then kill "$sampler_pid" 2>/dev/null || true; wait "$sampler_pid" 2>/dev/null || true; fi
   if [ -n "$probe" ]; then
     host_pg -c 'DROP TRIGGER IF EXISTS m8_quiet_claim ON jobs; DROP FUNCTION IF EXISTS m8bench.record_quiet_claim()' || log 'failed to remove quiet-claim probe'
+  fi
+  if [ -n "$trace" ]; then
+    host_pg -v trace="$trace" -f - <<'SQL' || log 'failed to remove no-op jobs of this run'
+DELETE FROM jobs WHERE kind = 'maintenance.noop' AND trace_id = :'trace'::uuid;
+SQL
   fi
   if [ -n "$restore_worker" ]; then compose up -d --no-build --no-deps --force-recreate zirv-flow-worker; fi
 }
@@ -37,11 +35,12 @@ caps=(unset)
 for setting in "${caps[@]}"; do
   dest="$raw/cap-$setting"
   mkdir -p "$dest"
-  python3 -I - "$dest/worker.yaml" "$setting" <<'PY'
+  python3 -I - "$dest/worker.yaml" "$setting" "$concurrency" <<'PY'
 import json, pathlib, sys
 cap = None if sys.argv[2] == 'unset' else sys.argv[2]
-pathlib.Path(sys.argv[1]).write_text(json.dumps({'services': {'zirv-flow-worker': {
-    'environment': {'ZIRV_FLOW_WORKER__MAX_RUNNING_PER_WORKSPACE': cap}}}}) + '\n')
+pathlib.Path(sys.argv[1]).write_text(json.dumps({'services': {'zirv-flow-worker': {'environment': {
+    'ZIRV_FLOW_WORKER__CONCURRENCY': sys.argv[3],
+    'ZIRV_FLOW_WORKER__MAX_RUNNING_PER_WORKSPACE': cap}}}}) + '\n')
 PY
   restore_worker=1
   compose -f "$dest/worker.yaml" up -d --no-build --no-deps --force-recreate zirv-flow-worker
@@ -52,11 +51,11 @@ import json, sys
 env = dict(item.split("=", 1) for item in json.load(sys.stdin))
 cap = env.get("ZIRV_FLOW_WORKER__MAX_RUNNING_PER_WORKSPACE")
 expected = None if sys.argv[2] == "unset" else sys.argv[2]
-if cap != expected:
-    raise SystemExit("worker cap differs from requested scenario")
+if cap != expected or env["ZIRV_FLOW_WORKER__CONCURRENCY"] != sys.argv[3]:
+    raise SystemExit("worker cap or concurrency differs from requested scenario")
 json.dump(dict(worker_containers=1, concurrency_per_worker=int(env["ZIRV_FLOW_WORKER__CONCURRENCY"]),
                max_running_per_workspace=int(cap) if cap else None), open(sys.argv[1], "w"), indent=2)
-' "$dest/worker.json" "$setting"
+' "$dest/worker.json" "$setting" "$concurrency"
   wait_worker_metrics
   trace="$(python3 -I -c 'import uuid; print(uuid.uuid4())')"
   probe=1
@@ -104,7 +103,7 @@ rate = completed / seconds if seconds > 0 else None
 report = dict(jobs=probe['busy'] + 1, completed=completed, elapsed_s=seconds, completed_per_s=rate,
     target_per_s=1000, meets_target=rate is not None and rate >= 1000, quiet_claim_lag_s=probe['quiet_claim_lag_s'],
     busy_max_running_sampled=max(s['busy_running'] for s in samples), sample_sleep_s=float(sys.argv[2]),
-    measurement='enqueue-to-last-empty-poll; includes polling delay; running peak is sampled',
+    measurement='enqueue-to-last-empty-poll; includes polling delay; running peak is sampled; the ready-count poll and the job-sampler due_ready query run during the window and scan the jobs run_at index with future wakes pending (observer effects)',
     worker=json.loads((path / 'worker.json').read_text()), samples=samples, outcome=sys.argv[3])
 (path / 'jobs.json').write_text(json.dumps(report, indent=2) + '\n')
 if sys.argv[3] != 'done' or seconds <= 0 or probe['quiet_claim_lag_s'] is None:

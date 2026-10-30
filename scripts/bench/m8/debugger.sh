@@ -42,7 +42,7 @@ until [ "$(client_count)" = "$clients" ]; do
   [ "$SECONDS" -lt "$deadline" ] || die 'debugger clients did not connect before the timeout'
   sleep 0.2
 done
-track_load "$seconds" "$pool" "$raw/ingest.json" >"$raw/ingest.log" 2>&1
+(track_load "$seconds" "$pool" "$raw/ingest.json") >"$raw/ingest.log" 2>&1
 wait_inbox "$drain"
 kill -0 "$watcher" 2>/dev/null || die 'watchers ended before the inbox drained; increase M8_DRAIN_SECONDS'
 # Await normal completion: killing loadgen would lose its buffered receipts and final records.

@@ -93,6 +93,8 @@ STUB
 chmod +x "$work/bin/psql"
 expect_failure 'M8_DEBUGGER_CLIENTS must be in 1..20' env M8_DEBUGGER_CLIENTS=21 bash "$here/debugger.sh" "$raw" "$pool"
 expect_failure 'M8_JOBS_CAP must be an integer' env M8_JOBS_CAP=0 bash "$here/jobs.sh" "$raw"
+expect_failure 'must be below M8_JOBS_CONCURRENCY (16)' env M8_JOBS_CAP=16 bash "$here/jobs.sh" "$raw"
+expect_failure 'must be below M8_JOBS_CONCURRENCY (4)' env M8_JOBS_CAP=4 M8_JOBS_CONCURRENCY=4 bash "$here/jobs.sh" "$raw"
 expect_failure 'seconds must be an integer' env M8_TIMERS_SECONDS=0 bash "$here/timers.sh" "$raw" "$pool"
 [ ! -s "$M8_TEST_CALLS" ]
 mkdir -p "$raw" "$M4_STATE/.." "$work/out"
@@ -160,6 +162,35 @@ sample = json.loads((path / 'job-kinds.json').read_text())[0]
 assert sample['kind'] == 'flow.step' and sample['claims_total'] == 3
 assert sample['ready_lag_mean_seconds'] is None and sample['ready_lag_max_seconds'] == 1.5
 PY
+
+# Preflight names a missing sampler tool; run_all continues past a failed bench and fails at the end.
+expect_failure 'jq is required by the per-kind sampler' bash -c '. "$1/common.sh"; command() { return 1; }; require_job_sampler' _ "$here"
+(
+  bash() { printf '%s\n' "$2" >>"$work/ran"; [ "$2" != jobs ]; }
+  rc=0
+  run_all >"$work/all.out" 2>&1 || rc=$?
+  [ "$rc" = 1 ]
+)
+grep -Fxq timers "$work/ran"
+grep -Fq 'failed: jobs;' "$work/all.out"
+
+# A backgrounded track_load must be loadgen itself, so kill in a cleanup trap stops it.
+cat >"$work/bin/loadgen" <<'STUB'
+#!/usr/bin/env bash
+echo $$ >"$M8_TEST_LOADGEN_PID"
+exec sleep 30
+STUB
+chmod +x "$work/bin/loadgen"
+(
+  export LOADGEN="$work/bin/loadgen" M8_TEST_LOADGEN_PID="$work/loadgen.pid"
+  track_load 1 1 "$work/ingest.json" &
+  load_pid=$!
+  until [ -s "$work/loadgen.pid" ]; do sleep 0.1; done
+  [ "$(cat "$work/loadgen.pid")" = "$load_pid" ]
+  kill "$load_pid"
+  wait "$load_pid" || true
+  ! kill -0 "$load_pid" 2>/dev/null
+)
 
 # M7 must use a prebuilt binary when M8 supplies one; a cargo invocation is a test failure.
 cat >"$work/bin/cargo" <<'STUB'

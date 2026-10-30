@@ -32,6 +32,10 @@ for mode in noload loaded; do
   compose start zirv-flow-worker
   worker_stopped=''
   wait_worker_metrics
+  # The worker starts after the re-arm commits; the wakes must still lie ahead now.
+  lead_left="$(host_pg -At -c 'SELECT round(extract(epoch FROM min(j.run_at) - clock_timestamp())::numeric, 1) FROM jobs j JOIN m5bench.rows r ON r.job_id = j.id WHERE r.run = 1')"
+  [ -n "$lead_left" ] && awk -v v="$lead_left" 'BEGIN { exit !(v > 0) }' ||
+    die "earliest wake is not in the future after worker start (lead left: ${lead_left:-no wake jobs}s); increase M8_TIMERS_LEAD_SECONDS"
   host_pg -At -c 'SELECT row_to_json(r) FROM m5bench.runs r WHERE run = 1' >"$dest/window.json.tmp"
   mv "$dest/window.json.tmp" "$dest/window.json"
   start_job_sampler "$dest"
@@ -53,12 +57,14 @@ for mode in noload loaded; do
   host_pg -At -v run=1 -f "$m8_dir/../m5/lateness.sql" >"$dest/lateness.json.tmp"
   mv "$dest/lateness.json.tmp" "$dest/lateness.json"
   scrape_metrics http://127.0.0.1:9100/metrics zirv_flow_timer_wake_lateness_seconds "$dest/metrics"
-  python3 -I - "$dest" "$mode" "$M8_RATE" <<'PY'
+  python3 -I - "$dest" "$mode" "$M8_RATE" "$lead_left" <<'PY'
 import json, pathlib, sys
 path = pathlib.Path(sys.argv[1])
 late = json.loads((path / 'lateness.json').read_text())
 report = dict(mode=sys.argv[2], ingest_rate=int(sys.argv[3]) if sys.argv[2] == 'loaded' else 0,
-              lateness=late, distribution='uniform per workspace; no M5 burst set')
+              lateness=late, distribution='uniform per workspace; no M5 burst set',
+              lead_left_at_worker_ready_s=float(sys.argv[4]),
+              measurement='the job-sampler due_ready query and the wake-count poll run during the window and scan the jobs run_at index with all wakes pending; observer effects, not product load')
 (path / 'timers.json').write_text(json.dumps(report, indent=2) + '\n')
 if late['jobs_left'] or late['dead_wake_jobs'] or late['overall']['woken'] != late['overall']['seeded']:
     raise SystemExit('timer run did not wake every seeded enrollment')
