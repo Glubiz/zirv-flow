@@ -926,10 +926,144 @@ pub(crate) async fn stream(
 #[cfg(test)]
 mod tests {
     use axum::http::HeaderValue;
+    use http_body_util::BodyExt;
     use serde_json::json;
     use zirv_flow_core::events::{PropertyType, Reason, ReasonCode, SchemaProperty};
 
     use super::*;
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_feed_frames_event_id_resolves_to_the_inbox_arrival_before_the_frame(pool: PgPool) {
+        use zirv_flow_core::{
+            ApiKeyId, Cause, HmacPurpose, HmacRoot, MasterKey, Scope, Slug, TraceContext,
+            WorkspaceName,
+        };
+        use zirv_flow_store::{IngestItem, IngestPayload, Shard};
+
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let workspace = zirv_flow_store::create_workspace(
+            &pool,
+            &WorkspaceName::parse("Debugger latency").unwrap(),
+            &Slug::parse("debugger-latency").unwrap(),
+        )
+        .await
+        .unwrap();
+        let key = zirv_flow_store::create_api_key(
+            &pool,
+            ApiKeyId::new(),
+            workspace.id,
+            "watcher",
+            &[0; 32],
+            &[Scope::Read, Scope::Ingest],
+            None,
+        )
+        .await
+        .unwrap();
+        let root = HmacRoot::bootstrap_from(&MasterKey::generate());
+        let state = AppState::new(pool.clone(), Arc::new(String::new)).with_hmac_root(&root);
+        let response = stream(
+            State(state),
+            Principal::Key(crate::auth::KeyPrincipal { key: key.clone() }),
+            Path(workspace.id.to_string()),
+            RawQuery(Some("source=api".into())),
+            HeaderMap::new(),
+        )
+        .await
+        .unwrap();
+        let mut body = response.into_body();
+        let identifiers = vec![("external:user_id".into(), "latency-person".into())];
+        let items = [
+            IngestItem {
+                identifiers: identifiers.clone(),
+                timestamp: None,
+                message_id: Some("latency-identify".into()),
+                payload: IngestPayload::Identify { traits: Map::new() },
+            },
+            IngestItem {
+                identifiers,
+                timestamp: None,
+                message_id: Some("latency-track".into()),
+                payload: IngestPayload::Track {
+                    event: "seen".into(),
+                    properties: Map::new(),
+                },
+            },
+        ];
+        assert_eq!(
+            zirv_flow_store::append_inbox(
+                &pool,
+                workspace.id,
+                key.id.as_uuid(),
+                &TraceContext::root(Cause::api("debugger-latency")),
+                &items,
+            )
+            .await
+            .unwrap(),
+            2
+        );
+        let inbox_arrival: OffsetDateTime = sqlx::query_scalar(
+            "SELECT received_at FROM ingest_inbox WHERE workspace_id = $1 AND kind = 'track'",
+        )
+        .bind(workspace.id.as_uuid())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            zirv_flow_store::drain_batch(
+                &pool,
+                workspace.id,
+                Shard::ALL,
+                &root.hmac_key(HmacPurpose::Redaction),
+                10,
+            )
+            .await
+            .unwrap()
+            .rows,
+            2
+        );
+        let item = tokio::time::timeout(Duration::from_secs(30), async {
+            let mut buffer = String::new();
+            loop {
+                let frame = body.frame().await.unwrap().unwrap();
+                if let Ok(data) = frame.into_data() {
+                    buffer.push_str(std::str::from_utf8(&data).unwrap());
+                }
+                while let Some(end) = buffer.find("\n\n") {
+                    let frame: String = buffer.drain(..end + 2).collect();
+                    if frame.lines().any(|line| line == "event: item") {
+                        assert!(frame.lines().any(|line| line.starts_with("id: ")));
+                        let data = frame
+                            .lines()
+                            .find_map(|line| line.strip_prefix("data: "))
+                            .unwrap();
+                        return serde_json::from_str::<Value>(data).unwrap();
+                    }
+                }
+            }
+        })
+        .await
+        .expect("an item frame within 10 seconds");
+        let event_id = Uuid::parse_str(item["event_id"].as_str().unwrap()).unwrap();
+        let received_at: OffsetDateTime = sqlx::query_scalar(
+            "SELECT received_at FROM events WHERE workspace_id = $1 AND id = $2",
+        )
+        .bind(workspace.id.as_uuid())
+        .bind(event_id)
+        .fetch_one(&pool)
+        .await
+        .expect("the frame names a committed event");
+        let frame_at = OffsetDateTime::parse(
+            item["at"].as_str().unwrap(),
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        assert_eq!(received_at, inbox_arrival);
+        assert!(
+            received_at < frame_at,
+            "the inbox arrival precedes the feed frame"
+        );
+    }
 
     fn declared(name: &str, pii: bool) -> SchemaProperty {
         SchemaProperty {

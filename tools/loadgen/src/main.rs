@@ -1,18 +1,19 @@
 //! `loadgen`: a deterministic ingestion load generator for the zirv-flow benchmarks. It talks to
 //! a running instance over HTTP only (plain `http://`; the benchmarks run on localhost) and
-//! writes a JSON report: achieved rate, status counts and API latency percentiles.
+//! writes an ingestion JSON report or debugger receipts for the latency SQL report.
 
 mod pacing;
 mod payload;
 mod report;
 mod runner;
+mod sse;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 
 use report::{Latency, PhaseReport, Report, StatusCounts, achieved_rate};
 use runner::{Config, Mode, Phase, PhaseOutcome, run_phase};
@@ -81,6 +82,18 @@ pub(crate) fn init_tls() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
+/// The trimmed, non-empty API key held in `path`.
+pub(crate) fn read_key(path: &std::path::Path) -> Result<String, String> {
+    let key = std::fs::read_to_string(path)
+        .map_err(|error| format!("cannot read --key-file: {error}"))?
+        .trim()
+        .to_owned();
+    if key.is_empty() {
+        return Err("--key-file is empty".into());
+    }
+    Ok(key)
+}
+
 fn validate(args: &Args) -> Result<(), String> {
     let phase_ok = |rate: u32, seconds: f64| seconds == 0.0 || (rate > 0 && seconds > 0.0);
     if !(args.duration.is_finite() && args.burst_duration.is_finite()) {
@@ -137,13 +150,7 @@ fn merge(phases: &[PhaseReport], samples: Samples) -> PhaseReport {
 
 async fn run(args: Args) -> Result<(), String> {
     validate(&args)?;
-    let key = std::fs::read_to_string(&args.key_file)
-        .map_err(|error| format!("cannot read --key-file: {error}"))?
-        .trim()
-        .to_owned();
-    if key.is_empty() {
-        return Err("--key-file is empty".into());
-    }
+    let key = crate::read_key(&args.key_file)?;
     let started = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| error.to_string())?;
@@ -238,11 +245,76 @@ async fn run(args: Args) -> Result<(), String> {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    match run(Args::parse()).await {
+    let matches = command().get_matches();
+    let result = match matches.subcommand() {
+        Some(("debugger", matches)) => {
+            sse::run(sse::Args::from_arg_matches(matches).unwrap_or_else(|error| error.exit()))
+                .await
+        }
+        _ => run(Args::from_arg_matches(&matches).unwrap_or_else(|error| error.exit())).await,
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("loadgen: {message}");
             ExitCode::from(2)
         }
+    }
+}
+
+fn command() -> clap::Command {
+    Args::command()
+        .subcommand(sse::Args::command().name("debugger"))
+        .subcommand_negates_reqs(true)
+        .args_conflicts_with_subcommands(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_debugger_subcommand_preserves_the_ingestion_cli() {
+        let ingest = command()
+            .try_get_matches_from([
+                "loadgen",
+                "--url",
+                "http://localhost:8080",
+                "--key-file",
+                "ingest.key",
+                "--mode",
+                "track",
+                "--rate",
+                "1",
+                "--duration",
+                "1",
+            ])
+            .unwrap();
+        assert_eq!(Args::from_arg_matches(&ingest).unwrap().mode, Mode::Track);
+        let debugger = command()
+            .try_get_matches_from([
+                "loadgen",
+                "debugger",
+                "--url",
+                "http://localhost:8080",
+                "--key-file",
+                "read.key",
+                "--workspace",
+                "workspace",
+                "--clients",
+                "20",
+                "--duration",
+                "60",
+                "--out",
+                "receive.jsonl",
+            ])
+            .unwrap();
+        let (_, matches) = debugger.subcommand().unwrap();
+        assert_eq!(sse::Args::from_arg_matches(matches).unwrap().clients, 20);
+        assert!(
+            command()
+                .try_get_matches_from(["loadgen", "debugger"])
+                .is_err()
+        );
     }
 }
