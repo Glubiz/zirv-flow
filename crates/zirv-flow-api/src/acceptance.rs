@@ -9655,6 +9655,92 @@ email,b@example.com,
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_explorer_applies_the_configured_fifteen_second_statement_timeout(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let router = app_limits(crate::ExplorerLimits {
+            interactive_timeout: std::time::Duration::from_millis(15_000),
+            ..crate::ExplorerLimits::default()
+        })(&pool);
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let created = call(
+            &router,
+            "POST",
+            &schemas_uri(&ws),
+            Some(json!({"name": "order", "mode": "warn", "properties": [
+                {"name": "paid_at", "type": "timestamp"}
+            ]})),
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+        let published = call(
+            &router,
+            "POST",
+            &format!("{}/order/versions", schemas_uri(&ws)),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(
+            published.status,
+            StatusCode::CREATED,
+            "{:?}",
+            published.body
+        );
+        inv_store(
+            &pool,
+            &ws,
+            vec![inv_record(
+                "a@example.com",
+                "order",
+                None,
+                1,
+                json!({"paid_at": "2026-06-01T00:00:00Z"}),
+            )],
+        )
+        .await;
+        // The typed predicate runs this probe inside the handler's actual bounded transaction.
+        // A default/hard-coded timeout returns no match, so the total assertion fails immediately.
+        sqlx::query(
+            "CREATE OR REPLACE FUNCTION zf_try_timestamptz(value text) RETURNS timestamptz
+             LANGUAGE sql STABLE AS $$
+               SELECT CASE WHEN current_setting('statement_timeout')::interval = interval '15 seconds'
+                      THEN value::timestamptz ELSE NULL END
+             $$",
+        ).execute(&pool).await.unwrap();
+        let body = with_range(json!({"name": "order", "bucket": "day",
+            "filters": [{"key": "paid_at", "op": "eq", "value": "2026-06-01T00:00:00Z"}]}));
+
+        let reply = call(
+            &router,
+            "POST",
+            &explore_uri(&ws, "count"),
+            Some(body.clone()),
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+        assert_eq!(reply.body["total"], 1);
+
+        let default = app_limits(crate::ExplorerLimits::default())(&pool);
+        let reply = call(
+            &default,
+            "POST",
+            &explore_uri(&ws, "count"),
+            Some(body),
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+        assert_eq!(
+            reply.body["total"], 0,
+            "the probe must distinguish the default timeout"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_explorer_query_past_the_timeout_is_a_503_query_timeout(pool: PgPool) {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
