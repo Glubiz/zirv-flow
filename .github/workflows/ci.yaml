@@ -234,6 +234,9 @@ jobs:
   release-scripts:
     name: Release Script Tests
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4.4.0
@@ -243,6 +246,17 @@ jobs:
         run: bash scripts/generate-changelog.sh --self-test
       - name: Release flags self-test
         run: bash scripts/release-flags.sh --self-test
+      - name: Release checklist self-test
+        run: bash scripts/release-check.sh --self-test
+      - name: Check release readiness for workspace version 1.x
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          case "$version" in
+            1.*) bash scripts/release-check.sh ;;
+            *) echo "Release readiness check skipped for $version" ;;
+          esac
       - name: Upgrade drill self-test
         run: bash scripts/drill/upgrade.sh --self-test
       - name: Upgrade drill shellcheck

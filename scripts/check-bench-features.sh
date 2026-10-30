@@ -15,7 +15,8 @@
 #   3. no Cargo.toml lists `browser-test` among its default features;
 #   4. the server binary of a default build has no `/__test/` route in it.
 #
-# Usage: check-bench-features.sh [ROOT]   |   check-bench-features.sh --self-test
+# Usage: check-bench-features.sh [ROOT | --static-only [ROOT] | --self-test]
+# --static-only checks shipped inputs without compiling; CI also runs the full gate.
 # Exits 1 listing the offences, 2 on a setup error. Requires bash, grep, awk and (for 1 and 4) cargo.
 
 set -euo pipefail
@@ -180,7 +181,12 @@ run_self_test() {
 
 case "${1:-}" in
   --self-test) run_self_test ;;
-  -*) echo "usage: $0 [ROOT | --self-test]" >&2; exit 2 ;;
+  --static-only)
+    [ "$#" -le 2 ] || { echo "usage: $0 --static-only [ROOT]" >&2; exit 2; }
+    root="${2:-$(git rev-parse --show-toplevel 2>/dev/null)}" || { echo "not inside a git repository" >&2; exit 2; }
+    run_gate "$root"
+    ;;
+  -*) echo "usage: $0 [ROOT | --static-only [ROOT] | --self-test]" >&2; exit 2 ;;
   *)
     root="${1:-$(git rev-parse --show-toplevel 2>/dev/null)}" || { echo "not inside a git repository" >&2; exit 2; }
     run_gate "$root"
