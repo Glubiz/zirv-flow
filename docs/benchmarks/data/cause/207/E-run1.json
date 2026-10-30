@@ -1,0 +1,819 @@
+{
+  "label": "capped cause analysis (4 CPU / 8 GiB, ruling d84373ae); relative evidence only, not a section 19 measurement",
+  "image_version": "0.193.0",
+  "issue": 207,
+  "arm": "E",
+  "run": 1,
+  "variable": "no ingest",
+  "exit_code": 0,
+  "sql_via": "psql shim (.zirv/m8shim/psql, docker exec into the bench PostgreSQL container)",
+  "topology": [
+    {
+      "service": "postgres",
+      "image": "postgres:16.15",
+      "image_id": "sha256:1beaa3084eee2676f20a9cd9928f0bf2c5bf674f8e49f81017912183d377c61c",
+      "cpuset": "11-12",
+      "memory_bytes": 4294967296,
+      "shm_bytes": 1073741824
+    },
+    {
+      "service": "zirv-flow",
+      "image": "ghcr.io/glubiz/zirv-flow:0.193.0",
+      "image_id": "sha256:94e78251078c155a782295961bbb81dc895fa5f0d72728650659aede7eb96293",
+      "cpuset": "13",
+      "memory_bytes": 1572864000,
+      "shm_bytes": 21029191680
+    },
+    {
+      "service": "zirv-flow-worker",
+      "image": "ghcr.io/glubiz/zirv-flow:0.193.0",
+      "image_id": "sha256:94e78251078c155a782295961bbb81dc895fa5f0d72728650659aede7eb96293",
+      "cpuset": "14",
+      "memory_bytes": 1572864000,
+      "shm_bytes": 21029191680
+    },
+    {
+      "service": "zirv-flow-scheduler",
+      "image": "ghcr.io/glubiz/zirv-flow:0.193.0",
+      "image_id": "sha256:94e78251078c155a782295961bbb81dc895fa5f0d72728650659aede7eb96293",
+      "cpuset": "14",
+      "memory_bytes": 536870912,
+      "shm_bytes": 21029191680
+    },
+    {
+      "postgres_settings": {
+        "shared_buffers": "1GB",
+        "effective_cache_size": "16GB",
+        "maintenance_work_mem": "1GB",
+        "max_wal_size": "8GB",
+        "checkpoint_timeout": "15min"
+      }
+    }
+  ],
+  "results": {
+    "modes": {
+      "noload": {
+        "window": {
+          "run": 1,
+          "t0": "2026-10-30T19:20:22.374878+00:00",
+          "window_s": 600,
+          "burst_at_s": 300,
+          "n_spread": 90000,
+          "n_burst": 10000,
+          "staged_at": "2026-10-30T19:18:21.083353+00:00"
+        },
+        "timers": {
+          "mode": "noload",
+          "ingest_rate": 0,
+          "lateness": {
+            "run": 1,
+            "t0": "2026-10-30T19:20:22.374878+00:00",
+            "window_s": 600,
+            "burst_at_s": 300,
+            "sets": {
+              "38da1dff-2a54-b92d-2456-fd5d8502fab9": {
+                "early": 0,
+                "max_s": 413.574057,
+                "min_s": 0.484705,
+                "p50_s": 147.005529,
+                "p95_s": 398.776172,
+                "p99_s": 411.843265,
+                "woken": 20000,
+                "seeded": 20000
+              },
+              "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5": {
+                "early": 0,
+                "max_s": 413.580239,
+                "min_s": 0.313295,
+                "p50_s": 244.48622,
+                "p95_s": 410.668155,
+                "p99_s": 413.063827,
+                "woken": 40000,
+                "seeded": 40000
+              },
+              "e0572d44-1b49-f641-5a00-60d8c4b766ae": {
+                "early": 0,
+                "max_s": 413.572902,
+                "min_s": 0.313386,
+                "p50_s": 246.577701,
+                "p95_s": 405.985268,
+                "p99_s": 411.847518,
+                "woken": 40000,
+                "seeded": 40000
+              }
+            },
+            "overall": {
+              "early": 0,
+              "max_s": 413.580239,
+              "min_s": 0.313295,
+              "p50_s": 236.522825,
+              "p95_s": 407.05723,
+              "p99_s": 412.729328,
+              "woken": 100000,
+              "seeded": 100000
+            },
+            "spread_in_burst_minute": null,
+            "spread_outside_burst_minute": {
+              "early": 0,
+              "max_s": null,
+              "min_s": null,
+              "p50_s": null,
+              "p95_s": null,
+              "p99_s": null,
+              "woken": 0,
+              "seeded": 0
+            },
+            "per_minute": [
+              {
+                "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+                "max_s": 148.936501,
+                "p50_s": 129.395891,
+                "p99_s": 148.744932,
+                "woken": 1800,
+                "minute": 0,
+                "seeded": 1800
+              },
+              {
+                "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+                "max_s": 123.490894,
+                "p50_s": 100.795496,
+                "p99_s": 123.081758,
+                "woken": 1800,
+                "minute": 1,
+                "seeded": 1800
+              },
+              {
+                "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+                "max_s": 77.364021,
+                "p50_s": 55.93602,
+                "p99_s": 76.886475,
+                "woken": 1800,
+                "minute": 2,
+                "seeded": 1800
+              },
+              {
+                "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+                "max_s": 111.762472,
+                "p50_s": 22.884846,
+                "p99_s": 111.594296,
+                "woken": 1800,
+                "minute": 3,
+                "seeded": 1800
+              },
+              {
+                "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+                "max_s": 110.792745,
+                "p50_s": 89.112409,
+                "p99_s": 110.331913,
+                "woken": 1800,
+                "minute": 4,
+                "seeded": 1800
+              },
+              {
+                "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+                "max_s": 413.574057,
+                "p50_s": 195.640954,
+                "p99_s": 413.299952,
+                "woken": 3800,
+                "minute": 5,
+                "seeded": 3800
+              },
+              {
+                "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+                "max_s": 397.54183,
+                "p50_s": 375.441353,
+                "p99_s": 397.083902,
+                "woken": 1800,
+                "minute": 6,
+                "seeded": 1800
+              },
+              {
+                "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+                "max_s": 355.86591,
+                "p50_s": 333.299059,
+                "p99_s": 355.396116,
+                "woken": 1800,
+                "minute": 7,
+                "seeded": 1800
+              },
+              {
+                "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+                "max_s": 311.865043,
+                "p50_s": 288.576036,
+                "p99_s": 311.448768,
+                "woken": 1800,
+                "minute": 8,
+                "seeded": 1800
+              },
+              {
+                "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+                "max_s": 268.207698,
+                "p50_s": 253.284941,
+                "p99_s": 267.915995,
+                "woken": 1800,
+                "minute": 9,
+                "seeded": 1800
+              },
+              {
+                "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+                "max_s": 148.948715,
+                "p50_s": 129.40644,
+                "p99_s": 148.73873,
+                "woken": 3600,
+                "minute": 0,
+                "seeded": 3600
+              },
+              {
+                "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+                "max_s": 123.485133,
+                "p50_s": 100.790714,
+                "p99_s": 123.077434,
+                "woken": 3600,
+                "minute": 1,
+                "seeded": 3600
+              },
+              {
+                "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+                "max_s": 77.358771,
+                "p50_s": 55.927737,
+                "p99_s": 76.883831,
+                "woken": 3600,
+                "minute": 2,
+                "seeded": 3600
+              },
+              {
+                "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+                "max_s": 111.781578,
+                "p50_s": 22.894487,
+                "p99_s": 111.58375,
+                "woken": 3600,
+                "minute": 3,
+                "seeded": 3600
+              },
+              {
+                "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+                "max_s": 110.791169,
+                "p50_s": 89.130629,
+                "p99_s": 110.329745,
+                "woken": 3600,
+                "minute": 4,
+                "seeded": 3600
+              },
+              {
+                "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+                "max_s": 413.580239,
+                "p50_s": 401.792315,
+                "p99_s": 413.502725,
+                "woken": 7600,
+                "minute": 5,
+                "seeded": 7600
+              },
+              {
+                "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+                "max_s": 397.539185,
+                "p50_s": 375.437379,
+                "p99_s": 397.083114,
+                "woken": 3600,
+                "minute": 6,
+                "seeded": 3600
+              },
+              {
+                "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+                "max_s": 355.862081,
+                "p50_s": 333.297276,
+                "p99_s": 355.393638,
+                "woken": 3600,
+                "minute": 7,
+                "seeded": 3600
+              },
+              {
+                "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+                "max_s": 311.865064,
+                "p50_s": 288.571673,
+                "p99_s": 311.443087,
+                "woken": 3600,
+                "minute": 8,
+                "seeded": 3600
+              },
+              {
+                "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+                "max_s": 268.193816,
+                "p50_s": 253.279792,
+                "p99_s": 267.914864,
+                "woken": 3600,
+                "minute": 9,
+                "seeded": 3600
+              },
+              {
+                "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+                "max_s": 148.94868,
+                "p50_s": 129.406773,
+                "p99_s": 148.741548,
+                "woken": 3600,
+                "minute": 0,
+                "seeded": 3600
+              },
+              {
+                "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+                "max_s": 123.48842,
+                "p50_s": 100.794662,
+                "p99_s": 123.077723,
+                "woken": 3600,
+                "minute": 1,
+                "seeded": 3600
+              },
+              {
+                "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+                "max_s": 77.362577,
+                "p50_s": 55.934677,
+                "p99_s": 76.886492,
+                "woken": 3600,
+                "minute": 2,
+                "seeded": 3600
+              },
+              {
+                "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+                "max_s": 111.794914,
+                "p50_s": 22.894472,
+                "p99_s": 111.603116,
+                "woken": 3600,
+                "minute": 3,
+                "seeded": 3600
+              },
+              {
+                "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+                "max_s": 110.791943,
+                "p50_s": 89.131836,
+                "p99_s": 110.331265,
+                "woken": 3600,
+                "minute": 4,
+                "seeded": 3600
+              },
+              {
+                "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+                "max_s": 413.572902,
+                "p50_s": 402.358226,
+                "p99_s": 413.298955,
+                "woken": 7600,
+                "minute": 5,
+                "seeded": 7600
+              },
+              {
+                "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+                "max_s": 397.541036,
+                "p50_s": 375.438267,
+                "p99_s": 397.083349,
+                "woken": 3600,
+                "minute": 6,
+                "seeded": 3600
+              },
+              {
+                "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+                "max_s": 355.864858,
+                "p50_s": 333.297983,
+                "p99_s": 355.394329,
+                "woken": 3600,
+                "minute": 7,
+                "seeded": 3600
+              },
+              {
+                "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+                "max_s": 311.865058,
+                "p50_s": 288.574765,
+                "p99_s": 311.444687,
+                "woken": 3600,
+                "minute": 8,
+                "seeded": 3600
+              },
+              {
+                "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+                "max_s": 268.204582,
+                "p50_s": 253.28247,
+                "p99_s": 267.914919,
+                "woken": 3600,
+                "minute": 9,
+                "seeded": 3600
+              }
+            ],
+            "first_step_started": "2026-10-30T19:20:22.688173+00:00",
+            "last_step_started": "2026-10-30T19:34:13.384207+00:00",
+            "dead_wake_jobs": 0,
+            "jobs_left": 0,
+            "enrollments_by_state": {
+              "completed": 100000
+            }
+          },
+          "distribution": "uniform per workspace; no M5 burst set",
+          "lead_left_at_worker_ready_s": 85.2,
+          "measurement": "the job-sampler due_ready query and the wake-count poll run during the window and scan the jobs run_at index with all wakes pending; observer effects, not product load"
+        },
+        "lateness": {
+          "run": 1,
+          "t0": "2026-10-30T19:20:22.374878+00:00",
+          "window_s": 600,
+          "burst_at_s": 300,
+          "sets": {
+            "38da1dff-2a54-b92d-2456-fd5d8502fab9": {
+              "early": 0,
+              "max_s": 413.574057,
+              "min_s": 0.484705,
+              "p50_s": 147.005529,
+              "p95_s": 398.776172,
+              "p99_s": 411.843265,
+              "woken": 20000,
+              "seeded": 20000
+            },
+            "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5": {
+              "early": 0,
+              "max_s": 413.580239,
+              "min_s": 0.313295,
+              "p50_s": 244.48622,
+              "p95_s": 410.668155,
+              "p99_s": 413.063827,
+              "woken": 40000,
+              "seeded": 40000
+            },
+            "e0572d44-1b49-f641-5a00-60d8c4b766ae": {
+              "early": 0,
+              "max_s": 413.572902,
+              "min_s": 0.313386,
+              "p50_s": 246.577701,
+              "p95_s": 405.985268,
+              "p99_s": 411.847518,
+              "woken": 40000,
+              "seeded": 40000
+            }
+          },
+          "overall": {
+            "early": 0,
+            "max_s": 413.580239,
+            "min_s": 0.313295,
+            "p50_s": 236.522825,
+            "p95_s": 407.05723,
+            "p99_s": 412.729328,
+            "woken": 100000,
+            "seeded": 100000
+          },
+          "spread_in_burst_minute": null,
+          "spread_outside_burst_minute": {
+            "early": 0,
+            "max_s": null,
+            "min_s": null,
+            "p50_s": null,
+            "p95_s": null,
+            "p99_s": null,
+            "woken": 0,
+            "seeded": 0
+          },
+          "per_minute": [
+            {
+              "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+              "max_s": 148.936501,
+              "p50_s": 129.395891,
+              "p99_s": 148.744932,
+              "woken": 1800,
+              "minute": 0,
+              "seeded": 1800
+            },
+            {
+              "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+              "max_s": 123.490894,
+              "p50_s": 100.795496,
+              "p99_s": 123.081758,
+              "woken": 1800,
+              "minute": 1,
+              "seeded": 1800
+            },
+            {
+              "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+              "max_s": 77.364021,
+              "p50_s": 55.93602,
+              "p99_s": 76.886475,
+              "woken": 1800,
+              "minute": 2,
+              "seeded": 1800
+            },
+            {
+              "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+              "max_s": 111.762472,
+              "p50_s": 22.884846,
+              "p99_s": 111.594296,
+              "woken": 1800,
+              "minute": 3,
+              "seeded": 1800
+            },
+            {
+              "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+              "max_s": 110.792745,
+              "p50_s": 89.112409,
+              "p99_s": 110.331913,
+              "woken": 1800,
+              "minute": 4,
+              "seeded": 1800
+            },
+            {
+              "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+              "max_s": 413.574057,
+              "p50_s": 195.640954,
+              "p99_s": 413.299952,
+              "woken": 3800,
+              "minute": 5,
+              "seeded": 3800
+            },
+            {
+              "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+              "max_s": 397.54183,
+              "p50_s": 375.441353,
+              "p99_s": 397.083902,
+              "woken": 1800,
+              "minute": 6,
+              "seeded": 1800
+            },
+            {
+              "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+              "max_s": 355.86591,
+              "p50_s": 333.299059,
+              "p99_s": 355.396116,
+              "woken": 1800,
+              "minute": 7,
+              "seeded": 1800
+            },
+            {
+              "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+              "max_s": 311.865043,
+              "p50_s": 288.576036,
+              "p99_s": 311.448768,
+              "woken": 1800,
+              "minute": 8,
+              "seeded": 1800
+            },
+            {
+              "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+              "max_s": 268.207698,
+              "p50_s": 253.284941,
+              "p99_s": 267.915995,
+              "woken": 1800,
+              "minute": 9,
+              "seeded": 1800
+            },
+            {
+              "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+              "max_s": 148.948715,
+              "p50_s": 129.40644,
+              "p99_s": 148.73873,
+              "woken": 3600,
+              "minute": 0,
+              "seeded": 3600
+            },
+            {
+              "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+              "max_s": 123.485133,
+              "p50_s": 100.790714,
+              "p99_s": 123.077434,
+              "woken": 3600,
+              "minute": 1,
+              "seeded": 3600
+            },
+            {
+              "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+              "max_s": 77.358771,
+              "p50_s": 55.927737,
+              "p99_s": 76.883831,
+              "woken": 3600,
+              "minute": 2,
+              "seeded": 3600
+            },
+            {
+              "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+              "max_s": 111.781578,
+              "p50_s": 22.894487,
+              "p99_s": 111.58375,
+              "woken": 3600,
+              "minute": 3,
+              "seeded": 3600
+            },
+            {
+              "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+              "max_s": 110.791169,
+              "p50_s": 89.130629,
+              "p99_s": 110.329745,
+              "woken": 3600,
+              "minute": 4,
+              "seeded": 3600
+            },
+            {
+              "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+              "max_s": 413.580239,
+              "p50_s": 401.792315,
+              "p99_s": 413.502725,
+              "woken": 7600,
+              "minute": 5,
+              "seeded": 7600
+            },
+            {
+              "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+              "max_s": 397.539185,
+              "p50_s": 375.437379,
+              "p99_s": 397.083114,
+              "woken": 3600,
+              "minute": 6,
+              "seeded": 3600
+            },
+            {
+              "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+              "max_s": 355.862081,
+              "p50_s": 333.297276,
+              "p99_s": 355.393638,
+              "woken": 3600,
+              "minute": 7,
+              "seeded": 3600
+            },
+            {
+              "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+              "max_s": 311.865064,
+              "p50_s": 288.571673,
+              "p99_s": 311.443087,
+              "woken": 3600,
+              "minute": 8,
+              "seeded": 3600
+            },
+            {
+              "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+              "max_s": 268.193816,
+              "p50_s": 253.279792,
+              "p99_s": 267.914864,
+              "woken": 3600,
+              "minute": 9,
+              "seeded": 3600
+            },
+            {
+              "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+              "max_s": 148.94868,
+              "p50_s": 129.406773,
+              "p99_s": 148.741548,
+              "woken": 3600,
+              "minute": 0,
+              "seeded": 3600
+            },
+            {
+              "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+              "max_s": 123.48842,
+              "p50_s": 100.794662,
+              "p99_s": 123.077723,
+              "woken": 3600,
+              "minute": 1,
+              "seeded": 3600
+            },
+            {
+              "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+              "max_s": 77.362577,
+              "p50_s": 55.934677,
+              "p99_s": 76.886492,
+              "woken": 3600,
+              "minute": 2,
+              "seeded": 3600
+            },
+            {
+              "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+              "max_s": 111.794914,
+              "p50_s": 22.894472,
+              "p99_s": 111.603116,
+              "woken": 3600,
+              "minute": 3,
+              "seeded": 3600
+            },
+            {
+              "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+              "max_s": 110.791943,
+              "p50_s": 89.131836,
+              "p99_s": 110.331265,
+              "woken": 3600,
+              "minute": 4,
+              "seeded": 3600
+            },
+            {
+              "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+              "max_s": 413.572902,
+              "p50_s": 402.358226,
+              "p99_s": 413.298955,
+              "woken": 7600,
+              "minute": 5,
+              "seeded": 7600
+            },
+            {
+              "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+              "max_s": 397.541036,
+              "p50_s": 375.438267,
+              "p99_s": 397.083349,
+              "woken": 3600,
+              "minute": 6,
+              "seeded": 3600
+            },
+            {
+              "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+              "max_s": 355.864858,
+              "p50_s": 333.297983,
+              "p99_s": 355.394329,
+              "woken": 3600,
+              "minute": 7,
+              "seeded": 3600
+            },
+            {
+              "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+              "max_s": 311.865058,
+              "p50_s": 288.574765,
+              "p99_s": 311.444687,
+              "woken": 3600,
+              "minute": 8,
+              "seeded": 3600
+            },
+            {
+              "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+              "max_s": 268.204582,
+              "p50_s": 253.28247,
+              "p99_s": 267.914919,
+              "woken": 3600,
+              "minute": 9,
+              "seeded": 3600
+            }
+          ],
+          "first_step_started": "2026-10-30T19:20:22.688173+00:00",
+          "last_step_started": "2026-10-30T19:34:13.384207+00:00",
+          "dead_wake_jobs": 0,
+          "jobs_left": 0,
+          "enrollments_by_state": {
+            "completed": 100000
+          }
+        },
+        "ingest": null,
+        "job_kind_samples": 282,
+        "job_kind_samples_file": "/Users/jonathansolskov/Documents/Privat/zirv-flow/.zirv/worktrees/m8-cause/.zirv/work/m8-cause-runs/207/E-run1/raw/noload/job-kinds.csv",
+        "cpu_over_window": {
+          "zirv-flow-m8-cause-postgres-1": {
+            "samples": 104,
+            "cpu_mean_pct": 58.83201923076923,
+            "cpu_max_pct": 222.23
+          },
+          "zirv-flow-m8-cause-zirv-flow-1": {
+            "samples": 104,
+            "cpu_mean_pct": 0.5563461538461538,
+            "cpu_max_pct": 22.26
+          },
+          "zirv-flow-m8-cause-zirv-flow-scheduler-1": {
+            "samples": 104,
+            "cpu_mean_pct": 0.3114423076923077,
+            "cpu_max_pct": 1.86
+          },
+          "zirv-flow-m8-cause-zirv-flow-worker-1": {
+            "samples": 104,
+            "cpu_mean_pct": 12.43923076923077,
+            "cpu_max_pct": 50.95
+          }
+        }
+      }
+    },
+    "lateness_burst": {
+      "all": {
+        "max_s": 413.580239,
+        "p50_s": 236.522825,
+        "p95_s": 407.05723,
+        "p99_s": 412.729328,
+        "woken": 100000,
+        "seeded": 100000
+      },
+      "burst_set": {
+        "max_s": 413.580239,
+        "p50_s": 400.430464,
+        "p95_s": 412.736197,
+        "p99_s": 413.457853,
+        "woken": 19000,
+        "seeded": 19000
+      },
+      "spread_set": {
+        "max_s": 397.54183,
+        "p50_s": 129.406773,
+        "p95_s": 377.874209,
+        "p99_s": 393.973651,
+        "woken": 81000,
+        "seeded": 81000
+      }
+    },
+    "worker_wake_lateness_histogram": {
+      "count": 100000.0,
+      "mean_s": 212.00670757857003,
+      "p50_s": 5.0,
+      "p95_s": 5.0,
+      "p99_s": 5.0,
+      "observations_above_last_bucket": 99441.0
+    },
+    "worker_jobs_total": {
+      "maintenance.ai_transcripts/completed": 1.0,
+      "flow.step/completed": 100000.0
+    },
+    "inbox": {
+      "samples": 168,
+      "max_depth": 0.0,
+      "max_age_s": 0.0
+    }
+  }
+}

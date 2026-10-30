@@ -1,0 +1,915 @@
+{
+  "label": "capped cause analysis (4 CPU / 8 GiB, ruling d84373ae); relative evidence only, not a section 19 measurement",
+  "image_version": "0.193.0",
+  "issue": 207,
+  "arm": "F",
+  "run": 1,
+  "variable": "track ingest at 500 items/s",
+  "exit_code": 0,
+  "sql_via": "psql shim (.zirv/m8shim/psql, docker exec into the bench PostgreSQL container)",
+  "topology": [
+    {
+      "service": "postgres",
+      "image": "postgres:16.15",
+      "image_id": "sha256:1beaa3084eee2676f20a9cd9928f0bf2c5bf674f8e49f81017912183d377c61c",
+      "cpuset": "11-12",
+      "memory_bytes": 4294967296,
+      "shm_bytes": 1073741824
+    },
+    {
+      "service": "zirv-flow",
+      "image": "ghcr.io/glubiz/zirv-flow:0.193.0",
+      "image_id": "sha256:94e78251078c155a782295961bbb81dc895fa5f0d72728650659aede7eb96293",
+      "cpuset": "13",
+      "memory_bytes": 1572864000,
+      "shm_bytes": 21029191680
+    },
+    {
+      "service": "zirv-flow-worker",
+      "image": "ghcr.io/glubiz/zirv-flow:0.193.0",
+      "image_id": "sha256:94e78251078c155a782295961bbb81dc895fa5f0d72728650659aede7eb96293",
+      "cpuset": "14",
+      "memory_bytes": 1572864000,
+      "shm_bytes": 21029191680
+    },
+    {
+      "service": "zirv-flow-scheduler",
+      "image": "ghcr.io/glubiz/zirv-flow:0.193.0",
+      "image_id": "sha256:94e78251078c155a782295961bbb81dc895fa5f0d72728650659aede7eb96293",
+      "cpuset": "14",
+      "memory_bytes": 536870912,
+      "shm_bytes": 21029191680
+    },
+    {
+      "postgres_settings": {
+        "shared_buffers": "1GB",
+        "effective_cache_size": "16GB",
+        "maintenance_work_mem": "1GB",
+        "max_wal_size": "8GB",
+        "checkpoint_timeout": "15min"
+      }
+    }
+  ],
+  "results": {
+    "modes": {
+      "loaded": {
+        "window": {
+          "run": 1,
+          "t0": "2026-10-30T19:38:21.787856+00:00",
+          "window_s": 600,
+          "burst_at_s": 300,
+          "n_spread": 90000,
+          "n_burst": 10000,
+          "staged_at": "2026-10-30T19:36:20.741954+00:00"
+        },
+        "timers": {
+          "mode": "loaded",
+          "ingest_rate": 500,
+          "lateness": {
+            "run": 1,
+            "t0": "2026-10-30T19:38:21.787856+00:00",
+            "window_s": 600,
+            "burst_at_s": 300,
+            "sets": {
+              "38da1dff-2a54-b92d-2456-fd5d8502fab9": {
+                "early": 0,
+                "max_s": 4.141431,
+                "min_s": 0.001599,
+                "p50_s": 0.017006,
+                "p95_s": 1.083758,
+                "p99_s": 3.073185,
+                "woken": 20000,
+                "seeded": 20000
+              },
+              "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5": {
+                "early": 0,
+                "max_s": 4.142773,
+                "min_s": 0.001051,
+                "p50_s": 0.010723,
+                "p95_s": 2.380474,
+                "p99_s": 3.108936,
+                "woken": 40000,
+                "seeded": 40000
+              },
+              "e0572d44-1b49-f641-5a00-60d8c4b766ae": {
+                "early": 0,
+                "max_s": 4.148392,
+                "min_s": 0.001498,
+                "p50_s": 0.014967,
+                "p95_s": 2.851102,
+                "p99_s": 3.880917,
+                "woken": 40000,
+                "seeded": 40000
+              }
+            },
+            "overall": {
+              "early": 0,
+              "max_s": 4.148392,
+              "min_s": 0.001051,
+              "p50_s": 0.013869,
+              "p95_s": 2.514908,
+              "p99_s": 3.511036,
+              "woken": 100000,
+              "seeded": 100000
+            },
+            "spread_in_burst_minute": null,
+            "spread_outside_burst_minute": {
+              "early": 0,
+              "max_s": null,
+              "min_s": null,
+              "p50_s": null,
+              "p95_s": null,
+              "p99_s": null,
+              "woken": 0,
+              "seeded": 0
+            },
+            "per_minute": [
+              {
+                "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+                "max_s": 0.999111,
+                "p50_s": 0.013859,
+                "p99_s": 0.693279,
+                "woken": 1800,
+                "minute": 0,
+                "seeded": 1800
+              },
+              {
+                "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+                "max_s": 0.187763,
+                "p50_s": 0.013491,
+                "p99_s": 0.107128,
+                "woken": 1800,
+                "minute": 1,
+                "seeded": 1800
+              },
+              {
+                "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+                "max_s": 0.269162,
+                "p50_s": 0.018905,
+                "p99_s": 0.230943,
+                "woken": 1800,
+                "minute": 2,
+                "seeded": 1800
+              },
+              {
+                "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+                "max_s": 0.237253,
+                "p50_s": 0.01936,
+                "p99_s": 0.195268,
+                "woken": 1800,
+                "minute": 3,
+                "seeded": 1800
+              },
+              {
+                "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+                "max_s": 0.295523,
+                "p50_s": 0.015492,
+                "p99_s": 0.180749,
+                "woken": 1800,
+                "minute": 4,
+                "seeded": 1800
+              },
+              {
+                "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+                "max_s": 4.141431,
+                "p50_s": 0.097398,
+                "p99_s": 3.91969,
+                "woken": 3800,
+                "minute": 5,
+                "seeded": 3800
+              },
+              {
+                "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+                "max_s": 1.100794,
+                "p50_s": 0.01478,
+                "p99_s": 0.794648,
+                "woken": 1800,
+                "minute": 6,
+                "seeded": 1800
+              },
+              {
+                "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+                "max_s": 0.294974,
+                "p50_s": 0.016324,
+                "p99_s": 0.210001,
+                "woken": 1800,
+                "minute": 7,
+                "seeded": 1800
+              },
+              {
+                "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+                "max_s": 0.321475,
+                "p50_s": 0.015858,
+                "p99_s": 0.206948,
+                "woken": 1800,
+                "minute": 8,
+                "seeded": 1800
+              },
+              {
+                "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+                "max_s": 0.207096,
+                "p50_s": 0.013184,
+                "p99_s": 0.088982,
+                "woken": 1800,
+                "minute": 9,
+                "seeded": 1800
+              },
+              {
+                "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+                "max_s": 1.000807,
+                "p50_s": 0.007762,
+                "p99_s": 0.686306,
+                "woken": 3600,
+                "minute": 0,
+                "seeded": 3600
+              },
+              {
+                "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+                "max_s": 0.190708,
+                "p50_s": 0.007315,
+                "p99_s": 0.098417,
+                "woken": 3600,
+                "minute": 1,
+                "seeded": 3600
+              },
+              {
+                "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+                "max_s": 0.275134,
+                "p50_s": 0.011451,
+                "p99_s": 0.21889,
+                "woken": 3600,
+                "minute": 2,
+                "seeded": 3600
+              },
+              {
+                "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+                "max_s": 0.24186,
+                "p50_s": 0.011521,
+                "p99_s": 0.182718,
+                "woken": 3600,
+                "minute": 3,
+                "seeded": 3600
+              },
+              {
+                "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+                "max_s": 0.29058,
+                "p50_s": 0.008658,
+                "p99_s": 0.17848,
+                "woken": 3600,
+                "minute": 4,
+                "seeded": 3600
+              },
+              {
+                "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+                "max_s": 4.142773,
+                "p50_s": 0.791342,
+                "p99_s": 3.913629,
+                "woken": 7600,
+                "minute": 5,
+                "seeded": 7600
+              },
+              {
+                "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+                "max_s": 1.093017,
+                "p50_s": 0.008351,
+                "p99_s": 0.789715,
+                "woken": 3600,
+                "minute": 6,
+                "seeded": 3600
+              },
+              {
+                "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+                "max_s": 0.297206,
+                "p50_s": 0.009676,
+                "p99_s": 0.203791,
+                "woken": 3600,
+                "minute": 7,
+                "seeded": 3600
+              },
+              {
+                "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+                "max_s": 0.309292,
+                "p50_s": 0.009558,
+                "p99_s": 0.195874,
+                "woken": 3600,
+                "minute": 8,
+                "seeded": 3600
+              },
+              {
+                "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+                "max_s": 0.204942,
+                "p50_s": 0.007536,
+                "p99_s": 0.086634,
+                "woken": 3600,
+                "minute": 9,
+                "seeded": 3600
+              },
+              {
+                "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+                "max_s": 1.004468,
+                "p50_s": 0.011051,
+                "p99_s": 0.692322,
+                "woken": 3600,
+                "minute": 0,
+                "seeded": 3600
+              },
+              {
+                "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+                "max_s": 0.197187,
+                "p50_s": 0.010768,
+                "p99_s": 0.103467,
+                "woken": 3600,
+                "minute": 1,
+                "seeded": 3600
+              },
+              {
+                "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+                "max_s": 0.277731,
+                "p50_s": 0.01527,
+                "p99_s": 0.227055,
+                "woken": 3600,
+                "minute": 2,
+                "seeded": 3600
+              },
+              {
+                "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+                "max_s": 0.241898,
+                "p50_s": 0.015666,
+                "p99_s": 0.188997,
+                "woken": 3600,
+                "minute": 3,
+                "seeded": 3600
+              },
+              {
+                "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+                "max_s": 0.291557,
+                "p50_s": 0.012267,
+                "p99_s": 0.179886,
+                "woken": 3600,
+                "minute": 4,
+                "seeded": 3600
+              },
+              {
+                "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+                "max_s": 4.148392,
+                "p50_s": 2.062454,
+                "p99_s": 4.100551,
+                "woken": 7600,
+                "minute": 5,
+                "seeded": 7600
+              },
+              {
+                "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+                "max_s": 1.09465,
+                "p50_s": 0.011931,
+                "p99_s": 0.793112,
+                "woken": 3600,
+                "minute": 6,
+                "seeded": 3600
+              },
+              {
+                "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+                "max_s": 0.300552,
+                "p50_s": 0.013259,
+                "p99_s": 0.21099,
+                "woken": 3600,
+                "minute": 7,
+                "seeded": 3600
+              },
+              {
+                "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+                "max_s": 0.324248,
+                "p50_s": 0.012882,
+                "p99_s": 0.200784,
+                "woken": 3600,
+                "minute": 8,
+                "seeded": 3600
+              },
+              {
+                "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+                "max_s": 0.213662,
+                "p50_s": 0.0108,
+                "p99_s": 0.093628,
+                "woken": 3600,
+                "minute": 9,
+                "seeded": 3600
+              }
+            ],
+            "first_step_started": "2026-10-30T19:38:21.825653+00:00",
+            "last_step_started": "2026-10-30T19:48:21.800875+00:00",
+            "dead_wake_jobs": 0,
+            "jobs_left": 0,
+            "enrollments_by_state": {
+              "completed": 100000
+            }
+          },
+          "distribution": "uniform per workspace; no M5 burst set",
+          "lead_left_at_worker_ready_s": 97.1,
+          "measurement": "the job-sampler due_ready query and the wake-count poll run during the window and scan the jobs run_at index with all wakes pending; observer effects, not product load"
+        },
+        "lateness": {
+          "run": 1,
+          "t0": "2026-10-30T19:38:21.787856+00:00",
+          "window_s": 600,
+          "burst_at_s": 300,
+          "sets": {
+            "38da1dff-2a54-b92d-2456-fd5d8502fab9": {
+              "early": 0,
+              "max_s": 4.141431,
+              "min_s": 0.001599,
+              "p50_s": 0.017006,
+              "p95_s": 1.083758,
+              "p99_s": 3.073185,
+              "woken": 20000,
+              "seeded": 20000
+            },
+            "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5": {
+              "early": 0,
+              "max_s": 4.142773,
+              "min_s": 0.001051,
+              "p50_s": 0.010723,
+              "p95_s": 2.380474,
+              "p99_s": 3.108936,
+              "woken": 40000,
+              "seeded": 40000
+            },
+            "e0572d44-1b49-f641-5a00-60d8c4b766ae": {
+              "early": 0,
+              "max_s": 4.148392,
+              "min_s": 0.001498,
+              "p50_s": 0.014967,
+              "p95_s": 2.851102,
+              "p99_s": 3.880917,
+              "woken": 40000,
+              "seeded": 40000
+            }
+          },
+          "overall": {
+            "early": 0,
+            "max_s": 4.148392,
+            "min_s": 0.001051,
+            "p50_s": 0.013869,
+            "p95_s": 2.514908,
+            "p99_s": 3.511036,
+            "woken": 100000,
+            "seeded": 100000
+          },
+          "spread_in_burst_minute": null,
+          "spread_outside_burst_minute": {
+            "early": 0,
+            "max_s": null,
+            "min_s": null,
+            "p50_s": null,
+            "p95_s": null,
+            "p99_s": null,
+            "woken": 0,
+            "seeded": 0
+          },
+          "per_minute": [
+            {
+              "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+              "max_s": 0.999111,
+              "p50_s": 0.013859,
+              "p99_s": 0.693279,
+              "woken": 1800,
+              "minute": 0,
+              "seeded": 1800
+            },
+            {
+              "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+              "max_s": 0.187763,
+              "p50_s": 0.013491,
+              "p99_s": 0.107128,
+              "woken": 1800,
+              "minute": 1,
+              "seeded": 1800
+            },
+            {
+              "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+              "max_s": 0.269162,
+              "p50_s": 0.018905,
+              "p99_s": 0.230943,
+              "woken": 1800,
+              "minute": 2,
+              "seeded": 1800
+            },
+            {
+              "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+              "max_s": 0.237253,
+              "p50_s": 0.01936,
+              "p99_s": 0.195268,
+              "woken": 1800,
+              "minute": 3,
+              "seeded": 1800
+            },
+            {
+              "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+              "max_s": 0.295523,
+              "p50_s": 0.015492,
+              "p99_s": 0.180749,
+              "woken": 1800,
+              "minute": 4,
+              "seeded": 1800
+            },
+            {
+              "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+              "max_s": 4.141431,
+              "p50_s": 0.097398,
+              "p99_s": 3.91969,
+              "woken": 3800,
+              "minute": 5,
+              "seeded": 3800
+            },
+            {
+              "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+              "max_s": 1.100794,
+              "p50_s": 0.01478,
+              "p99_s": 0.794648,
+              "woken": 1800,
+              "minute": 6,
+              "seeded": 1800
+            },
+            {
+              "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+              "max_s": 0.294974,
+              "p50_s": 0.016324,
+              "p99_s": 0.210001,
+              "woken": 1800,
+              "minute": 7,
+              "seeded": 1800
+            },
+            {
+              "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+              "max_s": 0.321475,
+              "p50_s": 0.015858,
+              "p99_s": 0.206948,
+              "woken": 1800,
+              "minute": 8,
+              "seeded": 1800
+            },
+            {
+              "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+              "max_s": 0.207096,
+              "p50_s": 0.013184,
+              "p99_s": 0.088982,
+              "woken": 1800,
+              "minute": 9,
+              "seeded": 1800
+            },
+            {
+              "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+              "max_s": 1.000807,
+              "p50_s": 0.007762,
+              "p99_s": 0.686306,
+              "woken": 3600,
+              "minute": 0,
+              "seeded": 3600
+            },
+            {
+              "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+              "max_s": 0.190708,
+              "p50_s": 0.007315,
+              "p99_s": 0.098417,
+              "woken": 3600,
+              "minute": 1,
+              "seeded": 3600
+            },
+            {
+              "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+              "max_s": 0.275134,
+              "p50_s": 0.011451,
+              "p99_s": 0.21889,
+              "woken": 3600,
+              "minute": 2,
+              "seeded": 3600
+            },
+            {
+              "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+              "max_s": 0.24186,
+              "p50_s": 0.011521,
+              "p99_s": 0.182718,
+              "woken": 3600,
+              "minute": 3,
+              "seeded": 3600
+            },
+            {
+              "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+              "max_s": 0.29058,
+              "p50_s": 0.008658,
+              "p99_s": 0.17848,
+              "woken": 3600,
+              "minute": 4,
+              "seeded": 3600
+            },
+            {
+              "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+              "max_s": 4.142773,
+              "p50_s": 0.791342,
+              "p99_s": 3.913629,
+              "woken": 7600,
+              "minute": 5,
+              "seeded": 7600
+            },
+            {
+              "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+              "max_s": 1.093017,
+              "p50_s": 0.008351,
+              "p99_s": 0.789715,
+              "woken": 3600,
+              "minute": 6,
+              "seeded": 3600
+            },
+            {
+              "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+              "max_s": 0.297206,
+              "p50_s": 0.009676,
+              "p99_s": 0.203791,
+              "woken": 3600,
+              "minute": 7,
+              "seeded": 3600
+            },
+            {
+              "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+              "max_s": 0.309292,
+              "p50_s": 0.009558,
+              "p99_s": 0.195874,
+              "woken": 3600,
+              "minute": 8,
+              "seeded": 3600
+            },
+            {
+              "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+              "max_s": 0.204942,
+              "p50_s": 0.007536,
+              "p99_s": 0.086634,
+              "woken": 3600,
+              "minute": 9,
+              "seeded": 3600
+            },
+            {
+              "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+              "max_s": 1.004468,
+              "p50_s": 0.011051,
+              "p99_s": 0.692322,
+              "woken": 3600,
+              "minute": 0,
+              "seeded": 3600
+            },
+            {
+              "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+              "max_s": 0.197187,
+              "p50_s": 0.010768,
+              "p99_s": 0.103467,
+              "woken": 3600,
+              "minute": 1,
+              "seeded": 3600
+            },
+            {
+              "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+              "max_s": 0.277731,
+              "p50_s": 0.01527,
+              "p99_s": 0.227055,
+              "woken": 3600,
+              "minute": 2,
+              "seeded": 3600
+            },
+            {
+              "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+              "max_s": 0.241898,
+              "p50_s": 0.015666,
+              "p99_s": 0.188997,
+              "woken": 3600,
+              "minute": 3,
+              "seeded": 3600
+            },
+            {
+              "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+              "max_s": 0.291557,
+              "p50_s": 0.012267,
+              "p99_s": 0.179886,
+              "woken": 3600,
+              "minute": 4,
+              "seeded": 3600
+            },
+            {
+              "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+              "max_s": 4.148392,
+              "p50_s": 2.062454,
+              "p99_s": 4.100551,
+              "woken": 7600,
+              "minute": 5,
+              "seeded": 7600
+            },
+            {
+              "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+              "max_s": 1.09465,
+              "p50_s": 0.011931,
+              "p99_s": 0.793112,
+              "woken": 3600,
+              "minute": 6,
+              "seeded": 3600
+            },
+            {
+              "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+              "max_s": 0.300552,
+              "p50_s": 0.013259,
+              "p99_s": 0.21099,
+              "woken": 3600,
+              "minute": 7,
+              "seeded": 3600
+            },
+            {
+              "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+              "max_s": 0.324248,
+              "p50_s": 0.012882,
+              "p99_s": 0.200784,
+              "woken": 3600,
+              "minute": 8,
+              "seeded": 3600
+            },
+            {
+              "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+              "max_s": 0.213662,
+              "p50_s": 0.0108,
+              "p99_s": 0.093628,
+              "woken": 3600,
+              "minute": 9,
+              "seeded": 3600
+            }
+          ],
+          "first_step_started": "2026-10-30T19:38:21.825653+00:00",
+          "last_step_started": "2026-10-30T19:48:21.800875+00:00",
+          "dead_wake_jobs": 0,
+          "jobs_left": 0,
+          "enrollments_by_state": {
+            "completed": 100000
+          }
+        },
+        "ingest": {
+          "tool": "zirv-flow-loadgen",
+          "mode": "track",
+          "seed": 1,
+          "run_id": "1a18e520700",
+          "started_unix_s": 1793389102,
+          "batch_size": 1,
+          "max_in_flight": 10000,
+          "latency_note": "One sample per request at its final outcome of any status (202, 4xx, 5xx, timeout or transport error, 429 retries exhausted). latency_from_schedule runs from the request's scheduled due time to its final response, retry waits and dispatch lag included: judge API latency targets on it. dispatch_lag is the final send minus the scheduled time and service_latency the final attempt's send to response, so latency_from_schedule is about dispatch_lag plus service_latency.",
+          "people": 40000,
+          "total": {
+            "name": "total",
+            "target_rate": 500,
+            "planned_duration_s": 600.0,
+            "elapsed_s": 600.007698667,
+            "requests": 300000,
+            "items_offered": 300000,
+            "items_accepted": 300000,
+            "achieved_rate": 499.9935845264843,
+            "retries_after_429": 0,
+            "status": {
+              "accepted_202": 300000,
+              "rate_limited_429": 0,
+              "server_5xx": 0,
+              "other": 0,
+              "transport_errors": 0
+            },
+            "latency_from_schedule": {
+              "count": 300000,
+              "p50_ms": 6.259,
+              "p95_ms": 46.117,
+              "p99_ms": 156.945,
+              "max_ms": 388.977
+            },
+            "service_latency": {
+              "count": 300000,
+              "p50_ms": 4.817,
+              "p95_ms": 44.208,
+              "p99_ms": 155.443,
+              "max_ms": 387.391
+            },
+            "dispatch_lag": {
+              "count": 300000,
+              "p50_ms": 1.417,
+              "p95_ms": 2.062,
+              "p99_ms": 4.919,
+              "max_ms": 38.451
+            },
+            "late_dispatch": 0,
+            "abandoned_requests": 0,
+            "gave_up_after_retries": 0
+          },
+          "phases": [
+            {
+              "name": "base",
+              "target_rate": 500,
+              "planned_duration_s": 600.0,
+              "elapsed_s": 600.007698667,
+              "requests": 300000,
+              "items_offered": 300000,
+              "items_accepted": 300000,
+              "achieved_rate": 499.9935845264843,
+              "retries_after_429": 0,
+              "status": {
+                "accepted_202": 300000,
+                "rate_limited_429": 0,
+                "server_5xx": 0,
+                "other": 0,
+                "transport_errors": 0
+              },
+              "latency_from_schedule": {
+                "count": 300000,
+                "p50_ms": 6.259,
+                "p95_ms": 46.117,
+                "p99_ms": 156.945,
+                "max_ms": 388.977
+              },
+              "service_latency": {
+                "count": 300000,
+                "p50_ms": 4.817,
+                "p95_ms": 44.208,
+                "p99_ms": 155.443,
+                "max_ms": 387.391
+              },
+              "dispatch_lag": {
+                "count": 300000,
+                "p50_ms": 1.417,
+                "p95_ms": 2.062,
+                "p99_ms": 4.919,
+                "max_ms": 38.451
+              },
+              "late_dispatch": 0,
+              "abandoned_requests": 0,
+              "gave_up_after_retries": 0
+            }
+          ]
+        },
+        "job_kind_samples": 233,
+        "job_kind_samples_file": "/Users/jonathansolskov/Documents/Privat/zirv-flow/.zirv/worktrees/m8-cause/.zirv/work/m8-cause-runs/207/F-run1/raw/loaded/job-kinds.csv",
+        "cpu_over_window": {
+          "zirv-flow-m8-cause-postgres-1": {
+            "samples": 111,
+            "cpu_mean_pct": 162.60234234234235,
+            "cpu_max_pct": 247.13
+          },
+          "zirv-flow-m8-cause-zirv-flow-1": {
+            "samples": 111,
+            "cpu_mean_pct": 25.318108108108106,
+            "cpu_max_pct": 32.16
+          },
+          "zirv-flow-m8-cause-zirv-flow-scheduler-1": {
+            "samples": 111,
+            "cpu_mean_pct": 0.0854954954954955,
+            "cpu_max_pct": 0.23
+          },
+          "zirv-flow-m8-cause-zirv-flow-worker-1": {
+            "samples": 111,
+            "cpu_mean_pct": 41.23900900900901,
+            "cpu_max_pct": 72.21
+          }
+        }
+      }
+    },
+    "lateness_burst": {
+      "all": {
+        "max_s": 4.148392,
+        "p50_s": 0.013869,
+        "p95_s": 2.514908,
+        "p99_s": 3.511036,
+        "woken": 100000,
+        "seeded": 100000
+      },
+      "burst_set": {
+        "max_s": 4.148392,
+        "p50_s": 1.352435,
+        "p95_s": 3.53678,
+        "p99_s": 4.04486,
+        "woken": 19000,
+        "seeded": 19000
+      },
+      "spread_set": {
+        "max_s": 1.100794,
+        "p50_s": 0.011706,
+        "p95_s": 0.105659,
+        "p99_s": 0.217077,
+        "woken": 81000,
+        "seeded": 81000
+      }
+    },
+    "worker_wake_lateness_histogram": {
+      "count": 100000.0,
+      "mean_s": 0.29310032326000074,
+      "p50_s": 0.017325301562778537,
+      "p95_s": 2.5562072336265884,
+      "p99_s": 4.511241446725318,
+      "observations_above_last_bucket": 0.0
+    },
+    "worker_jobs_total": {
+      "ingest.drain/completed": 19853.0,
+      "flow.step/completed": 100000.0
+    },
+    "inbox": {
+      "samples": 136,
+      "max_depth": 2213.0,
+      "max_age_s": 5.9
+    }
+  }
+}

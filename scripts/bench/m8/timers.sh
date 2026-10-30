@@ -21,7 +21,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for mode in noload loaded; do
+for mode in ${M8_TIMERS_MODES:-noload loaded}; do
   dest="$raw/$mode"
   mkdir -p "$dest"
   wait_inbox "$drain"
@@ -29,6 +29,9 @@ for mode in noload loaded; do
   compose stop -t 60 zirv-flow-worker
   host_pg -v seconds="$seconds" -v lead="$lead" -v enrollments="$M8_ENROLLMENTS" \
     -f "$m8_dir/timers-rearm.sql"
+  if [ -n "${M8_TIMERS_POST_REARM_SQL:-}" ]; then
+    host_pg -v seconds="$seconds" -f "$M8_TIMERS_POST_REARM_SQL"
+  fi
   compose start zirv-flow-worker
   worker_stopped=''
   wait_worker_metrics
