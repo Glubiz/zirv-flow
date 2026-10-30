@@ -16,7 +16,7 @@ import {
   WEBHOOK_DESTINATION_ID,
   WS,
 } from "../../test/flowsApi";
-import { lastGraph, mountEditor as mount, openSheetOf } from "../../test/flowsEditor";
+import { lastGraph, mountEditor as mount, openInspectorOf } from "../../test/flowsEditor";
 import { json, mockApi, problem, type Handler } from "../../test/mockApi";
 import { stubReactFlow } from "../../test/reactFlowStubs";
 
@@ -36,16 +36,12 @@ function node(calls: Parameters<typeof lastGraph>[0], id: string) {
 }
 
 describe("the send and sync steps in the editor", () => {
-  it("offers both kinds in the add-a-step menu", async () => {
+  it("offers both kinds in the step palette", async () => {
     mockApi(routes());
-    const user = userEvent.setup();
     mount();
     await screen.findByRole("group", { name: /^Wait: 1 day/ });
-
-    await user.click(screen.getByRole("button", { name: "Add a step" }));
-
-    expect(screen.getByRole("menuitem", { name: "Send an email" })).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: "Sync a profile" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send an email" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sync a profile" })).toBeInTheDocument();
   });
 
   it("adds a send step that starts with nothing chosen", async () => {
@@ -54,8 +50,7 @@ describe("the send and sync steps in the editor", () => {
     mount();
     await screen.findByRole("group", { name: /^Wait: 1 day/ });
 
-    await user.click(screen.getByRole("button", { name: "Add a step" }));
-    await user.click(screen.getByRole("menuitem", { name: "Send an email" }));
+    await user.click(screen.getByRole("button", { name: "Send an email" }));
 
     await waitFor(() => expect(node(calls, "n6")).toMatchObject({ type: "action.send" }), SAVE);
     expect(await screen.findByRole("group", { name: /^Send an email: Choose a template/ })).toBeInTheDocument();
@@ -66,7 +61,7 @@ describe("the send and sync steps in the editor", () => {
     const user = userEvent.setup();
     mount();
 
-    const sheet = await openSheetOf(user, /^Send an email: Send an email/);
+    const sheet = await openInspectorOf(user, /^Send an email: Send an email/);
     expect(await within(sheet).findByLabelText("Template")).toHaveValue(TEMPLATE_ID);
     expect(within(sheet).queryByRole("option", { name: "Unpublished" })).not.toBeInTheDocument();
     expect(await within(sheet).findByLabelText("Destination")).toHaveValue(DESTINATION_ID);
@@ -85,7 +80,7 @@ describe("the send and sync steps in the editor", () => {
     const user = userEvent.setup();
     mount();
 
-    const sheet = await openSheetOf(user, /^Send an email: Send an email/);
+    const sheet = await openInspectorOf(user, /^Send an email: Send an email/);
     await user.selectOptions(await within(sheet).findByLabelText("Topic"), "");
     await user.selectOptions(await within(sheet).findByLabelText("Vertical"), "");
 
@@ -102,7 +97,7 @@ describe("the send and sync steps in the editor", () => {
     const user = userEvent.setup();
     mount();
 
-    const sheet = await openSheetOf(user, /^Sync a profile: Update the profile/);
+    const sheet = await openInspectorOf(user, /^Sync a profile: Update the profile/);
     expect(within(sheet).getByText("city")).toBeInTheDocument();
     await user.selectOptions(within(sheet).getByLabelText("Operation"), "remove");
 
@@ -115,7 +110,7 @@ describe("the send and sync steps in the editor", () => {
     const user = userEvent.setup();
     mount();
 
-    const sheet = await openSheetOf(user, /^Sync a profile: /);
+    const sheet = await openInspectorOf(user, /^Sync a profile: /);
     await user.selectOptions(await within(sheet).findByLabelText("Add a trait"), "age");
 
     await waitFor(() => expect(node(calls, "n3")?.["trait_keys"]).toEqual(["city", "age"]), SAVE);
@@ -126,7 +121,7 @@ describe("the send and sync steps in the editor", () => {
     const user = userEvent.setup();
     mount();
 
-    const sheet = await openSheetOf(user, /^Webhook: /);
+    const sheet = await openInspectorOf(user, /^Webhook: /);
     const select = await within(sheet).findByLabelText("Payload template");
     expect(select).toHaveValue(HOOK_TEMPLATE_ID);
     expect(within(select).queryByRole("option", { name: "Trial nudge" })).not.toBeInTheDocument();
@@ -145,7 +140,7 @@ describe("the send and sync steps in the editor", () => {
     const user = userEvent.setup();
     mount();
 
-    const sheet = await openSheetOf(user, /^Send an email: Send an email/);
+    const sheet = await openInspectorOf(user, /^Send an email: Send an email/);
 
     expect(await within(sheet).findByText(DESTINATION_ID)).toBeInTheDocument();
     expect(within(sheet).getByText("Needs the write role.")).toBeInTheDocument();
@@ -164,7 +159,7 @@ describe("the send and sync steps in the editor", () => {
     const user = userEvent.setup();
     mount();
 
-    const sheet = await openSheetOf(user, /^Send an email: Send an email/);
+    const sheet = await openInspectorOf(user, /^Send an email: Send an email/);
     const retries = await within(sheet).findAllByRole("button", { name: "Try again" });
     await user.click(retries[0] as HTMLElement);
 
@@ -176,7 +171,7 @@ describe("the send and sync steps in the editor", () => {
     const user = userEvent.setup();
     mount();
 
-    const sheet = await openSheetOf(user, /^Send an email: Send an email/);
+    const sheet = await openInspectorOf(user, /^Send an email: Send an email/);
 
     expect(await within(sheet).findByRole("option", { name: "Loading destinations" })).toBeInTheDocument();
   });
@@ -186,7 +181,7 @@ describe("the send and sync steps in the editor", () => {
     const user = userEvent.setup();
     mount();
 
-    const sheet = await openSheetOf(user, /^Send an email: Send an email/);
+    const sheet = await openInspectorOf(user, /^Send an email: Send an email/);
     const select = await within(sheet).findByLabelText("Destination");
 
     expect(within(select).getByRole("option", { name: "Transactional mail" })).toBeInTheDocument();
@@ -200,7 +195,7 @@ describe("the send and sync steps in the editor", () => {
     const user = userEvent.setup();
     mount();
 
-    const sheet = await openSheetOf(user, /^Sync a profile: /);
+    const sheet = await openInspectorOf(user, /^Sync a profile: /);
     const select = await within(sheet).findByLabelText("Destination");
 
     expect(within(select).getByRole("option", { name: "Transactional mail" })).toBeInTheDocument();
@@ -219,7 +214,7 @@ describe("the send and sync steps in the editor", () => {
     const user = userEvent.setup();
     mount();
 
-    const sheet = await openSheetOf(user, /^Send an email: Send an email/);
+    const sheet = await openInspectorOf(user, /^Send an email: Send an email/);
 
     expect(await within(sheet).findByRole("option", { name: "Transactional mail" })).toBeInTheDocument();
     expect(within(sheet).getByText(/Transactional mail cannot send email/)).toBeInTheDocument();
@@ -235,7 +230,7 @@ describe("the send and sync steps in the editor", () => {
     const user = userEvent.setup();
     mount();
 
-    const sheet = await openSheetOf(user, /^Send an email: Send an email/);
+    const sheet = await openInspectorOf(user, /^Send an email: Send an email/);
 
     expect(await within(sheet).findByText(/No destination can send email/)).toBeInTheDocument();
     expect(within(sheet).getByRole("option", { name: DESTINATION_ID })).toBeInTheDocument();
@@ -254,7 +249,7 @@ describe("the send and sync steps in the editor", () => {
     const user = userEvent.setup();
     mount();
 
-    const sheet = await openSheetOf(user, /^Send an email: Send an email/);
+    const sheet = await openInspectorOf(user, /^Send an email: Send an email/);
     const retries = await within(sheet).findAllByRole("button", { name: "Try again" });
     await user.click(retries[0] as HTMLElement);
 
@@ -305,8 +300,8 @@ describe("delivery counts on the canvas", () => {
 
   async function openCounts(user: ReturnType<typeof userEvent.setup>) {
     await screen.findByRole("group", { name: /^Wait: 1 day/ });
-    await user.click(screen.getByRole("tab", { name: "Enrollments" }));
-    await screen.findByRole("dialog", { name: "Enrollments" });
+    await user.click(screen.getByRole("link", { name: "Results" }));
+    await screen.findByRole("region", { name: "Enrollments" });
   }
 
   it("shows sent, skipped by reason, and failed sends on the send step", async () => {
@@ -381,7 +376,6 @@ describe("delivery counts on the canvas", () => {
     await openCounts(user);
 
     const card = await screen.findByRole("group", { name: "Counts and versions" });
-    await user.click(within(card).getByText("Counts as a list"));
 
     const table = within(card).getByRole("table");
     expect(within(table).getByRole("columnheader", { name: "Delivery" })).toBeInTheDocument();

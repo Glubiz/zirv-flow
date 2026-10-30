@@ -212,23 +212,26 @@ Open **Flows** (`/w/:ws/flows`) and choose **New flow**. Name it *Spring newslet
 For **Starts when**, choose **A person enters or leaves a segment**, then
 **Create flow**.
 
-In **Flow settings**, choose *Newsletter readers* as the **Segment** and
+In **Build**, select the trigger to open **Flow settings** in the inspector.
+Choose *Newsletter readers* as the **Segment** and
 **Enters the segment** under **When a person**. Select **Also enroll the people
 already in the segment when the flow is published**. In **Re-entry**, keep
 **Never enters again**. No goal or exit criteria are needed for this first flow.
 
-In **Canvas**, use **Add a step** to add **Send an email** and **Exit**. Open the
-send step, choose the published newsletter **Template** and *Newsletter capture*
+Use the step palette to add **Send an email**. In its inspector, choose the
+published newsletter **Template** and *Newsletter capture*
 as **Destination**, and leave **Topic** at **No topic** to use the channel-wide
-consent recorded earlier. Under **Where it goes next**, set **Next step** to the
-Exit step. The trigger leads to the send step, the one with no incoming connection.
+consent recorded earlier. With the send step still selected, choose **Exit**
+in the palette. It is connected after the send step. Open the send step again
+and check **Next step** under **Where it goes next**. The trigger leads to the
+send step, the one with no incoming connection.
 Wait for **Saved** and resolve the validation problems shown on the canvas.
 
 Choose **Test** before publishing. Choose the synthetic person, or
 **A made-up person, from an editable snapshot** and leave **Snapshot** at `{}`.
 Choose **Start the test**. Check that the path reaches the send step and Exit.
 The captured send effect names what would be queued; it neither renders nor
-sends an email, and it does not run the send gates. Choose **Exit test** when done.
+sends an email, and it does not run the send gates. Choose **Build** when done.
 
 **Common mistake:** publishing first to make test mode available.
 **Fix:** test the draft first. Publishing with current segment members selected
@@ -236,12 +239,12 @@ can begin sending immediately.
 
 ## 8. Publish, send and read the trace
 
-A publisher chooses **Publish…**. Check the entry estimate and input warnings.
+A publisher chooses **Review and publish**. Check the entry estimate and input warnings.
 For this first send, the segment should contain only the synthetic recipient.
 Choose **Publish version 1**. Publishing enrolls the current segment members
 because you selected that option; there is no separate Send button for this flow.
 
-Open **Enrollments**, choose **Show enrollments** if needed, and open the
+Open **Results**, find **Enrollments** below the counts table, and open the
 person's enrollment. Read its step history and **Trace**. The tree labels the
 decisions, including **A person was considered for a flow**, **A flow step ran**
 and **Message sent**. A send check is recorded as `send.gate`; a final send

@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { FLOW_ID, flowRoutes, sampleGraph, WS } from "../../test/flowsApi";
-import { lastGraph, mountEditor as mount, openSheetOf, saves } from "../../test/flowsEditor";
+import { lastGraph, mountEditor as mount, openInspectorOf, saves } from "../../test/flowsEditor";
 import { json, mockApi, problem, type Call, type Handler } from "../../test/mockApi";
 import { stubReactFlow } from "../../test/reactFlowStubs";
 import { PURCHASE_DETAIL } from "../../test/segmentsApi";
@@ -31,16 +31,17 @@ function pause(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-describe("the add a step menu", () => {
-  it("opens beside the rail, on screen, instead of ending at the button", async () => {
+describe("the step palette", () => {
+  it("keeps the palette beside the canvas and outside any popover", async () => {
     mockApi(flowRoutes());
-    const user = userEvent.setup();
     mount();
     await screen.findByRole("group", { name: /^Wait: 1 day/ });
 
-    await user.click(screen.getByRole("button", { name: "Add a step" }));
-
-    expect(screen.getByRole("menu", { name: "Add a step" })).toHaveClass("menu-beside");
+    const palette = screen.getByRole("complementary", { name: "Step palette" });
+    expect(palette).toHaveClass("fl-palette");
+    expect(palette.closest(".fl-canvas")).toBeNull();
+    expect(within(palette).getAllByRole("button")).toHaveLength(12);
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
   });
 });
 
@@ -72,16 +73,16 @@ describe("the issues popover", () => {
     expect(screen.queryByRole("list", { name: "Issues in this flow" })).not.toBeInTheDocument();
   });
 
-  it("closes when the add a step menu opens", async () => {
+  it("closes when the palette filter is clicked", async () => {
     mockApi(flowRoutes({ issues: ISSUES }));
     const user = userEvent.setup();
     mount();
     await user.click(await screen.findByRole("button", { name: "1 issue" }));
 
-    await user.click(screen.getByRole("button", { name: "Add a step" }));
+    await user.click(screen.getByLabelText("Filter steps"));
 
     expect(screen.queryByRole("list", { name: "Issues in this flow" })).not.toBeInTheDocument();
-    expect(screen.getByRole("menu", { name: "Add a step" })).toBeInTheDocument();
+    expect(screen.getByRole("complementary", { name: "Step palette" })).toBeInTheDocument();
   });
 });
 
@@ -97,14 +98,14 @@ describe("issue words", () => {
     expect(screen.queryByText(/there is a loop/)).not.toBeInTheDocument();
   });
 
-  it("names the output of an unwired port in the list, as the sheet does", async () => {
+  it("names the output of an unwired port in the list, as the inspector does", async () => {
     mockApi(flowRoutes({ issues: [{ code: "port_not_wired", node: "n2", at: "/ports/case_0" }] }));
     const user = userEvent.setup();
     mount();
 
     await user.click(await screen.findByRole("button", { name: "1 issue" }));
 
-    expect(screen.getByText("The Yes output is not connected to a next step.")).toBeInTheDocument();
+    expect(within(screen.getByRole("list", { name: "Issues in this flow" })).getByText("The Yes output is not connected to a next step.")).toBeInTheDocument();
   });
 
   it("shows an issue about the whole flow as text, not as a button that does nothing", async () => {
@@ -120,7 +121,7 @@ describe("issue words", () => {
   });
 });
 
-describe("a sheet per step", () => {
+describe("an inspector per step", () => {
   const waits = graphOf(
     [
       { id: "n1", type: "wait.duration", seconds: 172_800 },
@@ -138,12 +139,12 @@ describe("a sheet per step", () => {
     const user = userEvent.setup();
     mount();
 
-    const first = await openSheetOf(user, /^Wait: 2 days/);
+    const first = await openInspectorOf(user, /^Wait: 2 days/);
     expect(within(first).getByLabelText("Unit")).toHaveValue("day");
 
     await user.click(await screen.findByRole("group", { name: /^Wait: 90 seconds/ }));
 
-    const second = await screen.findByRole("dialog");
+    const second = await screen.findByRole("region", { name: "Step inspector" });
     await waitFor(() => expect(second).toHaveFocus());
     expect(within(second).getByLabelText("Unit")).toHaveValue("second");
     expect(within(second).getByLabelText("Amount")).toHaveValue(90);
@@ -164,7 +165,7 @@ describe("arm weights", () => {
     const calls = mockApi(flowRoutes({ flow: { graph: split } }));
     const user = userEvent.setup();
     mount();
-    const sheet = await openSheetOf(user, /^Random split/);
+    const sheet = await openInspectorOf(user, /^Random split/);
     const field = within(sheet).getByLabelText("Weight of arm 1");
 
     await user.clear(field);
@@ -184,7 +185,7 @@ describe("arm weights", () => {
     const calls = mockApi(flowRoutes({ flow: { graph: split } }));
     const user = userEvent.setup();
     mount();
-    const sheet = await openSheetOf(user, /^Random split/);
+    const sheet = await openInspectorOf(user, /^Random split/);
     const field = within(sheet).getByLabelText("Weight of arm 1");
 
     await user.clear(field);
@@ -198,7 +199,7 @@ describe("arm weights", () => {
     const calls = mockApi(flowRoutes({ flow: { graph: split } }));
     const user = userEvent.setup();
     mount();
-    const sheet = await openSheetOf(user, /^Random split/);
+    const sheet = await openInspectorOf(user, /^Random split/);
     const field = within(sheet).getByLabelText("Weight of arm 1");
 
     await user.clear(field);
@@ -214,7 +215,7 @@ describe("a duration", () => {
     const calls = mockApi(flowRoutes());
     const user = userEvent.setup();
     mount();
-    const sheet = await openSheetOf(user, /^Wait: 1 day/);
+    const sheet = await openInspectorOf(user, /^Wait: 1 day/);
     const amount = within(sheet).getByLabelText("Amount");
 
     await user.clear(amount);
@@ -231,7 +232,7 @@ describe("stale issues", () => {
     const user = userEvent.setup();
     mount();
     expect(await screen.findByRole("button", { name: "1 issue" })).toBeInTheDocument();
-    const sheet = await openSheetOf(user, /^Webhook: /);
+    const sheet = await openInspectorOf(user, /^Webhook: /);
 
     await user.click(within(sheet).getByRole("button", { name: "Delete step…" }));
     await user.click(await screen.findByRole("button", { name: "Delete step" }));
@@ -262,7 +263,7 @@ describe("stale issues", () => {
     });
     const user = userEvent.setup();
     mount();
-    const sheet = await openSheetOf(user, /^Wait: 1 day/);
+    const sheet = await openInspectorOf(user, /^Wait: 1 day/);
     await waitFor(() => expect(checks).toBe(1));
 
     await user.selectOptions(within(sheet).getByLabelText("Unit"), "hour");
@@ -300,7 +301,7 @@ describe("a failed save", () => {
     const user = userEvent.setup();
     mount();
     expect(await screen.findByRole("button", { name: "1 issue" })).toBeInTheDocument();
-    const sheet = await openSheetOf(user, /^Wait: 1 day/);
+    const sheet = await openInspectorOf(user, /^Wait: 1 day/);
 
     await user.selectOptions(within(sheet).getByLabelText("Unit"), "hour");
     await waitFor(() => expect(patches).toBe(1), SAVE);
@@ -328,7 +329,7 @@ describe("boolean choices", () => {
     const user = userEvent.setup();
     mount();
 
-    const sheet = await openSheetOf(user, /^Update a trait: /);
+    const sheet = await openInspectorOf(user, /^Update a trait: /);
 
     const value = await within(sheet).findByLabelText("Value");
     expect(value).toHaveValue("");
@@ -358,7 +359,7 @@ describe("boolean choices", () => {
     const user = userEvent.setup();
     mount();
 
-    const sheet = await openSheetOf(user, /^Wait for an event: /);
+    const sheet = await openInspectorOf(user, /^Wait for an event: /);
 
     const filter = await within(sheet).findByRole("group", { name: "Filter 1" });
     await waitFor(() => expect(within(filter).getByLabelText("Value")).toHaveValue(""));
@@ -366,24 +367,22 @@ describe("boolean choices", () => {
 });
 
 describe("the views", () => {
-  it("has one tabpanel, labelled by the selected tab, and only that tab controls it", async () => {
+  it("names the current view and connects the Versions button to its panel", async () => {
     mockApi(flowRoutes());
     const user = userEvent.setup();
     mount();
-    const canvas = await screen.findByRole("tab", { name: "Canvas" });
+    const build = await screen.findByRole("link", { name: "Build" });
 
-    const panel = screen.getByRole("tabpanel");
-    expect(panel).toHaveAttribute("tabindex", "0");
-    expect(panel).toHaveAccessibleName("Canvas");
-    expect(canvas).toHaveAttribute("aria-controls", panel.id);
-    expect(screen.getByRole("tab", { name: "Versions" })).not.toHaveAttribute("aria-controls");
+    expect(screen.getByRole("region", { name: "Build" })).toBeInTheDocument();
+    expect(build).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("button", { name: "Versions" })).not.toHaveAttribute("aria-controls");
 
-    await user.click(screen.getByRole("tab", { name: "Versions" }));
+    await user.click(screen.getByRole("button", { name: "Versions" }));
 
-    const next = screen.getByRole("tabpanel");
-    expect(next).toHaveAccessibleName("Versions");
-    expect(screen.getByRole("tab", { name: "Versions" })).toHaveAttribute("aria-controls", next.id);
-    expect(screen.getByRole("tab", { name: "Canvas" })).not.toHaveAttribute("aria-controls");
+    const panel = screen.getByRole("region", { name: "Published versions" });
+    expect(screen.getByRole("button", { name: "Versions" })).toHaveAttribute("aria-controls", panel.id);
+    expect(screen.getByRole("button", { name: "Versions" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.queryByRole("region", { name: "Flow canvas" })).not.toBeInTheDocument();
   });
 });
 
@@ -398,7 +397,7 @@ describe("a connection to a step that is not there", () => {
     await user.click(await screen.findByRole("button", { name: "1 issue" }));
     await user.click(screen.getByRole("button", { name: /A connection leads to or from a step that is not in the flow/ }));
 
-    const sheet = await screen.findByRole("dialog");
+    const sheet = await screen.findByRole("region", { name: "Step inspector" });
     const select = within(sheet).getByLabelText("Next step");
     expect(select).toHaveValue("ghost");
     expect(select).toHaveAccessibleDescription(/not in the flow/);
@@ -418,7 +417,7 @@ describe("a connection issue that names a path", () => {
     await user.click(await screen.findByRole("button", { name: "1 issue" }));
     await user.click(screen.getByRole("button", { name: /A connection leads to or from a step that is not in the flow/ }));
 
-    const sheet = await screen.findByRole("dialog");
+    const sheet = await screen.findByRole("region", { name: "Step inspector" });
     expect(within(sheet).getByLabelText("Next step")).toHaveAccessibleDescription(/not in the flow/);
   });
 });
@@ -428,10 +427,10 @@ describe("saving", () => {
     mockApi(flowRoutes());
     const user = userEvent.setup();
     const { router } = mount();
-    const sheet = await openSheetOf(user, /^Wait: 1 day/);
+    const sheet = await openInspectorOf(user, /^Wait: 1 day/);
     await user.selectOptions(within(sheet).getByLabelText("Unit"), "hour");
 
-    await user.click(screen.getByRole("link", { name: "← Flows" }));
+    await user.click(screen.getByRole("link", { name: "Flows" }));
 
     expect(await screen.findByText("Leave without saving?")).toBeInTheDocument();
     expect(router.state.location.pathname).toBe(`/w/ws1/flows/${FLOW_ID}`);
@@ -454,7 +453,7 @@ describe("saving", () => {
     });
     const user = userEvent.setup();
     mount();
-    const sheet = await openSheetOf(user, /^Wait: 1 day/);
+    const sheet = await openInspectorOf(user, /^Wait: 1 day/);
     await user.selectOptions(within(sheet).getByLabelText("Unit"), "hour");
     await waitFor(() => expect(patches).toBe(1), SAVE);
 
@@ -482,7 +481,7 @@ describe("saving", () => {
     });
     const user = userEvent.setup();
     mount();
-    const sheet = await openSheetOf(user, /^Wait: 1 day/);
+    const sheet = await openInspectorOf(user, /^Wait: 1 day/);
     await user.selectOptions(within(sheet).getByLabelText("Unit"), "hour");
     await waitFor(() => expect(patches).toBe(1), SAVE);
 

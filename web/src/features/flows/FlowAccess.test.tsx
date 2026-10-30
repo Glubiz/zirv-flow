@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { flowRoutes } from "../../test/flowsApi";
-import { lastGraph, mountEditor as mount, openSheetOf, saves, type User } from "../../test/flowsEditor";
+import { lastGraph, mountEditor as mount, openInspectorOf, saves, type User } from "../../test/flowsEditor";
 import { mockApi } from "../../test/mockApi";
 import { stubReactFlow } from "../../test/reactFlowStubs";
 
@@ -20,17 +20,17 @@ describe("flow editor for a reader", () => {
     mount();
 
     await screen.findByRole("group", { name: /^Wait: 1 day/ });
-    expect(screen.queryByRole("button", { name: "Add a step" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("complementary", { name: "Step palette" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Undo" })).not.toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: "Flow name" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Fit to screen" })).toBeInTheDocument();
 
-    const sheet = await openSheetOf(user, /^Wait: 1 day/);
+    const sheet = await openInspectorOf(user, /^Wait: 1 day/);
     expect(within(sheet).getByLabelText("Amount")).toBeDisabled();
     expect(within(sheet).getByLabelText("Next step")).toBeDisabled();
     expect(within(sheet).queryByRole("button", { name: "Delete step…" })).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("tab", { name: "Flow settings" }));
+    await user.click(screen.getByRole("group", { name: /^Trigger:/ }));
     expect(await screen.findByLabelText("Starts when")).toBeDisabled();
     expect(calls.some((call) => call.method === "PATCH" || call.path.endsWith("/validate"))).toBe(false);
   });
@@ -78,7 +78,7 @@ describe("flow editor keyboard", () => {
     expect(screen.getByRole("group", { name: /^Branch: / })).toHaveFocus();
   });
 
-  it("opens the sheet with Enter, and Escape closes it and returns focus to the node", async () => {
+  it("opens the docked inspector with Enter, and Escape returns focus to the node", async () => {
     mockApi(flowRoutes());
     const user = userEvent.setup();
     mount();
@@ -86,9 +86,12 @@ describe("flow editor keyboard", () => {
     step.focus();
 
     await user.keyboard("{Enter}");
-    expect(await screen.findByRole("dialog")).toHaveFocus();
+    expect(await screen.findByRole("region", { name: "Step inspector" })).toHaveFocus();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Flow canvas" })).toBeInTheDocument();
 
     await user.keyboard("{Escape}");
+    expect(screen.queryByRole("region", { name: "Step inspector" })).not.toBeInTheDocument();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     await waitFor(() => expect(step).toHaveFocus());
   });
