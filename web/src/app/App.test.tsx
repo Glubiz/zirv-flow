@@ -82,7 +82,7 @@ describe("navigation", () => {
     });
     renderApp("/w/ws1/settings");
 
-    const nav = await screen.findByRole("navigation", { name: "Settings", exact: true });
+    const nav = await screen.findByRole("navigation", { name: "Settings" });
     await waitFor(() => {
       expect(nav).toHaveTextContent("Health");
     });
@@ -159,9 +159,9 @@ describe("event routes", () => {
     await user.click(screen.getByRole("link", { name: "Rejects" }));
     expect(await screen.findByRole("heading", { name: "Rejects" })).toBeInTheDocument();
     expect(await screen.findByText("No rejects")).toBeInTheDocument();
-    await user.click(within(screen.getByRole("navigation", { name: "Events", exact: true })).getByRole("link", { name: "Settings" }));
+    await user.click(within(screen.getByRole("navigation", { name: "Events" })).getByRole("link", { name: "Settings" }));
     expect(await screen.findByRole("heading", { name: "Event settings" })).toBeInTheDocument();
-    const settings = screen.getByRole("navigation", { name: "Settings", exact: true });
+    const settings = screen.getByRole("navigation", { name: "Settings" });
     expect(within(settings).getByRole("link", { name: "Event settings" })).toHaveAttribute("aria-current", "page");
     expect(within(settings).getByRole("link", { name: "Back to Spring campaigns" })).toHaveAttribute("href", "/w/ws1");
   });
@@ -270,7 +270,7 @@ describe("settings shell and Home", () => {
     expect(await screen.findByRole("heading", { name: "Home", level: 1 })).toBeInTheDocument();
     await user.click(within(screen.getByRole("navigation", { name: "Main" })).getByRole("link", { name: "Settings" }));
     expect(await screen.findByRole("heading", { name: "Settings", level: 1 })).toBeInTheDocument();
-    const nav = screen.getByRole("navigation", { name: "Settings", exact: true });
+    const nav = screen.getByRole("navigation", { name: "Settings" });
     await user.click(within(nav).getByRole("link", { name: "Members and roles" }));
     expect(await screen.findByRole("heading", { name: "Members", level: 1 })).toBeInTheDocument();
     expect(within(nav).getByRole("link", { name: "Members and roles" })).toHaveAttribute("aria-current", "page");
@@ -286,14 +286,14 @@ describe("settings shell and Home", () => {
     });
     const user = userEvent.setup();
     renderApp("/w/ws1/settings");
-    const nav = await screen.findByRole("navigation", { name: "Settings", exact: true });
+    const nav = await screen.findByRole("navigation", { name: "Settings" });
     await user.click(within(nav).getByRole("button", { name: "Search pages" }));
     for (const name of ["Sending domains", "Destinations", "Forwarding", "Privacy and erasure", "Audit log", "API keys", "Credentials", "AI assistant"]) {
       if (role === "admin") {
-        expect(await within(nav).findByRole("link", { name, exact: true })).toBeInTheDocument();
+        expect(await within(nav).findByRole("link", { name })).toBeInTheDocument();
         expect(await screen.findByRole("option", { name: new RegExp(`^${name} `) })).toBeInTheDocument();
       } else {
-        expect(within(nav).queryByRole("link", { name, exact: true })).not.toBeInTheDocument();
+        expect(within(nav).queryByRole("link", { name })).not.toBeInTheDocument();
         expect(screen.queryByRole("option", { name: new RegExp(`^${name} `) })).not.toBeInTheDocument();
       }
     }
