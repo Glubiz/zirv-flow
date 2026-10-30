@@ -1339,6 +1339,177 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn concurrent_claimers_respect_the_cap_and_claim_quiet_work_in_the_first_round(
+        pool: PgPool,
+    ) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            const CLAIMERS: usize = 8;
+            let busy = workspace(&pool, "busy").await;
+            let quiet = workspace(&pool, "quiet").await;
+            for _ in 0..50 {
+                let mut new = job("a.kind");
+                new.workspace_id = Some(busy);
+                enqueue(&pool, &new).await.unwrap();
+            }
+            let mut other = job("a.kind");
+            other.workspace_id = Some(quiet);
+            other.priority = 1;
+            enqueue(&pool, &other).await.unwrap();
+
+            let barrier = Arc::new(tokio::sync::Barrier::new(CLAIMERS));
+            let mut tasks = tokio::task::JoinSet::new();
+            for worker in 0..CLAIMERS {
+                let pool = pool.clone();
+                let barrier = barrier.clone();
+                tasks.spawn(async move {
+                    let name = format!("claimer-{worker}");
+                    let (mut completed, mut quiet_claims, mut max_running) = (0, 0, 0_i64);
+                    // Each round holds its claims until all eight attempts have sampled the
+                    // database. With no completions yet, at most two busy claims can precede
+                    // the quiet job: it must be claimed within the first eight attempts.
+                    // Two busy jobs per round drain the 50-job backlog in 25 rounds.
+                    for round in 0..25 {
+                        barrier.wait().await;
+                        let claimed = claim_job(&pool, &name, &["a.kind"], LEASE, Some(2))
+                            .await
+                            .unwrap();
+                        let running: i64 = sqlx::query_scalar(
+                            "SELECT count(*) FROM jobs WHERE workspace_id = $1 AND state = 'running'",
+                        )
+                        .bind(busy.as_uuid())
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                        assert!(running <= 2, "round {round}: {running} busy jobs running");
+                        max_running = max_running.max(running);
+                        barrier.wait().await;
+                        if let Some(claimed) = claimed {
+                            if claimed.workspace_id == Some(quiet.as_uuid()) {
+                                assert_eq!(round, 0, "quiet work missed the first eight attempts");
+                                quiet_claims += 1;
+                            }
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                            assert!(
+                                complete_job(&pool, claimed.id, claimed.lease_token)
+                                    .await
+                                    .unwrap()
+                            );
+                            completed += 1;
+                        }
+                    }
+                    (completed, quiet_claims, max_running)
+                });
+            }
+
+            tokio::time::timeout(Duration::from_secs(30), async {
+                let (mut completed, mut quiet_claims, mut max_running) = (0, 0, 0_i64);
+                while let Some(result) = tasks.join_next().await {
+                    let (done, quiet, running) = result.unwrap();
+                    completed += done;
+                    quiet_claims += quiet;
+                    max_running = max_running.max(running);
+                }
+                assert_eq!(completed, 51);
+                assert_eq!(quiet_claims, 1);
+                assert_eq!(max_running, 2, "the claimers must overlap at the cap");
+            })
+            .await
+            .expect("eight claimers did not drain the queue within 30 seconds");
+            let left: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = 'a.kind'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(left, 0);
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn uncapped_claims_bypass_the_advisory_lock_while_capped_claims_wait(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            let mut new = job("a.kind");
+            new.workspace_id = Some(ws);
+            for _ in 0..2 {
+                enqueue(&pool, &new).await.unwrap();
+            }
+            let mut holder = pool.begin().await.unwrap();
+            let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *holder)
+                .await
+                .unwrap();
+            sqlx::query("SELECT pg_advisory_xact_lock($1)")
+                .bind(CLAIM_LOCK_KEY)
+                .execute(&mut *holder)
+                .await
+                .unwrap();
+
+            let uncapped = tokio::time::timeout(
+                Duration::from_secs(10),
+                claim_job(&pool, "uncapped", &["a.kind"], LEASE, None),
+            )
+            .await
+            .expect("an uncapped claim waited for the advisory lock")
+            .unwrap()
+            .unwrap();
+            assert!(
+                complete_job(&pool, uncapped.id, uncapped.lease_token)
+                    .await
+                    .unwrap()
+            );
+
+            let mut tasks = tokio::task::JoinSet::new();
+            let capped_pool = pool.clone();
+            tasks.spawn(async move {
+                claim_job(&capped_pool, "capped", &["a.kind"], LEASE, Some(2)).await
+            });
+            // Observe the lock wait before using a short timeout: a task that has not
+            // connected yet is not evidence that capped claims take the advisory lock.
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let waiting: bool = sqlx::query_scalar(
+                        "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' \
+                         AND NOT granted AND $1 = ANY(pg_blocking_pids(pid)))",
+                    )
+                    .bind(holder_pid)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                    if waiting {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the capped claim never waited for the held advisory lock");
+            assert!(
+                tokio::time::timeout(Duration::from_millis(200), tasks.join_next())
+                    .await
+                    .is_err(),
+                "the capped claim completed while the advisory lock was held"
+            );
+            holder.rollback().await.unwrap();
+            let capped = tokio::time::timeout(Duration::from_secs(10), tasks.join_next())
+                .await
+                .expect("the capped claim did not resume after the lock was released")
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_ne!(uncapped.id, capped.id);
+            assert!(
+                complete_job(&pool, capped.id, capped.lease_token)
+                    .await
+                    .unwrap()
+            );
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn completing_deletes_the_job_and_a_stale_token_changes_nothing(pool: PgPool) {
         enqueue(&pool, &job("a.kind")).await.unwrap();
         let claimed = claim(&pool, &["a.kind"]).await.unwrap();
