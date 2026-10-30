@@ -404,3 +404,25 @@ RENDER_BENCH_CONSTRAINT="session pinned to the 16 E-core threads (mask 0xFFFF000
 
 The report is `docs/benchmarks/m7-render.md`. The smoke run (20 renders, the pool, a report) is a unit
 test of the tool and runs in the normal test job.
+
+## 13. Per-kind job sampling (M8, issues #207 and #396)
+
+While a run is active, use `scripts/bench/m8/sample-job-kinds.sh` with psql's `PG*` connection
+variables and every worker's metrics URL once (default `http://127.0.0.1:9100/metrics`):
+
+```sh
+PGHOST=127.0.0.1 PGPORT=55432 PGUSER=zirv PGDATABASE=zirv_flow \
+  scripts/bench/m8/sample-job-kinds.sh http://127.0.0.1:9100/metrics >job-kinds.csv
+```
+
+It needs psql, curl, awk and jq; stop with Ctrl-C. Each sample emits one CSV row per observed kind:
+`t`, `kind`, `claims_total`, `completed_total`, `claim_lag_seconds_sum`, `due_ready`, `running`,
+`ready_lag_mean_seconds`, `ready_lag_max_seconds`. Worker metrics supply claims and lag from
+`zirv_flow_job_claim_lag_seconds_count`/`_sum` (claim time minus `run_at`) and completions from
+`zirv_flow_jobs_total{outcome="completed"}`; SQL supplies due/running counts and ready lag
+(database `now()` minus `run_at`, blank when none are due). Completed jobs are deleted, so SQL
+cannot count their completions. Counters sum all supplied workers and cover their lifetimes:
+take deltas for interval counts and divide the lag-sum delta by the claim-count delta for mean
+claim lag (undefined with no claims). Start a new file if workers restart. Samples cover all
+workspaces; SQL and worker scrapes are sequential, not atomic. `JOB_KINDS_TICK_S` sets the sleep
+between samples (default 5 seconds); a query or scrape failure stops the sampler.
