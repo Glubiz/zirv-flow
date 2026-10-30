@@ -1,18 +1,19 @@
 //! `loadgen`: a deterministic ingestion load generator for the zirv-flow benchmarks. It talks to
 //! a running instance over HTTP only (plain `http://`; the benchmarks run on localhost) and
-//! writes a JSON report: achieved rate, status counts and API latency percentiles.
+//! writes an ingestion JSON report or debugger receipts for the latency SQL report.
 
 mod pacing;
 mod payload;
 mod report;
 mod runner;
+mod sse;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 
 use report::{Latency, PhaseReport, Report, StatusCounts, achieved_rate};
 use runner::{Config, Mode, Phase, PhaseOutcome, run_phase};
@@ -238,11 +239,76 @@ async fn run(args: Args) -> Result<(), String> {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    match run(Args::parse()).await {
+    let matches = command().get_matches();
+    let result = match matches.subcommand() {
+        Some(("debugger", matches)) => {
+            sse::run(sse::Args::from_arg_matches(matches).unwrap_or_else(|error| error.exit()))
+                .await
+        }
+        _ => run(Args::from_arg_matches(&matches).unwrap_or_else(|error| error.exit())).await,
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("loadgen: {message}");
             ExitCode::from(2)
         }
+    }
+}
+
+fn command() -> clap::Command {
+    Args::command()
+        .subcommand(sse::Args::command().name("debugger"))
+        .subcommand_negates_reqs(true)
+        .args_conflicts_with_subcommands(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_debugger_subcommand_preserves_the_ingestion_cli() {
+        let ingest = command()
+            .try_get_matches_from([
+                "loadgen",
+                "--url",
+                "http://localhost:8080",
+                "--key-file",
+                "ingest.key",
+                "--mode",
+                "track",
+                "--rate",
+                "1",
+                "--duration",
+                "1",
+            ])
+            .unwrap();
+        assert_eq!(Args::from_arg_matches(&ingest).unwrap().mode, Mode::Track);
+        let debugger = command()
+            .try_get_matches_from([
+                "loadgen",
+                "debugger",
+                "--url",
+                "http://localhost:8080",
+                "--key-file",
+                "read.key",
+                "--workspace",
+                "workspace",
+                "--clients",
+                "20",
+                "--duration",
+                "60",
+                "--out",
+                "receive.jsonl",
+            ])
+            .unwrap();
+        let (_, matches) = debugger.subcommand().unwrap();
+        assert_eq!(sse::Args::from_arg_matches(matches).unwrap().clients, 20);
+        assert!(
+            command()
+                .try_get_matches_from(["loadgen", "debugger"])
+                .is_err()
+        );
     }
 }
