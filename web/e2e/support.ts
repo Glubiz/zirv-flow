@@ -20,6 +20,24 @@ export async function signIn(page: Page): Promise<void> {
 
 /** Opens the templates page of the seeded workspace. */
 export async function openTemplates(page: Page): Promise<void> {
-  await page.getByRole("link", { name: "Templates" }).first().click();
+  await openPage(page, "Templates");
   await expect(page.getByRole("heading", { name: "Template library", level: 1 })).toBeVisible();
+}
+
+/** Opens a destination through the sidebar, including its folded and mobile forms. */
+export async function openPage(page: Page, name: string, area: "Main" | "Settings" = "Main"): Promise<void> {
+  const mobileMenu = page.getByRole("button", { name: "Open menu", exact: true });
+  if (await mobileMenu.isVisible()) await mobileMenu.click();
+  const unfold = page.getByRole("button", { name: "Unfold the menu", exact: true });
+  if (await unfold.isVisible()) await unfold.click();
+  const nav = page.getByRole("navigation", { name: area, exact: true });
+  if (!(await nav.isVisible())) {
+    if (area === "Settings") {
+      await page.getByRole("navigation", { name: "Main", exact: true }).getByRole("link", { name: "Settings", exact: true }).click();
+    } else {
+      await page.getByRole("navigation", { name: "Settings", exact: true }).getByRole("link", { name: /^Back to / }).click();
+    }
+    if (await mobileMenu.isVisible()) await mobileMenu.click();
+  }
+  await nav.getByRole("link", { name, exact: true }).click();
 }

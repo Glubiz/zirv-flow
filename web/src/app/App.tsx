@@ -8,6 +8,7 @@ import { ContactDefinitionPage, ContactPage, ContactsPage } from "../features/co
 import { DestinationPage, DestinationsPage, ForwardingPage, NewDestinationPage } from "../features/destinations";
 import { DebuggerPage, EventSchemaPage, EventSettingsPage, EventsPage, ExplorerPage, RejectsPage } from "../features/events";
 import { HealthPage } from "../features/health";
+import { HomePage } from "../features/home";
 import { ImportPage, ImportsPage, NewImportPage } from "../features/imports";
 import { JobsPage } from "../features/jobs";
 import { ListDetailPage, ListsPage } from "../features/lists";
@@ -27,10 +28,11 @@ import { HistoryPage, PublishPage, TemplatePage, TemplatesPage, TestSendPage } f
 import { TracesPage } from "../features/traces";
 import { SessionProvider, SignInPage, useSession } from "../features/session";
 import { SetupPage, useSetupStatus } from "../features/setup";
-import { WorkspacesPage, WorkspacesProvider } from "../features/workspaces";
+import { useCurrentWorkspace, useWorkspaces, WorkspacesPage, WorkspacesProvider } from "../features/workspaces";
 import { EmptyState, ErrorState, LoadingState, SkipLink } from "../ui";
 import { describeError } from "../api";
 import { Shell } from "./Shell";
+import { SettingsPage } from "./SettingsPage";
 
 function Centered({ children }: { children: React.ReactNode }) {
   return (
@@ -98,7 +100,7 @@ function SignInRoute() {
     );
   }
   if (state.status === "signed-in") {
-    const from = (location.state as { from?: string } | null)?.from ?? "/w";
+    const from = (location.state as { from?: string } | null)?.from ?? "/";
     return <Navigate to={from} replace />;
   }
   return <SignInPage />;
@@ -108,10 +110,18 @@ function NotFound() {
   return (
     <div className="page">
       <div className="panel panel-flush">
-        <EmptyState title="This page does not exist">Use the menu above to go back to your workspaces.</EmptyState>
+        <EmptyState title="This page does not exist">Use the navigation menu or search to return to your workspace.</EmptyState>
       </div>
     </div>
   );
+}
+
+function WorkspaceLanding() {
+  const current = useCurrentWorkspace();
+  const workspaces = useWorkspaces();
+  if (workspaces.status === "loading") return <LoadingState label="Loading workspaces" />;
+  if (workspaces.status === "error") return <ErrorState {...describeError(workspaces.error)} onRetry={workspaces.reload} />;
+  return <Navigate to={current ? `/w/${current.id}` : "/w"} replace />;
 }
 
 export function AppRoutes() {
@@ -122,9 +132,10 @@ export function AppRoutes() {
         <Route path="/setup" element={<SetupPage />} />
         <Route path="/sign-in" element={<SignInRoute />} />
         <Route element={<Protected />}>
-          <Route index element={<Navigate to="/w" replace />} />
+          <Route index element={<WorkspaceLanding />} />
           <Route path="w" element={<WorkspacesPage />} />
-          <Route path="w/:ws" element={<Navigate to="members" replace />} />
+          <Route path="w/:ws" element={<HomePage />} />
+          <Route path="w/:ws/settings" element={<SettingsPage />} />
           <Route path="w/:ws/members" element={<MembersPage />} />
           <Route path="w/:ws/traits" element={<TraitsPage />} />
           <Route path="w/:ws/lists" element={<ListsPage />} />

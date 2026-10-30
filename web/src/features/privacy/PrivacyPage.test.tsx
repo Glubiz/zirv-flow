@@ -4,7 +4,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { json, MEMBER, mockApi, OWNER, problem, session } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
-import { PrivacyNav } from "./PrivacyNav";
 import { PrivacyPage } from "./PrivacyPage";
 
 const BASE = "/api/v1/workspaces/ws1/privacy";
@@ -249,21 +248,6 @@ describe("privacy", () => {
     expect(await screen.findByText("Only workspace admins can use this page")).toBeInTheDocument();
     expect(screen.queryByRole("form")).not.toBeInTheDocument();
     expect(calls.some((call) => call.path.includes("/privacy/"))).toBe(false);
-  });
-
-  it("shows the menu entry to admins and not to members", async () => {
-    mockApi(adminRoutes());
-    const first = renderRoute("/w/ws1/privacy", ROUTE, <PrivacyNav workspaceId="ws1" />);
-    expect(await screen.findByRole("link", { name: "Privacy" })).toHaveAttribute("href", "/w/ws1/privacy");
-    first.unmount();
-
-    mockApi({
-      "GET /api/v1/session": () => json(session(MEMBER)),
-      "GET /api/v1/workspaces/ws1/members": () => json(members("editor", MEMBER.id)),
-    });
-    renderRoute("/w/ws1/privacy", ROUTE, <PrivacyNav workspaceId="ws1" />);
-    await waitFor(() => expect(screen.queryByText("Waiting for the session")).not.toBeInTheDocument());
-    expect(screen.queryByRole("link", { name: "Privacy" })).not.toBeInTheDocument();
   });
 
   describe("polling", () => {

@@ -23,6 +23,9 @@ publisher can publish. Real-person previews and tests also require `view_pii`
 
 ## Themes, snippets, assets and conditions
 
+Open **Content library** under **Messaging** for Themes, Snippets and Images.
+The library tabs also link to Templates.
+
 A block document has sections with one to three columns. Add blocks from the
 palette, reorder them by drag or keyboard, and edit their settings. The draft
 saves automatically; wait for **Draft saved** before leaving. If another edit
@@ -140,7 +143,7 @@ http(s) URL without credentials, a query or a fragment. A mistake fails startup 
 blocked until its address is in `egress.allow`** (see [Egress](sources.md#egress)); the model client never follows
 redirects and ignores proxy environment variables.
 
-**Per workspace.** Open **AI** in the web UI (workspace admins and the owner). An admin chooses
+**Per workspace.** Open **Settings → AI assistant** in the web UI (workspace admins and the owner). An admin chooses
 the provider and model, stores the provider key, sets a monthly budget and turns the assistant
 on. The key is stored encrypted like any other secret (see [Secrets](../operations/secrets.md)) and is never shown again;
 this needs the master key. Turning the assistant on, or changing its provider, model or key while

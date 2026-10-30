@@ -6,7 +6,9 @@ for a first newsletter; use this page to choose settings and operate a flow.
 
 ## Drafts and access
 
-Open **Flows** at `/w/:ws/flows`. **New flow** asks for a name and **Starts when**.
+Open **Flows** under **Messaging** (**Messaging › Flows**), at `/w/:ws/flows`. **New flow** asks for a name and **Starts when**.
+The sidebar folds to an icon rail in the flow editor. Use **Unfold the menu**,
+a group icon, or Cmd/Ctrl+K to navigate to another page.
 The flow opens at `/w/:ws/flows/:id` in **Build**. Switch to **Test** or **Results**
 in the header; the address keeps the view as `?view=test` or `?view=results`.
 **Versions** in the header opens the published versions, each read-only.
@@ -394,7 +396,7 @@ readable. An archived flow cannot be published or resumed.
 Before delivery, the send pipeline checks the sender, recipient address,
 consent, suppressions, frequency caps, quiet hours, rendering and destination
 rate. These decisions appear as `send.gate`. A successful flow test does not
-check them. Admins open **Sending**, headed **Sending limits**, at
+check them. Admins open **Settings → Sending limits** at
 `/w/:ws/settings/sending`.
 
 - **Consent and suppression.** A marketing message uses its channel, topic and

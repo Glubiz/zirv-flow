@@ -7,17 +7,18 @@ publishers put templates and flows into use.
 
 ## Worked example: send a newsletter from your domain
 
-1. In **Sending domains**, add a domain you control. Publish the displayed DKIM,
+1. In **Settings → Sending domains**, add a domain you control. Publish the displayed DKIM,
    SPF and DMARC records in DNS, merging SPF with the existing record. Request a
    verification and wait until the domain is verified.
 2. Add a sender identity on that domain using **From name**, **From address** and,
    if needed, **Reply-to (optional)**.
-3. In **Credentials**, create an SMTP credential for your relay. In
+3. In **Settings → Credentials**, create an SMTP credential for your relay. In
    **Destinations**, create an SMTP destination using that credential and test it.
    If the relay is private, ask the operator to allow its address in the
    [egress policy](sources.md#egress).
-4. In **Sending**, set appropriate frequency caps and quiet hours. Prepare an
-   email in **Templates**, choose the verified sender and send a test to a team
+4. In **Settings → Sending limits**, set appropriate frequency caps and quiet hours.
+   Choose **Back to <workspace name>**, then prepare an
+   email in **Messaging → Templates**, choose the verified sender and send a test to a team
    member or approved test inbox. Review and publish the template.
 5. Build a flow for the newsletter audience with a send step using this template,
    destination and the intended consent topic. Test the flow, then review and

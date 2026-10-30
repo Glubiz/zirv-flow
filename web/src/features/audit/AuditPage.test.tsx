@@ -5,7 +5,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { json, MEMBER, mockApi, OWNER, problem, session, WORKSPACE, type Handler } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
 import { WorkspacesProvider } from "../workspaces";
-import { AuditNav } from "./AuditNav";
 import { AuditPage } from "./AuditPage";
 
 const TRACE = "0123456789abcdef0123456789abcdef";
@@ -446,30 +445,12 @@ describe("audit log", () => {
     expect(screen.queryByRole("switch", { name: "Instance" })).not.toBeInTheDocument();
   });
 
-  it.each(["editor", "viewer"])("sends %s away from the page and hides the menu entry", async (role) => {
+  it.each(["editor", "viewer"])("sends %s away from the page without fetching the audit log", async (role) => {
     const calls = mockApi(routes({}, MEMBER, role));
     const { router } = page();
 
     await waitFor(() => expect(router.state.location.pathname).toBe("/w/ws1/members"));
     expect(calls.some((call) => call.path.endsWith("/audit"))).toBe(false);
 
-    const nav = renderRoute(
-      "/w/ws1/members",
-      "/w/:ws/members",
-      <WorkspacesProvider>
-        <AuditNav workspaceId="ws1" />
-        <p>nav rendered</p>
-      </WorkspacesProvider>,
-    );
-    expect(await screen.findAllByText("nav rendered")).not.toHaveLength(0);
-    expect(screen.queryByRole("link", { name: "Audit log" })).not.toBeInTheDocument();
-    nav.unmount();
-  });
-
-  it("shows the menu entry to an admin", async () => {
-    mockApi(routes({}, MEMBER, "admin"));
-    renderRoute("/w/ws1/members", "/w/:ws/members", <AuditNav workspaceId="ws1" />);
-
-    expect(await screen.findByRole("link", { name: "Audit log" })).toHaveAttribute("href", "/w/ws1/settings/audit");
   });
 });

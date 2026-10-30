@@ -49,7 +49,7 @@ test("an admin changes a member's role, then finds membership.set in the audit l
   await role.selectOption("publisher");
   await expect(role).toHaveValue("publisher");
 
-  await admin.getByRole("link", { name: "Audit log" }).click();
+  await admin.getByRole("navigation", { name: "Settings", exact: true }).getByRole("link", { name: "Audit log" }).click();
   await expect(admin.getByRole("heading", { name: "Audit log", level: 1 })).toBeVisible();
   await admin.getByLabel("Action", { exact: true }).selectOption("membership.set");
   await admin.getByRole("button", { name: "Apply" }).click();

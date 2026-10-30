@@ -78,10 +78,11 @@ describe("navigation", () => {
     mockApi({
       "GET /api/v1/session": () => json(session(MEMBER)),
       "GET /api/v1/workspaces": () => json([WORKSPACE]),
+      "GET /api/v1/workspaces/ws1/members": () => json([{ user_id: MEMBER.id, role: "viewer" }]),
     });
-    renderApp("/w");
+    renderApp("/w/ws1/settings");
 
-    const nav = await screen.findByRole("navigation", { name: "Main" });
+    const nav = await screen.findByRole("navigation", { name: "Settings" });
     await waitFor(() => {
       expect(nav).toHaveTextContent("Health");
     });
@@ -106,18 +107,17 @@ describe("people routes", () => {
     const nav = screen.getByRole("navigation", { name: "Main" });
     // The workspace links appear once the workspace has loaded, which may be after the page.
     expect(await within(nav).findByRole("link", { name: "People" })).toHaveAttribute("aria-current", "page");
-    expect(within(nav).getByRole("link", { name: "Conflicts" })).not.toHaveAttribute("aria-current");
+    expect(within(nav).queryByRole("link", { name: "Conflicts" })).not.toBeInTheDocument();
   });
 
-  it("keeps Conflicts current, and People not, on the conflicts page", async () => {
+  it("keeps People current on the conflicts page", async () => {
     mockApi(routes);
     renderApp("/w/ws1/people/conflicts");
 
     const nav = await screen.findByRole("navigation", { name: "Main" });
     await waitFor(() => {
-      expect(within(nav).getByRole("link", { name: "Conflicts" })).toHaveAttribute("aria-current", "page");
+      expect(within(nav).getByRole("link", { name: "People" })).toHaveAttribute("aria-current", "page");
     });
-    expect(within(nav).getByRole("link", { name: "People" })).not.toHaveAttribute("aria-current");
   });
 
   it("reaches a profile at a person's address", async () => {
@@ -133,7 +133,7 @@ describe("people routes", () => {
 });
 
 describe("event routes", () => {
-  it("serves the schema list, the rejects and the settings, with Events current in the menu", async () => {
+  it("keeps Events current on rejects and switches to the settings menu for Event settings", async () => {
     mockApi({
       "GET /api/v1/session": () => json(session(OWNER)),
       "GET /api/v1/workspaces": () => json([WORKSPACE]),
@@ -159,9 +159,11 @@ describe("event routes", () => {
     await user.click(screen.getByRole("link", { name: "Rejects" }));
     expect(await screen.findByRole("heading", { name: "Rejects" })).toBeInTheDocument();
     expect(await screen.findByText("No rejects")).toBeInTheDocument();
-    await user.click(screen.getByRole("link", { name: "Settings" }));
+    await user.click(within(screen.getByRole("navigation", { name: "Events" })).getByRole("link", { name: "Settings" }));
     expect(await screen.findByRole("heading", { name: "Event settings" })).toBeInTheDocument();
-    expect(within(main).getByRole("link", { name: "Events" })).toHaveAttribute("aria-current", "page");
+    const settings = screen.getByRole("navigation", { name: "Settings" });
+    expect(within(settings).getByRole("link", { name: "Event settings" })).toHaveAttribute("aria-current", "page");
+    expect(within(settings).getByRole("link", { name: "Back to Spring campaigns" })).toHaveAttribute("href", "/w/ws1");
   });
 });
 
@@ -197,7 +199,7 @@ describe("event schema routes", () => {
 
 describe("navigation without a workspace", () => {
   it("marks exactly one item as current and renders the workspace items as plain text", async () => {
-    mockApi({
+    const calls = mockApi({
       "GET /api/v1/session": () => json(session(MEMBER)),
       "GET /api/v1/workspaces": () => json([]),
     });
@@ -205,14 +207,121 @@ describe("navigation without a workspace", () => {
 
     const nav = await screen.findByRole("navigation", { name: "Main" });
     await waitFor(() => {
-      expect(nav.querySelectorAll("[aria-disabled='true']")).toHaveLength(18);
+      expect(nav.querySelectorAll("[aria-disabled='true']")).toHaveLength(15);
     });
     expect(nav.querySelectorAll("[aria-current='page']")).toHaveLength(1);
     expect(within(nav).getByRole("link", { name: "Workspaces" })).toHaveAttribute("aria-current", "page");
-    for (const name of ["Members", "Fields", "Lists", "Segments", "Flows", "Templates", "Contacts", "People", "Conflicts", "Sources", "Imports", "Events", "Topics", "Suppressions", "AI", "Credentials", "API keys", "Traces"]) {
+    for (const name of ["Home", "Lists", "Segments", "Flows", "Templates", "Content library", "Contacts", "People", "Sources", "Imports", "Events", "Consent", "Explorer", "Traces", "Settings"]) {
       expect(within(nav).queryByRole("link", { name: new RegExp(name) })).not.toBeInTheDocument();
     }
     expect(nav).toHaveTextContent("pick a workspace first");
+    await screen.findByText("No workspaces yet");
+    expect(calls.some((call) => call.path.endsWith("/members"))).toBe(false);
+  });
+
+  it("keeps instance-scoped pages reachable, Jobs for owners only", async () => {
+    mockApi({
+      "GET /api/v1/session": () => json(session(MEMBER)),
+      "GET /api/v1/workspaces": () => json([]),
+    });
+    const member = renderApp("/w");
+    const memberNav = await screen.findByRole("navigation", { name: "Main" });
+    expect(await within(memberNav).findByRole("link", { name: "Health" })).toHaveAttribute("href", "/health");
+    expect(within(memberNav).queryByRole("link", { name: "Jobs" })).not.toBeInTheDocument();
+    member.unmount();
+
+    mockApi({
+      "GET /api/v1/session": () => json(session(OWNER)),
+      "GET /api/v1/workspaces": () => json([]),
+    });
+    renderApp("/w");
+    const ownerNav = await screen.findByRole("navigation", { name: "Main" });
+    expect(await within(ownerNav).findByRole("link", { name: "Jobs" })).toHaveAttribute("href", "/jobs");
+    expect(within(ownerNav).getByRole("link", { name: "Health" })).toHaveAttribute("href", "/health");
+  });
+});
+
+describe("settings shell and Home", () => {
+  const routes = {
+    "GET /api/v1/session": () => json(session(OWNER)),
+    "GET /api/v1/workspaces": () => json([WORKSPACE]),
+    "GET /api/v1/workspaces/ws1/members": () => json([]),
+    "GET /api/v1/workspaces/ws1/sending-domains": () => json([]),
+    "GET /api/v1/workspaces/ws1/destinations": () => json([]),
+    "GET /api/v1/workspaces/ws1/sources": () => json([]),
+    "GET /api/v1/workspaces/ws1/flows": () => json([]),
+    "GET /api/v1/workspaces/ws1/templates": () => json([]),
+    "GET /api/v1/workspaces/ws1/segments": () => json([]),
+  };
+
+  it("opens Home after signing in, then Settings and Back return to that workspace", async () => {
+    mockApi({
+      ...routes,
+      "GET /api/v1/session": () => problem(401, "Unauthorized", "Sign in"),
+      "GET /api/v1/version": () => json({ version: "0.10.0" }),
+      "GET /api/v1/session/methods": () => json({ local: true, oidc: false }),
+      "POST /api/v1/session": () => json(session(OWNER)),
+    });
+    const user = userEvent.setup();
+    renderApp("/sign-in");
+    await user.type(await screen.findByLabelText("Email"), OWNER.email);
+    await user.type(screen.getByLabelText("Password"), "correct horse battery");
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    expect(await screen.findByRole("heading", { name: "Home", level: 1 })).toBeInTheDocument();
+    await user.click(within(screen.getByRole("navigation", { name: "Main" })).getByRole("link", { name: "Settings" }));
+    expect(await screen.findByRole("heading", { name: "Settings", level: 1 })).toBeInTheDocument();
+    const nav = screen.getByRole("navigation", { name: "Settings" });
+    await user.click(within(nav).getByRole("link", { name: "Members and roles" }));
+    expect(await screen.findByRole("heading", { name: "Members", level: 1 })).toBeInTheDocument();
+    expect(within(nav).getByRole("link", { name: "Members and roles" })).toHaveAttribute("aria-current", "page");
+    await user.click(within(nav).getByRole("link", { name: "Back to Spring campaigns" }));
+    expect(await screen.findByRole("heading", { name: "Home", level: 1 })).toBeInTheDocument();
+  });
+
+  it.each(["viewer", "editor", "publisher", "admin"])("filters the settings menu and palette for %s", async (role) => {
+    mockApi({
+      ...routes,
+      "GET /api/v1/session": () => json(session(MEMBER)),
+      "GET /api/v1/workspaces/ws1/members": () => json([{ user_id: MEMBER.id, role }]),
+    });
+    const user = userEvent.setup();
+    renderApp("/w/ws1/settings");
+    const nav = await screen.findByRole("navigation", { name: "Settings" });
+    await user.click(within(nav).getByRole("button", { name: "Search pages" }));
+    for (const name of ["Sending domains", "Destinations", "Forwarding", "Privacy and erasure", "Audit log", "API keys", "Credentials", "AI assistant"]) {
+      if (role === "admin") {
+        expect(await within(nav).findByRole("link", { name })).toBeInTheDocument();
+        expect(await screen.findByRole("option", { name: new RegExp(`^${name} `) })).toBeInTheDocument();
+      } else {
+        expect(within(nav).queryByRole("link", { name })).not.toBeInTheDocument();
+        expect(screen.queryByRole("option", { name: new RegExp(`^${name} `) })).not.toBeInTheDocument();
+      }
+    }
+    expect(within(nav).queryByRole("link", { name: "Jobs" })).not.toBeInTheDocument();
+  });
+
+  it("shows only endpoint-backed Settings warnings", async () => {
+    mockApi({ ...routes, "GET /api/v1/workspaces/ws1/sending-domains": () => json([{ status: "verified" }, { status: "unverified" }]) });
+    renderApp("/w/ws1/settings");
+    expect(await screen.findByText("1 not verified")).toBeInTheDocument();
+  });
+
+  it("opens the palette with Ctrl+K and Cmd+K and restores focus on Escape", async () => {
+    mockApi(routes);
+    const user = userEvent.setup();
+    renderApp("/w/ws1");
+    await screen.findByText("No running flows");
+    const nav = await screen.findByRole("navigation", { name: "Main" });
+    const search = within(nav).getByRole("button", { name: "Search pages" });
+    search.focus();
+    await user.keyboard("{Control>}k{/Control}");
+    expect(screen.getByRole("dialog", { name: "Go to a page" })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    expect(search).toHaveFocus();
+    await user.keyboard("{Meta>}k{/Meta}");
+    expect(screen.getByRole("dialog", { name: "Go to a page" })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 });
 

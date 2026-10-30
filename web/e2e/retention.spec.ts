@@ -1,10 +1,10 @@
 import { expect, test } from "@playwright/test";
 
-import { signIn } from "./support";
+import { openPage, signIn } from "./support";
 
 test("an admin shortens the messages window and sees it after a reload", async ({ page }) => {
   await signIn(page);
-  await page.getByRole("link", { name: "Privacy" }).first().click();
+  await openPage(page, "Privacy and erasure", "Settings");
 
   const table = page.getByRole("table", { name: "Retention windows" });
   await expect(table).toBeVisible();

@@ -37,11 +37,24 @@ describe("workspaces", () => {
 
     expect(await screen.findByText("Spring campaigns", { selector: "td" })).toBeInTheDocument();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Open Spring campaigns" })).toHaveAttribute("href", "/w/ws1");
     const post = calls.find((call) => call.method === "POST");
     expect(post?.body).toEqual({ name: "Spring campaigns", slug: null });
     expect(post?.headers.get("x-csrf-token")).toBe("csrf-ws");
 
     await user.click(screen.getByRole("button", { name: "Switch workspace" }));
     expect(screen.getByRole("menuitemradio", { name: "Spring campaigns" })).toBeInTheDocument();
+  });
+
+  it("switches from the workspace list to Home", async () => {
+    mockApi({
+      "GET /api/v1/session": () => json(session(OWNER)),
+      "GET /api/v1/workspaces": () => json([WORKSPACE]),
+    });
+    const user = userEvent.setup();
+    const { router } = renderRoute("/w", "/w/*", <WorkspacesProvider><WorkspaceSwitcher /></WorkspacesProvider>);
+    await user.click(await screen.findByRole("button", { name: "Switch workspace" }));
+    await user.click(screen.getByRole("menuitemradio", { name: "Spring campaigns" }));
+    expect(router.state.location.pathname).toBe("/w/ws1");
   });
 });

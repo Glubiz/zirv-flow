@@ -42,10 +42,16 @@ tracking links. The default Compose file has no public URL or TLS proxy.
 
 ## 2. Create a workspace
 
-Open **Workspaces**, choose **New workspace**, enter a **Name**, and choose
+Open **All workspaces** in the workspace switcher, choose **New workspace**, enter a **Name**, and choose
 **Create workspace**. **Slug** is optional. Select the workspace in the workspace
 switcher. Workspace pages have addresses starting with `/w/:ws`; `:ws` is the
 workspace id, not its slug.
+
+Selecting a workspace opens **Home**. Its setup checklist is visible to admins
+until every step is complete. The sidebar groups daily work under **Audience**,
+**Data**, **Messaging** and **Insights**. Setup pages are under **Settings**;
+choose **Back to <workspace name>** there to return to Home. **Search** or
+Cmd/Ctrl+K jumps to a page. On a narrow screen, open the menu button first.
 
 The instance owner can do every step below. For a team:
 
@@ -72,14 +78,14 @@ In **Events**, choose **Add schema**, name the event `order_placed`, and choose
 **Add schema** in the dialog. Open its draft and choose **Publish**, then
 **Publish version**. Leave the property list empty for the event below.
 
-In **API keys**, choose **Create key**, enter a **Name** such as *Guide ingestion*,
+In **Settings → API keys**, choose **Create key**, enter a **Name** such as *Guide ingestion*,
 and select only the **Ingest** scope in the **New API key** dialog (clear the
 default **Read** selection). Choose **Create key** there and copy the
 key when it appears; it is shown only once. In a terminal, set `INGEST_KEY` to
 that key and `FLOW_URL` to your instance's public address. These are shell
 variables for this example, not server configuration keys.
 
-Open **Events → Debugger** (`/w/:ws/events/debugger`) before sending. In a clean
+Return using **Back to <workspace name>**, then open **Events → Debugger** (`/w/:ws/events/debugger`) before sending. In a clean
 workspace, this event creates the person identified by the synthetic address:
 
 ```sh
@@ -131,13 +137,13 @@ must support STARTTLS or implicit TLS and accept the configured username and
 password. The quickstart has no SMTP capture service; the browser harness's
 sink is a test fixture only.
 
-1. Open **Sending domains** (`/w/:ws/sending-domains`), choose **Add a domain**,
+1. Open **Settings → Sending domains** (`/w/:ws/sending-domains`), choose **Add a domain**,
    enter your domain, and choose **Add the domain**. Publish the displayed SPF,
    DKIM and DMARC records in DNS. Choose **Check DNS now** and wait for verification.
 2. On the domain page, choose **Add sender identity**. Enter **From name** and a
    **From address** on that domain. **Reply-to (optional)** can be left empty.
    Choose **Add the identity** and check that it says **Can send**.
-3. Open **Destinations**, choose **New destination**, and select **SMTP** as the
+3. In the Settings menu, open **Destinations**, choose **New destination**, and select **SMTP** as the
    **Type**. Name it *Newsletter capture*. Choose an existing credential, or choose
    **New credential** and enter **Host**, **Port**, **Username** and **Password**
    from the capture server. In **TLS mode**, type `tls` for implicit TLS or
@@ -146,7 +152,7 @@ sink is a test fixture only.
    **CA certificate (optional)** on the destination form. Choose
    **Create destination**. Use the server address reachable from
    the container; its localhost is the container itself.
-4. Open **Sending** (`/w/:ws/settings/sending`), headed **Sending limits**. Under
+4. In the Settings menu, open **Sending limits** (`/w/:ws/settings/sending`). Under
    **Test inboxes**, enter the synthetic recipient's **Address** and choose
    **Add address**. This allowlist is used by template test sends. It does not
    restrict a published flow's audience.
@@ -169,7 +175,8 @@ normal application.
 
 ## 6. Write and test the newsletter
 
-Open **Templates**, choose **New template**, name it *Spring newsletter*, select
+Choose **Back to <workspace name>**, then open **Templates** under **Messaging**.
+Choose **New template**, name it *Spring newsletter*, select
 **Blocks**, and choose **Create template**. Build a short version of the browser
 test's newsletter:
 

@@ -4,6 +4,8 @@ import { resolve } from "node:path";
 
 import { expect, test, type Page } from "@playwright/test";
 
+import { openPage } from "../support";
+
 const RECIPIENT = "reader@example.com";
 const NEWSLETTER = "Spring newsletter";
 const ADDRESS = "Spring Street 1, 1000 Copenhagen";
@@ -27,7 +29,8 @@ function captured(): Message[] {
 }
 
 async function nav(page: Page, name: string): Promise<void> {
-  await page.getByRole("navigation", { name: "Main", exact: true }).getByRole("link", { name, exact: true }).click();
+  const settings = ["API keys", "Sending domains", "Destinations", "Sending limits"].includes(name);
+  await openPage(page, name, settings ? "Settings" : "Main");
 }
 
 async function receipt(page: Page, index: number, subject: string): Promise<Message> {
@@ -76,6 +79,7 @@ test("getting started on a clean Compose stack", async ({ page, request }) => {
     await expect(page.getByRole("link", { name: "Open Newsletter guide" })).toBeVisible();
     await page.getByRole("button", { name: "Switch workspace" }).click();
     await page.getByRole("menuitemradio", { name: "Newsletter guide" }).click();
+    await expect(page.getByRole("heading", { name: "Home", exact: true })).toBeVisible();
   });
 
   await test.step("3. Publish the schema, create an ingest key and watch the event arrive", async () => {
@@ -181,7 +185,7 @@ test("getting started on a clean Compose stack", async ({ page, request }) => {
     await expect(credential).toBeHidden();
     await page.getByRole("button", { name: "Create destination" }).click();
     await expect(page.getByRole("heading", { name: "Newsletter capture", exact: true })).toBeVisible();
-    await nav(page, "Sending");
+    await nav(page, "Sending limits");
     await page.getByLabel("Address", { exact: true }).fill(RECIPIENT);
     await page.getByRole("button", { name: "Add address" }).click();
     await expect(page.getByRole("list", { name: "Test inboxes", exact: true })).toContainText("r***@example.com");
