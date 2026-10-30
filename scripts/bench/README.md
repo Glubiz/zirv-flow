@@ -552,7 +552,7 @@ raw runs remain in the state directory. No measured data files are fabricated by
 Run `bash scripts/bench/m8/check-report.sh` to validate `docs/benchmarks/m8-validation.md`
 (`--self-test` tests temporary fixtures; `--data-only` checks just JSON). Its Markdown table needs
 `Dimension`, `Data file` and `Verdict` columns: exact section 19 dimension names, existing M8 JSON
-citations (links relative to the report or literal paths starting at `docs/`), and exactly `met`,
+citations (links relative to the report or literal paths starting at `docs/`; never smoke or `.failed.json` files, and the run needs `smoke` false and `exit_code` 0), and exactly `met`,
 `missed and fixed`, or `revised by decision`. The report must contain the one-line label
 "reference-resource emulation, not a reference-hardware run". Every JSON under
 `docs/benchmarks/data/m8/`, including smoke and failed runs, must parse and carry a nonempty

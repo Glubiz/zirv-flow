@@ -95,6 +95,11 @@ def check_citations(cell, where):
             raise ValueError(f'{where}: citation must be a JSON file under docs/benchmarks/data/m8/: {target}')
         if not resolved.is_file():
             raise ValueError(f'{where}: missing data file: {target}')
+        if 'smoke' in resolved.relative_to(data_dir).parts[:-1] or resolved.name.endswith('.failed.json'):
+            raise ValueError(f'{where}: citation must not be a smoke or failed run: {target}')
+        value = json.loads(resolved.read_text(encoding='utf-8'))
+        if value.get('smoke') is not False or value.get('exit_code') != 0:
+            raise ValueError(f'{where}: cited run needs smoke false and exit_code 0: {target}')
 
 
 def reject_constant(value):
@@ -188,18 +193,19 @@ reference-resource emulation, not a reference-hardware run
 | Dimension | Target | Measured | Scale | Data file | Verdict |
 | --- | --- | --- | --- | --- | --- |
 | Fixture people | 10 | 11 | 10 | [people](data/m8/people.json) | met |
-| Fixture ingest | 20 | 21 | 20 | `docs/benchmarks/data/m8/ingest.failed.json` | missed and fixed |
-| Fixture render | 30 | 31 | 30 | [render](data/m8/smoke/render.json) | revised by decision |
+| Fixture ingest | 20 | 21 | 20 | `docs/benchmarks/data/m8/ingest.json` | missed and fixed |
+| Fixture render | 30 | 31 | 30 | [render](data/m8/render.json) | revised by decision |
 '''
 arch_path = pathlib.Path('docs/architecture.md')
 report_path = pathlib.Path('docs/benchmarks/m8-validation.md')
 data_path = pathlib.Path('docs/benchmarks/data/m8')
 (base / arch_path).write_text(architecture)
 (base / report_path).write_text(report)
-for name in ('people.json', 'ingest.failed.json', 'smoke/render.json', 'smoke/render.failed.json'):
+for name in ('people.json', 'ingest.json', 'render.json', 'ingest.failed.json', 'smoke/render.json', 'smoke/render.failed.json'):
     path = data / name
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(dict(image_version='0.190.0', topology=dict(containers=[]))))
+    path.write_text(json.dumps(dict(image_version='0.190.0', topology=dict(containers=[]),
+                                    smoke=False, exit_code=0)))
 
 def fixture(name):
     return pathlib.Path(shutil.copytree(base, work / name))
@@ -217,6 +223,8 @@ edit_report('bare-miss', report.replace('| met |', '| missed |'))
 edit_report('missing-data', report.replace('data/m8/people.json', 'data/m8/absent.json'))
 edit_report('outside-data', report.replace('data/m8/people.json', 'data/m8/../outside.json'))
 (work / 'outside-data/docs/benchmarks/data/outside.json').write_text('{}')
+edit_report('smoke-citation', report.replace('data/m8/people.json', 'data/m8/smoke/render.json'))
+edit_report('failed-citation', report.replace('data/m8/people.json', 'data/m8/ingest.failed.json'))
 edit_report('missing-label', report.replace('reference-resource emulation, not a reference-hardware run', ''))
 edit_report('duplicate-dimension', report + next(line for line in report.splitlines()
                                                if line.startswith('| Fixture people')) + '\n')
@@ -253,6 +261,8 @@ PY
   expect bare-miss 1 'invalid verdict'
   expect missing-data 1 'missing data file'
   expect outside-data 1 'must be a JSON file under docs/benchmarks/data/m8/'
+  expect smoke-citation 1 'must not be a smoke or failed run'
+  expect failed-citation 1 'must not be a smoke or failed run'
   expect missing-image_version 1 'image_version must be a nonempty string'
   expect missing-topology 1 'topology must be an object'
   expect malformed-json 1 'invalid JSON'
