@@ -109,6 +109,9 @@ LANGUAGE sql VOLATILE AS $$
     ) e
 $$;
 
+-- M8 reuses the generators inside its checkpointed transactions.
+\if :{?seed_functions_only}
+\else
 SELECT :'ws'::uuid AS ws, :'seed_at'::timestamptz AS seed_ts, :people::bigint AS n_people,
        :events::bigint AS n_events, :days::int AS n_days, :chunk::bigint AS chunk,
        least(:lg_pool::bigint, :people::bigint) AS pool
@@ -130,3 +133,4 @@ SELECT format('SELECT pg_temp.seed_events(%L, %s, %s, %s, %s, %L)', :'ws', lo,
               least(lo + :chunk - 1, :n_events), :n_people, :n_days, :'seed_ts')
 FROM generate_series(1, :n_events, :chunk) AS lo
 \gexec
+\endif
