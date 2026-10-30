@@ -47,6 +47,21 @@ export BENCH_APP_CPUSET BENCH_IMAGE_TAG
 export BENCH_MEM_WORKER="${mem[0]}m" BENCH_MEM_SERVE="${mem[1]}m" BENCH_MEM_SCHEDULER="${mem[2]}m"
 export BENCH_PG_SHM="${BENCH_PG_SHM:-1gb}"
 
+# A decimal-comma locale would make awk print 0,121 into JSON.
+export LC_NUMERIC=C
+
+# BSD date (macOS) lacks %6N and -d; emulate the forms the bench scripts use. GNU date is untouched.
+if ! [[ "$(date +%6N)" =~ ^[0-9]+$ ]]; then
+  date() {
+    case "$*" in
+      '+%s%6N') python3 -I -c 'import time; print(time.time_ns() // 1000)' ;;
+      '+%s.%N') python3 -I -c 'import time; print(f"{time.time():.9f}")' ;;
+      '-u +%FT%T.%6NZ') python3 -I -c 'import datetime as d; print(d.datetime.now(d.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"))' ;;
+      "-u -d +3 days +%a") python3 -I -c 'import datetime as d; print((d.datetime.now(d.timezone.utc) + d.timedelta(days=3)).strftime("%a"))' ;;
+      *) command date "$@" ;;
+    esac
+  }
+fi
 log() { echo "[m4 $(date -u +%T)] $*" >&2; }
 die() { log "FAILED: $*"; exit 1; }
 
