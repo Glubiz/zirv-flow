@@ -356,11 +356,8 @@ mod tests {
                     assert_ne!(socket.read_line(&mut head).await.unwrap(), 0);
                 }
                 assert!(head.starts_with("POST /export HTTP/1.1"));
-                assert!(
-                    head.to_ascii_lowercase()
-                        .contains("authorization: bearer synthetic-key")
-                );
                 let lower = head.to_ascii_lowercase();
+                assert!(lower.contains("authorization: bearer synthetic-key"));
                 let length: usize = lower
                     .lines()
                     .find_map(|line| line.strip_prefix("content-length: "))
