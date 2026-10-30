@@ -2,6 +2,7 @@
 """Check documentation links, guide contracts and the lean README."""
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -16,6 +17,7 @@ GUIDES = (
     "docs/guide/sources.md", "docs/guide/segments.md",
     "docs/guide/templates.md", "docs/guide/channels.md",
 )
+SIZING_GUIDE = "docs/operations/sizing.md"
 README_LINE_BUDGET = 350
 MOVED_HEADINGS = (
     "Master key",
@@ -219,6 +221,25 @@ def check_metrics(text, metrics):
     )]
 
 
+def check_benchmark_paths(root, page, text):
+    literals = {match.rstrip(".") for match in re.findall(
+        r"\bdocs/benchmarks/data/[A-Za-z0-9_./-]+", text
+    )}
+    linked = set()
+    for _, target in links(text):
+        path = unquote(urlsplit(repository_target(target)).path)
+        if path and not urlsplit(target).scheme:
+            linked.add(os.path.normpath(root / path.lstrip("/") if path.startswith("/") else page.parent / path))
+    linked = {os.path.relpath(path, root) for path in linked}
+    errors = [f"missing benchmark data path {path}" for path in sorted(literals)
+              if not (root / path).exists()]
+    errors += [f"benchmark data must not cite smoke or failed runs: {path}"
+               for path in sorted(literals | linked)
+               if path.startswith("docs/benchmarks/data/")
+               and ("/smoke/" in path or path.endswith(".failed.json"))]
+    return errors
+
+
 def check_nodes(text, nodes):
     documented = re.findall(r"^## [^\n]+ \(`([a-z][a-z0-9_.]*)`\)$", text, re.M)
     errors = [f"node type missing from headings: {node}" for node in sorted(nodes - set(documented))]
@@ -253,13 +274,15 @@ def check(root):
     # Webhook completion events are emitted by the webhook worker.
     source = (root / "crates/zirv-flow-jobs/src/kinds/webhook_call.rs").read_text()
     actions |= set(re.findall(r'"(webhook\.(?:succeeded|failed))"', source))
-    for guide in GUIDES:
+    for guide in (*GUIDES, SIZING_GUIDE):
         page = root / guide
         if not page.is_file():
             errors.append(f"missing guide {guide}")
             continue
         errors += [f"{guide}: {error}" for error in check_accuracy(page.read_text(), paths, config, nodes, actions | symbols)]
         errors += [f"{guide}: {error}" for error in check_metrics(page.read_text(), metrics)]
+        if guide == SIZING_GUIDE:
+            errors += [f"{guide}: {error}" for error in check_benchmark_paths(root, page, page.read_text())]
         if guide.endswith("/flows.md"):
             errors += [f"{guide}: {error}" for error in check_nodes(page.read_text(), nodes)]
     return errors, len(pages), len(nodes)
@@ -277,6 +300,7 @@ class DocumentationTests(unittest.TestCase):
             "README.md": '# Guide checks\n<a id="sources"></a>\n',
             GUIDES[0]: "# Getting started\n`POST /api/v1/things/{id}`\n`server.public_url`\n",
             GUIDES[1]: "# Flows\n## Wait (`wait.duration`)\n## Exit (`exit`)\n",
+            SIZING_GUIDE: "# Sizing\n",
             "crates/zirv-flow-api/openapi.json": json.dumps({"paths": {
                 "/api/v1/things/{id}": {"post": {}}
             }}),
@@ -354,6 +378,44 @@ class DocumentationTests(unittest.TestCase):
         self.assertEqual(check_metrics("`zirv_flow_jobs{kind,state}`", {"zirv_flow_jobs"}), [])
         self.assertEqual(check_metrics("`zirv_flow_worker_busy`", {"zirv_flow_jobs"}), [
             "unknown metric zirv_flow_worker_busy"
+        ])
+
+    def test_sizing_config_keys_are_checked(self):
+        self.fixture_repo()
+        page = self.root / "docs/operations/sizing.md"
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text("`server.public_url`\n")
+        self.assertEqual(check(self.root)[0], [])
+        page.write_text("`server.public_urll`\n")
+        self.assertEqual(check(self.root)[0], [
+            "docs/operations/sizing.md: unknown config key or registered type/action server.public_urll"
+        ])
+
+    def test_sizing_literal_data_paths_must_exist(self):
+        self.fixture_repo()
+        page = self.root / "docs/operations/sizing.md"
+        page.parent.mkdir(parents=True, exist_ok=True)
+        data = self.root / "docs/benchmarks/data/run.json"
+        data.parent.mkdir(parents=True)
+        data.write_text("{}")
+        page.write_text("`docs/benchmarks/data/run.json`\n")
+        self.assertEqual(check(self.root)[0], [])
+        data.unlink()
+        self.assertEqual(check(self.root)[0], [
+            "docs/operations/sizing.md: missing benchmark data path docs/benchmarks/data/run.json"
+        ])
+
+    def test_sizing_cannot_cite_smoke_or_failed_data(self):
+        self.fixture_repo()
+        page = self.root / "docs/operations/sizing.md"
+        page.parent.mkdir(parents=True, exist_ok=True)
+        data = self.root / "docs/benchmarks/data/m8/smoke/x.json"
+        data.parent.mkdir(parents=True)
+        data.write_text("{}")
+        page.write_text("[run](../benchmarks/data/m8/smoke/x.json)\n")
+        self.assertEqual(check(self.root)[0], [
+            "docs/operations/sizing.md: benchmark data must not cite smoke or failed runs: "
+            "docs/benchmarks/data/m8/smoke/x.json"
         ])
 
     def test_new_guides_have_link_route_and_config_checks(self):
@@ -472,19 +534,19 @@ class DocumentationTests(unittest.TestCase):
 
     def test_unmapped_node_variant_is_not_silently_omitted(self):
         self.fixture_repo()
-        self.assertEqual(check(self.root), ([], 7, 2))
+        self.assertEqual(check(self.root), ([], 8, 2))
         source = self.root / "crates/zirv-flow-core/src/flow/graph.rs"
         source.write_text(source.read_text().replace('    Exit {},', '    Exit {},\n    NewNode {},'))
         self.assertEqual(check(self.root), ([
             "cannot map every NodeKind variant to its serialized name"
-        ], 7, 2))
+        ], 8, 2))
 
     def test_cli_summary_and_invalid_argument(self):
         self.fixture_repo()
         command = [sys.executable, "-B", str(self.root / "scripts/check-docs.py")]
         result = subprocess.run(command, capture_output=True, text=True, check=False)
         self.assertEqual((result.returncode, result.stdout, result.stderr), (
-            0, "Documentation checks passed (7 Markdown pages, 6 guides, 2 node types).\n", ""
+            0, "Documentation checks passed (8 Markdown pages, 7 guides, 2 node types).\n", ""
         ))
         result = subprocess.run(command + ["--unknown"], capture_output=True, text=True, check=False)
         self.assertEqual((result.returncode, result.stdout, result.stderr), (
@@ -521,4 +583,4 @@ if __name__ == "__main__":
         if failures:
             print("\n".join(failures), file=sys.stderr)
             sys.exit(1)
-        print(f"Documentation checks passed ({page_count} Markdown pages, {len(GUIDES)} guides, {node_count} node types).")
+        print(f"Documentation checks passed ({page_count} Markdown pages, {len(GUIDES) + 1} guides, {node_count} node types).")

@@ -612,7 +612,7 @@ Requests wait for a connection, answer slowly or time out; `/readyz` can time ou
 ### Fix
 
 1. Raise `database.max_connections` and restart, keeping the sum over all processes, plus the
-   worker pools, under the server's `max_connections`.
+   worker pools, under the server's `max_connections`; use the [sizing guide](sizing.md#connection-arithmetic) to budget it.
 2. Cancel the long-running statements found by the probe.
 3. Roll back a release that began the saturation.
 
