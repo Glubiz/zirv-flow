@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { Link, useParams } from "react-router";
+import { Link, useParams, useSearchParams } from "react-router";
 
 import { ApiError, client, describeError, unwrap, useResource, type components, type ErrorSummary } from "../../api";
-import { Button, Dialog, EmptyState, ErrorState, LoadingState, Panel } from "../../ui";
+import { Button, Dialog, EmptyState, ErrorState, LoadingState, Panel, plural } from "../../ui";
 import { useAssistantAccess } from "../assistant";
 import { useCatalog, useLeaveGuard } from "../segments";
 import { useFlowAccess } from "./access";
@@ -11,7 +11,9 @@ import { wordsFor, triggerWords } from "./describe";
 import { StatePill } from "./FlowsPage";
 import { placeIssues, SECTIONS, type Section } from "./issues";
 import {
-  addNode,
+  insertNode,
+  portsOf,
+  sameJson,
   edgeFrom,
   kindLabel,
   portLabel,
@@ -33,10 +35,12 @@ import { PublishDialog } from "./PublishDialog";
 import { VersionCanvas, VersionsView, type FlowVersion } from "./VersionsView";
 import { SettingsView, type SettingsFocus } from "./SettingsView";
 import { FlowAssistantSheet } from "./FlowAssistant";
-import { Inspector } from "./Inspector";
+import { ResultsView } from "./ResultsView";
+import { StepPalette } from "./StepPalette";
+import { useVersionCounts } from "./counts";
 import { pathOverlay, type Overlay } from "./overlay";
-import { StepSheet } from "./StepSheet";
-import { NOTHING_SENT, TestSheet } from "./TestSheet";
+import { StepInspector } from "./StepInspector";
+import { TestView } from "./TestView";
 import type { TestResult } from "./testMode";
 import { useFlowDraft } from "./useFlowDraft";
 
@@ -48,14 +52,18 @@ function sectionOfIssue(issue: FlowIssue) {
 
 type FlowBody = components["schemas"]["FlowBody"];
 
-const TABS = [
-  { id: "canvas", label: "Canvas" },
-  { id: "settings", label: "Flow settings" },
-  { id: "versions", label: "Versions" },
-  { id: "enrollments", label: "Enrollments" },
+const VIEWS = [
+  { id: "build", label: "Build" },
+  { id: "test", label: "Test" },
+  { id: "results", label: "Results" },
 ] as const;
 
-type TabId = (typeof TABS)[number]["id"];
+type ViewId = (typeof VIEWS)[number]["id"];
+
+function viewFrom(params: URLSearchParams): ViewId {
+  const value = params.get("view") ?? params.get("tab");
+  return value === "test" ? "test" : value === "results" || value === "enrollments" ? "results" : "build";
+}
 
 export function FlowPage() {
   const { ws = "", id = "" } = useParams();
@@ -101,6 +109,7 @@ function FlowLoader({ workspaceId, flowId }: { workspaceId: string; flowId: stri
       canPublish={access.canPublish}
       canAdmin={access.canAdmin}
       canTestWithPerson={access.canTestWithPerson}
+      canViewPii={access.canViewPii}
     />;
 }
 
@@ -122,6 +131,7 @@ function Editor({
   canPublish,
   canAdmin,
   canTestWithPerson,
+  canViewPii,
 }: {
   workspaceId: string;
   flow: FlowDetail;
@@ -129,6 +139,7 @@ function Editor({
   canPublish: boolean;
   canAdmin: boolean;
   canTestWithPerson: boolean;
+  canViewPii: boolean;
 }) {
   const [life, setLife] = useState<Life>({ state: flow.state, version: flow.current_version ?? null });
   const archived = life.state === "archived";
@@ -145,9 +156,26 @@ function Editor({
   const busy = store.held;
   const canEdit = editable && !busy;
 
-  const [tab, setTab] = useState<TabId>("canvas");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeView = viewFrom(searchParams);
+  const testing = activeView === "test";
+  const versionsOpen = searchParams.get("panel") === "versions" || searchParams.get("tab") === "versions";
+  const [showCounts, setShowCounts] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
-  const [sheetFocus, setSheetFocus] = useState(true);
+  const counts = useVersionCounts(workspaceId, flow.id, !versionsOpen && activeView === "build" && (showCounts || selected !== null) ? life.version : null);
+  const versions = useResource(
+    () => unwrap(client.GET("/api/v1/workspaces/{ws}/flows/{id}/versions", { params: { path: { ws: workspaceId, id: flow.id } } })),
+    [workspaceId, flow.id, life.version],
+  );
+  const currentVersion = versions.status === "ready" ? versions.data.find((entry) => entry.version === life.version) : undefined;
+  const draftChanged = currentVersion !== undefined &&
+    (!sameJson(currentVersion.graph, draft.graph) || !sameJson(currentVersion.settings, draft.settings));
+  const countsOverlay = useMemo<Overlay | undefined>(() => {
+    if (!showCounts || counts.status !== "ready" || !counts.data) return undefined;
+    return { counts: new Map(counts.data.nodes.map((entry) => [entry.node_id, entry])) };
+  }, [showCounts, counts]);
+  const publishBlocked = (store.issues?.length ?? 0) > 0;
+  const [inspectorFocus, setInspectorFocus] = useState(true);
   const [focusRequest, setFocusRequest] = useState<FocusRequest | null>(null);
   const [settingsFocus, setSettingsFocus] = useState<SettingsFocus | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
@@ -162,13 +190,19 @@ function Editor({
   const [archiving, setArchiving] = useState(false);
   const [acting, setActing] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
-  const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<TestResult | null>(null);
   const [assistantOpen, setAssistantOpen] = useState(false);
+  const [previousView, setPreviousView] = useState(activeView);
   /** Bumped when a whole new draft is loaded, so the canvas draws it afresh. */
   const [layoutEpoch, setLayoutEpoch] = useState(0);
   /** The steps the assistant's explanation cites, marked on the canvas while it is open. */
   const [cited, setCited] = useState<readonly string[]>([]);
+  if (previousView !== activeView) {
+    setPreviousView(activeView);
+    setTestResult(null);
+    setAssistantOpen(false);
+    setCited([]);
+  }
   const [assistantSeen, setAssistantSeen] = useState(assistantOn);
   if (assistantSeen !== assistantOn) {
     setAssistantSeen(assistantOn);
@@ -263,13 +297,14 @@ function Editor({
 
   function focusStep(id: string, takeFocus: boolean) {
     nonce.current += 1;
-    setTab("canvas");
+    chooseView("build");
     setSelected(id);
-    setSheetFocus(takeFocus);
+    setSettingsFocus(null);
+    setInspectorFocus(takeFocus);
     if (!takeFocus) setFocusRequest({ id, nonce: nonce.current });
   }
 
-  /** Moves focus to a step without opening its sheet, so the assistant's sheet stays. */
+  /** Moves focus to a step without changing the inspector, so the assistant's sheet stays. */
   function revealStep(id: string) {
     nonce.current += 1;
     setFocusRequest({ id, nonce: nonce.current, reveal: true });
@@ -327,8 +362,8 @@ function Editor({
 
   function openSettings(section: Section) {
     nonce.current += 1;
-    setSelected(null);
-    setTab("settings");
+    setSelected(TRIGGER_ID);
+    chooseView("build");
     setSettingsFocus({ section, nonce: nonce.current });
   }
 
@@ -337,7 +372,7 @@ function Editor({
     else focusStep(id, true);
   }
 
-  function closeSheet() {
+  function closeInspector() {
     if (selected !== null) {
       nonce.current += 1;
       setFocusRequest({ id: selected, nonce: nonce.current });
@@ -364,13 +399,13 @@ function Editor({
     pick(item);
   }
 
-  /** After an action the button that had focus may be gone, so focus goes to the first action or the tab in use. */
+  /** After an action the button that had focus may be gone, so focus goes to the first action or the view in use. */
   function refocusActions() {
     if (!mounted.current) return;
     setTimeout(() => {
       const page = pageRef.current;
       if (!mounted.current || !page) return;
-      (page.querySelector<HTMLElement>("#flow-primary-action") ?? page.querySelector<HTMLElement>(`#flow-tab-${tab}`))?.focus();
+      (page.querySelector<HTMLElement>("#flow-primary-action:not(:disabled)") ?? page.querySelector<HTMLElement>(`#flow-view-${activeView}`))?.focus();
     }, 0);
   }
 
@@ -451,7 +486,7 @@ function Editor({
   }
 
   function openPublish() {
-    if (inFlight || acting || busy) return;
+    if (inFlight || acting || busy || publishBlocked) return;
     setRefusal(null);
     setRefusedIssues(null);
     setPublishOpen(true);
@@ -503,7 +538,7 @@ function Editor({
     void adoptCurrent().then(refocusActions);
   }
 
-  function view(version: FlowVersion) {
+  function viewVersion(version: FlowVersion) {
     setViewing(version);
     announce(`Viewing version ${version.version}, read-only.`);
   }
@@ -514,8 +549,8 @@ function Editor({
     store.edit((current) => ({ ...current, settings: change(current.settings) }), key);
 
   function add(type: NodeType) {
-    const { id } = addNode(draft.graph, type);
-    editGraph((graph) => addNode(graph, type).graph);
+    const { id } = insertNode(draft.graph, type, selected);
+    editGraph((graph) => insertNode(graph, type, selected).graph);
     focusStep(id, true);
   }
 
@@ -538,56 +573,50 @@ function Editor({
     setFocusRequest({ id: TRIGGER_ID, nonce: nonce.current });
   }
 
-  const sheetNode = selected === null ? undefined : draft.graph.nodes.find((candidate) => candidate.id === selected);
+  const selectedNode = selected === null ? undefined : draft.graph.nodes.find((candidate) => candidate.id === selected);
   const doomed = deleting === null ? undefined : draft.graph.nodes.find((candidate) => candidate.id === deleting);
 
-  /** Switching tabs leaves a version being looked at. */
-  function chooseTab(next: TabId) {
-    setViewing(null);
-    setCited([]);
-    setTesting(false);
-    setTestResult(null);
-    setTab(next);
+  function paramsFor(next: ViewId) {
+    const params = new URLSearchParams(searchParams);
+    params.delete("tab");
+    params.delete("panel");
+    if (next === "build") params.delete("view");
+    else params.set("view", next);
+    return params;
   }
 
-  function onTabKey(event: KeyboardEvent<HTMLDivElement>) {
-    const at = TABS.findIndex((entry) => entry.id === tab);
-    const last = TABS.length - 1;
-    let to: number;
-    if (event.key === "ArrowRight") to = at === last ? 0 : at + 1;
-    else if (event.key === "ArrowLeft") to = at === 0 ? last : at - 1;
-    else if (event.key === "Home") to = 0;
-    else if (event.key === "End") to = last;
-    else return;
+  function chooseView(next: ViewId) {
+    if (next !== activeView || versionsOpen) {
+      setViewing(null);
+      setCited([]);
+      setTestResult(null);
+      setAssistantOpen(false);
+      setFocusRequest(null);
+      setSettingsFocus(null);
+      setInspectorFocus(false);
+      setSearchParams(paramsFor(next));
+    }
+  }
+
+  function onViewKey(event: KeyboardEvent<HTMLElement>) {
+    const at = VIEWS.findIndex((entry) => entry.id === activeView);
+    const index = event.key === "ArrowRight" ? (at + 1) % VIEWS.length
+      : event.key === "ArrowLeft" ? (at + VIEWS.length - 1) % VIEWS.length
+      : event.key === "Home" ? 0 : event.key === "End" ? VIEWS.length - 1 : null;
+    if (index === null) return;
     event.preventDefault();
-    const next = TABS[to];
+    const next = VIEWS[index];
     if (next) {
-      chooseTab(next.id);
-      document.getElementById(`flow-tab-${next.id}`)?.focus();
+      chooseView(next.id);
+      document.getElementById(`flow-view-${next.id}`)?.focus();
     }
   }
 
-  function toggleTest() {
-    if (testing) {
-      exitTest();
-      return;
-    }
+  function toggleVersions() {
     setViewing(null);
-    setSelected(null);
-    setAssistantOpen(false);
-    setCited([]);
-    setTab("canvas");
-    setTesting(true);
-    announce("Test mode is on. Nothing is sent or changed.");
-  }
-
-  function exitTest() {
-    setTesting(false);
-    setTestResult(null);
-    announce("Test mode is off.");
-    setTimeout(() => {
-      if (mounted.current) document.getElementById("flow-test-toggle")?.focus();
-    }, 0);
+    const params = paramsFor("build");
+    if (!versionsOpen) params.set("panel", "versions");
+    setSearchParams(params);
   }
 
   function portName(id: string, port: string): string | null {
@@ -596,11 +625,49 @@ function Editor({
   }
 
   const version = stateLabel(life.state, life.version);
+  const selectedPort = selectedNode ? portsOf(selectedNode)[0] : undefined;
+  const canvas = (
+    <Canvas
+      graph={draft.graph}
+      settings={draft.settings}
+      names={names}
+      placed={placed}
+      issueItems={issueItems}
+      checked={store.issues !== null}
+      checking={store.checking}
+      editable={canEdit && !testing}
+      layoutKey={layoutEpoch}
+      overlay={testing ? testOverlay : citedOverlay ?? countsOverlay}
+      assistant={assistantOn && !testing ? { open: assistantOpen, onToggle: toggleAssistant } : undefined}
+      selectedId={testing ? null : selected}
+      focusRequest={focusRequest}
+      canUndo={store.canUndo}
+      onOpen={testing ? () => undefined : open}
+      onClose={closeInspector}
+      onWire={wireStep}
+      onUndo={store.undo}
+      onDeleteRequest={(id) => setDeleting(id)}
+      onPickIssue={pick}
+    >
+      {assistantOn && !testing && assistantOpen ? (
+        <div className="fl-sheet" hidden={selectedNode !== undefined}>
+          <FlowAssistantSheet
+            workspaceId={workspaceId} flowId={flow.id} version={null}
+            graph={draft.graph} revision={[draft.graph, draft.settings]} names={names}
+            onGone={reloadAssistant} busy={busy}
+            drafting={editable ? { confirmAccept: confirmAssistantAccept, onAccept: loadAssistantDraft, onAcceptFailed: reconcileAccept } : undefined}
+            prepare={editable ? store.saveNow : undefined}
+            onReveal={revealStep} onCited={setCited} onClose={toggleAssistant}
+          />
+        </div>
+      ) : null}
+    </Canvas>
+  );
 
   return (
     <div className="fl-page" ref={pageRef} aria-busy={busy || undefined}>
       <div className="fl-head">
-        <Link to={`/w/${workspaceId}/flows`}>← Flows</Link>
+        <nav aria-label="Breadcrumb"><Link to={`/w/${workspaceId}/flows`}>Flows</Link></nav>
         {editable ? (
           <NameField disabled={busy} name={draft.name} onCommit={(name) => store.edit((current) => ({ ...current, name }), "name")} />
         ) : (
@@ -609,24 +676,24 @@ function Editor({
         <span className="fl-state">
           <StatePill state={life.state} />
           {version ? <span className="faint">{version}</span> : null}
+          {draftChanged ? <span className="pill">Draft with changes</span> : null}
         </span>
-        <div className="fl-tabs" role="tablist" aria-label="Flow views" onKeyDown={onTabKey}>
-          {TABS.map((entry) => (
-            <button
-              key={entry.id}
-              type="button"
-              role="tab"
-              id={`flow-tab-${entry.id}`}
-              className="fl-tab"
-              aria-selected={tab === entry.id}
-              aria-controls={tab === entry.id ? "flow-panel" : undefined}
-              tabIndex={tab === entry.id ? 0 : -1}
-              onClick={() => chooseTab(entry.id)}
-            >
+        <nav className="fl-views" aria-label="Flow views" onKeyDown={onViewKey}>
+          {VIEWS.map((entry) => (
+            <Link key={entry.id} id={`flow-view-${entry.id}`} className="fl-view"
+              to={{ search: paramsFor(entry.id).toString() }}
+              aria-current={activeView === entry.id ? "page" : undefined}
+              onClick={(event) => {
+                if (event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
+                  event.preventDefault();
+                  chooseView(entry.id);
+                }
+              }}>
               {entry.label}
-            </button>
+            </Link>
           ))}
-        </div>
+        </nav>
+        <Button aria-expanded={versionsOpen} aria-controls={versionsOpen ? "flow-versions" : undefined} onClick={toggleVersions}>Versions</Button>
         <div className="fl-status" role="status">
           {busy ? (
             <span className="muted">Loading the draft…</span>
@@ -640,16 +707,17 @@ function Editor({
             <span className="muted">Saved</span>
           ) : null}
         </div>
-        {canWrite ? (
-          <Button id="flow-test-toggle" aria-pressed={testing} onClick={toggleTest}>
-            {testing ? "Exit test" : "Test"}
-          </Button>
-        ) : null}
         {canPublish && life.state !== "archived" ? (
           <div className="fl-actions">
-            <Button id="flow-primary-action" variant="primary" disabled={acting || busy} aria-disabled={inFlight || undefined} onClick={openPublish}>
-              {inFlight ? "Publishing…" : "Publish…"}
+            <Button id="flow-primary-action" variant="primary" disabled={acting || busy} aria-disabled={inFlight || publishBlocked || undefined}
+              aria-describedby={publishBlocked ? "flow-publish-blocked" : undefined} onClick={openPublish}>
+              {inFlight ? "Publishing…" : store.issues === null ? "Review and publish" : `Review and publish (${issueItems.length})`}
             </Button>
+            {publishBlocked ? (
+              <span id="flow-publish-blocked" className="visually-hidden">
+                {`${plural(issueItems.length, "problem", "problems")} must be fixed before this flow can be published.`}
+              </span>
+            ) : null}
             {life.state === "published" ? (
               <Button disabled={acting || busy} aria-disabled={inFlight || undefined} onClick={() => void lifecycle("pause")}>
                 Pause
@@ -681,169 +749,80 @@ function Editor({
         </p>
       ) : null}
 
-      {testing ? (
-        <div className="fl-banner" role="note">
-          <span className="strong">Test mode</span>
-          <span>{NOTHING_SENT}</span>
-        </div>
-      ) : null}
-
-      <div role="tabpanel" id="flow-panel" aria-labelledby={`flow-tab-${tab}`} tabIndex={0} className="fl-panel">
-      {tab === "canvas" ? (
-          <Canvas
-            graph={draft.graph}
-            settings={draft.settings}
-            names={names}
-            placed={placed}
-            issueItems={issueItems}
-            checked={store.issues !== null}
-            checking={store.checking}
-            editable={canEdit && !testing}
-            layoutKey={layoutEpoch}
-            overlay={testOverlay ?? citedOverlay}
-            assistant={assistantOn && !testing ? { open: assistantOpen, onToggle: toggleAssistant } : undefined}
-            selectedId={sheetNode && !testing ? sheetNode.id : null}
-            focusRequest={focusRequest}
-            canUndo={store.canUndo}
-            onOpen={testing ? () => undefined : open}
-            onClose={closeSheet}
-            onWire={(from, port, to) => wireStep(from, port, to)}
-            onAdd={add}
-            onUndo={store.undo}
-            onDeleteRequest={(id) => setDeleting(id)}
-            onPickIssue={pick}
-          >
-            {testing ? (
-              <div className="fl-sheet">
-                <TestSheet
-                  workspaceId={workspaceId}
-                  flowId={flow.id}
-                  canSeePeople={canTestWithPerson}
-                  describeStep={describeStep}
-                  portName={portName}
-                  graph={draft.graph}
-                  settingsUnsaved={store.settingsUnsaved}
-                  onResult={setTestResult}
-                  onClose={exitTest}
-                  announce={announce}
-                />
+      <div id="flow-panel" role="region" aria-label={versionsOpen ? "Versions" : VIEWS.find((entry) => entry.id === activeView)?.label} className="fl-panel">
+        {versionsOpen ? (
+          <section id="flow-versions" className="fl-version-panel" aria-label="Published versions">
+            <div className="fl-viewing">
+              <h2>{viewing ? `Viewing version ${viewing.version} · read-only` : "Versions"}</h2>
+              {viewing ? <Button onClick={() => setViewing(null)}>All versions</Button> : null}
+              <Button onClick={() => chooseView("build")}>Back to the draft</Button>
+            </div>
+            {viewing ? (
+              <VersionCanvas key={viewing.version} workspaceId={workspaceId} flowId={flow.id} version={viewing}
+                names={names} catalog={catalog} assistantOn={assistantOn} onAssistantGone={reloadAssistant} />
+            ) : (
+              <div className="fl-pane">
+                <VersionsView workspaceId={workspaceId} versions={versions} state={life.state} current={life.version}
+                  canPublish={canPublish && !archived} publishing={inFlight} acting={acting || busy || publishBlocked}
+                  onPublish={openPublish} onView={viewVersion} />
               </div>
-            ) : null}
-            {assistantOn && !testing && assistantOpen ? (
-              <div className="fl-sheet" hidden={sheetNode !== undefined}>
-                <FlowAssistantSheet
-                  workspaceId={workspaceId}
-                  flowId={flow.id}
-                  version={null}
-                  graph={draft.graph}
-                  revision={[draft.graph, draft.settings]}
-                  names={names}
-                  onGone={reloadAssistant}
-                  busy={busy}
-                  drafting={
-                    editable
-                      ? { confirmAccept: confirmAssistantAccept, onAccept: loadAssistantDraft, onAcceptFailed: reconcileAccept }
-                      : undefined
-                  }
-                  prepare={editable ? store.saveNow : undefined}
-                  onReveal={revealStep}
-                  onCited={setCited}
-                  onClose={toggleAssistant}
-                />
-              </div>
-            ) : null}
-            {!testing && sheetNode ? (
-              <div className="fl-sheet">
-                <StepSheet
-                  key={sheetNode.id}
-                  workspaceId={workspaceId}
-                  graph={draft.graph}
-                  node={sheetNode}
-                  names={names}
-                  steps={steps}
-                  issues={issuesOfStep(sheetNode.id)}
-                  catalog={catalog}
-                  readOnly={!canEdit}
-                  autoFocus={sheetFocus}
-                  onClose={closeSheet}
+            )}
+          </section>
+        ) : activeView === "results" ? (
+          <ResultsView workspaceId={workspaceId} flowId={flow.id} versions={versions} state={life.state} current={life.version}
+            canPublish={canPublish} canSeePeople={canViewPii} assistantOn={assistantOn} onAssistantGone={reloadAssistant}
+            names={names} announce={announce} onConflict={() => adoptCurrent(false)} />
+        ) : testing ? (
+          canWrite ? (
+            <TestView workspaceId={workspaceId} flowId={flow.id} canSeePeople={canTestWithPerson}
+              describeStep={describeStep} portName={portName} graph={draft.graph} settingsUnsaved={store.settingsUnsaved}
+              onResult={setTestResult} announce={announce}>
+              {canvas}
+            </TestView>
+          ) : <EmptyState title="Testing needs an editor">You can explore the flow in Build and read its Results.</EmptyState>
+        ) : (
+          <>
+            <div className="fl-build-bar">
+              {life.version !== null ? (
+                <label className="check">
+                  <input type="checkbox" checked={showCounts} onChange={(event) => setShowCounts(event.target.checked)} />
+                  Show counts from version {life.version}
+                </label>
+              ) : <span className="faint">Draft · results are available after publishing.</span>}
+              {showCounts && counts.status === "loading" ? <span role="status">Loading the counts</span> : null}
+              {showCounts && counts.status === "error" ? (
+                <span role="alert">{describeError(counts.error).title} <Button onClick={counts.reload}>Retry counts</Button></span>
+              ) : null}
+              {draft.graph.nodes.length === 0 ? <span className="muted">Start with the trigger, then add your first step.</span> : null}
+            </div>
+            <div className="fl-workbench">
+              {editable ? <StepPalette disabled={!canEdit} onAdd={add}
+                placement={selectedNode
+                  ? selectedPort
+                    ? `Inserts after this step via ${portLabel(selectedNode, selectedPort)}. Other outputs need connecting.`
+                    : "This step has no output. New steps start disconnected."
+                  : selected === TRIGGER_ID ? "Inserts directly after the trigger." : "Select a step to insert after it, or add a disconnected step."} /> : null}
+              {canvas}
+              {selectedNode ? (
+                <StepInspector key={selectedNode.id} workspaceId={workspaceId} graph={draft.graph}
+                  node={selectedNode} names={names} steps={steps} issues={issuesOfStep(selectedNode.id)}
+                  catalog={catalog} readOnly={!canEdit} autoFocus={inspectorFocus} counts={counts}
+                  onClose={closeInspector}
                   onChange={(next: FlowNode, key) => editGraph((graph) => replaceNode(graph, next), key)}
                   onRemovePort={(next, prefix, index) => editGraph((graph) => removeIndexedPort(graph, next, prefix, index))}
-                  onWire={(port, to) => wireStep(sheetNode.id, port, to)}
-                  onDelete={() => setDeleting(sheetNode.id)}
-                />
-              </div>
-            ) : null}
-          </Canvas>
-      ) : null}
-
-      {tab === "settings" ? (
-        <div className="fl-pane">
-          <p className="faint">
-            Starts with: {triggerWords(draft.settings, names).title}. Changes here are saved as you make them.
-          </p>
-          <SettingsView
-            workspaceId={workspaceId}
-            settings={draft.settings}
-            catalog={catalog}
-            readOnly={!canEdit}
-            issues={placed.bySection}
-            focus={settingsFocus}
-            onChange={editSettings}
-          />
-        </div>
-      ) : null}
-
-      {tab === "versions" && viewing === null ? (
-        <div className="fl-pane">
-          <VersionsView
-            workspaceId={workspaceId}
-            flowId={flow.id}
-            state={life.state}
-            current={life.version}
-            canPublish={canPublish && !archived}
-            publishing={inFlight}
-            acting={acting}
-            onPublish={openPublish}
-            onView={view}
-          />
-        </div>
-      ) : null}
-
-      {tab === "enrollments" ? (
-        <Inspector
-          workspaceId={workspaceId}
-          flowId={flow.id}
-          state={life.state}
-          current={life.version}
-          canPublish={canPublish}
-          assistantOn={assistantOn}
-          onAssistantGone={reloadAssistant}
-          names={names}
-          catalog={catalog}
-          announce={announce}
-          onConflict={() => adoptCurrent(false)}
-        />
-      ) : null}
-
-      {tab === "versions" && viewing !== null ? (
-        <>
-          <div className="fl-viewing">
-            <span>Viewing version {viewing.version} · read-only</span>
-            <Button onClick={() => setViewing(null)}>All versions</Button>
-            <Button onClick={() => chooseTab("canvas")}>Back to the draft</Button>
-          </div>
-          <VersionCanvas
-            key={viewing.version}
-            workspaceId={workspaceId}
-            flowId={flow.id}
-            version={viewing}
-            names={names}
-            catalog={catalog}
-            assistantOn={assistantOn}
-            onAssistantGone={reloadAssistant}
-          />
-        </>
-      ) : null}
+                  onWire={(port, to) => wireStep(selectedNode.id, port, to)}
+                  onDelete={() => setDeleting(selectedNode.id)} />
+              ) : (
+                <section className="fl-inspector stack" aria-label="Flow settings">
+                  <h2>Flow settings</h2>
+                  <p className="faint">Starts with: {triggerWords(draft.settings, names).title}.</p>
+                  <SettingsView workspaceId={workspaceId} settings={draft.settings} catalog={catalog}
+                    readOnly={!canEdit} issues={placed.bySection} focus={settingsFocus} onChange={editSettings} />
+                </section>
+              )}
+            </div>
+          </>
+        )}
       </div>
 
       <div className="visually-hidden" role="status" aria-live="polite">

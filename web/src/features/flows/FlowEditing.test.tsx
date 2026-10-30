@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { FLOW_ID, flowRoutes, WS } from "../../test/flowsApi";
-import { lastGraph, mountEditor as mount, openSheetOf, saves } from "../../test/flowsEditor";
+import { lastGraph, mountEditor as mount, openInspectorOf, saves } from "../../test/flowsEditor";
 import { json, mockApi, problem } from "../../test/mockApi";
 import { stubReactFlow } from "../../test/reactFlowStubs";
 
@@ -14,12 +14,12 @@ beforeEach(() => {
 const SAVE = { timeout: 3000 };
 
 describe("editing a step", () => {
-  it("changes a wait in the sheet and saves the new graph", async () => {
+  it("changes a wait in the inspector and saves the new graph", async () => {
     const calls = mockApi(flowRoutes());
     const user = userEvent.setup();
     mount();
 
-    const sheet = await openSheetOf(user, /^Wait: 1 day/);
+    const sheet = await openInspectorOf(user, /^Wait: 1 day/);
     const amount = within(sheet).getByLabelText("Amount");
     await user.clear(amount);
     await user.type(amount, "2");
@@ -34,7 +34,7 @@ describe("editing a step", () => {
     const user = userEvent.setup();
     mount();
 
-    const sheet = await openSheetOf(user, /^Branch: /);
+    const sheet = await openInspectorOf(user, /^Branch: /);
     const value = await within(sheet).findByLabelText("Value");
     await user.clear(value);
     await user.type(value, "Odense");
@@ -50,7 +50,7 @@ describe("editing a step", () => {
     const user = userEvent.setup();
     mount();
 
-    const sheet = await openSheetOf(user, /^Branch: /);
+    const sheet = await openInspectorOf(user, /^Branch: /);
     await user.click(await within(sheet).findByRole("button", { name: "Add a case" }));
 
     expect(within(sheet).getByLabelText("Case 1 leads to")).toBeInTheDocument();
@@ -61,12 +61,12 @@ describe("editing a step", () => {
 });
 
 describe("wiring and undo", () => {
-  it("wires a port from the select in the sheet, replacing the earlier wire", async () => {
+  it("wires a port from the select in the inspector, replacing the earlier wire", async () => {
     const calls = mockApi(flowRoutes());
     const user = userEvent.setup();
     mount();
 
-    const sheet = await openSheetOf(user, /^Update a trait: /);
+    const sheet = await openInspectorOf(user, /^Update a trait: /);
     await user.selectOptions(within(sheet).getByLabelText("Next step"), "n4");
 
     await waitFor(() => expect(saves(calls)).toHaveLength(1), SAVE);
@@ -75,12 +75,12 @@ describe("wiring and undo", () => {
     expect(edges?.[0]).toMatchObject({ from: "n3", port: "next", to: "n4" });
   });
 
-  it("disconnects a port from the sheet", async () => {
+  it("disconnects a port from the inspector", async () => {
     const calls = mockApi(flowRoutes());
     const user = userEvent.setup();
     mount();
 
-    const sheet = await openSheetOf(user, /^Update a trait: /);
+    const sheet = await openInspectorOf(user, /^Update a trait: /);
     await user.click(within(sheet).getByRole("button", { name: "Disconnect Next" }));
 
     await waitFor(() => expect(saves(calls)).toHaveLength(1), SAVE);
@@ -92,7 +92,7 @@ describe("wiring and undo", () => {
     const user = userEvent.setup();
     mount();
 
-    const sheet = await openSheetOf(user, /^Update a trait: /);
+    const sheet = await openInspectorOf(user, /^Update a trait: /);
     await user.selectOptions(within(sheet).getByLabelText("Next step"), "n4");
     await waitFor(() => expect(saves(calls)).toHaveLength(1), SAVE);
 
@@ -105,16 +105,15 @@ describe("wiring and undo", () => {
     expect(screen.getByRole("button", { name: "Undo" })).toBeDisabled();
   });
 
-  it("adds a step that starts unwired and opens its sheet", async () => {
+  it("adds a step that starts unwired and opens its inspector", async () => {
     const calls = mockApi(flowRoutes());
     const user = userEvent.setup();
     mount();
     await screen.findByRole("group", { name: /^Wait: 1 day/ });
 
-    await user.click(screen.getByRole("button", { name: "Add a step" }));
-    await user.click(screen.getByRole("menuitem", { name: "Webhook" }));
+    await user.click(screen.getByRole("button", { name: "Webhook" }));
 
-    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: "Step inspector" })).toBeInTheDocument();
     await waitFor(() => expect(saves(calls)).toHaveLength(1), SAVE);
     const graph = lastGraph(calls);
     expect(graph?.nodes.at(-1)).toMatchObject({ id: "n6", type: "action.webhook" });
@@ -135,7 +134,7 @@ describe("wiring and undo", () => {
     const user = userEvent.setup();
     mount();
 
-    const sheet = await openSheetOf(user, /^Wait: 1 day/);
+    const sheet = await openInspectorOf(user, /^Wait: 1 day/);
     await user.selectOptions(within(sheet).getByLabelText("Unit"), "hour");
     expect(await screen.findByText(/Couldn.t save/, undefined, SAVE)).toBeInTheDocument();
 
@@ -151,7 +150,7 @@ describe("flow settings", () => {
     const calls = mockApi(flowRoutes());
     const user = userEvent.setup();
     mount();
-    await user.click(await screen.findByRole("tab", { name: "Flow settings" }));
+    await user.click(await screen.findByRole("group", { name: /^Trigger:/ }));
 
     await user.selectOptions(await screen.findByLabelText("When a person"), "exited");
 
@@ -166,14 +165,15 @@ describe("flow settings", () => {
     mockApi({ ...flowRoutes(), [`GET ${WS}/flows/${FLOW_ID}/versions`]: () => json([]) });
     const user = userEvent.setup();
     mount();
-    const canvas = await screen.findByRole("tab", { name: "Canvas" });
+    const canvas = await screen.findByRole("link", { name: "Build" });
     canvas.focus();
 
     await user.keyboard("{ArrowRight}");
-    expect(screen.getByRole("tab", { name: "Flow settings" })).toHaveFocus();
-    expect(screen.getByRole("tab", { name: "Flow settings", selected: true })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Test" })).toHaveFocus();
+    expect(screen.getByRole("link", { name: "Test" })).toHaveAttribute("aria-current", "page");
     await user.keyboard("{ArrowRight}");
-    expect(screen.getByRole("tab", { name: "Versions", selected: true })).toHaveFocus();
-    expect(await screen.findByText("Not published yet")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Results" })).toHaveFocus();
+    expect(screen.getByRole("link", { name: "Results" })).toHaveAttribute("aria-current", "page");
+    expect(await screen.findByText("No one can be in this flow yet")).toBeInTheDocument();
   });
 });

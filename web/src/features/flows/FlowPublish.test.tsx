@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { FLOW_ID, flowBody, flowDetail, flowRoutes, impactBody, WS } from "../../test/flowsApi";
-import { mountEditor as mount, openSheetOf } from "../../test/flowsEditor";
+import { mountEditor as mount, openInspectorOf } from "../../test/flowsEditor";
 import { json, mockApi, problem, type Handler } from "../../test/mockApi";
 import { stubReactFlow } from "../../test/reactFlowStubs";
 import { SEGMENT_ID } from "../../test/segmentsApi";
@@ -52,7 +52,7 @@ function refused(issues: { code: string; node?: string }[]) {
 }
 
 async function openDialog(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(await screen.findByRole("button", { name: "Publish…" }));
+  await user.click(await screen.findByRole("button", { name: /^Review and publish/ }));
   return screen.findByRole("dialog");
 }
 
@@ -72,7 +72,7 @@ describe("publish dialog", () => {
     const calls = mockApi({ ...flowRoutes(), ...publishRoute(() => json(impactBody()), () => published(1)) });
     const user = userEvent.setup();
     mount();
-    const sheet = await openSheetOf(user, /^Wait: 1 day/);
+    const sheet = await openInspectorOf(user, /^Wait: 1 day/);
     await user.selectOptions(within(sheet).getByLabelText("Unit"), "hour");
     await user.click(screen.getByRole("button", { name: "Close" }));
 
@@ -254,11 +254,11 @@ describe("publish dialog", () => {
     await waitFor(() => expect(screen.getByRole("group", { name: /^Wait: 1 day/ })).toHaveFocus());
   });
 
-  it("traps focus in the dialog, closes on Escape and returns focus to Publish…", async () => {
+  it("traps focus in the dialog, closes on Escape and returns focus to Review and publish", async () => {
     mockApi({ ...flowRoutes(), ...publishRoute(() => json(impactBody()), () => published(1)) });
     const user = userEvent.setup();
     mount();
-    const opener = await screen.findByRole("button", { name: "Publish…" });
+    const opener = await screen.findByRole("button", { name: /^Review and publish/ });
     await user.click(opener);
     const dialog = await screen.findByRole("dialog");
     await within(dialog).findByRole("button", { name: "Publish version 1" });
@@ -280,7 +280,7 @@ describe("publishing is for admins", () => {
     mount();
 
     await screen.findByRole("group", { name: /^Wait: 1 day/ });
-    expect(screen.queryByRole("button", { name: "Publish…" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Review and publish/ })).not.toBeInTheDocument();
   });
 });
 
@@ -293,7 +293,7 @@ describe("publish in flight and refused", () => {
     mockApi({ ...flowRoutes(), ...publishRoute(() => json(impactBody()), () => pending) });
     const user = userEvent.setup();
     mount();
-    const opener = await screen.findByRole("button", { name: "Publish…" });
+    const opener = await screen.findByRole("button", { name: /^Review and publish/ });
     await user.click(opener);
     const dialog = await screen.findByRole("dialog");
     await user.click(await within(dialog).findByRole("button", { name: "Publish version 1" }));
@@ -311,7 +311,7 @@ describe("publish in flight and refused", () => {
     expect(await screen.findByText("v1 live")).toBeInTheDocument();
     expect(screen.getByText("Live")).toBeInTheDocument();
     expect(await screen.findByText("Version 1 of Welcome series is published.")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Publish…" })).not.toHaveAttribute("aria-disabled");
+    expect(screen.getByRole("button", { name: /^Review and publish/ })).not.toHaveAttribute("aria-disabled");
   });
 
   it("puts the issues on the canvas with a notice when a publish is refused after the dialog was closed", async () => {
@@ -332,7 +332,9 @@ describe("publish in flight and refused", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("has issues");
     expect(await screen.findByRole("group", { name: /^Wait: 1 day.*1 issue/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Publish…" })).not.toHaveAttribute("aria-disabled");
+    const blocked = screen.getByRole("button", { name: /^Review and publish/ });
+    expect(blocked).toHaveAttribute("aria-disabled", "true");
+    expect(blocked).toHaveAccessibleDescription("1 problem must be fixed before this flow can be published.");
   });
 
   it("refetches the flow on a 409, closes the dialog, makes the editor read-only and says so", async () => {
@@ -359,7 +361,7 @@ describe("publish in flight and refused", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     expect(await screen.findByRole("alert")).toHaveTextContent("changed somewhere else");
     expect(screen.getByText("Archived")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Publish…" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Review and publish/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: "Flow name" })).not.toBeInTheDocument();
     expect(loads).toBe(2);
   });

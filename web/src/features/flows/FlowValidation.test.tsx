@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { flowRoutes } from "../../test/flowsApi";
-import { mountEditor as mount, openSheetOf } from "../../test/flowsEditor";
+import { mountEditor as mount, openInspectorOf } from "../../test/flowsEditor";
 import { mockApi } from "../../test/mockApi";
 import { stubReactFlow } from "../../test/reactFlowStubs";
 import { issueText } from "./issues";
@@ -42,7 +42,7 @@ describe("validation on the canvas", () => {
 
     const step = await screen.findByRole("group", { name: /^Webhook: / });
     await waitFor(() => expect(step).toHaveFocus());
-    const sheet = await screen.findByRole("dialog");
+    const sheet = await screen.findByRole("region", { name: "Step inspector" });
     expect(within(sheet).getByText("This step has a problem")).toBeInTheDocument();
     expect(within(sheet).getByLabelText("URL")).toHaveAccessibleDescription(/not valid/);
   });
@@ -55,7 +55,7 @@ describe("validation on the canvas", () => {
 
     await user.click(screen.getByRole("button", { name: /not a valid cron expression/ }));
 
-    expect(await screen.findByRole("tab", { name: "Flow settings", selected: true })).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: "Flow settings" })).toBeInTheDocument();
     const heading = await screen.findByRole("heading", { name: "Trigger" });
     await waitFor(() => expect(heading).toHaveFocus());
     const section = screen.getByRole("region", { name: "Trigger" });
@@ -66,7 +66,7 @@ describe("validation on the canvas", () => {
     mockApi(flowRoutes({ issues: (asked) => (asked === 1 ? [{ code: "invalid_url", node: "n4", at: "/url" }] : []) }));
     const user = userEvent.setup();
     mount();
-    const sheet = await openSheetOf(user, /^Webhook: /);
+    const sheet = await openInspectorOf(user, /^Webhook: /);
     const url = within(sheet).getByLabelText("URL");
 
     await user.clear(url);

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router";
 
-import { ApiError, client, describeError, unwrap, useResource, type components } from "../../api";
+import { ApiError, client, describeError, unwrap, useResource, type components, type Resource } from "../../api";
 import {
   Button,
   Dialog,
@@ -12,18 +12,19 @@ import {
   reasonLabel,
   ResourceView,
   SelectField,
-  Sheet,
   shortId,
   type Tone,
 } from "../../ui";
-import type { Catalog } from "../segments";
+
 import { TraceTree, traceHref, type TraceTreeRecord } from "../traces";
 import { Canvas } from "./Canvas";
+import { useVersionCounts, type VersionCounts } from "./counts";
 import { wordsFor, type Names } from "./describe";
 import { placeIssues } from "./issues";
 import { TraceExplanation } from "./TraceExplanation";
 import { kindLabel, TRIGGER_ID, type FlowDetail, type Graph } from "./model";
 import { pathOverlay, type NodeMark, type NodeTally, type Overlay } from "./overlay";
+import { PersonPicker, type PersonChoice } from "./TestView";
 import type { FlowVersion } from "./VersionsView";
 
 type EnrollmentItem = components["schemas"]["EnrollmentItemBody"];
@@ -37,28 +38,26 @@ const CHANGED_ELSEWHERE = "This changed somewhere else. It is shown as it is now
 interface Props {
   workspaceId: string;
   flowId: string;
+  versions: Resource<FlowVersion[]>;
   state: FlowDetail["state"];
   /** The newest published version of the flow. */
   current: number | null;
   canPublish: boolean;
+  /** Looking a person up by an identifier needs the personal data grant. */
+  canSeePeople: boolean;
   /** Whether the assistant is on and the person may use it: a trace can then be explained. */
   assistantOn: boolean;
   /** The assistant refused a request because it is off or no longer the person's to use. */
   onAssistantGone: () => void;
   names: Names;
-  catalog: Catalog | null;
   announce: (text: string) => void;
   /** Reads the flow's lifecycle state again after a 409, so the editor shows what the API now says. */
   onConflict: () => Promise<void>;
 }
 
-/** The Enrollments view: a version on the canvas with its counts, the people in it, and one person's path. */
-export function Inspector(props: Props) {
-  const { workspaceId, flowId } = props;
-  const versions = useResource(
-    () => unwrap(client.GET("/api/v1/workspaces/{ws}/flows/{id}/versions", { params: { path: { ws: workspaceId, id: flowId } } })),
-    [workspaceId, flowId, props.current],
-  );
+/** Version totals, step results and the enrollments behind them. */
+export function ResultsView(props: Props) {
+  const { versions, ...rest } = props;
   return (
     <ResourceView
       resource={versions}
@@ -72,7 +71,7 @@ export function Inspector(props: Props) {
         </div>
       }
     >
-      {(list) => <InspectorBody {...props} versions={list} />}
+      {(list) => <ResultsBody {...rest} versions={list} />}
     </ResourceView>
   );
 }
@@ -92,14 +91,18 @@ interface Filters {
   node: string;
 }
 
-function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[] }) {
+function ResultsBody({ versions, ...props }: Omit<Props, "versions"> & { versions: FlowVersion[] }) {
   const { workspaceId, flowId, names, current } = props;
   const sorted = useMemo(() => [...versions].sort((left, right) => right.version - left.version), [versions]);
   const newest = sorted[0]?.version ?? 1;
   const [version, setVersion] = useState<number>(current ?? newest);
   const [showCounts, setShowCounts] = useState(true);
-  const [sheetOpen, setSheetOpen] = useState(true);
+  const [person, setPerson] = useState<PersonChoice | null>(null);
+  const enrollmentPanel = useRef<HTMLElement>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  useEffect(() => {
+    if (selectedId !== null) enrollmentPanel.current?.focus();
+  }, [selectedId]);
   const [filters, setFilters] = useState<Filters>({ state: "", version: "", node: "" });
   /** Bumped when the list must be read again; the counts and the detail reload in place, so what is shown stays. */
   const [refresh, setRefresh] = useState(0);
@@ -113,15 +116,7 @@ function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[]
   const shown = graphs.get(version) ?? sorted[0];
   const none = useMemo(() => placeIssues([]), []);
 
-  const counts = useResource(
-    () =>
-      unwrap(
-        client.GET("/api/v1/workspaces/{ws}/flows/{id}/versions/{n}/counts", {
-          params: { path: { ws: workspaceId, id: flowId, n: version } },
-        }),
-      ),
-    [workspaceId, flowId, version],
-  );
+  const counts = useVersionCounts(workspaceId, flowId, version);
   const detail = useResource(async (): Promise<EnrollmentPath | null> => {
     if (selectedId === null) return null;
     return unwrap(
@@ -137,7 +132,7 @@ function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[]
     detail.reload();
   }
 
-  const tallies = counts.status === "ready" ? counts.data.nodes : null;
+  const tallies = counts.status === "ready" ? (counts.data?.nodes ?? null) : null;
 
   const picked = detail.status === "ready" ? detail.data : null;
 
@@ -168,7 +163,6 @@ function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[]
   function select(item: EnrollmentItem) {
     setSelectedId(item.id);
     setReturnFocus(false);
-    setSheetOpen(true);
     setVersion(item.version);
     props.announce(`Showing the path of one enrollment in version ${item.version}.`);
   }
@@ -252,36 +246,8 @@ function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[]
           {notice}
         </p>
       ) : null}
-      <Canvas
-        fitKey={shown.version}
-        graph={shown.graph}
-        settings={shown.settings}
-        names={names}
-        placed={none}
-        issueItems={[]}
-        checked={false}
-        checking={false}
-        editable={false}
-        selectedId={null}
-        focusRequest={null}
-        canUndo={false}
-        overlay={overlay}
-        onOpen={(id) => {
-          if (id === TRIGGER_ID) return;
-          setFilters((value) => ({ ...value, node: id }));
-          setSheetOpen(true);
-          setSelectedId(null);
-          setReturnFocus(false);
-          props.announce(`Showing the enrollments at ${stepTitle(shown.graph, names, id)}.`);
-        }}
-        onClose={() => undefined}
-        onWire={() => undefined}
-        onAdd={() => undefined}
-        onUndo={() => undefined}
-        onDeleteRequest={() => undefined}
-        onPickIssue={() => undefined}
-      >
-        <div className="fl-card" role="group" aria-label="Counts and versions">
+      <div className="fl-results stack">
+        <div className="fl-results-summary stack" role="group" aria-label="Counts and versions">
           <SelectField
             label="Counts for"
             value={String(version)}
@@ -300,9 +266,8 @@ function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[]
           </SelectField>
           <div className="row">
             <Button aria-pressed={showCounts} onClick={() => setShowCounts((value) => !value)}>
-              {showCounts ? "Hide" : "Show counts"}
+              Counts on canvas
             </Button>
-            {!sheetOpen ? <Button onClick={() => setSheetOpen(true)}>Show enrollments</Button> : null}
           </div>
           <p className="faint">
             Everyone who entered version {version}, computed when you opened this. Dark badges count step runs (a retried step counts
@@ -332,58 +297,94 @@ function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[]
             </div>
           ) : null}
         </div>
-        {sheetOpen ? (
-          <div className="fl-sheet">
-            <Sheet
-              key={selectedId ?? "list"}
-              title={selectedId === null ? "Enrollments" : "One enrollment"}
-              eyebrow={selectedId === null ? `Flow ${shortId(flowId)}` : "Enrollment"}
-              closeLabel={selectedId === null ? "Hide list" : "Back to all"}
-              onClose={() => (selectedId === null ? setSheetOpen(false) : back())}
-              autoFocus={selectedId !== null}
-            >
-              {selectedId === null ? (
-                <EnrollmentList
-                  key={`${filters.state}|${filters.version}|${filters.node}|${refresh}`}
-                  workspaceId={workspaceId}
-                  flowId={flowId}
-                  filters={filters}
-                  onFilters={setFilters}
-                  sorted={sorted}
-                  graph={shown.graph}
-                  graphs={graphs}
-                  names={names}
-                  onSelect={select}
-                />
-              ) : (
-                <ResourceView resource={detail} loadingLabel="Loading the enrollment" isEmpty={(data) => data === null}>
-                  {(data) =>
-                    data ? (
-                      <EnrollmentDetail
-                        key={data.enrollment.id}
-                        path={data}
-                        workspaceId={workspaceId}
-                        graph={graphs.get(data.enrollment.version)?.graph}
-                        names={names}
-                        canPublish={props.canPublish}
-                        assistantOn={props.assistantOn}
-                        onAssistantGone={props.onAssistantGone}
-                        acting={acting}
-                        reason={stepReason}
-                        refreshing={detail.status === "ready" && detail.refreshing}
-                        returnFocus={returnFocus}
-                        onFocused={() => setReturnFocus(false)}
-                        onRetry={() => !stepReason && void act("retry", data.enrollment.id)}
-                        onSkip={() => !acting && !stepReason && setConfirm("skip")}
-                      />
-                    ) : null
-                  }
-                </ResourceView>
-              )}
-            </Sheet>
-          </div>
+
+        {props.canSeePeople ? (
+          <section className="panel panel-pad stack" aria-label="Person lookup">
+            <h2>Why did or didn’t someone get it?</h2>
+            <PersonPicker workspaceId={workspaceId} chosen={person} onChoose={setPerson} />
+            {person ? <Link to={`/w/${workspaceId}/people/${person.id}?tab=messages`}>Messages for {person.label}</Link> : null}
+          </section>
         ) : null}
-      </Canvas>
+        <div className="fl-results-enrollments">
+          <Canvas
+            fitKey={shown.version}
+            graph={shown.graph}
+            settings={shown.settings}
+            names={names}
+            placed={none}
+            issueItems={[]}
+            checked={false}
+            checking={false}
+            editable={false}
+            selectedId={null}
+            focusRequest={null}
+            canUndo={false}
+            overlay={overlay}
+            onOpen={(id) => {
+              if (id === TRIGGER_ID) return;
+              setFilters((value) => ({ ...value, node: id }));
+              setSelectedId(null);
+              setReturnFocus(false);
+              props.announce(`Showing the enrollments at ${stepTitle(shown.graph, names, id)}.`);
+            }}
+            onClose={() => undefined}
+            onWire={() => undefined}
+            onUndo={() => undefined}
+            onDeleteRequest={() => undefined}
+            onPickIssue={() => undefined}
+          />
+
+          <section ref={enrollmentPanel} tabIndex={-1} className="fl-enrollments stack"
+            onKeyDown={(event) => {
+              if (event.key === "Escape" && selectedId !== null) { event.stopPropagation(); back(); }
+            }}
+            aria-label={selectedId === null ? "Enrollments" : "One enrollment"}>
+            <div className="row">
+              <h2>{selectedId === null ? "Enrollments" : "One enrollment"}</h2>
+              {selectedId !== null ? <Button onClick={back}>Back to all</Button> : null}
+            </div>
+            {selectedId === null ? (
+              <EnrollmentList
+                key={`${filters.state}|${filters.version}|${filters.node}|${refresh}`}
+                workspaceId={workspaceId}
+                flowId={flowId}
+                filters={filters}
+                onFilters={setFilters}
+                sorted={sorted}
+                graph={shown.graph}
+                graphs={graphs}
+                names={names}
+                onSelect={select}
+              />
+            ) : (
+              <ResourceView resource={detail} loadingLabel="Loading the enrollment" isEmpty={(data) => data === null}>
+                {(data) =>
+                  data ? (
+                    <EnrollmentDetail
+                      key={data.enrollment.id}
+                      path={data}
+                      workspaceId={workspaceId}
+                      graph={graphs.get(data.enrollment.version)?.graph}
+                      names={names}
+                      canPublish={props.canPublish}
+                      assistantOn={props.assistantOn}
+                      onAssistantGone={props.onAssistantGone}
+                      acting={acting}
+                      reason={stepReason}
+                      refreshing={detail.status === "ready" && detail.refreshing}
+                      returnFocus={returnFocus}
+                      onFocused={() => setReturnFocus(false)}
+                      onRetry={() => !stepReason && void act("retry", data.enrollment.id)}
+                      onSkip={() => !acting && !stepReason && setConfirm("skip")}
+                    />
+                  ) : null
+                }
+              </ResourceView>
+            )}
+
+          </section>
+        </div>
+      </div>
       {confirm === "skip" && selectedId !== null ? (
         <Dialog title="Skip the failed step?" onClose={() => setConfirm(null)}>
           <p className="muted">
@@ -415,7 +416,7 @@ function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[]
   );
 }
 
-/** The delivery counts of a send step as words; a dash for a step that sends nothing. */
+/** The delivery counts of a send step as words; “None” for a step that sends nothing. */
 function deliveryText(entry: NodeCount): string {
   const parts: string[] = [];
   if (entry.sent > 0) parts.push(`${entry.sent} sent`);
@@ -430,7 +431,7 @@ function Tally({
   graph,
   names,
 }: {
-  counts: ReturnType<typeof useResource<components["schemas"]["VersionCountsBody"]>>;
+  counts: Resource<VersionCounts | null>;
   graph: Graph;
   names: Names;
 }) {
@@ -449,34 +450,50 @@ function Tally({
       </div>
     );
   }
+  if (!counts.data) return null;
   return (
-    <details>
-      <summary>Counts as a list</summary>
-      <table className="table">
-        <caption className="visually-hidden">Counts per step of version {counts.data.version}</caption>
-        <thead>
-          <tr>
-            <th scope="col">Step</th>
-            <th scope="col">Entered (step runs)</th>
-            <th scope="col">Waiting</th>
-            <th scope="col">Failed</th>
-            <th scope="col">Delivery</th>
-          </tr>
-        </thead>
-        <tbody>
-          {counts.data.nodes.map((entry: NodeCount) => (
-            <tr key={entry.node_id}>
-              <th scope="row">{stepTitle(graph, names, entry.node_id)}</th>
-              <td>{entry.entered}</td>
-              <td>{entry.waiting}</td>
-              <td>{entry.failed}</td>
-              <td>{deliveryText(entry)}</td>
+    <>
+      <dl className="fl-totals" aria-label={`Totals for version ${counts.data.version}`}>
+        {[
+          { label: "Step runs", value: counts.data.nodes.filter((node) => node.node_type !== "settings.goal").reduce((sum, node) => sum + node.entered, 0) },
+          { label: "Waiting", value: counts.data.nodes.reduce((sum, node) => sum + node.waiting, 0) },
+          { label: "Messages sent", value: counts.data.nodes.reduce((sum, node) => sum + node.sent, 0) },
+          { label: "Goal conversions", value: counts.data.nodes.reduce((sum, node) => sum + node.goal_conversions, 0) },
+        ].map(({ label, value }) => <div key={label}><dt>{label}</dt><dd>{value.toLocaleString("en")}</dd></div>)}
+      </dl>
+      {counts.data.nodes.every((node) => node.entered === 0 && node.waiting === 0 && node.failed === 0 && node.sent === 0 && node.send_failed === 0 && node.skipped.length === 0) ? (
+        <EmptyState title="No results yet">No steps have run in version {counts.data.version}.</EmptyState>
+      ) : null}
+      <h2>Step by step · version {counts.data.version}</h2>
+      <div className="fl-table-scroll">
+        <table className="table">
+          <caption className="visually-hidden">Counts per step of version {counts.data.version}</caption>
+          <thead>
+            <tr>
+              <th scope="col">Step</th>
+              <th scope="col">Reached (step runs)</th>
+              <th scope="col">Waiting</th>
+              <th scope="col">Failed step runs</th>
+              <th scope="col">Skipped messages</th>
+              <th scope="col">Delivery</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
-      <p className="faint">Entered counts the runs of a step, so a step that was retried counts again. It is not a count of people.</p>
-    </details>
+          </thead>
+          <tbody>
+            {counts.data.nodes.map((entry: NodeCount) => (
+              <tr key={entry.node_id}>
+                <th scope="row">{stepTitle(graph, names, entry.node_id)}</th>
+                <td>{entry.entered}</td>
+                <td>{entry.waiting}</td>
+                <td>{entry.failed}</td>
+                <td>{entry.skipped.reduce((sum, skip) => sum + skip.count, 0)}</td>
+                <td>{deliveryText(entry)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="faint">Reached counts the runs of a step, so a step that was retried counts again. It is not a count of people.</p>
+    </>
   );
 }
 

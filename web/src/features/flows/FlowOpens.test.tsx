@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { flowRoutes } from "../../test/flowsApi";
-import { lastGraph, mountEditor as mount, openSheetOf, saves } from "../../test/flowsEditor";
+import { lastGraph, mountEditor as mount, openInspectorOf, saves } from "../../test/flowsEditor";
 import { mockApi } from "../../test/mockApi";
 import { stubReactFlow } from "../../test/reactFlowStubs";
 
@@ -31,7 +31,7 @@ describe("the machine filter on opens", () => {
     const user = userEvent.setup();
     mount();
 
-    const sheet = await openSheetOf(user, /^Wait/);
+    const sheet = await openInspectorOf(user, /^Wait/);
     await user.selectOptions(within(sheet).getByLabelText("Event"), "email.opened");
 
     const filter = await within(sheet).findByRole("group", { name: "Filter 1" });
@@ -59,7 +59,7 @@ describe("the machine filter on opens", () => {
     const calls = mockApi(flowRoutes({ flow: { settings } }));
     const user = userEvent.setup();
     mount();
-    await user.click(await screen.findByRole("tab", { name: "Flow settings" }));
+    await user.click(await screen.findByRole("group", { name: /^Trigger:/ }));
 
     await user.selectOptions(await screen.findByLabelText("Goal event"), "email.opened");
 

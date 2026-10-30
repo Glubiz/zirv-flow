@@ -78,10 +78,10 @@ function routes(extra: Record<string, Handler> = {}, enabled = true): Record<str
 
 async function openEnrollment(user: User, which: RegExp = /Open the enrollment/) {
   await screen.findByRole("group", { name: /^Wait: 1 day/ });
-  await user.click(screen.getByRole("tab", { name: "Enrollments" }));
-  const list = await screen.findByRole("dialog", { name: "Enrollments" });
+  await user.click(screen.getByRole("link", { name: "Results" }));
+  const list = await screen.findByRole("region", { name: "Enrollments" });
   await user.click(await within(list).findByRole("button", { name: which }));
-  return screen.findByRole("dialog", { name: "One enrollment" });
+  return screen.findByRole("region", { name: "One enrollment" });
 }
 
 describe("explaining a trace in the inspector", () => {
@@ -167,9 +167,9 @@ describe("explaining a trace after switching enrollments", () => {
     await within(sheet).findByText(/Asking the assistant to explain this trace/);
 
     await user.click(within(sheet).getByRole("button", { name: "Back to all" }));
-    const list = await screen.findByRole("dialog", { name: "Enrollments" });
+    const list = await screen.findByRole("region", { name: "Enrollments" });
     await user.click(await within(list).findByRole("button", { name: /waiting, version 2/ }));
-    const next = await screen.findByRole("dialog", { name: "One enrollment" });
+    const next = await screen.findByRole("region", { name: "One enrollment" });
     await within(next).findByRole("list", { name: "Decisions on the trace of this enrollment" });
     await act(async () => {
       open();

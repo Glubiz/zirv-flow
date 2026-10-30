@@ -174,13 +174,7 @@ database must be idempotent: a crash can run a job again. A workspace is limited
 to `worker.max_running_per_workspace` running jobs when that is set, so one busy
 workspace cannot take every worker.
 
-The worker runs on pools of its own, so HTTP traffic and running jobs cannot
-starve a heartbeat: it opens up to `(2 + ingest.drain_shards) * worker.concurrency + 1`
-connections (41 at the defaults, `(2 + 8) * 4 + 1`) (one pool for claims, job transactions and the transactions a handler such as
-`ingest.drain` commits on its own, one per drain shard, one for heartbeats), in addition to
-`database.max_connections`. The `LISTEN` connection and the scheduler's leader
-lock each take one connection from `database.max_connections`, as does all HTTP
-and admin work, so keep it above a few.
+For pool sizes and the deployment connection budget, see [connection arithmetic](sizing.md#connection-arithmetic).
 
 On `SIGTERM` or Ctrl-C a worker stops claiming and has 30 seconds to finish
 running jobs; any still running are left to lease expiry. The

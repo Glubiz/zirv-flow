@@ -83,7 +83,7 @@ the `worker` or `scheduler` role has no HTTP listener yet, so give it
 Pass an optional TOML file with `zirv-flow --config <path>`, or set
 `ZIRV_FLOW_CONFIG`. Environment overrides use the case-insensitive form
 `ZIRV_FLOW_<SECTION>__<KEY>` and take precedence over the file, for example
-`ZIRV_FLOW_DATABASE__MAX_CONNECTIONS=20`.
+`ZIRV_FLOW_DATABASE__MAX_CONNECTIONS=20`. See [sizing and PostgreSQL tuning](docs/operations/sizing.md) for capacity, pool budgets and maintenance.
 
 | Key | Type | Default | Rule |
 |-----|------|---------|------|

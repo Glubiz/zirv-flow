@@ -10,8 +10,8 @@ import { renderRoute } from "./renderFeature";
 
 export type User = ReturnType<typeof userEvent.setup>;
 
-export function mountEditor() {
-  return renderRoute(`/w/ws1/flows/${FLOW_ID}`, "/w/:ws/flows/:id", <FlowPage />);
+export function mountEditor(search = "") {
+  return renderRoute(`/w/ws1/flows/${FLOW_ID}${search}`, "/w/:ws/flows/:id", <FlowPage />);
 }
 
 /** The bodies of the saves so far, oldest first. */
@@ -32,8 +32,8 @@ export function lastGraph(calls: Call[]): SavedGraph | null {
   return last?.graph ?? null;
 }
 
-/** Clicks the step with this accessible name and returns the sheet that opens. */
-export async function openSheetOf(user: User, name: RegExp | string) {
+/** Clicks the step with this accessible name and returns the docked inspector. */
+export async function openInspectorOf(user: User, name: RegExp | string) {
   await user.click(await screen.findByRole("group", { name }));
-  return screen.findByRole("dialog");
+  return screen.findByRole("region", { name: "Step inspector" });
 }
