@@ -30,7 +30,7 @@ function publishRoute(real: Handler): Record<string, Handler> {
 
 /** Starts a publish that hangs, and closes its dialog. */
 async function hangingPublish(user: User) {
-  await user.click(await screen.findByRole("button", { name: "Publish…" }));
+  await user.click(await screen.findByRole("button", { name: /^Review and publish/ }));
   const dialog = await screen.findByRole("dialog");
   await user.click(await within(dialog).findByRole("button", { name: "Publish version 1" }));
   await within(dialog).findByRole("button", { name: "Publishing…" });
@@ -77,11 +77,11 @@ describe("lifecycle actions and a publish in flight", () => {
     await user.click(within(dialog).getByRole("button", { name: "Archive flow" }));
     // Cancel closes the dialog while the archive is still on its way.
     await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
-    expect(screen.getByRole("button", { name: "Publish…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /^Review and publish/ })).toBeDisabled();
 
-    await user.click(screen.getByRole("tab", { name: "Versions" }));
-    const publish = await within(await screen.findByRole("tabpanel")).findByRole("button", { name: "Publish…" });
-    expect(publish).toHaveAttribute("aria-disabled", "true");
+    await user.click(screen.getByRole("button", { name: "Versions" }));
+    const publish = await within(await screen.findByRole("region", { name: "Versions" })).findByRole("button", { name: /^Review and publish/ });
+    expect(publish).toBeDisabled();
     await user.click(publish);
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(calls.filter((call) => call.method === "POST" && call.path.endsWith("/publish"))).toHaveLength(0);
@@ -106,7 +106,7 @@ describe("lifecycle actions and a publish in flight", () => {
     });
     const user = userEvent.setup();
     mount();
-    await user.click(await screen.findByRole("button", { name: "Publish…" }));
+    await user.click(await screen.findByRole("button", { name: /^Review and publish/ }));
     const dialog = await screen.findByRole("dialog");
     await user.click(await within(dialog).findByRole("button", { name: "Publish version 1" }));
     await waitFor(() => expect(loads).toBe(2));
@@ -162,8 +162,8 @@ describe("the empty Versions view while a publish runs", () => {
     mount();
     await hangingPublish(user);
 
-    await user.click(screen.getByRole("tab", { name: "Versions" }));
-    const panel = await screen.findByRole("tabpanel");
+    await user.click(screen.getByRole("button", { name: "Versions" }));
+    const panel = await screen.findByRole("region", { name: "Versions" });
     const button = await within(panel).findByRole("button", { name: "Publishing…" });
     expect(button).toHaveAttribute("aria-disabled", "true");
     await user.click(button);

@@ -27,6 +27,11 @@ export function stubReactFlow() {
   }
   vi.stubGlobal("ResizeObserver", ResizeObserverStub);
   vi.stubGlobal("DOMMatrixReadOnly", DOMMatrixReadOnlyStub);
+  vi.stubGlobal("matchMedia", vi.fn().mockImplementation((media: string) => ({
+    matches: false, media, onchange: null,
+    addListener: vi.fn(), removeListener: vi.fn(),
+    addEventListener: vi.fn(), removeEventListener: vi.fn(), dispatchEvent: vi.fn(),
+  })));
   Object.defineProperties(HTMLElement.prototype, {
     offsetHeight: {
       configurable: true,

@@ -28,13 +28,13 @@ export interface Draft {
 
 interface KindInfo {
   type: NodeType;
-  /** The kind in the add-a-step menu and above the title of a node. */
+  /** The kind in the palette and above the title of a node. */
   label: string;
   /** What the kind does. */
   hint: string;
 }
 
-/** Every kind of step, in the order the add menu offers them. */
+/** Every kind of step offered in the palette. */
 export const KINDS: readonly KindInfo[] = [
   { type: "wait.duration", label: "Wait", hint: "Pause for a set time" },
   { type: "wait.until_time", label: "Wait until a time", hint: "Pause until a time of day or a date" },
@@ -152,6 +152,28 @@ export function addNode(graph: Graph, type: NodeType): { graph: Graph; id: strin
     graph.nodes.map((node) => node.id),
   );
   return { graph: { ...graph, nodes: [...graph.nodes, blankNode(type, id)] }, id };
+}
+
+/** Insert on the selected step's first output, keeping its continuation when the new step has one. */
+export function insertNode(graph: Graph, type: NodeType, after: string | null): { graph: Graph; id: string } {
+  const added = addNode(graph, type);
+  const node = added.graph.nodes.find((candidate) => candidate.id === added.id);
+  if (!node) return added;
+  const nextPort = portsOf(node)[0];
+  if (after === TRIGGER_ID) {
+    const entry = entryOf(graph);
+    added.graph = { ...added.graph, nodes: [node, ...graph.nodes] };
+    if (entry && nextPort) added.graph = wire(added.graph, node.id, nextPort, entry.id);
+  } else {
+    const source = graph.nodes.find((candidate) => candidate.id === after);
+    const port = source ? portsOf(source)[0] : undefined;
+    if (source && port) {
+      const continuation = edgeFrom(graph, source.id, port);
+      added.graph = wire(added.graph, source.id, port, node.id);
+      if (continuation && nextPort) added.graph = wire(added.graph, node.id, nextPort, continuation.to);
+    }
+  }
+  return added;
 }
 
 /** Wires `port` of `from` to `to`, replacing any earlier wire from that port. */

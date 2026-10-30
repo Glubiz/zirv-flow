@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from "react";
 
-import { client, unwrap, useResource, type components } from "../../api";
+import type { components, Resource } from "../../api";
 import { Button, EmptyState, formatAgo, formatDateTime, Panel, Pill, ResourceView } from "../../ui";
 import { useMembers } from "../members";
 import type { Catalog } from "../segments";
@@ -11,13 +11,15 @@ import { placeIssues } from "./issues";
 import { layout } from "./layout";
 import { TRIGGER_ID, type FlowDetail } from "./model";
 import type { Overlay } from "./overlay";
-import { StepSheet } from "./StepSheet";
+import { StepInspector } from "./StepInspector";
+import { useVersionCounts } from "./counts";
+import { SettingsView } from "./SettingsView";
 
 export type FlowVersion = components["schemas"]["FlowVersionBody"];
 
 interface VersionsViewProps {
   workspaceId: string;
-  flowId: string;
+  versions: Resource<FlowVersion[]>;
   /** The state and newest version of the flow, to say which version is live. */
   state: FlowDetail["state"];
   current: number | null;
@@ -34,7 +36,7 @@ interface VersionsViewProps {
 /** The published versions of a flow, newest first. */
 export function VersionsView({
   workspaceId,
-  flowId,
+  versions,
   state,
   current,
   canPublish,
@@ -43,10 +45,6 @@ export function VersionsView({
   onPublish,
   onView,
 }: VersionsViewProps) {
-  const versions = useResource(
-    () => unwrap(client.GET("/api/v1/workspaces/{ws}/flows/{id}/versions", { params: { path: { ws: workspaceId, id: flowId } } })),
-    [workspaceId, flowId, current],
-  );
   const members = useMembers(workspaceId);
   const emails = useMemo(
     () => new Map(members.status === "ready" ? members.data.map((member) => [member.user_id, member.email]) : []),
@@ -69,8 +67,8 @@ export function VersionsView({
             title="Not published yet"
             action={
               canPublish ? (
-                <Button variant="primary" aria-disabled={publishing || acting || undefined} onClick={onPublish}>
-                  {publishing ? "Publishing…" : "Publish…"}
+                <Button variant="primary" disabled={acting} aria-disabled={publishing || undefined} onClick={onPublish}>
+                  {publishing ? "Publishing…" : "Review and publish"}
                 </Button>
               ) : undefined
             }
@@ -124,6 +122,7 @@ interface VersionCanvasProps {
 /** One published version drawn on the editor's canvas, with nothing to change. */
 export function VersionCanvas({ workspaceId, flowId, version, names, catalog, assistantOn, onAssistantGone }: VersionCanvasProps) {
   const { graph, settings } = version;
+  const counts = useVersionCounts(workspaceId, flowId, version.version);
   const [selected, setSelected] = useState<string | null>(null);
   const [focusRequest, setFocusRequest] = useState<FocusRequest | null>(null);
   const [assistantOpen, setAssistantOpen] = useState(false);
@@ -169,67 +168,78 @@ export function VersionCanvas({ workspaceId, flowId, version, names, catalog, as
   }
 
   return (
-    <Canvas
-      graph={graph}
-      settings={settings}
-      names={names}
-      placed={none}
-      issueItems={[]}
-      checked={false}
-      checking={false}
-      editable={false}
-      selectedId={node ? node.id : null}
-      focusRequest={focusRequest}
-      canUndo={false}
-      overlay={citedOverlay}
-      assistant={assistantOn ? { open: assistantOpen, onToggle: toggleAssistant } : undefined}
-      onOpen={(id) => {
-        if (id !== TRIGGER_ID) setSelected(id);
-      }}
-      onClose={close}
-      onWire={() => undefined}
-      onAdd={() => undefined}
-      onUndo={() => undefined}
-      onDeleteRequest={() => undefined}
-      onPickIssue={() => undefined}
-    >
-      {assistantOn && assistantOpen ? (
-        <div className="fl-sheet" hidden={node !== undefined}>
-          <FlowAssistantSheet
-            workspaceId={workspaceId}
-            flowId={flowId}
-            version={version.version}
-            graph={graph}
-            revision={[graph]}
-            names={names}
-            onGone={onAssistantGone}
-            onReveal={reveal}
-            onCited={setCited}
-            onClose={toggleAssistant}
-          />
-        </div>
-      ) : null}
+    <div className="fl-workbench">
+      <Canvas
+        graph={graph}
+        settings={settings}
+        names={names}
+        placed={none}
+        issueItems={[]}
+        checked={false}
+        checking={false}
+        editable={false}
+        selectedId={selected}
+        focusRequest={focusRequest}
+        canUndo={false}
+        overlay={citedOverlay}
+        assistant={assistantOn ? { open: assistantOpen, onToggle: toggleAssistant } : undefined}
+        onOpen={setSelected}
+        onClose={close}
+        onWire={() => undefined}
+        onUndo={() => undefined}
+        onDeleteRequest={() => undefined}
+        onPickIssue={() => undefined}
+      >
+        {assistantOn && assistantOpen ? (
+          <div className="fl-sheet" hidden={node !== undefined}>
+            <FlowAssistantSheet
+              workspaceId={workspaceId}
+              flowId={flowId}
+              version={version.version}
+              graph={graph}
+              revision={[graph]}
+              names={names}
+              onGone={onAssistantGone}
+              onReveal={reveal}
+              onCited={setCited}
+              onClose={toggleAssistant}
+            />
+          </div>
+        ) : null}
+      </Canvas>
       {node ? (
-        <div className="fl-sheet">
-          <StepSheet
-            key={node.id}
+        <StepInspector
+          key={node.id}
+          workspaceId={workspaceId}
+          graph={graph}
+          node={node}
+          names={names}
+          steps={steps}
+          issues={[]}
+          catalog={catalog}
+          readOnly
+          counts={counts}
+          autoFocus
+          onClose={close}
+          onChange={() => undefined}
+          onRemovePort={() => undefined}
+          onWire={() => undefined}
+          onDelete={() => undefined}
+        />
+      ) : (
+        <section className="fl-inspector stack" aria-label="Flow settings">
+          <h2>Flow settings · version {version.version}</h2>
+          <SettingsView
             workspaceId={workspaceId}
-            graph={graph}
-            node={node}
-            names={names}
-            steps={steps}
-            issues={[]}
+            settings={settings}
             catalog={catalog}
             readOnly
-            autoFocus
-            onClose={close}
+            issues={none.bySection}
+            focus={null}
             onChange={() => undefined}
-            onRemovePort={() => undefined}
-            onWire={() => undefined}
-            onDelete={() => undefined}
           />
-        </div>
-      ) : null}
-    </Canvas>
+        </section>
+      )}
+    </div>
   );
 }

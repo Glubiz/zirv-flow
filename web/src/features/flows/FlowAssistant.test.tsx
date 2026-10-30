@@ -183,7 +183,7 @@ describe("the assistant in the flow editor", () => {
     mount();
     await screen.findByRole("group", { name: /^Wait: 1 day/ });
     await user.click(await screen.findByRole("group", { name: /^Wait: 1 day/ }));
-    const step = await screen.findByRole("dialog");
+    const step = await screen.findByRole("region", { name: "Step inspector" });
     const amount = within(step).getByLabelText("Amount");
     await user.clear(amount);
     await user.type(amount, "3");
@@ -318,7 +318,7 @@ describe("explaining a flow", () => {
     const user = userEvent.setup();
     mount();
     await screen.findByRole("group", { name: /^Wait: 1 day/ });
-    await user.click(screen.getByRole("tab", { name: "Versions" }));
+    await user.click(screen.getByRole("button", { name: "Versions" }));
     await user.click(await screen.findByRole("button", { name: "View version 1" }));
     await screen.findByText("Viewing version 1 · read-only");
 
@@ -346,7 +346,7 @@ function gate() {
 
 async function editWait(user: User, amount: string) {
   await user.click(await screen.findByRole("group", { name: /^Wait: / }));
-  const step = await screen.findByRole("dialog", { name: /^\d/ });
+  const step = await screen.findByRole("region", { name: "Step inspector" });
   const field = within(step).getByLabelText("Amount");
   await user.clear(field);
   await user.type(field, amount);
@@ -415,7 +415,9 @@ describe("accepting while the editor has unsaved work", () => {
 
     expect(await screen.findByText("Loading the draft…")).toBeInTheDocument();
     expect(document.querySelector(".fl-page")).toHaveAttribute("aria-busy", "true");
-    expect(screen.queryByRole("button", { name: "Add a step" })).not.toBeInTheDocument();
+    for (const button of within(screen.getByRole("complementary", { name: "Step palette" })).getAllByRole("button")) {
+      expect(button).toBeDisabled();
+    }
     expect(screen.queryByRole("button", { name: "Undo" })).not.toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Flow name" })).toBeDisabled();
 
@@ -426,7 +428,7 @@ describe("accepting while the editor has unsaved work", () => {
 
     expect(await screen.findByRole("group", { name: /^Wait: 1 hour/ })).toBeInTheDocument();
     expect(screen.queryByText("Loading the draft…")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Add a step" })).toBeInTheDocument();
+    expect(screen.getByRole("complementary", { name: "Step palette" })).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Flow name" })).toBeEnabled();
   });
 
@@ -446,7 +448,7 @@ describe("accepting while the editor has unsaved work", () => {
     const before = saves(calls).length;
 
     expect(screen.getByRole("button", { name: "Retry" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Publish…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /^Review and publish/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Archive…" })).toBeDisabled();
     expect(within(sheet).getByRole("button", { name: "Explain the draft" })).toBeDisabled();
     await user.click(screen.getByRole("button", { name: "Retry" }));

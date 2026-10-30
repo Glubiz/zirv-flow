@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState, type SyntheticEvent } from "react";
+import { useEffect, useRef, useState, type ReactNode, type SyntheticEvent } from "react";
 
 import { ApiError, client, describeError, unwrap, type ErrorSummary } from "../../api";
-import { Button, EmptyState, formatDateTime, InlineError, Pill, SelectField, Sheet, TextAreaField, TextField } from "../../ui";
+import { Button, EmptyState, formatDateTime, InlineError, Pill, SelectField, TextAreaField, TextField } from "../../ui";
 import { issueText } from "./issues";
 import type { FlowIssue, Graph } from "./model";
 import {
@@ -20,9 +20,9 @@ import {
   type UnitId,
 } from "./testMode";
 
-export const NOTHING_SENT = "Nothing is sent or changed: the walk runs on a virtual clock and writes nothing.";
+const NOTHING_SENT = "Nothing is sent or changed in the flow: the walk runs on a virtual clock. Only the request is audited.";
 
-interface PersonChoice {
+export interface PersonChoice {
   id: string;
   label: string;
 }
@@ -41,12 +41,12 @@ interface Props {
   /** The draft's settings are not saved. The walk takes the goal and exit settings from the saved draft, as the request has no field for them. */
   settingsUnsaved: boolean;
   onResult: (result: TestResult | null) => void;
-  onClose: () => void;
+  children: ReactNode;
   announce: (text: string) => void;
 }
 
-/** The right-hand sheet of test mode: who is walked, the script, the path and what the walk captured. */
-export function TestSheet(props: Props) {
+/** Test controls, the canvas path and its timeline share one virtual walk. */
+export function TestView(props: Props) {
   const { workspaceId, flowId, describeStep, portName } = props;
   const [who, setWho] = useState<"person" | "snapshot">(props.canSeePeople ? "person" : "snapshot");
   const [person, setPerson] = useState<PersonChoice | null>(null);
@@ -61,7 +61,7 @@ export function TestSheet(props: Props) {
   /** The issues that stopped the walk: the draft is not valid. */
   const [invalid, setInvalid] = useState<ApiError | null>(null);
   const inFlight = useRef(false);
-  /** Bumped when the run starts over or the sheet goes, so a late answer is dropped. */
+  /** Bumped when the run starts over or the view goes, so a late answer is dropped. */
   const run = useRef(0);
 
   useEffect(() => {
@@ -171,119 +171,129 @@ export function TestSheet(props: Props) {
   }
 
   return (
-    <Sheet title={result ? "Test run" : "Set up a test run"} eyebrow="Test mode · the draft" closeLabel="Close" onClose={props.onClose}>
-      <p className="muted">{NOTHING_SENT}</p>
-      {props.settingsUnsaved ? (
-        <p className="muted">Your settings changes aren&apos;t saved yet. This test uses the saved trigger, goal and exit settings.</p>
-      ) : null}
-      <div className="fl-sheet-section">
-        {result === null ? (
-          <>
-            <fieldset className="fl-fieldset">
-              <legend className="strong">Who walks the flow</legend>
-              <label className="fl-radio">
-                <input
-                  type="radio"
-                  name="test-who"
-                  checked={who === "person"}
-                  disabled={!props.canSeePeople}
-                  onChange={() => setWho("person")}
-                />
-                <span>A real person</span>
-              </label>
-              {!props.canSeePeople ? (
-                <p className="faint">Walking a real person needs the personal data permission.</p>
-              ) : null}
-              <label className="fl-radio">
-                <input type="radio" name="test-who" checked={who === "snapshot"} onChange={() => setWho("snapshot")} />
-                <span>A made-up person, from an editable snapshot</span>
-              </label>
-            </fieldset>
-            {who === "person" ? (
-              <PersonPicker workspaceId={workspaceId} chosen={person} onChoose={setPerson} />
-            ) : (
-              <TextAreaField
-                label="Snapshot"
-                mono
-                rows={7}
-                spellCheck={false}
-                hint='JSON with "traits", "lists", "segments", "events" and "capped_events". Leave {} for a person with nothing yet.'
-                value={snapshotText}
-                onChange={(event) => setSnapshotText(event.target.value)}
-              />
-            )}
-            <TextField
-              label="Start time (UTC)"
-              type="datetime-local"
-              hint="Leave empty to start now."
-              value={startText}
-              onChange={(event) => setStartText(event.target.value)}
-            />
-            <div>
-              <Button variant="primary" aria-disabled={busy || undefined} onClick={() => void walk([])}>
-                {busy ? "Walking…" : "Start the test"}
-              </Button>
-            </div>
-            {invalidNote}
-          </>
-        ) : (
-          <>
-            <div className="row">
-              <span className="strong">
-                {result.person_id ? "A real person" : "A made-up person"} · from {formatDateTime(result.start_at)}
-              </span>
-              <Button aria-disabled={busy || undefined} onClick={startOver}>
-                Start over
-              </Button>
-            </div>
-            <div className="row" role="group" aria-label="Script">
-              <Button
-                variant="primary"
-                aria-disabled={busy || undefined}
-                aria-expanded={form === "advance"}
-                onClick={() => setForm(form === "advance" ? null : "advance")}
-              >
-                Advance the clock…
-              </Button>
-              <Button aria-disabled={busy || undefined} aria-expanded={form === "event"} onClick={() => setForm(form === "event" ? null : "event")}>
-                Send an event…
-              </Button>
-            </div>
-            {form === "advance" ? (
-              <AdvanceForm
-                busy={busy}
-                clock={result.final_state.clock}
-                onSubmit={async (to) => {
-                  if (await walk([...script, { advance_to: to }])) setForm(null);
-                }}
-              />
-            ) : null}
-            {form === "event" ? (
-              <EventForm
-                busy={busy}
-                clock={result.final_state.clock}
-                onSubmit={async (event) => {
-                  if (await walk([...script, { inject: event }])) setForm(null);
-                }}
-              />
-            ) : null}
-            {invalidNote}
-          </>
-        )}
-        {problem ? <InlineError title={problem} /> : null}
-        {failure ? <InlineError {...failure} /> : null}
-        {busy ? (
-          <p className="muted" role="status">
-            Walking the flow
-          </p>
+    <div className="fl-workbench fl-test-view" role="region" aria-label={result ? "Test run" : "Set up a test run"}>
+      <aside className="fl-test-controls stack" aria-label="Test controls">
+        <h2>Test with a person</h2>
+        <p className="muted">{NOTHING_SENT}</p>
+        <p className="faint">Test runs never count in Results.</p>
+        {props.settingsUnsaved ? (
+          <p className="muted">Your settings changes aren&apos;t saved yet. This test uses the saved trigger, goal and exit settings.</p>
         ) : null}
-      </div>
-      {result ? <Outcome result={result} script={script} describeStep={describeStep} portName={portName} /> : null}
-    </Sheet>
+        <div className="fl-sheet-section">
+          {result === null ? (
+            <>
+              <fieldset className="fl-fieldset">
+                <legend className="strong">Who walks the flow</legend>
+                <label className="fl-radio">
+                  <input
+                    type="radio"
+                    name="test-who"
+                    checked={who === "person"}
+                    disabled={!props.canSeePeople}
+                    onChange={() => setWho("person")}
+                  />
+                  <span>A real person</span>
+                </label>
+                {!props.canSeePeople ? (
+                  <p className="faint">Walking a real person needs the personal data permission.</p>
+                ) : null}
+                <label className="fl-radio">
+                  <input type="radio" name="test-who" checked={who === "snapshot"} onChange={() => setWho("snapshot")} />
+                  <span>A made-up person, from an editable snapshot</span>
+                </label>
+              </fieldset>
+              {who === "person" ? (
+                <PersonPicker workspaceId={workspaceId} chosen={person} onChoose={setPerson} />
+              ) : (
+                <TextAreaField
+                  label="Snapshot"
+                  mono
+                  rows={7}
+                  spellCheck={false}
+                  hint='JSON with "traits", "lists", "segments", "events" and "capped_events". Leave {} for a person with nothing yet.'
+                  value={snapshotText}
+                  onChange={(event) => setSnapshotText(event.target.value)}
+                />
+              )}
+              <TextField
+                label="Start time (UTC)"
+                type="datetime-local"
+                hint="Leave empty to start now."
+                value={startText}
+                onChange={(event) => setStartText(event.target.value)}
+              />
+              <div>
+                <Button variant="primary" aria-disabled={busy || undefined} onClick={() => void walk([])}>
+                  {busy ? "Walking…" : "Start the test"}
+                </Button>
+              </div>
+              {invalidNote}
+            </>
+          ) : (
+            <>
+              <div className="row">
+                <span className="strong">
+                  {result.person_id ? "A real person" : "A made-up person"} · from {formatDateTime(result.start_at)}
+                </span>
+                <Button aria-disabled={busy || undefined} onClick={startOver}>
+                  Start over
+                </Button>
+              </div>
+              <div className="row" role="group" aria-label="Script">
+                <Button
+                  variant="primary"
+                  aria-disabled={busy || undefined}
+                  aria-expanded={form === "advance"}
+                  onClick={() => setForm(form === "advance" ? null : "advance")}
+                >
+                  Advance the clock…
+                </Button>
+                <Button aria-disabled={busy || undefined} aria-expanded={form === "event"} onClick={() => setForm(form === "event" ? null : "event")}>
+                  Send an event…
+                </Button>
+              </div>
+              {form === "advance" ? (
+                <AdvanceForm
+                  busy={busy}
+                  clock={result.final_state.clock}
+                  onSubmit={async (to) => {
+                    if (await walk([...script, { advance_to: to }])) setForm(null);
+                  }}
+                />
+              ) : null}
+              {form === "event" ? (
+                <EventForm
+                  busy={busy}
+                  clock={result.final_state.clock}
+                  onSubmit={async (event) => {
+                    if (await walk([...script, { inject: event }])) setForm(null);
+                  }}
+                />
+              ) : null}
+              {invalidNote}
+            </>
+          )}
+          {problem ? <InlineError title={problem} /> : null}
+          {failure ? <InlineError {...failure} /> : null}
+          {busy ? (
+            <p className="muted" role="status">
+              Walking the flow
+            </p>
+          ) : null}
+        </div>
+      </aside>
+      {props.children}
+      <aside className="fl-test-timeline stack" aria-label="Test timeline">
+        <h2>What happened, step by step</h2>
+        {result ? <Outcome result={result} script={script} describeStep={describeStep} portName={portName} /> : (
+          <EmptyState title="No test run yet">Choose a person or snapshot and start the test to see their path.</EmptyState>
+        )}
+      </aside>
+    </div>
   );
 }
 
-function PersonPicker({
+export function PersonPicker({
   workspaceId,
   chosen,
   onChoose,
@@ -353,7 +363,7 @@ function PersonPicker({
       ) : null}
       {chosen ? (
         <p>
-          Walking <span className="strong">{chosen.label}</span>
+          Selected <span className="strong">{chosen.label}</span>
         </p>
       ) : null}
     </form>

@@ -29,7 +29,6 @@ function Icon({ size = 14, children }: IconProps) {
 export type IconName =
   | NodeType
   | "trigger"
-  | "plus"
   | "fit"
   | "zoom-in"
   | "zoom-out"
@@ -126,12 +125,6 @@ export function FlowIcon({ name, size }: { name: IconName; size?: number }) {
         <Icon size={size}>
           <path d="M6 2.5H3v11h3" />
           <path d="M9 5l3 3-3 3M12 8H6" />
-        </Icon>
-      );
-    case "plus":
-      return (
-        <Icon size={size}>
-          <path d="M8 3v10M3 8h10" />
         </Icon>
       );
     case "fit":

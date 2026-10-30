@@ -11,17 +11,20 @@ interface FlowAccess {
   canAdmin: boolean;
   /** Walk a real person in a test: needs Edit and the personal data grant. */
   canTestWithPerson: boolean;
+  /** Look people up by an identifier: the personal data grant. */
+  canViewPii: boolean;
 }
 
 export function useFlowAccess(workspaceId: string): FlowAccess {
   const access = useWorkspaceAccess(workspaceId);
-  if (access.status === "loading") return { ready: false, canWrite: false, canPublish: false, canAdmin: false, canTestWithPerson: false };
-  if (access.status === "error") return { ready: true, canWrite: false, canPublish: false, canAdmin: false, canTestWithPerson: false };
+  if (access.status === "loading") return { ready: false, canWrite: false, canPublish: false, canAdmin: false, canTestWithPerson: false, canViewPii: false };
+  if (access.status === "error") return { ready: true, canWrite: false, canPublish: false, canAdmin: false, canTestWithPerson: false, canViewPii: false };
   return {
     ready: true,
     canWrite: access.data.canEdit,
     canPublish: access.data.canPublish,
     canAdmin: access.data.canAdmin,
     canTestWithPerson: access.data.canEdit && access.data.canViewPii,
+    canViewPii: access.data.canViewPii,
   };
 }

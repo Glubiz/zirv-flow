@@ -11,7 +11,7 @@ beforeEach(() => {
   stubReactFlow();
 });
 
-const ACTIONS = ["Publish…", "Pause", "Resume", "Archive…"];
+const ACTIONS = ["Review and publish (0)", "Pause", "Resume", "Archive…"];
 
 function after(state: string, version: number | null = 2) {
   return () => json(flowDetail({ state, current_version: version }));
@@ -39,30 +39,31 @@ describe("lifecycle actions are for admins", () => {
     const view = mount();
     await screen.findByRole("group", { name: /^Wait: 1 day/ });
     expect(screen.getByRole("button", { name: "Pause" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "Publish…" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /^Review and publish/ })).toBeEnabled();
     view.unmount();
 
     mockApi(flowRoutes({ role: "editor", flow: { state: "published", current_version: 2 } }));
     mount();
     await screen.findByRole("group", { name: /^Wait: 1 day/ });
-    expect(screen.getByRole("button", { name: "Test" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Publish…" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Test" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Review and publish/ })).not.toBeInTheDocument();
   });
 
   it("offers a viewer no write control at all", async () => {
     mockApi(flowRoutes({ role: "reader", flow: { state: "published", current_version: 2 } }));
     mount();
     await screen.findByRole("group", { name: /^Wait: 1 day/ });
-    for (const name of ["Test", "Add a step", "Undo", ...ACTIONS]) {
+    expect(screen.queryByRole("complementary", { name: "Step palette" })).not.toBeInTheDocument();
+    for (const name of ["Start the test", "Undo", ...ACTIONS]) {
       expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
     }
   });
 
   it("offers only the actions the state allows", async () => {
     const expected: Record<string, string[]> = {
-      draft: ["Publish…", "Archive…"],
-      published: ["Publish…", "Pause", "Archive…"],
-      paused: ["Publish…", "Resume", "Archive…"],
+      draft: ["Review and publish (0)", "Archive…"],
+      published: ["Review and publish (0)", "Pause", "Archive…"],
+      paused: ["Review and publish (0)", "Resume", "Archive…"],
       archived: [],
     };
     for (const [state, names] of Object.entries(expected)) {
@@ -70,7 +71,7 @@ describe("lifecycle actions are for admins", () => {
       const view = mount();
       await screen.findByRole("group", { name: /^Wait: 1 day/ });
       for (const name of ACTIONS) {
-        if (names.includes(name)) expect(screen.getByRole("button", { name })).toBeEnabled();
+        if (names.includes(name)) expect(await screen.findByRole("button", { name })).toBeEnabled();
         else expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
       }
       view.unmount();
@@ -163,8 +164,8 @@ describe("archive", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     expect(await screen.findByText("Archived")).toBeInTheDocument();
     expect(screen.getByText(/This flow is archived/)).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Publish…" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Add a step" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Review and publish/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("complementary", { name: "Step palette" })).not.toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: "Flow name" })).not.toBeInTheDocument();
     expect(posted(calls, "archive")).toHaveLength(1);
   });
@@ -183,7 +184,7 @@ describe("announcements and notices", () => {
     const spoken: string[] = [];
     const watch = new MutationObserver(() => spoken.push(polite.textContent));
     watch.observe(polite, { childList: true, characterData: true, subtree: true });
-    await user.click(screen.getByRole("tab", { name: "Versions" }));
+    await user.click(screen.getByRole("button", { name: "Versions" }));
 
     await user.click(await screen.findByRole("button", { name: "View version 1" }));
     await screen.findByRole("button", { name: "All versions" });
@@ -219,7 +220,7 @@ describe("announcements and notices", () => {
 
     await user.click(await screen.findByRole("button", { name: "Pause" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("the pause failed");
-    await user.click(screen.getByRole("button", { name: "Publish…" }));
+    await user.click(screen.getByRole("button", { name: /^Review and publish/ }));
     await user.click(await within(await screen.findByRole("dialog")).findByRole("button", { name: /^Publish version/ }));
 
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());

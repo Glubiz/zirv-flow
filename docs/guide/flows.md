@@ -7,9 +7,18 @@ for a first newsletter; use this page to choose settings and operate a flow.
 ## Drafts and access
 
 Open **Flows** at `/w/:ws/flows`. **New flow** asks for a name and **Starts when**.
-The flow opens at `/w/:ws/flows/:id`, with **Canvas**, **Flow settings**, **Versions**
-and **Enrollments** views. Changes save to the draft. Wait for **Saved**; if a
-save fails, use **Retry** before publishing.
+The flow opens at `/w/:ws/flows/:id` in **Build**. Switch to **Test** or **Results**
+in the header; the address keeps the view as `?view=test` or `?view=results`.
+**Versions** in the header opens the published versions, each read-only.
+Changes save to the draft. Wait for **Saved**; if a save fails, use **Retry**
+before publishing. A live flow shows **Draft with changes** when its graph or
+settings differ from its current published version.
+
+Build has a step palette, the canvas, and a docked inspector. Select a step to
+edit its fields without covering the canvas. Select the trigger, or close the
+step inspector, to see **Flow settings**. **This step's results** shows counts
+for the published version; a new draft step has no published results yet.
+**Show counts from version** adds the version's counts to the canvas.
 
 An editor can create and edit drafts and use **Test**. A publisher can also
 publish, pause, resume, archive, retry or skip failed steps, and end enrollments.
@@ -82,7 +91,14 @@ counts as in flight.
 
 ## Connecting steps
 
-In **Canvas**, choose **Add a step**, then open a step to edit its settings.
+In **Build**, filter the step palette and click a kind, or focus it and press
+Enter. The palette groups steps into **Timing**, **Logic** and **Actions**.
+With a step selected, the new step is inserted on its first output, named in
+the palette, and keeps the continuation when it has an output of its own.
+Selecting the trigger inserts before the first step. With nothing selected,
+or after a step with no output, the new step starts disconnected. Inserting an
+Exit ends that path; reconnect any steps left behind before publishing.
+The new step opens in the docked inspector.
 Under **Where it goes next**, choose a target for each output. A single-path
 step has **Next step**. The trigger leads to the one step with no incoming
 connection. Every output needs a connection, and every step must be reachable.
@@ -258,15 +274,16 @@ An empty snapshot `{}` is enough for a simple send-to-exit path.
 
 The walk uses a virtual clock. Use **Advance the clock…** to pass a wait and
 **Send an event…** to inject an event into this test. Read the highlighted path,
-branch results and captured effects. Use **Start over** for another scenario
-and **Exit test** to return to editing. Save settings first: the canvas graph
+branch results and captured effects in the timeline on the right. The controls
+stay on the left; untaken branches are dimmed on the canvas. Use **Start over**
+for another scenario and **Build** to return to editing. Save settings first: the canvas graph
 can be tested unsaved, but the walk reads goal and exit settings from the saved
 draft.
 
 It does not send email, render templates, call webhooks or sync destinations.
 It does not evaluate send gates. Trait and list changes affect only the test's
 snapshot. It creates no enrollment, job, event or decision record; the request
-does write an audit entry. It walks one person directly and does not prove
+does write an audit entry. Test runs never count in **Results**. It walks one person directly and does not prove
 trigger enrollment or re-entry behavior. Segment membership changes are not
 scripted, so segment goals and segment-driven exits are listed as not simulated.
 
@@ -280,7 +297,10 @@ the live send gates and SMTP capture for your synthetic enrollment.
 
 ## Publishing and running versions
 
-Choose **Publish…**. The review checks the saved draft and shows the next
+Choose **Review and publish**, which shows the issue count and is disabled
+while validation reports blocking issues. Problems appear on their nodes;
+use the canvas issue list to open the affected field or settings section.
+The review checks the saved draft and shows the next
 version, entry estimate, older enrollments and input warnings. Resolve errors,
 then choose **Publish version** with the displayed number. A segment entry
 estimate is available when current members will be enrolled; it is not a
@@ -288,7 +308,7 @@ promise of that many sends.
 
 New enrollments use the newly published version. Existing enrollments keep the
 version they entered until they finish. Editing or publishing does not migrate
-them. In **Enrollments**, select an older version to review its remaining
+them. In **Results**, select an older version under **Counts for** to review its remaining
 people; a publisher can choose **End their enrollments** after confirmation.
 Ending them does not enroll them again, and re-entry rules still apply.
 
@@ -300,12 +320,20 @@ when the send worker handles a message.
 **Fix:** inspect their version and decide whether to let it finish or end those
 enrollments. Publish before relying on the fix for new entries.
 
-## Inspector and traces
+## Results and traces
 
-Open **Enrollments**, choose **Counts for**, and use **Show enrollments**.
-Filter by **State**, **Version** or **Step**, then open one enrollment. The
-inspector shows the path on that enrollment's graph, the executed steps, and a
+Open **Results** and choose **Counts for**. Totals show step runs, waiting
+enrollments, messages sent and goal conversions for that version. The step
+table shows reached (step runs), waiting, failed step runs, skipped messages
+and delivery outcomes. A retried step counts again: reached is not a count of
+unique people. These are cumulative counts computed when opened, without a
+date range or daily chart. A failed count request shows an error, not zeros.
+
+Below the table, filter **Enrollments** by **State**, **Version** or **Step**,
+then open one enrollment. Its panel shows the path on that enrollment's graph, the executed steps, and a
 **Trace** tree. Read the decision's action, outcome and reason together.
+The person lookup links to that person's **Messages** view to investigate sends
+and skipped messages even when you have not selected an enrollment.
 
 The tree uses labels such as **A person was considered for a flow**
 (`flow.enroll`), **A branch chose a path** (`flow.branch`), **A flow step ran**
@@ -331,7 +359,7 @@ went out. **Fix:** check each message outcome; a skipped send can continue to Ex
 
 ## Retry and skip a failed step
 
-Open a failed enrollment in **Enrollments** and read its failing step and trace.
+Open a failed enrollment under **Results → Enrollments** and read its failing step and trace.
 Correct the cause first. A publisher can choose **Retry** (the button also names
 the failed step) to run it again, or **Skip it…**, then **Skip the step**, to
 continue without running it. These actions are recorded on the enrollment trace.

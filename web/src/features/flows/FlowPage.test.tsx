@@ -59,7 +59,7 @@ describe("flow editor canvas", () => {
     expect(screen.getByLabelText(/^Yes output of /)).toBeInTheDocument();
     expect(screen.getByLabelText(/^No output of /)).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Welcome series" })).toBeInTheDocument();
-    expect(screen.getByRole("tablist", { name: "Flow views" })).toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: "Flow views" })).toBeInTheDocument();
   });
 
   it("labels the outputs of an event wait and a random split", async () => {

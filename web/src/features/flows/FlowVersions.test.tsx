@@ -27,8 +27,8 @@ function olderGraph() {
 
 async function openVersions(user: ReturnType<typeof userEvent.setup>) {
   await screen.findByRole("group", { name: /^Wait: 1 day/ });
-  await user.click(screen.getByRole("tab", { name: "Versions" }));
-  return screen.findByRole("tabpanel");
+  await user.click(screen.getByRole("button", { name: "Versions" }));
+  return screen.findByRole("region", { name: "Versions" });
 }
 
 describe("versions list", () => {
@@ -41,14 +41,14 @@ describe("versions list", () => {
     expect(await screen.findByText("Loading the versions")).toBeInTheDocument();
   });
 
-  it("says a flow is not published yet, and offers Publish… to an admin only", async () => {
+  it("says a flow is not published yet, and offers Review and publish to an admin only", async () => {
     mockApi({ ...flowRoutes(), [VERSIONS]: () => json([]) });
     const user = userEvent.setup();
     const view = mount();
     const panel = await openVersions(user);
 
     expect(await within(panel).findByText("Not published yet")).toBeInTheDocument();
-    expect(within(panel).getByRole("button", { name: "Publish…" })).toBeInTheDocument();
+    expect(within(panel).getByRole("button", { name: /^Review and publish/ })).toBeInTheDocument();
     view.unmount();
 
     mockApi({ ...flowRoutes({ role: "editor" }), [VERSIONS]: () => json([]) });
@@ -56,7 +56,7 @@ describe("versions list", () => {
     const memberPanel = await openVersions(user);
 
     expect(await within(memberPanel).findByText("Not published yet")).toBeInTheDocument();
-    expect(within(memberPanel).queryByRole("button", { name: "Publish…" })).not.toBeInTheDocument();
+    expect(within(memberPanel).queryByRole("button", { name: /^Review and publish/ })).not.toBeInTheDocument();
   });
 
   it("shows an error with a way to try again", async () => {
@@ -116,7 +116,7 @@ describe("a version on the canvas", () => {
     expect(await screen.findByText("Viewing version 1 · read-only")).toBeInTheDocument();
     expect(await screen.findByRole("group", { name: /^Wait: 2 days/ })).toBeInTheDocument();
     expect(screen.queryByRole("group", { name: /^Wait: 1 day/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Add a step" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("complementary", { name: "Step palette" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Undo" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Fit to screen" })).toBeInTheDocument();
   });
@@ -129,7 +129,7 @@ describe("a version on the canvas", () => {
     });
     mount();
     await openVersions(user);
-    await screen.findByRole("tabpanel");
+    await screen.findByRole("region", { name: "Versions" });
     const polite = document.querySelector('[aria-live="polite"]')!;
     expect(polite).toBeEmptyDOMElement();
 
@@ -140,13 +140,13 @@ describe("a version on the canvas", () => {
     await waitFor(() => expect(polite).toHaveTextContent("Viewing version 1, read-only."));
   });
 
-  it("opens a step in a sheet that cannot change anything", async () => {
+  it("opens a step in an inspector that cannot change anything", async () => {
     const user = userEvent.setup();
     await viewVersionOne(user);
 
     await user.click(await screen.findByRole("group", { name: /^Wait: 2 days/ }));
 
-    const sheet = await screen.findByRole("dialog");
+    const sheet = await screen.findByRole("region", { name: "Step inspector" });
     expect(within(sheet).getByLabelText("Amount")).toBeDisabled();
     expect(within(sheet).queryByRole("button", { name: "Delete step…" })).not.toBeInTheDocument();
   });
@@ -160,7 +160,7 @@ describe("a version on the canvas", () => {
 
     expect(await screen.findByRole("group", { name: /^Wait: 1 day/ })).toBeInTheDocument();
     expect(screen.queryByText(/Viewing version [0-9]+ · read-only/)).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Add a step" })).toBeInTheDocument();
+    expect(screen.getByRole("complementary", { name: "Step palette" })).toBeInTheDocument();
   });
 
   it("goes back to the list of versions", async () => {

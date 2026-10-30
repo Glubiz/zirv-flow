@@ -18,7 +18,7 @@ import {
 } from "@xyflow/react";
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
 
-import { MenuButton, reasonLabel } from "../../ui";
+import { reasonLabel } from "../../ui";
 import { wordsFor, triggerWords, type Names } from "./describe";
 import { FlowIcon, type IconName } from "./icons";
 import { issueText, type PlacedIssues } from "./issues";
@@ -27,14 +27,12 @@ import { COUNT_GAP, COUNT_ROW, MARK_ROW, overlayExtra, TRIGGER_EDGE, type NodeMa
 import {
   connectionWire,
   entryOf,
-  KINDS,
   kindLabel,
   portLabel,
   portsOf,
   TRIGGER_ID,
   type FlowIssue,
   type Graph,
-  type NodeType,
   type Settings,
 } from "./model";
 
@@ -46,6 +44,7 @@ interface StepData extends Record<string, unknown> {
   mono: boolean;
   ports: { id: string; label: string; name: string }[];
   issueCount: number;
+  problem: string | null;
   selected: boolean;
   editable: boolean;
   /** The numbers this step has on a path, in order; empty when it is not on one. */
@@ -125,6 +124,7 @@ const Step = memo(function Step({ data }: NodeProps<StepNode>) {
           {data.mark.text}
         </span>
       ) : null}
+      {data.problem ? <div className="fl-node-problem" title={data.problem}>{data.problem}</div> : null}
       {data.counts ? (
         <div className="fl-counts" style={{ "--count-row": `${COUNT_ROW}px`, "--count-gap": `${COUNT_GAP}px` } as CSSProperties}>
           {countBadges(data.counts).map((badge) => (
@@ -161,6 +161,15 @@ const Step = memo(function Step({ data }: NodeProps<StepNode>) {
 
 const nodeTypes = { step: Step };
 
+/** The issues of a step and of the connections leaving it. */
+function issuesOn(placed: PlacedIssues, graph: Graph, id: string): FlowIssue[] {
+  return [...(placed.byNode.get(id) ?? []), ...graph.edges.flatMap((edge) => (edge.from === id ? placed.byEdge.get(edge.id) ?? [] : []))];
+}
+
+function motionDuration() {
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 200;
+}
+
 export interface IssueItem {
   key: string;
   /** Where the issue is, in words: the step, the connection or the settings section. */
@@ -194,7 +203,6 @@ interface CanvasProps {
   onOpen: (id: string) => void;
   onClose: () => void;
   onWire: (from: string, port: string, to: string) => void;
-  onAdd: (type: NodeType) => void;
   onUndo: () => void;
   onDeleteRequest: (id: string) => void;
   onPickIssue: (item: IssueItem) => void;
@@ -240,32 +248,20 @@ function Tool({
 function Rail({
   editable,
   canUndo,
-  onAdd,
   onUndo,
   assistant,
 }: {
   editable: boolean;
   canUndo: boolean;
-  onAdd: (type: NodeType) => void;
   onUndo: () => void;
   assistant: CanvasProps["assistant"];
 }) {
   const flow = useReactFlow();
   return (
     <div className="fl-rail" role="toolbar" aria-label="Canvas tools">
-      {editable ? (
-        <MenuButton
-          label="Add a step"
-          buttonClassName="fl-tool"
-          buttonContent={<FlowIcon name="plus" size={18} />}
-          heading="Add a step"
-          placement="beside"
-          entries={KINDS.map((kind) => ({ key: kind.type, label: kind.label, onSelect: () => onAdd(kind.type) }))}
-        />
-      ) : null}
-      <Tool label="Fit to screen" icon="fit" onClick={() => void flow.fitView({ duration: 200, maxZoom: 1, padding: 0.2 })} />
-      <Tool label="Zoom in" icon="zoom-in" onClick={() => void flow.zoomIn({ duration: 200 })} />
-      <Tool label="Zoom out" icon="zoom-out" onClick={() => void flow.zoomOut({ duration: 200 })} />
+      <Tool label="Fit to screen" icon="fit" onClick={() => void flow.fitView({ duration: motionDuration(), maxZoom: 1, padding: 0.2 })} />
+      <Tool label="Zoom in" icon="zoom-in" onClick={() => void flow.zoomIn({ duration: motionDuration() })} />
+      <Tool label="Zoom out" icon="zoom-out" onClick={() => void flow.zoomOut({ duration: motionDuration() })} />
       {editable ? <Tool label="Undo" icon="undo" onClick={onUndo} disabled={!canUndo} /> : null}
       {assistant ? <Tool label="Assistant" icon="assistant" onClick={assistant.onToggle} pressed={assistant.open} /> : null}
     </div>
@@ -409,8 +405,11 @@ function Surface(props: CanvasProps) {
   const plan = useMemo(() => {
     const extra = new Map<string, number>();
     for (const [id, tally] of counts ?? []) extra.set(id, overlayExtra(tally, marks?.has(id) === true));
+    for (const id of [TRIGGER_ID, ...graph.nodes.map((node) => node.id)]) {
+      if (issuesOn(placed, graph, id).length > 0) extra.set(id, (extra.get(id) ?? 0) + 60);
+    }
     return layout(graph, extra);
-  }, [graph, counts, marks]);
+  }, [graph, counts, marks, placed]);
 
   const nodes = useMemo(() => {
     const byId = new Map(graph.nodes.map((node) => [node.id, node]));
@@ -421,7 +420,9 @@ function Surface(props: CanvasProps) {
       if (id !== TRIGGER_ID) step += 1;
       const spot = plan.placed.get(id);
       if (!spot) continue;
-      const count = placed.byNode.get(id)?.length ?? 0;
+      const problems = issuesOn(placed, graph, id);
+      const count = problems.length;
+      const problem = problems[0] ? issueText(problems[0], graph) : null;
       const extra = overlayFacts(overlay, id);
       const trailing = (count > 0 ? `, ${issuesLabel(count)}` : "") + extra.words;
       const base = {
@@ -448,6 +449,7 @@ function Surface(props: CanvasProps) {
             mono: false,
             ports: [{ id: "next", label: "Next", name: "Output of the trigger" }],
             issueCount: count,
+            problem,
             selected: base.selected,
             editable: false,
             ...extra.data,
@@ -473,6 +475,7 @@ function Surface(props: CanvasProps) {
             name: `${portLabel(node, port)} output of ${words.title}`,
           })),
           issueCount: count,
+          problem,
           selected: base.selected,
           editable,
           ...extra.data,
@@ -542,7 +545,7 @@ function Surface(props: CanvasProps) {
   /** Brings a step into view and marks it for a moment: a mouse click leaves no focus ring to show where it is. */
   const reveal = useCallback(
     (id: string) => {
-      void flow.fitView({ nodes: [{ id }], maxZoom: 1, padding: 0.5, duration: 200 });
+      void flow.fitView({ nodes: [{ id }], maxZoom: 1, padding: 0.5, duration: motionDuration() });
       clearTimeout(flashTimer.current);
       setFlash(id);
       flashTimer.current = setTimeout(() => setFlash(null), 2500);
@@ -637,7 +640,7 @@ function Surface(props: CanvasProps) {
   return (
     <>
       <div className="fl-tools">
-        <Rail editable={editable} canUndo={props.canUndo} onAdd={props.onAdd} onUndo={props.onUndo} assistant={props.assistant} />
+        <Rail editable={editable} canUndo={props.canUndo} onUndo={props.onUndo} assistant={props.assistant} />
         <IssuesButton
           items={props.issueItems}
           graph={graph}

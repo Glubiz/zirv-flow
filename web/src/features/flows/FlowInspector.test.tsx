@@ -118,14 +118,14 @@ function routes({ role = "writer", routes: extra = {}, state = "published" }: Op
 
 async function openInspector(user: ReturnType<typeof userEvent.setup>) {
   await screen.findByRole("group", { name: /^Wait: 1 day/ });
-  await user.click(screen.getByRole("tab", { name: "Enrollments" }));
-  return screen.findByRole("dialog", { name: "Enrollments" });
+  await user.click(screen.getByRole("link", { name: "Results" }));
+  return screen.findByRole("region", { name: "Enrollments" });
 }
 
 async function openFailed(user: ReturnType<typeof userEvent.setup>) {
   const list = await openInspector(user);
   await user.click(await within(list).findByRole("button", { name: /version 1/ }));
-  return screen.findByRole("dialog", { name: "One enrollment" });
+  return screen.findByRole("region", { name: "One enrollment" });
 }
 
 describe("the enrollment inspector", () => {
@@ -146,9 +146,8 @@ describe("the enrollment inspector", () => {
     expect(screen.queryByText(/Yes · \d/)).not.toBeInTheDocument();
     // The counts are also readable as text, which says what they count.
     const card = screen.getByRole("group", { name: "Counts and versions" });
-    await userEvent.click(within(card).getByText("Counts as a list"));
     const table = within(card).getByRole("table");
-    expect(within(table).getByRole("columnheader", { name: "Entered (step runs)" })).toBeInTheDocument();
+    expect(within(table).getByRole("columnheader", { name: "Reached (step runs)" })).toBeInTheDocument();
     expect(within(card).getByText(/a step that was retried counts again/)).toBeInTheDocument();
     expect(within(table).getByRole("row", { name: /Wait: 1 day 20 3 0/ })).toBeInTheDocument();
 
@@ -157,9 +156,9 @@ describe("the enrollment inspector", () => {
     await waitFor(() => expect(calls.some((call) => call.path === `${FLOW}/versions/1/counts`)).toBe(true));
     expect(await screen.findByRole("group", { name: /^Update a trait.*4 entered, 1 waiting, 3 failed/ })).toBeInTheDocument();
 
-    await user.click(within(card).getByRole("button", { name: "Hide" }));
+    await user.click(within(card).getByRole("button", { name: "Counts on canvas" }));
     expect(screen.queryByText("4 entered")).not.toBeInTheDocument();
-    expect(within(card).getByRole("button", { name: "Show counts" })).toBeInTheDocument();
+    expect(within(card).getByRole("button", { name: "Counts on canvas" })).toHaveAttribute("aria-pressed", "false");
   });
 
   it("lists enrollments in pages and filters them by state, version and step", async () => {
@@ -299,7 +298,7 @@ describe("the enrollment inspector", () => {
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Skip the failed step?" })).not.toBeInTheDocument());
   });
 
-  it("keeps the detail and the marks while it is read again after a skip, and keeps focus in the sheet", async () => {
+  it("keeps the detail and the marks while it is read again after a skip, and keeps focus in the panel", async () => {
     let reads = 0;
     let release: (() => void) | undefined;
     const gate = new Promise<void>((resolve) => {
@@ -442,11 +441,11 @@ describe("the enrollment inspector", () => {
     await user.click(within(await screen.findByRole("dialog", { name: /End everyone/ })).getByRole("button", { name: "End their enrollments" }));
     await screen.findByText("Everyone still in version 1 is being ended.");
 
-    const list = await screen.findByRole("dialog", { name: "Enrollments" });
+    const list = await screen.findByRole("region", { name: "Enrollments" });
     await user.click(await within(list).findByRole("button", { name: /version 1/ }));
-    const sheet = await screen.findByRole("dialog", { name: "One enrollment" });
+    const sheet = await screen.findByRole("region", { name: "One enrollment" });
 
-    // The Sheet's own autofocus holds: focus did not jump to Retry.
+    // The enrollment panel's autofocus holds: focus did not jump to Retry.
     await within(sheet).findByRole("button", { name: /^Retry/ });
     expect(sheet).toHaveFocus();
   });
@@ -498,8 +497,8 @@ describe("the enrollment inspector", () => {
     expect(sheet).toHaveFocus();
     await user.keyboard("{Escape}");
 
-    expect(await screen.findByRole("dialog", { name: "Enrollments" })).toBeInTheDocument();
-    expect(screen.queryByRole("dialog", { name: "One enrollment" })).not.toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: "Enrollments" })).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "One enrollment" })).not.toBeInTheDocument();
   });
 });
 
@@ -509,7 +508,7 @@ describe("the inspector's states", () => {
     const user = userEvent.setup();
     mount();
     await screen.findByRole("group", { name: /^Wait: 1 day/ });
-    await user.click(screen.getByRole("tab", { name: "Enrollments" }));
+    await user.click(screen.getByRole("link", { name: "Results" }));
 
     expect(await screen.findByText("No one can be in this flow yet")).toBeInTheDocument();
   });

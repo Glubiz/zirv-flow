@@ -76,6 +76,7 @@ export function flowRoutes({ role = "writer", flow, issues = [] }: Options = {})
       : actor(role)),
     ...catalogRoutes(),
     [`GET ${WS}/flows/${FLOW_ID}`]: () => json(current),
+    [`GET ${WS}/flows/${FLOW_ID}/versions`]: () => json([]),
     [`PATCH ${WS}/flows/${FLOW_ID}`]: async (request) => {
       current = { ...current, ...((await request.json()) as Record<string, unknown>) };
       return json(current);

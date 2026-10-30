@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { FLOW_ID, flowRoutes, WS } from "../../test/flowsApi";
-import { mountEditor as mount, openSheetOf, saves } from "../../test/flowsEditor";
+import { mountEditor as mount, openInspectorOf, saves } from "../../test/flowsEditor";
 import { json, mockApi, problem, type Call } from "../../test/mockApi";
 import { stubReactFlow } from "../../test/reactFlowStubs";
 
@@ -92,15 +92,15 @@ function afterADay() {
 
 async function openTest(user: ReturnType<typeof userEvent.setup>) {
   await screen.findByRole("group", { name: /^Wait: 1 day/ });
-  await user.click(screen.getByRole("button", { name: "Test" }));
-  return screen.findByRole("dialog", { name: "Set up a test run" });
+  await user.click(screen.getByRole("link", { name: "Test" }));
+  return screen.findByRole("region", { name: "Set up a test run" });
 }
 
 async function startMadeUp(user: ReturnType<typeof userEvent.setup>) {
   const sheet = await openTest(user);
   await user.click(within(sheet).getByRole("radio", { name: /made-up person/ }));
   await user.click(within(sheet).getByRole("button", { name: "Start the test" }));
-  return screen.findByRole("dialog", { name: "Test run" });
+  return screen.findByRole("region", { name: "Test run" });
 }
 
 /** Waits for the editor's own check of the draft, so what comes after it is test mode's doing. Returns where test mode starts. */
@@ -143,6 +143,8 @@ describe("test mode", () => {
     expect(wake).toHaveTextContent("Woke on time");
     expect(branch).toHaveTextContent("Took No");
     expect(branch).toHaveTextContent('{"value":"Copenhagen"}');
+    expect(steps.closest(".fl-test-timeline")).toBe(screen.getByRole("complementary", { name: "Test timeline" }));
+    expect(screen.getByRole("complementary", { name: "Test controls" })).toHaveTextContent("Test runs never count in Results.");
     expect(hook).toHaveTextContent("Webhook");
     expect(end).toHaveTextContent("Completed the flow");
 
@@ -189,7 +191,7 @@ describe("test mode", () => {
     await settled(calls);
 
     // An edit the editor could not save: it waits, unsaved, in the draft.
-    const step = await openSheetOf(user, /^Wait: 1 day/);
+    const step = await openInspectorOf(user, /^Wait: 1 day/);
     const amount = within(step).getByLabelText("Amount");
     await user.clear(amount);
     await user.type(amount, "2");
@@ -198,11 +200,11 @@ describe("test mode", () => {
 
     // From the Test click to the end of the walk, only the walk itself may start.
     const from = calls.length;
-    await user.click(screen.getByRole("button", { name: "Test" }));
-    const sheet = await screen.findByRole("dialog", { name: "Set up a test run" });
+    await user.click(screen.getByRole("link", { name: "Test" }));
+    const sheet = await screen.findByRole("region", { name: "Set up a test run" });
     await user.click(within(sheet).getByRole("radio", { name: /made-up person/ }));
     await user.click(within(sheet).getByRole("button", { name: "Start the test" }));
-    await screen.findByRole("dialog", { name: "Test run" });
+    await screen.findByRole("region", { name: "Test run" });
 
     // The walk carried the edited draft, though nothing had been saved when it was asked.
     const walks = calls.filter((call) => call.method === "POST" && call.path === `${WS}/flows/${FLOW_ID}/test`);
@@ -225,16 +227,16 @@ describe("test mode", () => {
     // Clean settings: no note.
     let sheet = await openTest(user);
     expect(within(sheet).queryByText(/settings changes aren.t saved/)).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Exit test" }));
+    await user.click(screen.getByRole("link", { name: "Build" }));
 
-    // A settings edit whose save failed stays unsaved, and the sheet says the test uses the saved settings.
-    await user.click(screen.getByRole("tab", { name: "Flow settings" }));
+    // A settings edit whose save failed stays unsaved, and the Test view says the test uses the saved settings.
+    await user.click(screen.getByRole("group", { name: /^Trigger:/ }));
     await user.selectOptions(await screen.findByLabelText("When a person"), "exited");
     expect(await screen.findByText(/Couldn.t save/, undefined, { timeout: 3000 })).toBeInTheDocument();
-    await user.click(screen.getByRole("tab", { name: "Canvas" }));
+    await user.click(screen.getByRole("link", { name: "Build" }));
     await screen.findByRole("group", { name: /^Wait: 1 day/ });
-    await user.click(screen.getByRole("button", { name: "Test" }));
-    sheet = await screen.findByRole("dialog", { name: "Set up a test run" });
+    await user.click(screen.getByRole("link", { name: "Test" }));
+    sheet = await screen.findByRole("region", { name: "Set up a test run" });
     expect(within(sheet).getByText(/settings changes aren.t saved yet/)).toBeInTheDocument();
     expect(within(sheet).queryByRole("alert")).not.toBeInTheDocument();
   });
@@ -267,7 +269,7 @@ describe("test mode", () => {
     expect(note).toHaveTextContent("The draft has issues that stop a test. Fix them, then start again.");
     expect(within(note).getByRole("list", { name: "Issues that stop the test" })).toHaveTextContent("Wait: 1 day");
     expect(sheet).not.toHaveTextContent("Unprocessable Entity");
-    // It sits right after the button, not at the bottom of the sheet.
+    // It sits right after the button, not at the bottom of the controls.
     const start = within(sheet).getByRole("button", { name: "Start the test" });
     expect(start.parentElement?.nextElementSibling).toBe(note);
   });
@@ -326,7 +328,7 @@ describe("test mode", () => {
     await user.click(await within(sheet).findByRole("button", { name: "Use dana@example.com" }));
     await user.click(within(sheet).getByRole("button", { name: "Start the test" }));
 
-    await screen.findByRole("dialog", { name: "Test run" });
+    await screen.findByRole("region", { name: "Test run" });
     const walks = calls.filter((call) => call.path === `${WS}/flows/${FLOW_ID}/test`);
     expect(walks[0]?.body).toEqual({ graph: expect.anything() as unknown, person_id: "88888888-0000-4000-8000-000000000001", script: [] });
     expect(nonGet(calls, from)).toEqual([`POST ${WS}/people/search`, `POST ${WS}/flows/${FLOW_ID}/test`]);
@@ -377,32 +379,30 @@ describe("test mode", () => {
     expect(calls.filter((call) => call.path.endsWith("/test"))).toHaveLength(0);
   });
 
-  it("is reached and left from the keyboard, and focus goes back to the Test button", async () => {
+  it("is reached and left with keyboard navigation without trapping focus", async () => {
     mockApi({ ...flowRoutes(), [TEST]: () => json(walk()) });
     const user = userEvent.setup();
     mount();
-    await screen.findByRole("group", { name: /^Wait: 1 day/ });
-    const toggle = screen.getByRole("button", { name: "Test" });
-    toggle.focus();
+    const link = await screen.findByRole("link", { name: "Test" });
+    link.focus();
     await user.keyboard("{Enter}");
 
-    const sheet = await screen.findByRole("dialog", { name: "Set up a test run" });
-    expect(sheet).toHaveFocus();
-    expect(screen.getByRole("button", { name: "Exit test" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByText("Test mode")).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: "Set up a test run" })).toBeInTheDocument();
+    expect(link).toHaveFocus();
+    expect(link).toHaveAttribute("aria-current", "page");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await user.keyboard("{ArrowLeft}");
 
-    await user.keyboard("{Escape}");
-
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Set up a test run" })).not.toBeInTheDocument());
-    expect(screen.queryByText("Test mode")).not.toBeInTheDocument();
-    await waitFor(() => expect(screen.getByRole("button", { name: "Test" })).toHaveFocus());
+    expect(screen.queryByRole("region", { name: "Set up a test run" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Build" })).toHaveFocus();
+    expect(screen.getByRole("link", { name: "Build" })).toHaveAttribute("aria-current", "page");
   });
 
-  it("is not offered to someone who can only look", async () => {
-    mockApi(flowRoutes({ role: "reader" }));
-    mount();
-    await screen.findByRole("group", { name: /^Wait: 1 day/ });
-
-    expect(screen.queryByRole("button", { name: "Test" })).not.toBeInTheDocument();
+  it("offers no test controls to someone who can only look, including a direct URL", async () => {
+    const calls = mockApi(flowRoutes({ role: "reader" }));
+    mount("?view=test");
+    expect(await screen.findByText("Testing needs an editor")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Start the test" })).not.toBeInTheDocument();
+    expect(calls.some((call) => call.path.endsWith("/test"))).toBe(false);
   });
 });
