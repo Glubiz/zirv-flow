@@ -10,6 +10,7 @@
 # Env:   RENDER_BENCH_CONSTRAINT  how the process is constrained, such as a CPU pin
 #        RENDER_BENCH_MACHINE     the machine, if the detected CPU name is not enough
 #        RENDER_BENCH_COUNT / RENDER_BENCH_WARMUP   override the 5000 / 200
+#        RENDER_BENCH_BIN        use this prebuilt executable, skipping the build (M8/CI)
 # Writes OUT_DIR/render.json (the raw report) and prints a summary line per run.
 
 set -euo pipefail
@@ -23,10 +24,14 @@ machine="${RENDER_BENCH_MACHINE:-${cpu:-unknown} ($(uname -s))}"
 commit="$(git -C "$root" rev-parse --short=8 HEAD)"
 git -C "$root" diff --quiet HEAD -- . ':!docs' ':!scripts' || commit="$commit+dirty"
 
-cargo build --release -p zirv-flow-renderbench --manifest-path "$root/Cargo.toml"
-target="${CARGO_TARGET_DIR:-$root/target}"
-bin="$target/release/renderbench"
-[ -x "$bin" ] || bin="$bin.exe"
+bin="${RENDER_BENCH_BIN:-}"
+if [ -z "$bin" ]; then
+  cargo build --release -p zirv-flow-renderbench --manifest-path "$root/Cargo.toml"
+  target="${CARGO_TARGET_DIR:-$root/target}"
+  bin="$target/release/renderbench"
+  [ -x "$bin" ] || bin="$bin.exe"
+fi
+[ -x "$bin" ] || { echo "no prebuilt renderbench at $bin" >&2; exit 1; }
 
 "$bin" \
   --warmup "${RENDER_BENCH_WARMUP:-200}" --count "${RENDER_BENCH_COUNT:-5000}" \

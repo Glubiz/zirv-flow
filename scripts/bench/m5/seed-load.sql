@@ -2,7 +2,11 @@
 -- run, set ('spread' or 'burst'), lo, hi (the n range, inclusive). One transaction, so a failed
 -- chunk leaves nothing behind. Each table gets rows of the template's exact shape:
 -- jsonb_populate_record copies every column of the sample row and only the per-row values change.
+-- M8 includes this inside the staging/checkpoint transaction.
+\if :{?seed_outer_transaction}
+\else
 BEGIN;
+\endif
 
 INSERT INTO enrollments
 SELECT (jsonb_populate_record(NULL::enrollments, t.row || jsonb_build_object(
@@ -45,4 +49,7 @@ SELECT (jsonb_populate_record(NULL::decision_records, t.row || jsonb_build_objec
 FROM m5bench.rows r JOIN m5bench.tmpl t ON t.set = r.set AND t.kind = 'decision'
 WHERE r.run = :run AND r.set = :'set' AND r.n BETWEEN :lo AND :hi;
 
+\if :{?seed_outer_transaction}
+\else
 COMMIT;
+\endif

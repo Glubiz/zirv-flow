@@ -11,6 +11,7 @@
 #   2. neither variable nor feature name appears on a non-comment line of a shipped-build input:
 #      any workflow but ci.yaml, a Dockerfile, a compose file, cargo config (.cargo/config.toml,
 #      .cargo/config), or a script those invoke (any scripts/... path, whatever its suffix);
+#      benchmark script/data/tool paths are forbidden in the same inputs;
 #   3. no Cargo.toml lists `browser-test` among its default features;
 #   4. the server binary of a default build has no `/__test/` route in it.
 #
@@ -41,7 +42,7 @@ scan() {
     done < <(grep -v '^[[:space:]]*#' "${queue[$i]}" | grep -oE '[A-Za-z0-9_./-]+\.sh|scripts/[A-Za-z0-9_./-]+' || true)
   done
   [ "${#queue[@]}" -eq 0 ] && return 0
-  grep -nHE 'ZIRV_FLOW_BENCH_BUILD|bench-no-decisions|ZIRV_FLOW_BROWSER_TEST_BUILD|browser-test' -- "${queue[@]}" \
+  grep -nHE 'ZIRV_FLOW_BENCH_BUILD|bench-no-decisions|ZIRV_FLOW_BROWSER_TEST_BUILD|browser-test|scripts/bench/|docs/benchmarks/|tools/(loadgen|renderbench)' -- "${queue[@]}" \
     | grep -Ev '^[^:]+:[0-9]+:[[:space:]]*#' || true
 }
 
@@ -67,7 +68,7 @@ default_hits() {
 run_gate() {
   hits="$(scan "$1")"
   if [ -n "$hits" ]; then
-    echo "test-feature gate: the build variables and feature names of bench-no-decisions and browser-test must not appear in a shipped build input:" >&2
+    echo "test-feature gate: test features and benchmark files must not appear in a shipped build input:" >&2
     printf '%s\n' "$hits" | sed 's/^/  - /' >&2
     return 1
   fi
@@ -140,6 +141,9 @@ run_self_test() {
   expect "clean tree passes (ci.yaml may use both)" 0 true
   expect "a comment is not a use" 0 'echo "# never set ZIRV_FLOW_BENCH_BUILD" >>Dockerfile'
   expect "the variable in a Dockerfile fails" 1 'echo "ENV ZIRV_FLOW_BENCH_BUILD=1" >>Dockerfile'
+  expect "an m8 bench file in a Dockerfile fails" 1 'echo "COPY scripts/bench/m8/run.sh /bench" >>Dockerfile'
+  expect "an m8 compose file in CD fails" 1 'echo "  - run: docker compose -f scripts/bench/m8/compose.m8.yaml up" >>.github/workflows/cd.yaml'
+  expect "a bench data file in a CD script fails" 1 'echo "cat docs/benchmarks/data/m8/ingest.json" >>scripts/build.sh'
   expect "the variable in a CD-invoked script fails" 1 'echo "ZIRV_FLOW_BENCH_BUILD=1 cargo build" >>scripts/build.sh'
   expect "the variable in a nested script fails" 1 \
     'echo "bash scripts/inner.sh" >>scripts/build.sh; echo "export ZIRV_FLOW_BENCH_BUILD=1" >scripts/inner.sh'

@@ -115,6 +115,9 @@ jobs:
       - name: Benchmark feature gate self-test
         run: bash scripts/check-bench-features.sh --self-test
 
+      - name: M8 benchmark driver self-test
+        run: bash scripts/bench/m8/run.sh --self-test
+
       # Catches canonical context drift before it ships: a CLAUDE.md/AGENTS.md
       # regenerated from an older `.zirv/context/` than what is on this branch
       # silently injects the canonical layer twice every session. `--check`
