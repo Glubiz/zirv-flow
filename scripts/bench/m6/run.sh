@@ -258,7 +258,7 @@ for f in "$out"/metrics-w*.txt; do metrics_args+=(--metrics "$f"); done
 "$SENDBENCH" report --arrivals "$out/arrivals.ndjson" --enrollments "$out/enrollments.csv" \
   "${metrics_args[@]}" --label "$label" --target 300 --tolerance "$tol" --expected "$people" \
   --offset-before-us "$offset_before" --offset-after-us "$offset_after" --uncertainty-us "$uncertainty" \
-  "${bucket_args[@]}" --queue "$out/queue.csv" --queue-misses "$(wc -l <"$out/queue.misses" 2>/dev/null || echo 0)" --docker-stats "$out/docker-stats.ndjson" \
+  "${bucket_args[@]}" --queue "$out/queue.csv" --queue-misses "$(awk 'END {print NR}' "$out/queue.misses" 2>/dev/null || echo 0)" --docker-stats "$out/docker-stats.ndjson" \
   "${cpu_args[@]}" --db-container "$pgname" --out "$out/report.json" | tee "$out/report.txt"
 # Whether the bucket (or the workers) was the limit: a queue stood in the steady window.
 echo "queue_in_window=$(jq -c .queue "$out/report.json") cpu_in_window=$(jq -c .cpu "$out/report.json")" >>"$out/variant.txt"

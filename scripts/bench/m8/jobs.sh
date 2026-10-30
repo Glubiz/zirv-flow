@@ -48,7 +48,7 @@ PY
   [ -n "$cid" ] && [[ "$cid" != *$'\n'* ]] || die 'expected the single M8 worker with its published metrics port'
   docker inspect --format '{{json .Config.Env}}' "$cid" | python3 -I -c '
 import json, sys
-env = dict(item.split("=", 1) for item in json.load(sys.stdin))
+env = dict(item.split("=", 1) for item in json.load(sys.stdin) if "=" in item)  # a bare NAME is an unset variable
 cap = env.get("ZIRV_FLOW_WORKER__MAX_RUNNING_PER_WORKSPACE")
 expected = None if sys.argv[2] == "unset" else sys.argv[2]
 if cap != expected or env["ZIRV_FLOW_WORKER__CONCURRENCY"] != sys.argv[3]:
