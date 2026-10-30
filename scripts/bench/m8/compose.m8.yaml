@@ -13,7 +13,7 @@ x-m8-db: &m8-db
 
 services:
   postgres:
-    image: postgres:16.15
+    image: ${M8_PG_IMAGE:?set by scripts/bench/m8/common.sh}
     cpuset: ${M8_PG_CPUSET:-8-15}
     mem_limit: ${M8_PG_MEMORY:-32g}
     shm_size: ${M8_PG_SHM:-8g}

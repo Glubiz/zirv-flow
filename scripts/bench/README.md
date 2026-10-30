@@ -427,6 +427,7 @@ one-shot key generator exits before measurement. Defaults, all overridable:
 | `M8_PG_MEMORY` / `M8_PG_SHM` | `32g` / `8g` | PostgreSQL memory cap / shared memory |
 | `M8_SERVE_MEMORY` | `8g` | Serve cap |
 | `M8_WORKER_MEMORY` / `M8_SCHEDULER_MEMORY` | `7g` / `1g` | Second app allocation's split caps |
+| `M8_PG_IMAGE` | `postgres:16.15` | PostgreSQL image; used by compose and the topology check |
 | `M8_SHARED_BUFFERS` | `8GB` | One quarter of the default 32 GiB PG budget |
 | `BENCH_IMAGE_TAG` | `0.190.0` | Pre-pulled versioned app image; no `latest` or build fallback |
 
@@ -510,10 +511,12 @@ seed to finish first; all three targets must be supplied together when selecting
 
 `all` and `smoke` note and skip only unregistered commands; a registered benchmark failure stops
 the suite. Bench setup may use the existing authenticated APIs; scale seeds do not. Each completed
-measurement writes `docs/benchmarks/data/m8/<bench>.json`, including the image version, actual
+measurement writes `docs/benchmarks/data/m8/<bench>.json` (`smoke` writes
+`docs/benchmarks/data/m8/smoke/<bench>.json`; a failed run writes `<bench>.failed.json` beside it
+and never replaces the last good file), including the image version, actual
 container images/cpusets/core counts/memory limits, host memory, Docker VM CPU/memory from
-`docker info` (null when unavailable), committed seed sizes, argument arrays, exit status, raw JSON
-results, the emulation label and all three limitations. Later runs replace that bench's summary;
+`docker info` (null when unavailable), the effective PostgreSQL settings, committed seed sizes, argument arrays, exit status, raw JSON
+results, the emulation label and all three limitations. Later good runs replace that bench's summary;
 raw runs remain in the state directory. No measured data files are fabricated by this change.
 
 To register an issue's measurement, replace its arm in `bench_command` in `m8/run.sh` with, for

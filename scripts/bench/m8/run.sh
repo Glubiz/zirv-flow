@@ -168,16 +168,21 @@ run_bench() {
 }
 
 run_all() {
-  local bench raw='' pool=1
+  local bench raw='' pool=1 reason issue ran=() skipped=()
   local cmd=()
   # Each benchmark runs in its own shell so a failed prerequisite cannot disable errexit.
   for bench in "${benches[@]}"; do
-    if bench_command "$bench"; then
+    if reason="$(bench_command "$bench" 2>&1)"; then
       bash "$m8_dir/run.sh" "$bench"
+      ran+=("$bench")
     else
+      issue=''
+      [[ "$reason" =~ \#[0-9]+ ]] && issue="${BASH_REMATCH[0]}"
       log "skipping unregistered $bench"
+      skipped+=("$bench${issue:+ ($issue)}")
     fi
   done
+  log "summary: ran: ${ran[*]:-none}; skipped (unregistered): ${skipped[*]:-none}"
 }
 
 main() {

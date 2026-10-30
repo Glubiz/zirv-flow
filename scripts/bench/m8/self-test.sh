@@ -17,6 +17,7 @@ case "$*" in
   'info --format {{.MemTotal}}') echo "${M8_TEST_MEMORY:-68719476736}" ;;
   *'df -Pk /var/lib/postgresql/data'*) df -Pk /var/lib/postgresql/data ;;
   *'ps -q postgres'*) echo m8-postgres ;;
+  *current_setting*) echo '{"postgres_settings":{"shared_buffers":"8GB","effective_cache_size":"16GB"}}' ;;
   *'psql '* ) cat >/dev/null; echo 0 ;;
   *) echo "unexpected docker invocation: $*" >&2; exit 99 ;;
 esac
@@ -52,7 +53,9 @@ for spec in 'M8_SERVE_CPUSET=8-11' 'M8_WORKER_CPUSET=8-11' 'M8_WORKER_CPUSET=0-3
 done
 expect_failure 'invalid cpuset' env M8_PG_CPUSET=15-8 bash "$here/run.sh" up
 expect_failure 'insufficient free disk' bash "$here/run.sh" seed people
-! grep -Eq 'psql.*-f /bench/' "$M8_TEST_CALLS"
+if grep -Eq 'psql.*-f /bench/' "$M8_TEST_CALLS"; then
+  echo 'self-test FAILED: seed refused on disk but still ran a /bench SQL file' >&2; exit 1
+fi
 
 # Pure helpers: happy cpusets, memory refusal and JSON provenance, with stubbed I/O.
 # shellcheck source=run.sh
@@ -74,6 +77,7 @@ out="$work/out"
 printf '{"committed":{"people":5000,"events":5000,"enrollments":3000}}\n' >"$M4_STATE/../seeds.json"
 printf '{"measured":true}\n' >"$raw/result.json"
 printf '{"service":"postgres","image":"postgres:16.15","cpuset":"8-15","memory_bytes":34359738368}\n' >"$work/topology"
+printf '{"postgres_settings":{"shared_buffers":"8GB","effective_cache_size":"16GB"}}\n' >>"$work/topology"
 invocation=(bash scripts/bench/m8/run.sh ingest)
 write_data ingest 0 "$raw" "$work/topology" loadgen 'argument with spaces'
 python3 -I - "$out/ingest.json" <<'PY'
@@ -81,7 +85,8 @@ import json, sys
 r = json.load(open(sys.argv[1]))
 assert r['label'] == 'reference-resource emulation, not a reference-hardware run'
 assert r['ruling'] == 'ef99d178' and r['reference_hardware_validation'] == 'outstanding'
-assert r['topology']['containers'][0]['cores'] == 8
+assert r['topology']['containers'][0]['cores'] == 8 and len(r['topology']['containers']) == 1
+assert r['topology']['postgres_settings']['shared_buffers'] == '8GB'
 assert r['topology']['docker_vm']['cpus'] == 32
 assert r['topology']['docker_vm']['memory_bytes'] == 68719476736
 assert 'memory_bytes' in r['topology']['host']
@@ -92,7 +97,10 @@ assert r['benchmark_command'] == ['loadgen', 'argument with spaces']
 assert r['results']['result.json']['measured'] and r['exit_code'] == 0
 PY
 write_data ingest 7 "$raw" "$work/topology" failing-tool
-python3 -I -c 'import json,sys; assert json.load(open(sys.argv[1]))["exit_code"] == 7' "$out/ingest.json"
+python3 -I -c 'import json,sys; assert json.load(open(sys.argv[1]))["exit_code"] == 7' "$out/ingest.failed.json"
+python3 -I -c 'import json,sys; assert json.load(open(sys.argv[1]))["exit_code"] == 0' "$out/ingest.json"
+(smoke=1; write_data ingest 0 "$raw" "$work/topology" smoke-tool)
+python3 -I -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["smoke"] and r["benchmark_command"] == ["smoke-tool"]' "$out/smoke/ingest.json"
 (
   docker() { return 1; }
   write_data ingest 0 "$raw" "$work/topology" no-info-tool

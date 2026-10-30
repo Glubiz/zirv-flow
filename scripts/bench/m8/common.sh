@@ -13,6 +13,7 @@ configure() {
   export M8_WORKER_CPUSET="${M8_WORKER_CPUSET:-4-7}"
   export M8_PG_MEMORY="${M8_PG_MEMORY:-32g}" M8_SERVE_MEMORY="${M8_SERVE_MEMORY:-8g}"
   export M8_WORKER_MEMORY="${M8_WORKER_MEMORY:-7g}" M8_SCHEDULER_MEMORY="${M8_SCHEDULER_MEMORY:-1g}"
+  export M8_PG_IMAGE="${M8_PG_IMAGE:-postgres:16.15}"
   export BENCH_IMAGE_TAG="${BENCH_IMAGE_TAG:-0.190.0}"
   [[ "$BENCH_IMAGE_TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][a-zA-Z0-9.-]+)?$ ]] || die 'BENCH_IMAGE_TAG must be a version, never latest'
   export M8_STATE="${M8_STATE:-$root/.zirv/work/m8}"
@@ -126,6 +127,7 @@ capture_topology() {
     [ -n "$cid" ] || die "no running $service; run up first"
     docker inspect --format '{"service":"{{index .Config.Labels "com.docker.compose.service"}}","image":"{{.Config.Image}}","image_id":"{{.Image}}","cpuset":"{{.HostConfig.CpusetCpus}}","memory_bytes":{{.HostConfig.Memory}},"shm_bytes":{{.HostConfig.ShmSize}}}' "$cid" >>"$dest"
   done
+  pg -At -c "SELECT json_build_object('postgres_settings', json_object_agg(name, current_setting(name))) FROM unnest(ARRAY['shared_buffers','effective_cache_size','maintenance_work_mem','max_wal_size','checkpoint_timeout']) name" >>"$dest"
   python3 -I - "$dest" "$(mem_bytes "$M8_PG_MEMORY")" "$(mem_bytes "$M8_SERVE_MEMORY")" \
     "$(mem_bytes "$M8_WORKER_MEMORY")" "$(mem_bytes "$M8_SCHEDULER_MEMORY")" <<'PY'
 import json, os, sys
@@ -134,7 +136,9 @@ expected = {'postgres': 'M8_PG_CPUSET', 'zirv-flow': 'M8_SERVE_CPUSET',
 memory = dict(zip(['postgres', 'zirv-flow', 'zirv-flow-worker', 'zirv-flow-scheduler'], map(int, sys.argv[2:])))
 for line in open(sys.argv[1]):
     row = json.loads(line)
-    image = 'postgres:16.15' if row['service'] == 'postgres' else 'ghcr.io/glubiz/zirv-flow:' + os.environ['BENCH_IMAGE_TAG']
+    if 'postgres_settings' in row:
+        continue
+    image = os.environ['M8_PG_IMAGE'] if row['service'] == 'postgres' else 'ghcr.io/glubiz/zirv-flow:' + os.environ['BENCH_IMAGE_TAG']
     if row['cpuset'] != os.environ[expected[row['service']]] or row['image'] != image:
         raise SystemExit(f"{row['service']} differs from requested image/cpuset; run up first")
     requested = memory[row['service']]
@@ -145,13 +149,16 @@ PY
 
 write_data() {
   local bench="$1" rc="$2" raw="$3" topology="$4"; shift 4
-  local vm
+  local vm target="$out${smoke:+/smoke}/$bench.json"
+  [ "$rc" = 0 ] || target="$out${smoke:+/smoke}/$bench.failed.json"
   vm="$(docker info --format '{{json .}}' 2>/dev/null || echo '{}')"
-  python3 -I - "$out/$bench.json" "$bench" "$rc" "$raw" "$topology" "$vm" "$label" "${smoke:-}" "${invocation[@]}" -- "$@" <<'PY'
+  python3 -I - "$target" "$bench" "$rc" "$raw" "$topology" "$vm" "$label" "${smoke:-}" "${invocation[@]}" -- "$@" <<'PY'
 import datetime, json, os, pathlib, platform, subprocess, sys
 path, bench, rc, raw, topology, vm, label, smoke, *args = sys.argv[1:]
 cut = args.index('--')
-containers = [json.loads(line) for line in pathlib.Path(topology).read_text().splitlines()]
+rows = [json.loads(line) for line in pathlib.Path(topology).read_text().splitlines()]
+containers = [row for row in rows if 'service' in row]
+postgres_settings = next((row['postgres_settings'] for row in rows if 'postgres_settings' in row), None)
 for row in containers:
     cpus = set()
     for part in row['cpuset'].split(','):
@@ -185,7 +192,7 @@ report = dict(benchmark=bench, label=label, ruling='ef99d178',
     measurement_scope='native host tool; Docker limits do not constrain renderbench' if bench == 'render' else 'Docker app stack',
     recorded_at=datetime.datetime.now(datetime.timezone.utc).isoformat(), smoke=bool(smoke),
     command_line=args[:cut], benchmark_command=args[cut+1:], exit_code=int(rc),
-    topology=dict(containers=containers, host=dict(os=platform.system(), logical_cpus=os.cpu_count(), memory_bytes=host_memory),
+    topology=dict(containers=containers, postgres_settings=postgres_settings, host=dict(os=platform.system(), logical_cpus=os.cpu_count(), memory_bytes=host_memory),
         docker_vm=dict(cpus=vm.get('NCPU'), memory_bytes=vm.get('MemTotal'), operating_system=vm.get('OperatingSystem'))),
     seeds=seeds, results=results)
 target = pathlib.Path(path)
