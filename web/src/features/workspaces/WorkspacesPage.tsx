@@ -21,7 +21,7 @@ export function WorkspacesPage() {
     <div className="page">
       <PageHeader
         title="Workspaces"
-        lede="Pick a workspace to see its members and API keys."
+        lede="Pick a workspace to open Home and continue your work."
         actions={newButton}
       />
       <Panel flush>
@@ -58,7 +58,7 @@ export function WorkspacesPage() {
                       <td className="mono">{workspace.slug}</td>
                       <td>{formatDate(workspace.created_at)}</td>
                       <td className="num">
-                        <Link to={`/w/${workspace.id}/members`} aria-label={`Open ${workspace.name}`}>
+                        <Link to={`/w/${workspace.id}`} aria-label={`Open ${workspace.name}`}>
                           Open
                         </Link>
                       </td>

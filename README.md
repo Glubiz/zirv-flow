@@ -221,6 +221,14 @@ so deep links work. An unknown `/api/...` path is still a JSON problem, never th
 The sign-in screen asks `GET /api/v1/session/methods` which of local and SSO sign-in
 are enabled.
 
+After sign-in, Home opens for the remembered workspace (or the first available
+one). The sidebar groups daily work into Audience, Data, Messaging and Insights;
+**Settings** holds workspace setup, sending, integrations, compliance and system
+pages. **Back to <workspace name>** returns from Settings to Home. Use the
+workspace switcher for **All workspaces**, or **Search** (Cmd/Ctrl+K) to jump to a
+page. The sidebar remembers whether it is folded, folds automatically in the
+flow editor, and opens from a menu button on narrow screens.
+
 The app is compiled into the binary. `cargo build` embeds `web/dist` when
 `web/dist/index.html` exists, and otherwise a small placeholder page from
 `crates/zirv-flow-api/web-placeholder/`, so a checkout without Node still builds.

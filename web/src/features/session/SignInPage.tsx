@@ -22,7 +22,7 @@ export function SignInPage() {
   const version = useResource(() => unwrap(client.GET("/api/v1/version")), []);
   const methodsResource = useResource(() => unwrap(client.GET("/api/v1/session/methods")), []);
 
-  const from = (location.state as FromState | null)?.from ?? "/w";
+  const from = (location.state as FromState | null)?.from ?? "/";
   const methods = methodsResource.status === "ready" ? methodsResource.data : BOTH_METHODS;
   const settled = methodsResource.status !== "loading";
 

@@ -14,7 +14,8 @@ c-1001,ada@example.test,pro
 c-1002,sam@example.test,basic
 ```
 
-1. In **Fields**, register a string field named `plan`. In **Sources**, add a
+1. In **Settings → Fields**, register a string field named `plan`. Choose
+   **Back to <workspace name>**, then in **Data → Sources**, add a
    file source with format `csv` and the file's URL. Complete **Test**, then
    **Streams**; the stream is `records`.
 2. In **Set up**, choose `customer_id` as the primary key and enable the stream.
@@ -676,8 +677,8 @@ referenced (409 `credential_archived`). Credentials a source or destination had 
 before this existed became credentials of kind `imported` when the database was migrated: they point
 at the same encrypted row, are never re-sealed by the migration, keep working, and are re-sealed as
 `workspace_credential` on their next rotation (which must give the same field names). OAuth access
-and refresh tokens stay per source, because they are runtime state. In the web UI, **Credentials**
-(in the workspace menu) lists, creates, edits, rotates, tests and archives them, and a source's
+and refresh tokens stay per source, because they are runtime state. In the web UI, **Settings → Credentials**
+lists, creates, edits, rotates, tests and archives them, and a source's
 credential field is a picker with **New credential**.
 
 ## Egress
@@ -864,7 +865,7 @@ a header or a response body.
 ## CSV import
 
 Load people from a CSV file in four steps: upload it, map its columns, check the mapping with
-a dry run, then run it. Open **Imports** (under People) in the web UI, or use the API under
+a dry run, then run it. Open **Imports** under **Data** in the web UI, or use the API under
 `/api/v1/workspaces/{ws}/imports`. An editor or `write` key can upload, map and dry-run; starting an import needs a publisher
 or `publish` key. Reading needs workspace access or a `read` key. Sessions send the CSRF token as for
 every other write.

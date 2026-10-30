@@ -17,6 +17,7 @@ interface MenuButtonProps {
   heading?: string;
   entries: MenuEntry[];
   emptyText?: string;
+  current?: boolean;
   /** Where the menu opens: under the button with its right edge on it (the default), or beside it, to its right, or under it with its left edge on it (`below-start`, for a trigger at the left edge). */
   placement?: "below-end" | "below-start" | "beside";
 }
@@ -28,6 +29,7 @@ export function MenuButton({
   heading,
   entries,
   emptyText,
+  current = false,
   placement = "below-end",
 }: MenuButtonProps) {
   const [open, setOpen] = useState(false);
@@ -106,6 +108,7 @@ export function MenuButton({
         type="button"
         className={buttonClassName}
         aria-label={label}
+        aria-current={current ? "page" : undefined}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={open ? menuId : undefined}

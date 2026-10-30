@@ -4,9 +4,9 @@ import { useSignedInUser } from "../session";
 export type Member = components["schemas"]["MemberBody"];
 export type MemberRole = "admin" | "publisher" | "editor" | "viewer";
 
-export function useMembers(workspaceId: string): Resource<Member[]> {
+export function useMembers(workspaceId: string | null): Resource<Member[]> {
   return useResource(
-    () => unwrap(client.GET("/api/v1/workspaces/{ws}/members", { params: { path: { ws: workspaceId } } })),
+    () => workspaceId === null ? Promise.resolve([]) : unwrap(client.GET("/api/v1/workspaces/{ws}/members", { params: { path: { ws: workspaceId } } })),
     [workspaceId],
   );
 }
@@ -38,7 +38,7 @@ export function accessFor(members: Member[], userId: string, isOwner: boolean): 
   return { role, isOwner, canEdit, canPublish, canAdmin, canViewPii: canAdmin || mine?.view_pii === true };
 }
 
-export function useWorkspaceAccess(workspaceId: string): Resource<WorkspaceAccess> {
+export function useWorkspaceAccess(workspaceId: string | null): Resource<WorkspaceAccess> {
   const user = useSignedInUser();
   const members = useMembers(workspaceId);
   if (members.status === "ready") {

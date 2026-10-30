@@ -526,53 +526,136 @@ select {
   color: var(--ink-2);
 }
 
-.header {
+.app-shell {
+  --sidebar-width: 240px;
+  display: grid;
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  min-height: 100dvh;
+}
+
+.app-shell-folded { --sidebar-width: 64px; }
+.app-shell > main { min-width: 0; }
+.mobile-bar { display: none; }
+
+.sidebar {
+  position: sticky;
+  top: 0;
+  height: 100dvh;
   background: var(--paper);
-  border-bottom: 1px solid var(--line);
+  border-right: 1px solid var(--line);
+  z-index: 30;
 }
 
-.header-inner {
-  max-width: 1320px;
-  margin: 0 auto;
-  padding: 10px 24px;
+.sidebar-content {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 12px;
+  height: 100%;
+  min-height: 0;
+  padding: 16px 12px 12px;
+  font-size: 14px;
+}
+
+.sidebar-brand {
+  display: flex;
   align-items: center;
-  gap: 12px 28px;
-}
-
-.nav {
-  display: flex;
-  flex-wrap: wrap;
+  justify-content: space-between;
   gap: 4px;
-  font-size: 15px;
-  font-weight: 500;
 }
 
-.nav a {
-  padding: 12px 14px;
-  border-radius: var(--radius-pill);
-  color: var(--ink-2);
+.sidebar-brand .brand-link { display: flex; align-items: center; min-height: 44px; }
+.sidebar-brand .brand { gap: 6px; }
+.sidebar-brand .brand-word { font-size: 19px; }
+.sidebar-brand .btn { padding: 0; min-width: 44px; border: 0; background: transparent; }
+.sidebar-content > .menu-wrap > .pill-button { width: 100%; border-radius: var(--radius-control); text-align: left; }
+.sidebar-content .workspace-name { min-width: 0; flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.sidebar-search { justify-content: space-between; }
+.sidebar-search kbd { font: 12px var(--mono); color: var(--ink-2); }
+
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+  padding: 4px;
+  margin: -4px;
+}
+
+.sidebar-group { display: flex; flex-direction: column; gap: 2px; }
+.sidebar-group-label { padding: 0 12px 4px; color: var(--ink-3); font-size: 12px; font-weight: 650; }
+.sidebar-link, .sidebar-group-button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  flex-shrink: 0;
+  cursor: pointer;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--ink);
   text-decoration: none;
+  text-align: left;
+  overflow-wrap: anywhere;
   transition: background-color var(--dur-hover) linear;
 }
+.sidebar-link svg { flex-shrink: 0; }
+.sidebar-link:hover, .sidebar-group-button:hover { background: var(--paper-3); color: var(--ink); }
+.sidebar-link[aria-current="page"], .sidebar-group-button[aria-current="page"] { background: var(--night); color: var(--night-ink); }
+.sidebar-link[aria-disabled="true"] { color: var(--ink-3); cursor: not-allowed; }
+.sidebar-bottom { display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--line); padding-top: 8px; }
+.sidebar-account .menu { top: auto; bottom: calc(100% + 8px); left: 0; right: auto; }
+.sidebar-rail { padding: 12px 8px; align-items: center; }
+.sidebar-rail .brand-word, .sidebar-rail .dot { display: none; }
+.sidebar-rail .workspace-name { text-align: center; }
+.sidebar-rail .sidebar-nav { overflow: visible; gap: 4px; }
+.sidebar-rail .sidebar-link, .sidebar-group-button, .sidebar-rail .btn, .sidebar-rail .pill-button { width: 44px; padding: 0; justify-content: center; }
+.sidebar-rail .sidebar-account .menu { left: calc(100% + 12px); bottom: 0; }
 
-.nav a:hover {
-  background: var(--paper-3);
-  color: var(--ink);
+.palette-results { list-style: none; padding: 4px; margin: 12px -4px 0; max-height: 50dvh; overflow-y: auto; }
+.palette-results [role="option"] { display: flex; justify-content: space-between; gap: 16px; padding: 10px 12px; min-height: 44px; border-radius: var(--radius-input); cursor: pointer; }
+.palette-results [aria-selected="true"] { background: var(--night); color: var(--night-ink); }
+.palette-results [aria-selected="true"] .muted { color: inherit; }
+
+.home-page { display: flex; flex-direction: column; gap: 20px; }
+.home-page .page-head { margin-bottom: 0; }
+.home-setup { padding: 18px 20px; border-radius: var(--radius-panel); background: var(--night); color: var(--night-ink); }
+.home-setup-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.home-setup h2 { font-size: 18px; }
+.home-setup progress { display: block; width: 100%; height: 6px; margin: 12px 0; accent-color: var(--cyan); border: 0; background: var(--night-hover); }
+.home-setup progress::-webkit-progress-bar { background: var(--night-hover); }
+.home-setup progress::-webkit-progress-value { background: var(--cyan); }
+.home-setup progress::-moz-progress-bar { background: var(--cyan); }
+.home-checklist { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 0 16px; list-style: none; margin: 0; padding: 0; }
+.home-checklist a { display: flex; align-items: center; gap: 10px; min-height: 44px; color: inherit; }
+.home-columns { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); align-items: start; gap: 20px; }
+.home-records, .settings-links { list-style: none; padding: 0; margin: 0; }
+.home-records li { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid var(--line); }
+.home-records a, .settings-links a { display: flex; align-items: center; min-height: 44px; padding: 8px 0; font-weight: 600; overflow-wrap: anywhere; }
+.home-all { display: inline-flex; align-items: center; min-height: 44px; }
+.settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 16px; }
+.settings-links li { border-top: 1px solid var(--line); }
+.settings-warning { display: block; color: var(--attention-text); font-size: 14px; padding-bottom: 8px; }
+
+@media (max-width: 1100px) {
+  .home-columns { grid-template-columns: minmax(0, 1fr); }
 }
 
-.nav a[aria-current="page"] {
-  background: var(--night);
-  color: var(--night-ink);
+@media (max-width: 899px) {
+  .app-shell { grid-template-columns: minmax(0, 1fr); }
+  .sidebar { display: none; }
+  .mobile-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 16px; background: var(--paper); border-bottom: 1px solid var(--line); }
+  .mobile-bar .btn { min-width: 44px; padding: 0; }
+  .sheet .sidebar-fold { display: none; }
 }
 
-.header-tools {
-  margin-left: auto;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
+.sheet-backdrop:has(.sidebar-content) { justify-content: flex-start; }
+.sheet-modal:has(.sidebar-content) { width: min(320px, 100vw); padding: 16px; border-width: 0 1px 0 0; }
+.sheet:has(.sidebar-content) .sheet-body { min-height: 0; }
+.sheet .sidebar-content { flex: 1; padding: 0; }
 
 .pill-button {
   height: 44px;
@@ -925,7 +1008,7 @@ select {
 }
 
 @media (forced-colors: active) {
-  .nav a[aria-current="page"] {
+  .sidebar-link[aria-current="page"], .sidebar-group-button[aria-current="page"], .palette-results [aria-selected="true"] {
     outline: 2px solid CanvasText;
   }
 }
@@ -937,12 +1020,6 @@ select {
 
 main:focus {
   outline: none;
-}
-
-.nav-disabled {
-  padding: 12px 14px;
-  color: var(--ink-3);
-  cursor: not-allowed;
 }
 
 .dialog-wide {
@@ -1553,25 +1630,22 @@ main:focus {
 }
 
 /* Flow editor */
-/*
- * The editor fills the window below the app header: while it is shown, the root is as tall as the window
- * and the page takes what the header leaves. The panel never gets less than 480px, so when the
- * header takes too much of a narrow or short window the root scrolls instead of squeezing the canvas away.
- * The sheet and the settings scroll inside themselves.
- */
-#root:has(.fl-page) {
-  display: flex;
-  flex-direction: column;
+/* Keep the canvas beside the rail, with its own scrolling on short windows. */
+.app-shell:has(.fl-page) {
   height: 100vh;
   height: 100dvh;
   overflow: auto;
 }
 
-#root:has(.fl-page) > main {
+.app-shell:has(.fl-page) > main {
   display: flex;
-  flex: 1;
   flex-direction: column;
   min-height: 0;
+  overflow: auto;
+}
+
+@media (max-width: 899px) {
+  .app-shell:has(.fl-page) { grid-template-rows: auto minmax(0, 1fr); }
 }
 
 .fl-page {

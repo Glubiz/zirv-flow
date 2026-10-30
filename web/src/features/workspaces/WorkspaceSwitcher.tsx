@@ -11,7 +11,7 @@ function Chevron() {
   );
 }
 
-export function WorkspaceSwitcher() {
+export function WorkspaceSwitcher({ compact = false }: { compact?: boolean }) {
   const list = useWorkspaces();
   const current = useCurrentWorkspace();
   const navigate = useNavigate();
@@ -32,24 +32,25 @@ export function WorkspaceSwitcher() {
     );
   }
 
-  const section = /^\/w\/[^/]+\/([^/]+)/.exec(location.pathname)?.[1] ?? "members";
+  const section = /^\/w\/[^/]+\/([^/]+)/.exec(location.pathname)?.[1] ?? "";
   const entries: MenuEntry[] = list.data.map((workspace) => ({
     key: workspace.id,
     label: workspace.name,
     checked: workspace.id === current?.id,
-    onSelect: () => void navigate(`/w/${workspace.id}/${section}`),
+    onSelect: () => void navigate(`/w/${workspace.id}${section ? `/${section}` : ""}`),
   }));
   entries.push({ key: "all", label: "All workspaces", onSelect: () => void navigate("/w") });
 
   return (
     <MenuButton
       label="Switch workspace"
+      placement={compact ? "beside" : "below-start"}
       buttonClassName="pill-button"
       buttonContent={
         <>
           <span className="dot" aria-hidden="true" />
-          {current?.name ?? "No workspace"}
-          <Chevron />
+          <span className="workspace-name">{compact ? (current?.name.slice(0, 1) ?? "W") : (current?.name ?? "No workspace")}</span>
+          {compact ? null : <Chevron />}
         </>
       }
       entries={entries}

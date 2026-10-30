@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
 import { PREVIEW_CSP_META } from "../src/ui/previewDocument";
-import { signIn } from "./support";
+import { openTemplates, signIn } from "./support";
 import { asLines, normaliseTracking, unifiedDiff } from "./tracking";
 
 const LOGO = resolve(import.meta.dirname, "fixtures/logo.png");
@@ -32,7 +32,7 @@ const TYPES: Record<string, string> = {
 
 async function openLibrary(page: Page, tab: "Templates" | "Themes" | "Snippets" | "Images"): Promise<void> {
   const nav = page.getByRole("navigation", { name: "Template library" });
-  if (!(await nav.isVisible())) await page.getByRole("link", { name: "Templates" }).first().click();
+  if (!(await nav.isVisible())) await openTemplates(page);
   await nav.getByRole("link", { name: tab }).click();
 }
 
@@ -226,7 +226,7 @@ async function recolourTheme(page: Page): Promise<void> {
 
 test("the newsletter built in the browser is sent as the preview shows it", async ({ page, request }) => {
   await signIn(page);
-  await page.getByRole("link", { name: "Templates" }).first().click();
+  await openTemplates(page);
 
   const logoAddress = await uploadLogo(page);
   await publishSnippet(page);
