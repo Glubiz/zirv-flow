@@ -120,7 +120,7 @@ versus monotonic clock step, exceeds 50 ms. Saved boundaries alone cannot establ
 SQL reports first-receipt nearest-rank p50/p95/p99/max and delivered share per client and overall:
 distinct client/event pairs divided by clients times stored API events arriving during the run.
 Leave a drain window before watchers stop; non-stored outcomes are excluded from that denominator.
-The target is p95 < 2 s; the 2,000 events/s run and driver registration remain follow-up work.
+The target is p95 < 2 s; the M8 driver below runs the 2,000 events/s scenario.
 The driver scrapes `zirv_flow_debugger_clients` and `zirv_flow_debugger_delivery_seconds`.
 
 ## 4. Applied latency and backlog drain
@@ -466,7 +466,10 @@ requiring a seventeenth, outside the app/PG allocations (`M6_SINK_CPUSET` can ov
 
 Run from the checkout root on a dedicated bench host/CI runner. Runtime prerequisites are Bash,
 Python 3, Docker Compose with `!reset`/`!override` support, jq, curl and GNU coreutils (M6 uses GNU
-`date`); psql runs inside PostgreSQL. Install CI-produced `loadgen`, `renderbench` and `sendbench`
+`date`). Debugger, jobs and timers also require host `psql` (jobs and timers also the per-kind sampler);
+`smoke`, `all` and those benches check this before spending time, and `all` runs every bench,
+lists failed ones in its summary and exits non-zero if any failed; the other helpers run it inside
+PostgreSQL. Install CI-produced `loadgen`, `renderbench` and `sendbench`
 executables at `target/release/`, or set `LOADGEN`, `RENDER_BENCH_BIN` and `SENDBENCH` to their paths.
 For send, install the Linux `sendbench` artifact at `.zirv/work/m8/send-tools/linux/sendbench`.
 Do not use M6's `sink.sh build`: M8 calls only `sink.sh start`, with `debian:bookworm-slim` as the
@@ -489,6 +492,8 @@ throwaway local credentials. No caller-supplied database URL is used. The script
 volumes. State and credentials stay under `.zirv/work/m8` (`M8_STATE` overrides it); smoke appends
 `-smoke`. Smoke uses 5,000 people, 5,000 events and 3,000 waiting enrollments across three workspaces,
 50 ingest items/s for 60 seconds, two preview samples, one refresh, and 20 measured renders.
+Debugger smoke uses one client and five seconds of load; jobs uses 3,000 busy jobs plus one quiet
+job per scenario; timers uses a five-second wake window per scenario.
 
 Seeds use SQL only in the bench database. They add no migration, product table or `DELETIONS`
 entry. M4's generator retains the OQ-1/M4 mix of six strings, five numbers, four booleans, two
@@ -516,8 +521,8 @@ and a rerun starts after the last committed row. Each seed finishes with M4/M5's
 `VACUUM (ANALYZE, PARALLEL 0)` on its tables; a rerun also retries this maintenance.
 People/events use M4's deterministic workspace/row
 IDs. Enrollments retain M5's `(run=1, set=workspace UUID, n)` staging keys. The waiting window starts
-seven days after initial seed configuration, allowing overnight loads; #396 must deliberately
-re-arm that window before a timer measurement. A new enrollment batch refuses a window less than
+seven days after initial seed configuration, allowing overnight loads; `timers` deliberately
+re-arms that window before each measurement. A new enrollment batch refuses a window less than
 one hour away. Completed/consumed rows are never re-created by
 resuming. Do not change or erase seed rows manually. Events and enrollments require the people
 seed to finish first; all three targets must be supplied together when selecting a smaller scale.
@@ -528,9 +533,10 @@ seed to finish first; all three targets must be supplied together when selecting
 | `segments` | `m4/measure.sh all`, including the incremental load window |
 | `send` | M6 sink/setup and `m6/run.sh`; SQL email/consent fixtures on existing M8 people |
 | `render` | `m7/render.sh` with prebuilt `tools/renderbench`; **native host tool, outside Docker CPU/memory caps**, explicitly labelled in JSON |
-| `debugger` | Non-zero until #394 registers it |
+| `debugger` | Watcher receipts and host SQL latency/clock report, alongside track load |
 | `explorer` | Non-zero until #395 registers it |
-| `jobs`, `timers` | Non-zero until #396 registers them; M5's old million-row run is not a 10 M registration |
+| `jobs` | SQL no-op throughput and busy/quiet workspace fairness, with and without a cap |
+| `timers` | M5 lateness query on the M8 waiting seed, idle and alongside track ingest |
 | `decisions` | Non-zero until #397 adapts `ab.sh`, which currently deletes its own fixed stack and launches unpinned Windows processes |
 
 `all` and `smoke` note and skip only unregistered commands; a registered benchmark failure stops
@@ -543,12 +549,44 @@ container images/cpusets/core counts/memory limits, host memory, Docker VM CPU/m
 results, the emulation label and all three limitations. Later good runs replace that bench's summary;
 raw runs remain in the state directory. No measured data files are fabricated by this change.
 
-To register an issue's measurement, replace its arm in `bench_command` in `m8/run.sh` with, for
-example, `debugger) cmd=(bash "$m8_dir/debugger.sh" "$raw") ;;` (#394), or split the existing shared
-arm into `jobs) cmd=(bash "$m8_dir/jobs.sh" "$raw") ;;` and
-`timers) cmd=(bash "$m8_dir/timers.sh" "$raw") ;;` (#396). The new script writes JSON under `$raw`,
-uses the exported M8 scale/duration and M4 compose/state variables, and returns non-zero on failure.
-`run_bench` handles metadata through the shared `write_data` helper. No other dispatch list changes.
+`debugger` starts `M8_DEBUGGER_CLIENTS=1` streams (set **20** for the full run), waits for all to
+connect, then offers track load at `M8_RATE=2000` for `M8_SECONDS=600`. Connection allowance is
+`M8_DEBUGGER_CONNECT_SECONDS=15`; drain allowance is `M8_DRAIN_SECONDS=60` (both five in smoke).
+It awaits normal watcher completion to flush receipts, scrapes debugger metrics, and runs the
+clock-gated SQL with host `psql` on `127.0.0.1:55432`, database/user `zirv_flow_m8`/`zirv`, password
+`zirv-m8-bench` fixed by the M8 compose layer. Missing host `psql`, connection/drain timeout or a
+clock gate fails the run. Raw `debugger.json` includes counts, p50/p95/p99/max, delivered share,
+gap frames, skipped items and clock offset; `receive.jsonl` retains the receipts.
+
+`timers` requires a completed `seed enrollments`. With the worker stopped it restores the M5
+waiting-row templates and re-arms the M8 seed for `noload/` then `loaded/`; the latter adds track
+ingest at `M8_RATE`. `M8_TIMERS_SECONDS=2400` preserves the seed's forty-minute spread,
+`M8_TIMERS_LEAD_SECONDS=600` allows for re-arming, and `M8_DRAIN_SECONDS=3600` bounds the drain
+(smoke: 5/10/60 seconds). A re-arm that overruns its lead rolls back; after the worker is ready
+the earliest pending wake must still lie ahead (else the run fails), and `timers.json` records the
+lead left then as `lead_left_at_worker_ready_s`. Each raw scenario holds
+M5 `lateness.json`, `timers.json`, the timer-wake histogram and per-kind job samples. Sets are
+workspace UUIDs, with no M5 burst set. The worker restarts between scenarios, resetting its metrics.
+
+`jobs` queues `M8_JOBS_BUSY=100000` ready `maintenance.noop` jobs in workspace 1 ahead of one in
+workspace 2, first uncapped then with `M8_JOBS_CAP=4` (use `8` to compare another cap, or `unset`
+for only uncapped). It sets the worker concurrency itself with `M8_JOBS_CONCURRENCY=16` (no-op jobs
+are cheap; the topology default of 4 would never let a cap of 4 bind) through the same compose
+override as the cap, records the effective value in `worker.json`, and refuses a cap at or above
+the concurrency. The worker is restored to the topology default afterwards. Leftover no-op rows of
+a run are deleted on every exit path. `M8_JOBS_LEAD_SECONDS=10` allows sampler startup; `M8_JOBS_TIMEOUT_SECONDS=600`
+bounds completion. Raw `cap-*/jobs.json` reports completions/s against 1,000/s, exact quiet claim
+lag from a temporary bench trigger, and the maximum sampled busy running count (fails above the
+cap). `M8_JOBS_TICK_SECONDS=1` is the sleep between polls (a 100,000-job run lasts about 100 s, so the
+final polling delay is at most about 1%; smoke's 3,000 jobs are not a measurement); throughput
+includes it and samples cannot prove an unsampled peak. Observer effects: the ready-count poll and
+the sampler's `run_at <= now()` query run during the window and may scan the `run_at` index while
+future wakes are pending; both are named in the `measurement` field of the jobs and timers reports. The trigger is removed and the base worker restored.
+
+Jobs and timers call `m8/sample-job-kinds.sh` and `job-kinds.sql` from #455; merge that dependency
+and select an image emitting its per-kind claim metrics before running. `JOB_KINDS_TICK_S=5`
+controls that sampler. CSV samples and their JSON copy remain under each raw scenario, alongside
+Prometheus scrapes and workload results; `write_data` embeds all raw JSON in the M8 report.
 
 The no-Docker self-test is in the existing CI job beside the benchmark feature gate. The feature
 gate rejects benchmark paths in Dockerfiles/CD inputs; `.dockerignore` excludes benchmark scripts

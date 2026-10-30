@@ -43,8 +43,11 @@ expect_failure 'unknown subcommand' bash "$here/run.sh" nope
 expect_failure 'seed requires' bash "$here/run.sh" seed
 expect_failure 'unknown seed' bash "$here/run.sh" seed nope
 expect_failure 'unexpected arguments' bash "$here/run.sh" up extra
-for spec in 'debugger:#394' 'explorer:#395' 'jobs:#396' 'timers:#396' 'decisions:#397'; do
-  expect_failure "${spec#*:}" bash "$here/run.sh" "${spec%:*}"
+for spec in 'explorer:#395' 'decisions:#397'; do
+  rc=0
+  bash "$here/run.sh" "${spec%:*}" >"$work/output" 2>&1 || rc=$?
+  [ "$rc" = 3 ]
+  grep -Fq -- "${spec#*:}" "$work/output"
 done
 for spec in 'M8_SERVE_CPUSET=8-11' 'M8_WORKER_CPUSET=8-11' 'M8_WORKER_CPUSET=0-3'; do
   : >"$M8_TEST_CALLS"
@@ -68,10 +71,32 @@ expect_failure 'configured PG/app budgets' bash "$here/run.sh" seed enrollments
 export M8_TEST_MEMORY=68719476736
 seed_preflight people >"$work/preflight" 2>&1
 raw="$work/raw"; pool=1000; cmd=()
-for name in ingest segments send render; do
+: >"$M8_TEST_CALLS"
+for name in ingest segments send render debugger jobs timers; do
+  cmd=()
   bench_command "$name"
   [ "${#cmd[@]}" -gt 1 ]
+  case "$name" in
+    debugger | jobs | timers)
+      [ "${cmd[0]}" = bash ]
+      [ "${cmd[1]}" = "$here/$name.sh" ]
+      [ "${cmd[2]}" = "$raw" ] ;;
+  esac
 done
+[ ! -s "$M8_TEST_CALLS" ]
+expect_failure 'host psql is required' bash -c '. "$1/common.sh"; command() { return 1; }; host_pg_setup' _ "$here"
+cat >"$work/bin/psql" <<'STUB'
+#!/usr/bin/env bash
+echo 'psql must not run in a preflight test' >&2
+exit 99
+STUB
+chmod +x "$work/bin/psql"
+expect_failure 'M8_DEBUGGER_CLIENTS must be in 1..20' env M8_DEBUGGER_CLIENTS=21 bash "$here/debugger.sh" "$raw" "$pool"
+expect_failure 'M8_JOBS_CAP must be an integer' env M8_JOBS_CAP=0 bash "$here/jobs.sh" "$raw"
+expect_failure 'must be below M8_JOBS_CONCURRENCY (16)' env M8_JOBS_CAP=16 bash "$here/jobs.sh" "$raw"
+expect_failure 'must be below M8_JOBS_CONCURRENCY (4)' env M8_JOBS_CAP=4 M8_JOBS_CONCURRENCY=4 bash "$here/jobs.sh" "$raw"
+expect_failure 'seconds must be an integer' env M8_TIMERS_SECONDS=0 bash "$here/timers.sh" "$raw" "$pool"
+[ ! -s "$M8_TEST_CALLS" ]
 mkdir -p "$raw" "$M4_STATE/.." "$work/out"
 out="$work/out"
 printf '{"committed":{"people":5000,"events":5000,"enrollments":3000}}\n' >"$M4_STATE/../seeds.json"
@@ -108,6 +133,64 @@ python3 -I -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["smoke"
 python3 -I -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["topology"]["docker_vm"]["cpus"] is None' "$out/ingest.json"
 rm "$raw/result.json"
 expect_failure 'no JSON results' write_data ingest 0 "$raw" "$work/topology" empty-tool
+
+# Preserve metric buckets and per-kind samples in JSON, and reject a dead sampler.
+(
+  curl() { printf '%s\n' '# HELP ignored' 'zirv_flow_debugger_clients 1' 'zirv_flow_debugger_delivery_seconds_bucket{le="2"} 3' 'unrelated 7'; }
+  scrape_metrics unused zirv_flow_debugger_clients,zirv_flow_debugger_delivery_seconds "$raw/metrics"
+  printf '%s\n' 't,kind,claims_total,completed_total,claim_lag_seconds_sum,due_ready,running,ready_lag_mean_seconds,ready_lag_max_seconds' \
+    '2026-10-30T00:00:00Z,flow.step,3,2,0.5,1,0,,1.5' >"$raw/job-kinds.csv"
+  kill() { return 0; }
+  wait() { return 143; }
+  sleep() { printf '%s\n' '2026-10-30T00:00:01Z,flow.step,4,4,0.7,0,0,,' >>"$raw/job-kinds.csv"; }
+  sampler_pid=123
+  stop_job_sampler "$raw"
+  dead_sampler() (
+    kill() { return 1; }
+    wait() { return 7; }
+    sampler_pid=123
+    stop_job_sampler "$raw"
+  )
+  expect_failure 'per-kind sampler exited early (7)' dead_sampler
+)
+python3 -I - "$raw" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+assert json.loads((path / 'metrics.json').read_text())['samples'] == [
+    'zirv_flow_debugger_clients 1', 'zirv_flow_debugger_delivery_seconds_bucket{le="2"} 3']
+sample = json.loads((path / 'job-kinds.json').read_text())[0]
+assert sample['kind'] == 'flow.step' and sample['claims_total'] == 3
+assert sample['ready_lag_mean_seconds'] is None and sample['ready_lag_max_seconds'] == 1.5
+PY
+
+# Preflight names a missing sampler tool; run_all continues past a failed bench and fails at the end.
+expect_failure 'jq is required by the per-kind sampler' bash -c '. "$1/common.sh"; command() { return 1; }; require_job_sampler' _ "$here"
+(
+  bash() { printf '%s\n' "$2" >>"$work/ran"; [ "$2" != jobs ]; }
+  rc=0
+  run_all >"$work/all.out" 2>&1 || rc=$?
+  [ "$rc" = 1 ]
+)
+grep -Fxq timers "$work/ran"
+grep -Fq 'failed: jobs;' "$work/all.out"
+
+# A backgrounded track_load must be loadgen itself, so kill in a cleanup trap stops it.
+cat >"$work/bin/loadgen" <<'STUB'
+#!/usr/bin/env bash
+echo $$ >"$M8_TEST_LOADGEN_PID"
+exec sleep 30
+STUB
+chmod +x "$work/bin/loadgen"
+(
+  export LOADGEN="$work/bin/loadgen" M8_TEST_LOADGEN_PID="$work/loadgen.pid"
+  track_load 1 1 "$work/ingest.json" &
+  load_pid=$!
+  until [ -s "$work/loadgen.pid" ]; do sleep 0.1; done
+  [ "$(cat "$work/loadgen.pid")" = "$load_pid" ]
+  kill "$load_pid"
+  wait "$load_pid" || true
+  ! kill -0 "$load_pid" 2>/dev/null
+)
 
 # M7 must use a prebuilt binary when M8 supplies one; a cargo invocation is a test failure.
 cat >"$work/bin/cargo" <<'STUB'

@@ -1833,10 +1833,26 @@ mod tests {
         assert_eq!(rows[0].4, Some(1));
         assert!(rows[0].5.is_some() && rows[1].5 == rows[0].5);
         assert!(rows[2].6.is_some());
-        let everything =
-            serde_json::to_string(&rows.iter().map(|row| &row.3).collect::<Vec<_>>()).unwrap();
-        assert!(!everything.contains("ada@example.com"));
-        assert!(!everything.contains("4111"));
+        let mut values: Vec<&Value> = rows.iter().map(|row| &row.3).collect();
+        while let Some(value) = values.pop() {
+            match value {
+                Value::Object(object) => {
+                    assert!(!object.contains_key("card"));
+                    values.extend(object.values());
+                }
+                Value::Array(array) => values.extend(array),
+                Value::String(text) => {
+                    // The workspace-bound HMAC can contain "4111" by chance.
+                    let digest =
+                        text.len() == 64 && text.bytes().all(|byte| byte.is_ascii_hexdigit());
+                    if !digest {
+                        assert!(!text.contains("ada@example.com"));
+                        assert!(!text.contains("4111"));
+                    }
+                }
+                _ => {}
+            }
+        }
         assert_eq!(rows[0].3["email"].as_str().unwrap().len(), 64);
     }
 
