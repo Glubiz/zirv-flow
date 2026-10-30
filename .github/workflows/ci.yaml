@@ -118,6 +118,16 @@ jobs:
       - name: M8 benchmark driver self-test
         run: bash scripts/bench/m8/run.sh --self-test
 
+      - name: M8 benchmark report check self-test
+        run: bash scripts/bench/m8/check-report.sh --self-test
+
+      - name: M8 benchmark data files
+        run: bash scripts/bench/m8/check-report.sh --data-only
+
+      - name: M8 benchmark report
+        if: ${{ hashFiles('docs/benchmarks/m8-validation.md') != '' }}
+        run: bash scripts/bench/m8/check-report.sh
+
       # Catches canonical context drift before it ships: a CLAUDE.md/AGENTS.md
       # regenerated from an older `.zirv/context/` than what is on this branch
       # silently injects the canonical layer twice every session. `--check`

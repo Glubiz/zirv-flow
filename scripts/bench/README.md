@@ -534,7 +534,7 @@ seed to finish first; all three targets must be supplied together when selecting
 | `send` | M6 sink/setup and `m6/run.sh`; SQL email/consent fixtures on existing M8 people |
 | `render` | `m7/render.sh` with prebuilt `tools/renderbench`; **native host tool, outside Docker CPU/memory caps**, explicitly labelled in JSON |
 | `debugger` | Watcher receipts and host SQL latency/clock report, alongside track load |
-| `explorer` | Non-zero until #395 registers it |
+| `explorer` | 90-day count/breakdown/list/CSV queries at both timeout budgets, alongside track ingest |
 | `jobs` | SQL no-op throughput and busy/quiet workspace fairness, with and without a cap |
 | `timers` | M5 lateness query on the M8 waiting seed, idle and alongside track ingest |
 | `decisions` | Non-zero until #397 adapts `ab.sh`, which currently deletes its own fixed stack and launches unpinned Windows processes |
@@ -549,6 +549,16 @@ container images/cpusets/core counts/memory limits, host memory, Docker VM CPU/m
 results, the emulation label and all three limitations. Later good runs replace that bench's summary;
 raw runs remain in the state directory. No measured data files are fabricated by this change.
 
+Run `bash scripts/bench/m8/check-report.sh` to validate `docs/benchmarks/m8-validation.md`
+(`--self-test` tests temporary fixtures; `--data-only` checks just JSON). Its Markdown table needs
+`Dimension`, `Data file` and `Verdict` columns: exact section 19 dimension names, existing M8 JSON
+citations (links relative to the report or literal paths starting at `docs/`; never smoke or `.failed.json` files, and the run needs `smoke` false and `exit_code` 0), and exactly `met`,
+`missed and fixed`, or `revised by decision`. The report must contain the one-line label
+"reference-resource emulation, not a reference-hardware run". Every JSON under
+`docs/benchmarks/data/m8/`, including smoke and failed runs, must parse and carry a nonempty
+`image_version` string and a `topology` object. Invalid input exits 1; absent reports are skipped
+and zero data files pass. CI always checks fixtures and data, and checks the report once present.
+
 `debugger` starts `M8_DEBUGGER_CLIENTS=1` streams (set **20** for the full run), waits for all to
 connect, then offers track load at `M8_RATE=2000` for `M8_SECONDS=600`. Connection allowance is
 `M8_DEBUGGER_CONNECT_SECONDS=15`; drain allowance is `M8_DRAIN_SECONDS=60` (both five in smoke).
@@ -557,6 +567,48 @@ clock-gated SQL with host `psql` on `127.0.0.1:55432`, database/user `zirv_flow_
 `zirv-m8-bench` fixed by the M8 compose layer. Missing host `psql`, connection/drain timeout or a
 clock gate fails the run. Raw `debugger.json` includes counts, p50/p95/p99/max, delivered share,
 gap frames, skipped items and clock offset; `receive.jsonl` retains the receipts.
+
+`explorer` uses the prebuilt `loadgen explorer` subcommand with `--url`, `--key-file`,
+`--workspace`, `--person-id`, `--to`, `--clients`, `--duration` and `--out`. It anchors every
+90-day range at the persisted `m8bench.config.seed_at`. The M8 seed calls M4's event generator:
+all shapes select `bench_order_placed`; counts select the name alone, `category = books`, or
+seed person 1 (`md5(workspace || '/p/1')`). **The person filter replaces issue #395's source
+filter:** the explorer API has no source filter; the seed writes `source=api` on every event.
+Breakdowns use `category` (six values) and `amount` (0–200 at two decimal places, up to 20,001
+values); `bench_seq` is declared but not written by the SQL seed. The list requests 100 rows;
+CSV uses the shipped export row cap. Responses are drained and discarded, including CSV;
+reports hold shapes, timings and outcome counts, not event property values.
+
+For each budget, `explorer.sh` recreates serve using a temporary Compose environment override:
+`ZIRV_FLOW_EXPLORER__INTERACTIVE_TIMEOUT_MS` is removed for the shipped 5,000 ms default, then
+set to `15000`. It verifies the container environment, waits for readiness, and restores base
+serve configuration on success, error, INT and TERM. Export keeps its shipped 60,000 ms timeout
+per statement and 1,000,000-row cap. Each budget measures track ingest alone, then with **1, 4
+and 16** explorer clients at `M8_RATE` for `M8_SECONDS` (smoke: five seconds and one client).
+`M8_DRAIN_SECONDS=60` bounds inbox draining between scenarios. Explorer clients run closed loop,
+cycling the seven shapes with staggered starting positions, and finish outstanding requests after
+the launch window. The client deadline for an entire response is 300 seconds
+(`--request-timeout-seconds`); it is reported separately from server `503 query_timeout`.
+A response body failure (including a CSV timeout after headers), unexpected HTTP status, client
+timeout, transport error or unvisited shape fails the run after writing its JSON.
+
+Raw `explorer/timeout-*/clients-*/comparison.json` carries per-shape count, nearest-rank
+p50/p95/p99/max for all outcomes and successful responses separately, timeout counts, exact
+retained total/workspace/window counts before load, and ingest p99 with/without explorer
+(from schedule), its delta/ratio and achieved ingest rates. Before/after Prometheus scrapes
+preserve `zirv_flow_explorer_query_seconds` buckets and `zirv_flow_explorer_timeouts_total`.
+Use the retained count to label each scale point, not `M8_EVENTS`; save the raw runs at 50 M,
+250 M and the largest reached for #397. `write_data` embeds all JSON under the raw directory in
+`docs/benchmarks/data/m8/explorer.json`.
+
+After the timed workloads, `explorer.sql` records `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` for
+each shape in raw `explorer/*.plan` and `*.json`. It transcribes the store's `push_scope` and
+count/breakdown/rows/total builders with psql-quoted synthetic parameters: identical predicates,
+UTC bucketing, ordering and limits, both breakdown statements, export count, first page and
+(where present) a later keyset page. These are literal/custom plans; schema lookups, HTTP masking
+and streaming are measured by the driver, not by EXPLAIN. Plans get a separate 15-minute cap
+and run outside ingest to avoid contaminating its latency. Actual plans, PostgreSQL 16/18
+behavior, the 5 s versus 15 s decision and the OQ-29 verdict remain for the live M8 run (#397).
 
 `timers` requires a completed `seed enrollments`. With the worker stopped it restores the M5
 waiting-row templates and re-arms the M8 seed for `noload/` then `loaded/`; the latter adds track

@@ -43,7 +43,7 @@ expect_failure 'unknown subcommand' bash "$here/run.sh" nope
 expect_failure 'seed requires' bash "$here/run.sh" seed
 expect_failure 'unknown seed' bash "$here/run.sh" seed nope
 expect_failure 'unexpected arguments' bash "$here/run.sh" up extra
-for spec in 'explorer:#395' 'decisions:#397'; do
+for spec in 'decisions:#397'; do
   rc=0
   bash "$here/run.sh" "${spec%:*}" >"$work/output" 2>&1 || rc=$?
   [ "$rc" = 3 ]
@@ -72,12 +72,12 @@ export M8_TEST_MEMORY=68719476736
 seed_preflight people >"$work/preflight" 2>&1
 raw="$work/raw"; pool=1000; cmd=()
 : >"$M8_TEST_CALLS"
-for name in ingest segments send render debugger jobs timers; do
+for name in ingest segments send render debugger explorer jobs timers; do
   cmd=()
   bench_command "$name"
   [ "${#cmd[@]}" -gt 1 ]
   case "$name" in
-    debugger | jobs | timers)
+    debugger | explorer | jobs | timers)
       [ "${cmd[0]}" = bash ]
       [ "${cmd[1]}" = "$here/$name.sh" ]
       [ "${cmd[2]}" = "$raw" ] ;;
@@ -92,6 +92,7 @@ exit 99
 STUB
 chmod +x "$work/bin/psql"
 expect_failure 'M8_DEBUGGER_CLIENTS must be in 1..20' env M8_DEBUGGER_CLIENTS=21 bash "$here/debugger.sh" "$raw" "$pool"
+expect_failure 'seconds must be an integer' env M8_SECONDS=0 bash "$here/explorer.sh" "$raw" "$pool"
 expect_failure 'M8_JOBS_CAP must be an integer' env M8_JOBS_CAP=0 bash "$here/jobs.sh" "$raw"
 expect_failure 'must be below M8_JOBS_CONCURRENCY (16)' env M8_JOBS_CAP=16 bash "$here/jobs.sh" "$raw"
 expect_failure 'must be below M8_JOBS_CONCURRENCY (4)' env M8_JOBS_CAP=4 M8_JOBS_CONCURRENCY=4 bash "$here/jobs.sh" "$raw"
@@ -191,6 +192,97 @@ chmod +x "$work/bin/loadgen"
   wait "$load_pid" || true
   ! kill -0 "$load_pid" 2>/dev/null
 )
+
+# Explorer orchestration with stubbed HTTP/SQL/tools: both budgets, concurrency and cleanup.
+cat >"$work/bin/explorer-loadgen" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"$M8_EXPLORER_CALLS"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --out ]; then
+    printf '{"valid":true,"shapes":[{"latency":{"count":1,"p95_ms":2,"p99_ms":3},"outcomes":{"query_timeouts":0}}]}\n' >"$2"
+    exit "${M8_EXPLORER_FAIL:-0}"
+  fi
+  shift
+done
+exit 99
+STUB
+chmod +x "$work/bin/explorer-loadgen"
+explorer_stub_run() (
+  export LOADGEN="$work/bin/explorer-loadgen" M8_SECONDS=2
+  export M8_EXPLORER_CALLS="$work/explorer-calls"
+  # shellcheck source=explorer.sh
+  . "$here/explorer.sh"
+  host_pg_setup() { :; }
+  login() { :; }
+  state_get() { echo 00000000-0000-0000-0000-000000000001; }
+  mkdir -p "$M4_STATE"
+  touch "$M4_STATE/explorer.key"
+  printf 'synthetic-key\n' >"$M4_STATE/explorer.key"
+  host_pg() {
+    if [[ "$*" = *'explorer.sql'* ]]; then
+      printf '[{"Plan":{"Node Type":"Aggregate"}}]\n'
+    else
+      cat >/dev/null
+      printf '%s\n' '{"retained_rows":50,"workspace_window_rows":10,"person_exists":true,"person_id":"00000000-0000-0000-0000-000000000002","from":"2026-08-01T00:00:00Z","to":"2026-10-30T00:00:00Z"}'
+    fi
+  }
+  wait_inbox() { :; }
+  compose() {
+    printf '%s\n' "$*" >>"$work/explorer-compose"
+    if [[ "$*" = *'ps -q'* ]]; then echo serve; fi
+  }
+  docker() {
+    if [ "$setting" = default ]; then echo '[]';
+    else echo '["ZIRV_FLOW_EXPLORER__INTERACTIVE_TIMEOUT_MS=15000"]'; fi
+  }
+  curl() {
+    printf '%s\n' 'zirv_flow_explorer_query_seconds_bucket{kind="count",le="5"} 1' 'zirv_flow_explorer_timeouts_total{kind="count"} 2'
+  }
+  track_load() {
+    printf '{"total":{"latency_from_schedule":{"p99_ms":7},"achieved_rate":2000}}\n' >"$3"
+  }
+  explorer_main "$1" 1000
+)
+: >"$work/explorer-calls"; : >"$work/explorer-compose"
+explorer_stub_run "$work/full-explorer" >"$work/explorer-output" 2>&1
+python3 -I - "$work" <<'PYTEST'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+calls = (path / 'explorer-calls').read_text().splitlines()
+assert len(calls) == 6
+assert [c.split('--clients ')[1].split()[0] for c in calls] == ['1','4','16'] * 2
+root = path / 'full-explorer/explorer'
+assert json.loads((root / 'timeout-default/config.json').read_text())['interactive_timeout_ms'] == 5000
+assert json.loads((root / 'timeout-15000/config.json').read_text())['interactive_timeout_ms'] == 15000
+for setting in ('default', '15000'):
+    for n in (1,4,16):
+        r = json.loads((root / f'timeout-{setting}/clients-{n}/comparison.json').read_text())
+        assert r['scale']['retained_rows'] == 50
+        assert r['ingest_p99_alone_ms'] == r['ingest_p99_with_explorer_ms'] == 7
+        assert r['queries']['shapes'][0]['outcomes']['query_timeouts'] == 0
+        metrics = json.loads((root / f'timeout-{setting}/clients-{n}/metrics-after.json').read_text())['samples']
+        assert len(metrics) == 2 and 'bucket' in metrics[0] and 'timeouts_total' in metrics[1]
+assert len(list(root.glob('*.plan'))) == 7
+assert json.loads((root / 'export.json').read_text())['plans']
+assert (path / 'explorer-compose').read_text().splitlines()[-1] == 'up -d --no-build --no-deps --force-recreate zirv-flow'
+PYTEST
+: >"$work/explorer-calls"
+(export M8_SMOKE=1; explorer_stub_run "$work/smoke-explorer") >"$work/explorer-output" 2>&1
+python3 -I - "$work/explorer-calls" <<'PYTEST'
+import pathlib, sys
+calls = pathlib.Path(sys.argv[1]).read_text().splitlines()
+assert len(calls) == 2
+assert all('--clients 1 --duration 5' in c for c in calls)
+PYTEST
+# Running in a fresh shell preserves errexit while expect_failure observes the exit status.
+export -f explorer_stub_run
+export work here
+rc=0
+env M8_EXPLORER_FAIL=7 bash -c 'explorer_stub_run "$work/failed-explorer"' >"$work/explorer-output" 2>&1 || rc=$?
+[ "$rc" = 7 ]
+[ "$(tail -n 1 "$work/explorer-compose")" = 'up -d --no-build --no-deps --force-recreate zirv-flow' ]
+unset -f explorer_stub_run
 
 # M7 must use a prebuilt binary when M8 supplies one; a cargo invocation is a test failure.
 cat >"$work/bin/cargo" <<'STUB'
