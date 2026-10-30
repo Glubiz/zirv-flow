@@ -52,6 +52,9 @@ CREATE TABLE IF NOT EXISTS m5bench.runs (
   n_spread int NOT NULL, n_burst int NOT NULL, staged_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- M8 reuses the staging schema with SQL fixtures and checkpointed batches.
+\if :{?seed_schema_only}
+\else
 -- The templates: the oldest sample enrollment of each flow (a person among the first 100 of the
 -- workspace, which the seed never uses), with its step row, wake job, flow entry and decisions.
 DELETE FROM m5bench.tmpl;
@@ -106,3 +109,4 @@ JOIN pool p ON p.rn = g.rn;
 ANALYZE m5bench.rows;
 SELECT set, count(*) AS staged, min(wake_at) AS first_wake, max(wake_at) AS last_wake
 FROM m5bench.rows WHERE run = :run GROUP BY set ORDER BY set;
+\endif

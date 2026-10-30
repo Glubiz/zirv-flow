@@ -268,6 +268,8 @@ which answers once it has dropped its scratch database. CI runs the same steps i
 Reports record their environment and limitations; development-machine results are not
 reference-hardware guarantees. The load generator is `tools/loadgen`; see the
 [benchmark runbook](scripts/bench/README.md).
+The [M8 driver](scripts/bench/README.md#13-m8-reference-resource-emulation-issue-393) adds resumable
+scale seeds and reference-resource emulation; its Docker smoke run and hardware validation remain outstanding.
 
 - [m2-ingestion](docs/benchmarks/m2-ingestion.md)
 - [m4-segments](docs/benchmarks/m4-segments.md)

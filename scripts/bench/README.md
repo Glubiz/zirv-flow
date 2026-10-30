@@ -428,3 +428,129 @@ RENDER_BENCH_CONSTRAINT="session pinned to the 16 E-core threads (mask 0xFFFF000
 
 The report is `docs/benchmarks/m7-render.md`. The smoke run (20 renders, the pool, a report) is a unit
 test of the tool and runs in the normal test job.
+
+## 13. M8 reference-resource emulation (issue #393)
+
+For the operator preparing the section 19 validation suite: this is **reference-resource emulation,
+not a reference-hardware run** (ruling ef99d178). Shared storage, Docker Desktop overhead and the
+mixed core types of the dev CPU remain limitations. Validation on actual reference hardware stays
+outstanding. Renting machines requires the operator's explicit spending authorisation; this change
+provisions no machines. The build-only change has not run Compose, seeded a database or measured
+a benchmark. A successful shell self-test is not a successful smoke run.
+
+`m8/compose.m8.yaml` layers on `docker-compose.yml` and `compose.bench.yaml`, replacing the shared
+app cpuset of `compose.tiers.yaml`. The existing CLI has separate `worker` and `scheduler` commands,
+so two app **allocations** use three role containers: serve alone, worker+scheduler together. The
+one-shot key generator exits before measurement. Defaults, all overridable:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `M8_PG_CPUSET` | `8-15` | Eight logical CPUs for PostgreSQL 16.15 |
+| `M8_SERVE_CPUSET` | `0-3` | Four logical CPUs for serve |
+| `M8_WORKER_CPUSET` | `4-7` | Four logical CPUs shared by worker and scheduler |
+| `M8_PG_MEMORY` / `M8_PG_SHM` | `32g` / `8g` | PostgreSQL memory cap / shared memory |
+| `M8_SERVE_MEMORY` | `8g` | Serve cap |
+| `M8_WORKER_MEMORY` / `M8_SCHEDULER_MEMORY` | `7g` / `1g` | Second app allocation's split caps |
+| `M8_PG_IMAGE` | `postgres:16.15` | PostgreSQL image; used by compose and the topology check |
+| `M8_SHARED_BUFFERS` | `8GB` | One quarter of the default 32 GiB PG budget |
+| `BENCH_IMAGE_TAG` | `0.190.0` | Pre-pulled versioned app image; no `latest` or build fallback |
+
+The other PostgreSQL settings match [M4 section 2.1](../../docs/benchmarks/m4-segments.md#21-hardware-spec-d1):
+`effective_cache_size=16GB`, `maintenance_work_mem=1GB`, `max_wal_size=8GB`,
+`checkpoint_timeout=15min`; 8 GiB shared memory follows the corrected M4 run. If changing the PG
+cap, size `M8_SHARED_BUFFERS` with it. `up` rejects intersections among all three CPU allocations
+before calling Docker. An enrollment seed also checks that the Docker VM can hold the sum of the
+configured memory caps (48 GiB by default). These IDs are logical CPUs, not claims about identical
+physical cores. Give the Docker VM at least 16 logical CPUs; the send sink defaults to CPU `16`,
+requiring a seventeenth, outside the app/PG allocations (`M6_SINK_CPUSET` can override it).
+
+Run from the checkout root on a dedicated bench host/CI runner. Runtime prerequisites are Bash,
+Python 3, Docker Compose with `!reset`/`!override` support, jq, curl and GNU coreutils (M6 uses GNU
+`date`); psql runs inside PostgreSQL. Install CI-produced `loadgen`, `renderbench` and `sendbench`
+executables at `target/release/`, or set `LOADGEN`, `RENDER_BENCH_BIN` and `SENDBENCH` to their paths.
+For send, install the Linux `sendbench` artifact at `.zirv/work/m8/send-tools/linux/sendbench`.
+Do not use M6's `sink.sh build`: M8 calls only `sink.sh start`, with `debian:bookworm-slim` as the
+sink runtime. Pre-pull that image, `postgres:16.15` and the selected app image before running.
+
+```sh
+bash scripts/bench/m8/run.sh --self-test  # local, no Docker, database or compiled tools
+# The following are run commands for an authorised bench runner, not build-only validation:
+bash scripts/bench/m8/run.sh up
+bash scripts/bench/m8/run.sh seed people
+bash scripts/bench/m8/run.sh seed events
+bash scripts/bench/m8/run.sh seed enrollments
+bash scripts/bench/m8/run.sh all
+# A separate small database and state, on the same published ports (stop the full stack first):
+bash scripts/bench/m8/run.sh smoke
+```
+
+The fixed project is `zirv-flow-m8`, or `zirv-flow-m8-smoke`; the database is `zirv_flow_m8` with
+throwaway local credentials. No caller-supplied database URL is used. The scripts never remove
+volumes. State and credentials stay under `.zirv/work/m8` (`M8_STATE` overrides it); smoke appends
+`-smoke`. Smoke uses 5,000 people, 5,000 events and 3,000 waiting enrollments across three workspaces,
+50 ingest items/s for 60 seconds, two preview samples, one refresh, and 20 measured renders.
+
+Seeds use SQL only in the bench database. They add no migration, product table or `DELETIONS`
+entry. M4's generator retains the OQ-1/M4 mix of six strings, five numbers, four booleans, two
+timestamps, one date and two lists. M5's staging schema and loader reuse its checked-in
+product-path sample; the SQL remaps workspace/flow/person IDs and creates the fixture flow without
+calling the API. The seed establishes waiting volume, not enrollment-throughput evidence.
+
+| Seed | Default target (`M8_*`) | Bytes/row and source | Initial free-space requirement |
+|---|---|---|---|
+| people | `M8_PEOPLE=25000000`: 10 M / 10 M / 5 M | 2,048 B, rounded above M4's 1,270 B/person plus 339 B/identity, allowing auxiliary indexes/consent | 110,989,934,592 B (103.4 GiB) |
+| events | `M8_EVENTS=500000000`: 200 M / 200 M / 100 M, 365 days in monthly partitions | 512 B, rounded above M4's (10.1 + 12.1) GB / 50 M = 444 B/event | 520,589,934,592 B (484.8 GiB) |
+| enrollments | `M8_ENROLLMENTS=10000000`: 4 M / 4 M / 2 M, spread over 40 minutes | 4,096 B estimate for enrollment, step, job, entry, three decisions, staging and indexes; no measured M5 size claim | 90,509,934,592 B (84.3 GiB) |
+
+The measured size source is [M4 section 2.2](../../docs/benchmarks/m4-segments.md#22-data-spec-d3).
+Each estimate is `remaining rows × bytes/row × 2 + 8 GiB`: the factor allows WAL, temporary work
+and index growth; the reserve is additional headroom. It is a conservative admission estimate,
+not a measured peak or a guarantee against later disk exhaustion. Free space comes from `df -Pk`
+inside PostgreSQL on its Docker data volume, never the checkout filesystem. A shortage refuses
+before writes. Plan the full event seed as an overnight job; #393's build-only work has no timings.
+
+Resume with the same sizes: `m8bench.config` fixes the sizes and event anchor, and refuses a changed
+scale. Each `M8_CHUNK` batch (default 100,000 rows) atomically advances
+`m8bench.progress(kind, workspace_id).last_n` with the inserted rows; a failed batch rolls back,
+and a rerun starts after the last committed row. Each seed finishes with M4/M5's
+`VACUUM (ANALYZE, PARALLEL 0)` on its tables; a rerun also retries this maintenance.
+People/events use M4's deterministic workspace/row
+IDs. Enrollments retain M5's `(run=1, set=workspace UUID, n)` staging keys. The waiting window starts
+seven days after initial seed configuration, allowing overnight loads; #396 must deliberately
+re-arm that window before a timer measurement. A new enrollment batch refuses a window less than
+one hour away. Completed/consumed rows are never re-created by
+resuming. Do not change or erase seed rows manually. Events and enrollments require the people
+seed to finish first; all three targets must be supplied together when selecting a smaller scale.
+
+| Command | Existing measurement / registration |
+|---|---|
+| `ingest` | `tools/loadgen` track workload on the running stack |
+| `segments` | `m4/measure.sh all`, including the incremental load window |
+| `send` | M6 sink/setup and `m6/run.sh`; SQL email/consent fixtures on existing M8 people |
+| `render` | `m7/render.sh` with prebuilt `tools/renderbench`; **native host tool, outside Docker CPU/memory caps**, explicitly labelled in JSON |
+| `debugger` | Non-zero until #394 registers it |
+| `explorer` | Non-zero until #395 registers it |
+| `jobs`, `timers` | Non-zero until #396 registers them; M5's old million-row run is not a 10 M registration |
+| `decisions` | Non-zero until #397 adapts `ab.sh`, which currently deletes its own fixed stack and launches unpinned Windows processes |
+
+`all` and `smoke` note and skip only unregistered commands; a registered benchmark failure stops
+the suite. Bench setup may use the existing authenticated APIs; scale seeds do not. Each completed
+measurement writes `docs/benchmarks/data/m8/<bench>.json` (`smoke` writes
+`docs/benchmarks/data/m8/smoke/<bench>.json`; a failed run writes `<bench>.failed.json` beside it
+and never replaces the last good file), including the image version, actual
+container images/cpusets/core counts/memory limits, host memory, Docker VM CPU/memory from
+`docker info` (null when unavailable), the effective PostgreSQL settings, committed seed sizes, argument arrays, exit status, raw JSON
+results, the emulation label and all three limitations. Later good runs replace that bench's summary;
+raw runs remain in the state directory. No measured data files are fabricated by this change.
+
+To register an issue's measurement, replace its arm in `bench_command` in `m8/run.sh` with, for
+example, `debugger) cmd=(bash "$m8_dir/debugger.sh" "$raw") ;;` (#394), or split the existing shared
+arm into `jobs) cmd=(bash "$m8_dir/jobs.sh" "$raw") ;;` and
+`timers) cmd=(bash "$m8_dir/timers.sh" "$raw") ;;` (#396). The new script writes JSON under `$raw`,
+uses the exported M8 scale/duration and M4 compose/state variables, and returns non-zero on failure.
+`run_bench` handles metadata through the shared `write_data` helper. No other dispatch list changes.
+
+The no-Docker self-test is in the existing CI job beside the benchmark feature gate. The feature
+gate rejects benchmark paths in Dockerfiles/CD inputs; `.dockerignore` excludes benchmark scripts
+and data from the build context. The full gate still invokes Cargo and is run only by CI when
+local builds are forbidden.

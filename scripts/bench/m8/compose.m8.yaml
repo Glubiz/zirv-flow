@@ -1,0 +1,62 @@
+# Last resource layer after docker-compose.yml and compose.bench.yaml. No local builds.
+# Two app allocations: serve, and worker+scheduler (separate processes sharing one allocation).
+# These are logical CPU IDs, not a claim about physical or performance cores. See README section 13.
+name: zirv-flow-m8
+
+x-m8-image: &m8-image
+  image: ghcr.io/glubiz/zirv-flow:${BENCH_IMAGE_TAG:-0.190.0}
+  build: !reset null
+  pull_policy: never
+
+x-m8-db: &m8-db
+  ZIRV_FLOW_DATABASE__URL: postgres://zirv:zirv-m8-bench@postgres:5432/zirv_flow_m8
+
+services:
+  postgres:
+    image: ${M8_PG_IMAGE:?set by scripts/bench/m8/common.sh}
+    cpuset: ${M8_PG_CPUSET:-8-15}
+    mem_limit: ${M8_PG_MEMORY:-32g}
+    shm_size: ${M8_PG_SHM:-8g}
+    environment:
+      POSTGRES_USER: zirv
+      POSTGRES_PASSWORD: zirv-m8-bench
+      POSTGRES_DB: zirv_flow_m8
+    volumes:
+      - ./scripts/bench:/bench:ro
+    command:
+      - postgres
+      - -c
+      - shared_buffers=${M8_SHARED_BUFFERS:-8GB}
+      - -c
+      - effective_cache_size=16GB
+      - -c
+      - maintenance_work_mem=1GB
+      - -c
+      - max_wal_size=8GB
+      - -c
+      - checkpoint_timeout=15min
+
+  zirv-flow-key:
+    <<: *m8-image
+    cpuset: ${M8_SERVE_CPUSET:-0-3}
+
+  zirv-flow:
+    <<: *m8-image
+    command: ["serve"]
+    cpuset: ${M8_SERVE_CPUSET:-0-3}
+    mem_limit: ${M8_SERVE_MEMORY:-8g}
+    environment: *m8-db
+
+  zirv-flow-worker:
+    <<: *m8-image
+    command: ["worker"]
+    cpuset: ${M8_WORKER_CPUSET:-4-7}
+    mem_limit: ${M8_WORKER_MEMORY:-7g}
+    environment: *m8-db
+
+  zirv-flow-scheduler:
+    <<: *m8-image
+    command: ["scheduler"]
+    cpuset: ${M8_WORKER_CPUSET:-4-7}
+    mem_limit: ${M8_SCHEDULER_MEMORY:-1g}
+    environment: *m8-db

@@ -10,3 +10,5 @@ web/dist/
 Dockerfile
 docker-compose.yml
 .dockerignore
+scripts/bench/
+docs/benchmarks/

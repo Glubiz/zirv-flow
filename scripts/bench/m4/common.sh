@@ -13,6 +13,7 @@
 #   M4_HOST, M4_PORT  the API, default 127.0.0.1:8080
 #   M4_EMAIL        the bench owner, default bench@example.com
 #   M4_EXTRA_COMPOSE  one more compose file layered last (the M6 send bench adds its environment)
+#   M4_RESOURCE_COMPOSE replaces the tier and M4 image layers (M8 supplies its resource layer)
 #   M4_TIER         app tier S, M or L (compose.tiers.yaml), default M: 4 vCPU, worker concurrency 4
 #   BENCH_IMAGE_TAG release tag of ghcr.io/glubiz/zirv-flow, default 0.55.0
 #   BENCH_PG_CPUSET, BENCH_PG_SHM  PostgreSQL cpuset (default 8-31) and /dev/shm (default 1gb)
@@ -51,8 +52,10 @@ die() { log "FAILED: $*"; exit 1; }
 
 # The project name given with -p wins over the `name:` in compose.bench.yaml.
 compose() {
+  local resources=(-f scripts/bench/compose.tiers.yaml -f scripts/bench/m4/compose.m4.yaml)
+  [ -z "${M4_RESOURCE_COMPOSE:-}" ] || resources=(-f "$M4_RESOURCE_COMPOSE")
   docker compose -p "$M4_PROJECT" -f docker-compose.yml -f scripts/bench/compose.bench.yaml \
-    -f scripts/bench/compose.tiers.yaml -f scripts/bench/m4/compose.m4.yaml \
+    "${resources[@]}" \
     ${M4_EXTRA_COMPOSE:+-f "$M4_EXTRA_COMPOSE"} "$@"
 }
 
@@ -60,7 +63,7 @@ pg_container() { compose ps -q postgres; }
 
 # psql inside the postgres container. Extra arguments go to psql; the script comes on stdin
 # (-f -) or in -c. The role and database are the compose defaults.
-pg() { docker exec -i "$(pg_container)" psql -U zirv -d zirv_flow -X -q -v ON_ERROR_STOP=1 "$@"; }
+pg() { docker exec -i "$(pg_container)" psql -U "${POSTGRES_USER:-zirv}" -d "${POSTGRES_DB:-zirv_flow}" -X -q -v ON_ERROR_STOP=1 "$@"; }
 
 state_get() { [ -f "$M4_STATE/state.env" ] && sed -n "s/^$1=//p" "$M4_STATE/state.env" | tail -n 1 || true; }
 state_put() {
