@@ -549,6 +549,16 @@ container images/cpusets/core counts/memory limits, host memory, Docker VM CPU/m
 results, the emulation label and all three limitations. Later good runs replace that bench's summary;
 raw runs remain in the state directory. No measured data files are fabricated by this change.
 
+Run `bash scripts/bench/m8/check-report.sh` to validate `docs/benchmarks/m8-validation.md`
+(`--self-test` tests temporary fixtures; `--data-only` checks just JSON). Its Markdown table needs
+`Dimension`, `Data file` and `Verdict` columns: exact section 19 dimension names, existing M8 JSON
+citations (links relative to the report or literal paths starting at `docs/`; never smoke or `.failed.json` files, and the run needs `smoke` false and `exit_code` 0), and exactly `met`,
+`missed and fixed`, or `revised by decision`. The report must contain the one-line label
+"reference-resource emulation, not a reference-hardware run". Every JSON under
+`docs/benchmarks/data/m8/`, including smoke and failed runs, must parse and carry a nonempty
+`image_version` string and a `topology` object. Invalid input exits 1; absent reports are skipped
+and zero data files pass. CI always checks fixtures and data, and checks the report once present.
+
 `debugger` starts `M8_DEBUGGER_CLIENTS=1` streams (set **20** for the full run), waits for all to
 connect, then offers track load at `M8_RATE=2000` for `M8_SECONDS=600`. Connection allowance is
 `M8_DEBUGGER_CONNECT_SECONDS=15`; drain allowance is `M8_DRAIN_SECONDS=60` (both five in smoke).
