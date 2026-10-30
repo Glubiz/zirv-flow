@@ -10,7 +10,7 @@ drain="${M8_DRAIN_SECONDS:-3600}"
 if [ -n "${M8_SMOKE:-}" ]; then seconds=5; lead=10; drain=60; fi
 for name in seconds lead drain; do positive_integer "$name" "${!name}"; done
 [ -x "${LOADGEN:-$root/target/release/loadgen}" ] || die 'no prebuilt loadgen'
-[ -f "$m8_dir/sample-job-kinds.sh" ] && [ -f "$m8_dir/job-kinds.sql" ] || die 'per-kind sampler is missing; merge #455 first'
+require_job_sampler
 sampler_pid=''; load_pid=''; worker_stopped=''
 cleanup() {
   local pid

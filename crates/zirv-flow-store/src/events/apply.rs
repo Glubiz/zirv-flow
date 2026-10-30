@@ -1843,10 +1843,8 @@ mod tests {
                 Value::Array(array) => values.extend(array),
                 Value::String(text) => {
                     // The workspace-bound HMAC can contain "4111" by chance.
-                    let digest = text.len() == 64
-                        && text
-                            .bytes()
-                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+                    let digest =
+                        text.len() == 64 && text.bytes().all(|byte| byte.is_ascii_hexdigit());
                     if !digest {
                         assert!(!text.contains("ada@example.com"));
                         assert!(!text.contains("4111"));

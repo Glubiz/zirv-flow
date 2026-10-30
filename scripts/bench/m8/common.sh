@@ -86,8 +86,11 @@ pathlib.Path(dest + '.json').write_text(json.dumps({'samples': lines}, indent=2)
 PY
 }
 
-start_job_sampler() {
+require_job_sampler() {
   [ -f "$m8_dir/sample-job-kinds.sh" ] && [ -f "$m8_dir/job-kinds.sql" ] || die 'per-kind sampler is missing; merge #455 first'
+}
+
+start_job_sampler() {
   bash "$m8_dir/sample-job-kinds.sh" >"$1/job-kinds.csv" 2>"$1/job-kinds.err" &
   sampler_pid=$!
 }

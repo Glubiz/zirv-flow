@@ -13,7 +13,7 @@ tick="${M8_JOBS_TICK_SECONDS:-0.2}"
 for name in busy lead timeout; do positive_integer "$name" "${!name}"; done
 [ "$cap" = unset ] || positive_integer M8_JOBS_CAP "$cap"
 [[ "$tick" =~ ^[0-9]+([.][0-9]+)?$ && "$tick" =~ [1-9] ]] || die 'M8_JOBS_TICK_SECONDS must be positive'
-[ -f "$m8_dir/sample-job-kinds.sh" ] && [ -f "$m8_dir/job-kinds.sql" ] || die 'per-kind sampler is missing; merge #455 first'
+require_job_sampler
 cid="$(compose ps -q zirv-flow-worker)"
 [ -n "$cid" ] && [[ "$cid" != *$'\n'* ]] || die 'expected the single M8 worker with its published metrics port'
 concurrency="$(docker inspect --format '{{json .Config.Env}}' "$cid" | python3 -I -c '

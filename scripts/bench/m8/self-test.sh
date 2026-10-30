@@ -44,10 +44,10 @@ expect_failure 'seed requires' bash "$here/run.sh" seed
 expect_failure 'unknown seed' bash "$here/run.sh" seed nope
 expect_failure 'unexpected arguments' bash "$here/run.sh" up extra
 for spec in 'explorer:#395' 'decisions:#397'; do
-  expect_failure "${spec#*:}" bash "$here/run.sh" "${spec%:*}"
   rc=0
   bash "$here/run.sh" "${spec%:*}" >"$work/output" 2>&1 || rc=$?
   [ "$rc" = 3 ]
+  grep -Fq -- "${spec#*:}" "$work/output"
 done
 for spec in 'M8_SERVE_CPUSET=8-11' 'M8_WORKER_CPUSET=8-11' 'M8_WORKER_CPUSET=0-3'; do
   : >"$M8_TEST_CALLS"
