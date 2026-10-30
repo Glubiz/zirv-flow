@@ -199,8 +199,7 @@ data_path = pathlib.Path('docs/benchmarks/data/m8')
 for name in ('people.json', 'ingest.failed.json', 'smoke/render.json', 'smoke/render.failed.json'):
     path = data / name
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(dict(image_version='0.190.0', topology=dict(containers=[]),
-                                   smoke=name.startswith('smoke/'), exit_code=1 if '.failed.' in name else 0)))
+    path.write_text(json.dumps(dict(image_version='0.190.0', topology=dict(containers=[]))))
 
 def fixture(name):
     return pathlib.Path(shutil.copytree(base, work / name))
@@ -267,10 +266,11 @@ PY
   echo 'check-report.sh --self-test: all scenarios passed'
 }
 
-[ "$#" -le 1 ] || { echo "usage: $0 [--self-test | --data-only]" >&2; exit 2; }
+usage() { echo "usage: $0 [--self-test | --data-only]" >&2; exit 2; }
+[ "$#" -le 1 ] || usage
 case "${1:-}" in
   --self-test) run_self_test ;;
   --data-only) run_check "$root" data-only ;;
   '') run_check "$root" all ;;
-  *) echo "usage: $0 [--self-test | --data-only]" >&2; exit 2 ;;
+  *) usage ;;
 esac
