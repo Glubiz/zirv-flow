@@ -82,6 +82,18 @@ pub(crate) fn init_tls() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
+/// The trimmed, non-empty API key held in `path`.
+pub(crate) fn read_key(path: &std::path::Path) -> Result<String, String> {
+    let key = std::fs::read_to_string(path)
+        .map_err(|error| format!("cannot read --key-file: {error}"))?
+        .trim()
+        .to_owned();
+    if key.is_empty() {
+        return Err("--key-file is empty".into());
+    }
+    Ok(key)
+}
+
 fn validate(args: &Args) -> Result<(), String> {
     let phase_ok = |rate: u32, seconds: f64| seconds == 0.0 || (rate > 0 && seconds > 0.0);
     if !(args.duration.is_finite() && args.burst_duration.is_finite()) {
@@ -138,13 +150,7 @@ fn merge(phases: &[PhaseReport], samples: Samples) -> PhaseReport {
 
 async fn run(args: Args) -> Result<(), String> {
     validate(&args)?;
-    let key = std::fs::read_to_string(&args.key_file)
-        .map_err(|error| format!("cannot read --key-file: {error}"))?
-        .trim()
-        .to_owned();
-    if key.is_empty() {
-        return Err("--key-file is empty".into());
-    }
+    let key = crate::read_key(&args.key_file)?;
     let started = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| error.to_string())?;

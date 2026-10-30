@@ -332,13 +332,7 @@ pub(crate) async fn run(args: Args) -> Result<(), String> {
         ]);
     url.set_query(Some("source=api"));
     url.set_fragment(None);
-    let key = std::fs::read_to_string(&args.key_file)
-        .map_err(|error| format!("cannot read --key-file: {error}"))?
-        .trim()
-        .to_owned();
-    if key.is_empty() {
-        return Err("--key-file is empty".into());
-    }
+    let key = crate::read_key(&args.key_file)?;
     crate::init_tls();
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
