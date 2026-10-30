@@ -66,7 +66,7 @@ test("a viewer sees no write control on segments and flows, and no personal valu
   await viewer.getByLabel("Kind").selectOption("external");
   await viewer.getByLabel("System").fill("contact_key");
   await viewer.getByLabel("Value").fill(CONTACT_KEY);
-  await viewer.getByRole("button", { name: "Search" }).click();
+  await viewer.getByRole("button", { name: "Search", exact: true }).click();
   const table = viewer.getByRole("table");
   await expect(table.getByText("Hidden").first()).toBeVisible();
   await expect(viewer.getByText(CONTACT_KEY, { exact: false })).toHaveCount(0);
