@@ -1,0 +1,133 @@
+{
+  "label": "capped cause analysis (4 CPU / 8 GiB, ruling d84373ae); relative evidence only, not a section 19 measurement",
+  "image_version": "0.193.0",
+  "issue": 76,
+  "arm": "B",
+  "run": 1,
+  "variable": "drain_shards 1",
+  "exit_code": 0,
+  "sql_via": "psql shim (.zirv/m8shim/psql, docker exec into the bench PostgreSQL container)",
+  "topology": [
+    {
+      "service": "postgres",
+      "image": "postgres:16.15",
+      "image_id": "sha256:1beaa3084eee2676f20a9cd9928f0bf2c5bf674f8e49f81017912183d377c61c",
+      "cpuset": "11-12",
+      "memory_bytes": 4294967296,
+      "shm_bytes": 1073741824
+    },
+    {
+      "service": "zirv-flow",
+      "image": "ghcr.io/glubiz/zirv-flow:0.193.0",
+      "image_id": "sha256:94e78251078c155a782295961bbb81dc895fa5f0d72728650659aede7eb96293",
+      "cpuset": "13",
+      "memory_bytes": 1572864000,
+      "shm_bytes": 21029191680
+    },
+    {
+      "service": "zirv-flow-worker",
+      "image": "ghcr.io/glubiz/zirv-flow:0.193.0",
+      "image_id": "sha256:94e78251078c155a782295961bbb81dc895fa5f0d72728650659aede7eb96293",
+      "cpuset": "14",
+      "memory_bytes": 1572864000,
+      "shm_bytes": 21029191680
+    },
+    {
+      "service": "zirv-flow-scheduler",
+      "image": "ghcr.io/glubiz/zirv-flow:0.193.0",
+      "image_id": "sha256:94e78251078c155a782295961bbb81dc895fa5f0d72728650659aede7eb96293",
+      "cpuset": "14",
+      "memory_bytes": 536870912,
+      "shm_bytes": 21029191680
+    },
+    {
+      "postgres_settings": {
+        "shared_buffers": "1GB",
+        "effective_cache_size": "16GB",
+        "maintenance_work_mem": "1GB",
+        "max_wal_size": "8GB",
+        "checkpoint_timeout": "15min"
+      }
+    }
+  ],
+  "results": {
+    "params": {
+      "rate": "2000",
+      "seconds": "300",
+      "mode": "batch"
+    },
+    "loadgen": {
+      "requests": 1200,
+      "items_offered": 600000,
+      "items_accepted": 600000,
+      "achieved_rate": 1999.984279290238,
+      "elapsed_s": 300.002358125,
+      "status": {
+        "accepted_202": 1200,
+        "rate_limited_429": 0,
+        "server_5xx": 0,
+        "other": 0,
+        "transport_errors": 0
+      },
+      "latency_from_schedule": {
+        "count": 1200,
+        "p50_ms": 13.414,
+        "p95_ms": 27.29,
+        "p99_ms": 36.639,
+        "max_ms": 139.939
+      },
+      "service_latency": {
+        "count": 1200,
+        "p50_ms": 9.995,
+        "p95_ms": 24.304,
+        "p99_ms": 34.064,
+        "max_ms": 136.718
+      }
+    },
+    "server_request_latency": {
+      "route": "/api/v1/ingest/batch",
+      "count": 1200.0,
+      "mean_s": 0.010562702750833333,
+      "p50_s": 0.008325942350332594,
+      "p95_s": 0.02445344129554656,
+      "p99_s": 0.045312500000000006,
+      "observations_above_last_bucket": 0.0
+    },
+    "worker_jobs_delta": {
+      "ingest.drain/completed": 14.0
+    },
+    "cpu_over_load_window": {
+      "zirv-flow-m8-cause-postgres-1": {
+        "samples": 57,
+        "cpu_mean_pct": 88.1078947368421,
+        "cpu_max_pct": 181.81
+      },
+      "zirv-flow-m8-cause-zirv-flow-1": {
+        "samples": 57,
+        "cpu_mean_pct": 1.6775438596491228,
+        "cpu_max_pct": 4.47
+      },
+      "zirv-flow-m8-cause-zirv-flow-scheduler-1": {
+        "samples": 57,
+        "cpu_mean_pct": 0.08210526315789474,
+        "cpu_max_pct": 0.15
+      },
+      "zirv-flow-m8-cause-zirv-flow-worker-1": {
+        "samples": 57,
+        "cpu_mean_pct": 38.629122807017545,
+        "cpu_max_pct": 44.54
+      }
+    },
+    "inbox": {
+      "samples": 114,
+      "max_depth": 414500.0,
+      "max_age_s": 414.1
+    },
+    "drain_after_load_s": 300.0,
+    "final_state": {
+      "inbox_rows": 220000,
+      "people": 97743,
+      "events": 190517
+    }
+  }
+}

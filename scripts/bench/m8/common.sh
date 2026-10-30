@@ -17,7 +17,7 @@ configure() {
   export BENCH_IMAGE_TAG="${BENCH_IMAGE_TAG:-0.190.0}"
   [[ "$BENCH_IMAGE_TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][a-zA-Z0-9.-]+)?$ ]] || die 'BENCH_IMAGE_TAG must be a version, never latest'
   export M8_STATE="${M8_STATE:-$root/.zirv/work/m8}"
-  export M4_PROJECT="zirv-flow-m8${smoke:+-smoke}" M4_STATE="$M8_STATE${smoke:+-smoke}/auth"
+  export M4_PROJECT="${M8_PROJECT:-zirv-flow-m8${smoke:+-smoke}}" M4_STATE="$M8_STATE${smoke:+-smoke}/auth"
   export M4_RESOURCE_COMPOSE="$m8_dir/compose.m8.yaml"
   export POSTGRES_USER=zirv POSTGRES_DB=zirv_flow_m8
   unset M4_EXTRA_COMPOSE

@@ -415,3 +415,52 @@ report (`<test>.json`), the ramp steps (`<test>-steps.jsonl`), the applied-laten
 `M/decision-append*.json`, `M/oq1.json`. Section 5.1 (after #74): `after-74/{S,M,L}` (2-minute burst in
 each tier, tier M also the sustained regression check) and `after-74/burst600/M` (the 10-minute burst). They contain no keys or secrets. The harness is
 `scripts/bench/` (runbook: `scripts/bench/README.md`).
+
+## 10. Capped cause analysis for #76 (relative evidence only)
+
+Issue #76: 500-item batch ingest requests at 2,000 items/s had API p99 125 ms against 11 ms for single items.
+Supervisor ruling d84373ae allows only capped, relative A/B experiments, so this is not a section 19
+measurement and makes no absolute target claim.
+
+Setup: image 0.193.0; 4 CPU / 8 GiB in total (PostgreSQL cpuset 11-12, serve 13, worker 14); small seeds
+(100,000 people); a fresh database per run; 2,000 items/s target for 300 s (a 60 s pilot first, arm P = A);
+`drain_shards` 8 and `worker.concurrency` 4 unless the arm changes it. Each arm ran twice, interleaved
+A B C D A B C D. SQL ran through a psql shim (`.zirv/m8shim/psql`, `docker exec` into the bench PostgreSQL
+container). One variable per arm: A baseline (batch 500, drain on); B `drain_shards` 1; C drain not running
+(worker container stopped before load); D single-item `track` requests at the same item rate.
+
+Each cell is the median of the two runs (the mean, for two) with the two values in brackets. Data:
+`docs/benchmarks/data/cause/76/<ARM>-run<N>.json` (A, B, C: runs 1 and 2; pilot `P-run1.json`). Client p99 is
+the loadgen service latency; server p99 is from the API route histogram. CPU is the mean over the load window
+in percent of one core (PostgreSQL has two).
+
+| Arm | Client p99 ms | Server p99 ms | PostgreSQL CPU % | serve CPU % | worker CPU % | Inbox max depth | Inbox max age s | Drain after load | Errors |
+|---|---|---|---|---|---|---|---|---|---|
+| A baseline (`A-run1/2.json`) | 68 (59-77) | 79 (64-94) | 193 (187-198) | 1.8 (1.7-1.8) | 70 (67-72) | 18,250 (18,000-18,500) | 9.7 (9.4-9.9) | 2-5 s | 0 |
+| B drain_shards 1 (`B-run1/2.json`) | 37 (34-40) | 46 (45-46) | 88 (88-88) | 1.7 (1.7-1.7) | 38 (38-39) | 413,750 (413,000-414,500) | 417 (414-419) | not drained after 300 s; 220,000 and 231,000 rows left | 0 |
+| C no drain (`C-run1/2.json`) | 36 (32-40) | 41 (40-43) | 5.8 (5.5-6.1) | 2.0 (2.0-2.0) | 0 (stopped) | 600,000 (all rows; nothing drains) | 300 (300.1-300.3) | not applicable | 0 |
+| D single-item (`D-run1/2.json`) | skipped for cause | skipped for cause | not used | not used | not used | not used | not used | not used | 285,706 and 300,835 transport errors |
+
+All A, B and C runs reached 2,000 items/s with 1,200 requests accepted and no 429, 5xx or transport errors.
+
+Arm D is invalid and is not a result. The 2,000 items/s of single-item requests could not be held inside the
+cap: the achieved rate was 980 and 992 requests/s, the serve core ran at 82-86% mean and 131-155% peak, and
+there were 285,706 and 300,835 transport errors. Its latencies measure an overloaded generator path, not the
+API, so no single-item comparison is made here and the 11 ms figure from #76 is not reproduced.
+
+What the evidence supports. In the same stack and at the same offered load, batch p99 depends on the drain.
+With the drain stopped (C) server p99 is about 41 ms; with one drain shard (B) about 46 ms; with eight shards (A)
+about 79 ms, and A's runs differ by 30 ms (64 and 94 ms). A is also the only arm where PostgreSQL ran near its
+two cores (187-198%), and its drain kept up (inbox at most 18,500 rows, empty 2-5 s after load). So the
+drain's PostgreSQL work competing with the request path is the best-supported cause of the extra tail, with
+the request path alone (C) accounting for the remainder. B shows the opposite cost: less contention, but the
+drain falls far behind (inbox about 414,000 rows and 7 minutes old, not drained 300 s after load), so fewer
+shards trades latency for backlog and is not a fix. The serve process is not the bottleneck in the batch arms (about 2% of a core).
+
+What it does not show. Whether C's 41 ms is the batch insert itself, or how it compares with single items
+(D is invalid). Two runs per arm give only a rough spread, and the A runs overlap with B and C on client p99
+(59 ms against 40 ms). Nothing was tested for the mechanism inside PostgreSQL (locks, WAL, I/O), for other
+`drain_shards` values or batch sizes, or outside the cap. The absolute numbers are specific to this cap and
+do not belong in a section 19 verdict.
+
+#76 stays open until a fix is shown and verified.
