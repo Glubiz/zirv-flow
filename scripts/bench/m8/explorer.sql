@@ -58,17 +58,19 @@ SELECT e.id, e.occurred_at, e.name, e.source, e.person_id, e.validation_state,
 :scope ORDER BY e.occurred_at DESC, e.id DESC LIMIT :page_size;
 \if :is_export
 -- Also show the keyset query of a later export page, using the first page's last row.
-SELECT max(at) AS at, max(id::text) AS id FROM (
+SELECT count(*) > 0 AS has, max(at) AS at, max(id::text) AS id FROM (
   SELECT e.occurred_at AS at, e.id
   :scope ORDER BY e.occurred_at DESC, e.id DESC LIMIT 1 OFFSET 999
 ) last_row
 \gset cursor_
-\if :{?cursor_id}
+\if :cursor_has
 EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
 SELECT e.id, e.occurred_at, e.name, e.source, e.person_id, e.validation_state,
        e.flags, e.trace_id, e.properties, e.schema_version
 :scope AND (e.occurred_at, e.id) < (:'cursor_at'::timestamptz, :'cursor_id'::uuid)
 ORDER BY e.occurred_at DESC, e.id DESC LIMIT 1001;
+\else
+\echo 'export cursor page skipped: fewer than 1000 rows in the window'
 \endif
 \endif
 \endif
