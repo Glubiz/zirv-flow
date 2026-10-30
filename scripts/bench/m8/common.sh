@@ -70,6 +70,16 @@ for value in sys.argv[1:]:
 PY
 }
 
+mem_bytes() {
+  python3 -I - "$1" <<'PY'
+import re, sys
+match = re.fullmatch(r'([0-9]+)([bBkKmMgG]?)', sys.argv[1])
+if not match:
+    raise SystemExit(f'invalid memory limit: {sys.argv[1]} (use integer bytes, k, m or g)')
+print(int(match[1]) * 1024 ** {'': 0, 'b': 0, 'k': 1, 'm': 2, 'g': 3}[match[2].lower()])
+PY
+}
+
 seed_preflight() {
   local kind="$1" count bytes source completed remaining free needed
   case "$kind" in
@@ -99,18 +109,10 @@ SQL
     local vm_mem
     vm_mem="$(docker info --format '{{.MemTotal}}')"
     [[ "$vm_mem" =~ ^[0-9]+$ ]] || die 'cannot check Docker VM memory before enrollment seed'
-    local budget
-    budget="$(python3 -I - "$M8_PG_MEMORY" "$M8_SERVE_MEMORY" "$M8_WORKER_MEMORY" "$M8_SCHEDULER_MEMORY" <<'PY'
-import re, sys
-total = 0
-for value in sys.argv[1:]:
-    match = re.fullmatch(r'([0-9]+)([bBkKmMgG]?)', value)
-    if not match:
-        raise SystemExit(f'invalid memory limit: {value} (use integer bytes, k, m or g)')
-    total += int(match[1]) * 1024 ** {'': 0, 'b': 0, 'k': 1, 'm': 2, 'g': 3}[match[2].lower()]
-print(total)
-PY
-)"
+    local budget=0 limit
+    for limit in "$M8_PG_MEMORY" "$M8_SERVE_MEMORY" "$M8_WORKER_MEMORY" "$M8_SCHEDULER_MEMORY"; do
+      budget=$((budget + $(mem_bytes "$limit")))
+    done
     [ "$vm_mem" -ge "$budget" ] || die "enrollment seed needs $budget bytes for the configured PG/app budgets in the Docker VM"
   fi
 }
@@ -124,22 +126,18 @@ capture_topology() {
     [ -n "$cid" ] || die "no running $service; run up first"
     docker inspect --format '{"service":"{{index .Config.Labels "com.docker.compose.service"}}","image":"{{.Config.Image}}","image_id":"{{.Image}}","cpuset":"{{.HostConfig.CpusetCpus}}","memory_bytes":{{.HostConfig.Memory}},"shm_bytes":{{.HostConfig.ShmSize}}}' "$cid" >>"$dest"
   done
-  python3 -I - "$dest" <<'PY'
-import json, os, re, sys
+  python3 -I - "$dest" "$(mem_bytes "$M8_PG_MEMORY")" "$(mem_bytes "$M8_SERVE_MEMORY")" \
+    "$(mem_bytes "$M8_WORKER_MEMORY")" "$(mem_bytes "$M8_SCHEDULER_MEMORY")" <<'PY'
+import json, os, sys
 expected = {'postgres': 'M8_PG_CPUSET', 'zirv-flow': 'M8_SERVE_CPUSET',
             'zirv-flow-worker': 'M8_WORKER_CPUSET', 'zirv-flow-scheduler': 'M8_WORKER_CPUSET'}
-memory = {'postgres': 'M8_PG_MEMORY', 'zirv-flow': 'M8_SERVE_MEMORY',
-          'zirv-flow-worker': 'M8_WORKER_MEMORY', 'zirv-flow-scheduler': 'M8_SCHEDULER_MEMORY'}
+memory = dict(zip(['postgres', 'zirv-flow', 'zirv-flow-worker', 'zirv-flow-scheduler'], map(int, sys.argv[2:])))
 for line in open(sys.argv[1]):
     row = json.loads(line)
     image = 'postgres:16.15' if row['service'] == 'postgres' else 'ghcr.io/glubiz/zirv-flow:' + os.environ['BENCH_IMAGE_TAG']
     if row['cpuset'] != os.environ[expected[row['service']]] or row['image'] != image:
         raise SystemExit(f"{row['service']} differs from requested image/cpuset; run up first")
-    value = os.environ[memory[row['service']]]
-    match = re.fullmatch(r'([0-9]+)([bBkKmMgG]?)', value)
-    if not match:
-        raise SystemExit(f'invalid memory limit: {value}')
-    requested = int(match[1]) * 1024 ** {'': 0, 'b': 0, 'k': 1, 'm': 2, 'g': 3}[match[2].lower()]
+    requested = memory[row['service']]
     if requested <= 0 or row['memory_bytes'] != requested:
         raise SystemExit(f"{row['service']} differs from requested memory cap; run up first")
 PY
