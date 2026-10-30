@@ -56,6 +56,15 @@ FROM debugger_run
     DO $$ BEGIN RAISE EXCEPTION 'invalid run boundaries or missing connected clients'; END $$;
 \endif
 
+\set client_host `python3 -I -c 'import socket; print(socket.gethostname().split(".")[0].lower())'`
+SELECT COALESCE(bool_and(record->>'host' = :'client_host'), false) AS same_host
+FROM debugger_receipts WHERE record->>'kind' = 'started'
+\gset
+\if :same_host
+\else
+    DO $$ BEGIN RAISE EXCEPTION 'psql host differs from the watcher host recorded in the receipt'; END $$;
+\endif
+
 \set client_before_us `python3 -I -c 'import time; print(time.time_ns() // 1000)'`
 SELECT extract(epoch FROM now()) * 1000000 AS db_now_us
 \gset

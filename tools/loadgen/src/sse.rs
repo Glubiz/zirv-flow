@@ -346,9 +346,19 @@ pub(crate) async fn run(args: Args) -> Result<(), String> {
     let end = start
         .checked_add(duration)
         .ok_or("--duration is too large")?;
+    let host = std::process::Command::new("hostname")
+        .output()
+        .map_err(|error| format!("cannot run hostname: {error}"))?;
+    let host = String::from_utf8_lossy(&host.stdout);
+    let host = host
+        .trim()
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_lowercase();
     write_record(
         &output,
-        json!({"kind": "started", "workspace": args.workspace,
+        json!({"kind": "started", "workspace": args.workspace, "host": host,
         "clients": args.clients, "received_at": wall_time()?}),
     )?;
     let key = Arc::new(key);

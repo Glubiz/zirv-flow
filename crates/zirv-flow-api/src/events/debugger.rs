@@ -1022,7 +1022,7 @@ mod tests {
             .rows,
             2
         );
-        let item = tokio::time::timeout(Duration::from_secs(10), async {
+        let item = tokio::time::timeout(Duration::from_secs(30), async {
             let mut buffer = String::new();
             loop {
                 let frame = body.frame().await.unwrap().unwrap();

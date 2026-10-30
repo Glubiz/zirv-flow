@@ -115,7 +115,7 @@ psql -X "$DATABASE_URL" -v receive_file="$PWD/receive.jsonl" \
 The JSONL holds one `item` per receipt (`client`, nullable `event_id`, `received_at` in UTC Unix
 microseconds), `started`/`finished` clock boundaries and per-client gap/skipped/status summaries.
 Run SQL after the inbox drains, on the watcher's host with `python3` available and stable clocks;
-it samples that host around database `now()` and fails if skew plus uncertainty, or the run's wall
+it fails unless that host's short name matches the `host` in the `started` record, then samples that host around database `now()` and fails if skew plus uncertainty, or the run's wall
 versus monotonic clock step, exceeds 50 ms. Saved boundaries alone cannot establish clock skew.
 SQL reports first-receipt nearest-rank p50/p95/p99/max and delivered share per client and overall:
 distinct client/event pairs divided by clients times stored API events arriving during the run.
