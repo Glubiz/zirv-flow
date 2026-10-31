@@ -39,7 +39,11 @@ function NewFlow({ workspaceId }: { workspaceId: string }) {
 
   return (
     <div className="page">
-      <PageHeader title="New flow" breadcrumb={{ group: "Messaging", section: "Flows", to: `/w/${workspaceId}/flows` }} lede="Name it and say what starts it. You lay out the steps next." />
+      <PageHeader
+        title="New flow"
+        breadcrumb={{ group: "Messaging", section: "Flows", to: `/w/${workspaceId}/flows` }}
+        lede="Name it and say what starts it. You lay out the steps next."
+      />
       {ready && !canWrite ? (
         <Panel flush>
           <EmptyState title="You cannot create flows">Ask a member of the workspace to create one, or to give you a role.</EmptyState>

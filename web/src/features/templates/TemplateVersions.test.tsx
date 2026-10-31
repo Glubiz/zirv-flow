@@ -49,16 +49,41 @@ describe("publishing", () => {
 });
 
 describe("versions and where used", () => {
-  it("shows where the template is used, active or not", async () => {
-    mockApi(templateRoutes({ uses: [useBody(), useBody({ flow_id: "f2", flow_name: "Paused flow", active: false, flow_state: "paused" })] }));
+  it("lists the flows that use the template in a Related panel with their state", async () => {
+    mockApi(templateRoutes({ uses: [useBody(), useBody({ flow_id: "f2", flow_name: "Paused flow", active: false, flow_state: "draft" })] }));
     const user = userEvent.setup();
     mount();
 
     await user.click(await screen.findByRole("tab", { name: "Where used" }));
 
-    const list = await screen.findByRole("list", { name: "Flows that use this template" });
-    expect(within(list).getByRole("link", { name: "Welcome series" })).toHaveAttribute("href", expect.stringContaining("/flows/"));
-    expect(within(list).getByText("Active")).toBeInTheDocument();
-    expect(within(list).getByText("Not running now")).toBeInTheDocument();
+    const panel = await screen.findByRole("complementary", { name: "Related" });
+    expect(within(panel).getByRole("heading", { name: "Used by flows" })).toBeInTheDocument();
+    expect(within(panel).getByRole("link", { name: "Welcome series" })).toHaveAttribute("href", expect.stringContaining("/flows/"));
+    expect(within(panel).getByText("Draft")).toBeInTheDocument();
+  });
+
+  it("draws no Related panel when no flow uses the template", async () => {
+    mockApi(templateRoutes({ uses: [] }));
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("tab", { name: "Where used" }));
+
+    expect(await screen.findByText("No flow uses this template")).toBeInTheDocument();
+    expect(screen.queryByRole("complementary", { name: "Related" })).not.toBeInTheDocument();
+  });
+
+  it("walks back from the Where used tab to the editor tab", async () => {
+    mockApi(templateRoutes());
+    const user = userEvent.setup();
+    const { router } = mount();
+
+    await user.click(await screen.findByRole("tab", { name: "Where used" }));
+    expect(router.state.location.search).toBe("?tab=used");
+    await router.navigate(-1);
+
+    await waitFor(() => expect(router.state.location.pathname).toBe(`/w/ws1/templates/${TEMPLATE_ID}`));
+    expect(router.state.location.search).toBe("");
+    expect(await screen.findByRole("tab", { name: "Editor", selected: true })).toBeInTheDocument();
   });
 });

@@ -30,7 +30,8 @@ function Definition({ workspaceId }: { workspaceId: string }) {
   return (
     <div className="page">
       <PageHeader
-        title="Contact definition" breadcrumb={{ group: "Workspace", section: "Contact definition" }}
+        title="Contact definition"
+        breadcrumb={{ group: "Workspace", section: "Contact definition" }}
         lede="Which fields a contact has. Each field is a field from your registry, which gives it its type. A required field must be present on every contact; a field marked as an identifier also identifies the person."
       />
       <ResourceView resource={schema} loadingLabel="Loading the definition">

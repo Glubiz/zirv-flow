@@ -53,15 +53,12 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin, canPu
   const [query, setQuery] = useSearchParams();
   const tab: Tab = query.get("tab") === "used" ? "used" : "editor";
   const setTab = (next: Tab) =>
-    setQuery(
-      (current) => {
-        const params = new URLSearchParams(current);
-        if (next === "editor") params.delete("tab");
-        else params.set("tab", next);
-        return params;
-      },
-      { replace: true },
-    );
+    setQuery((current) => {
+      const params = new URLSearchParams(current);
+      if (next === "editor") params.delete("tab");
+      else params.set("tab", next);
+      return params;
+    });
   const [save, setSave] = useState<SaveState>("saved");
   const [saveFailure, setSaveFailure] = useState<ErrorSummary | null>(null);
   const [preview, setPreview] = useState<PreviewState>({ status: "loading" });

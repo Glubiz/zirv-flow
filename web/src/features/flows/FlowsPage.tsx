@@ -35,7 +35,8 @@ function Flows({ workspaceId }: { workspaceId: string }) {
   return (
     <div className="page">
       <PageHeader
-        title="Flows" breadcrumb={{ group: "Messaging", section: "Flows" }}
+        title="Flows"
+        breadcrumb={{ group: "Messaging", section: "Flows" }}
         lede="Automations that start when something happens to a person and then walk them through steps: waiting, branching, updating what you know about them and calling out."
         actions={
           canWrite ? (
