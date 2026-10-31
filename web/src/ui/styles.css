@@ -5409,3 +5409,7 @@ main:focus {
     width: 100vw;
   }
 }
+
+.palette-group { list-style: none; padding: 0; margin: 0; }
+.palette-heading { padding: 8px 12px 4px; font-size: 0.875em; }
+.palette-note { padding: 6px 12px; margin: 0; }
