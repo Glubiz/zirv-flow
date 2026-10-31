@@ -445,6 +445,7 @@ values.
 | GET | `/api/v1/workspaces` | none or any signed-in user | none |
 | POST | `/api/v1/workspaces` | owner | none |
 | GET | `/api/v1/workspaces/{ws}` | member | read |
+| GET | `/api/v1/workspaces/{ws}/summary` | member | read |
 | PATCH | `/api/v1/workspaces/{ws}` | admin | admin |
 | GET | `/api/v1/workspaces/{ws}/members` | member | read or admin |
 | PUT | `/api/v1/workspaces/{ws}/members/{user_id}` | admin | admin |
