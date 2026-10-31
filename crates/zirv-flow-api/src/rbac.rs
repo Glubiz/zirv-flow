@@ -180,6 +180,7 @@ pub(crate) const ROUTES: &[Route] = table! {
     Get    "/api/v1/workspaces" => INSTANCE, "lists the caller's workspaces";
     Post   "/api/v1/workspaces" => OWNER @ audited("workspace.created");
     Get    "/api/v1/workspaces/{ws}" => READ;
+    Get    "/api/v1/workspaces/{ws}/summary" => READ @ not_audited("read-only query");
     Patch  "/api/v1/workspaces/{ws}" => ADMIN @ audited("workspace.updated");
     // members
     Get    "/api/v1/workspaces/{ws}/members" => READ_MEMBERS;

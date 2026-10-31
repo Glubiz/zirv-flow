@@ -83,6 +83,8 @@ pub struct AppState {
     pub(crate) prefetch_user_agents: Vec<String>,
     /// The per-message rate limit of the tracking routes.
     pub(crate) tracking_limiter: Arc<RateLimiter>,
+    /// The workspace summaries computed in the last minute.
+    pub(crate) summaries: crate::summary::SummaryCache,
 }
 
 /// OIDC sign-in, when it is configured.
@@ -129,6 +131,7 @@ impl AppState {
             tracking_key: None,
             prefetch_user_agents: Vec::new(),
             tracking_limiter: Arc::new(crate::tracking::limiter()),
+            summaries: crate::summary::SummaryCache::default(),
         }
     }
 
