@@ -42,17 +42,19 @@ an audit service failure is not an exception and must fail the job.
 
 ## Known advisories
 
-Both ignores below were reviewed on **2026-10-27** against `Cargo.lock`, the
-resolved dependency graph and the production call sites. Both affected versions
-remain in the tree. Before the release candidate, re-check each ignore against
-the resolved tree and current RustSec advisory; remove any ignore whose affected
-dependency is gone or fixed. Reassess sooner whenever these cryptographic uses
-change. Deferring the upstream upgrades retains the vulnerable transitive code,
-so the restricted usage must continue to hold.
+The ignore below was reviewed on **2026-10-27** and re-checked on **2026-10-31**
+against `Cargo.lock`, the resolved dependency graph and the production call
+sites. The affected version remains in the tree. Before the release candidate,
+re-check it against the resolved tree and current RustSec advisory; remove it
+once the dependency is gone or fixed. Reassess sooner whenever this cryptographic
+use changes. Deferring the upstream upgrade retains the vulnerable transitive
+code, so the restricted usage must continue to hold. RUSTSEC-2026-0387
+(`crypto-bigint`) no longer applies: `openidconnect 4.1.0` resolves
+`crypto-bigint 0.7.10`, and no 0.5 version remains.
 
 ### RUSTSEC-2023-0071 — rsa timing side channel
 
-- Affected path: `zirv-flow-identity → openidconnect 4.0.1 → rsa 0.9.10`.
+- Affected path: `zirv-flow-identity → openidconnect 4.1.0 → rsa 0.9.10`.
   `zirv-flow-core` also uses `rsa` to generate and read DKIM keys. Identity's mock
   provider and the connector verification tests use it only in test support.
 - Exposure review: production ID-token verification uses the provider's public
@@ -65,22 +67,6 @@ so the restricted usage must continue to hold.
 - Reviewed: **2026-10-27**. Exit: upgrade every affected `rsa` path to a release
   RustSec marks fixed, or remove those paths, then delete the ignore. Reassess
   before adding RSA private-key signing or decryption through `rsa`.
-
-### RUSTSEC-2026-0387 — crypto-bigint timing side channels
-
-- Affected path: `zirv-flow-identity → openidconnect 4.0.1 → p256 0.13.2 / p384
-  0.13.1 → elliptic-curve 0.13.8 → crypto-bigint 0.5.5`.
-- Exposure review: OIDC authenticates with a client secret and verifies ID-token
-  signatures with public keys (`Provider::client_and_algorithms` and
-  `Provider::finish` in `crates/zirv-flow-identity/src/oidc.rs`). It performs no
-  elliptic-curve private-key operation on secret integers. The test mock signs
-  with RSA; production DKIM signing uses `ring`.
-- Reviewed: **2026-10-27**, incorporating the review and upstream exit condition
-  from [#269](https://github.com/Glubiz/zirv-flow/issues/269). Exit: upgrade
-  `openidconnect` to a dependency chain using `p256`/`p384` and `elliptic-curve`
-  0.14 with `crypto-bigint` 0.7.6 or later (or another RustSec-confirmed fix),
-  verify that affected 0.5 versions are absent, and delete the ignore. Reassess
-  before enabling private-key OIDC authentication such as `private_key_jwt`.
 
 ## License exceptions
 
