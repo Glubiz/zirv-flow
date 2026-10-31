@@ -1,4 +1,4 @@
-import { act, render, screen, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { createMemoryRouter, RouterProvider } from "react-router";
@@ -76,7 +76,7 @@ describe("page palette", () => {
     const user = userEvent.setup();
     const router = palette();
     await user.type(screen.getByRole("combobox"), "no-such-page");
-    expect(await screen.findByText("No pages match")).toBeInTheDocument();
+    expect(await screen.findByText("No results for “no-such-page”")).toBeInTheDocument();
     await user.keyboard("{ArrowUp}{Enter}");
     expect(router.state.location.pathname).toBe("/w/ws1");
     await user.keyboard("{Escape}");
@@ -179,9 +179,10 @@ describe("page palette", () => {
     await act(() => vi.advanceTimersByTimeAsync(50));
     await user.type(screen.getByRole("combobox"), "welcome");
     expect(screen.queryByRole("option", { name: /Welcome series/ })).not.toBeInTheDocument();
-    expect(screen.getByText("Searching")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Searching");
     await act(() => vi.advanceTimersByTimeAsync(250));
     expect(screen.getByRole("option", { name: "Welcome series, flow, live" })).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("1 result");
   });
 
   it("drops a people response that arrives after the query changed", async () => {
@@ -202,6 +203,7 @@ describe("page palette", () => {
     const router = palette();
     await user.type(screen.getByRole("combobox"), "ann@example.test");
     const find = await screen.findByRole("option", { name: "Find person ann@example.test" });
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("0 results"));
     expect(calls.filter((call) => call.method === "POST")).toHaveLength(0);
     expect(find).toHaveAttribute("aria-selected", "true");
     await user.keyboard("{Enter}");

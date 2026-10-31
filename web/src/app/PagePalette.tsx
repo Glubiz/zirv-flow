@@ -162,7 +162,9 @@ export function PagePalette({ items, base, workspaceId, canSearchPeople, onClose
   }
 
   let index = 0;
-  const count = trimmed === "" ? "" : `${options.length} ${options.length === 1 ? "result" : "results"}`;
+  const results = options.filter((entry) => !entry.find).length;
+  const searching = waiting || shown.some((group) => group.note === "Searching");
+  const status = trimmed === "" ? "" : searching ? "Searching" : `${results} ${results === 1 ? "result" : "results"}`;
   const empty = options.length === 0 && !waiting && shown.every((group) => group.note === undefined);
 
   return (
@@ -198,10 +200,10 @@ export function PagePalette({ items, base, workspaceId, canSearchPeople, onClose
           </li>
         ))}
       </ul>
-      {waiting ? <p className="muted palette-note" aria-live="polite">Searching</p> : null}
-      <div className="visually-hidden" role="status" aria-live="polite">{count}</div>
+      {waiting ? <p className="muted palette-note" aria-hidden="true">Searching</p> : null}
+      <div className="visually-hidden" role="status" aria-live="polite">{status}</div>
       {empty ? (
-        <EmptyState title="No pages match">{identifierKind(trimmed) === null ? `No results for “${trimmed}”` : "Try a page or group name."}</EmptyState>
+        <EmptyState title={identifierKind(trimmed) === null ? `No results for “${trimmed}”` : "No results"}>Try a page or group name.</EmptyState>
       ) : null}
       <div className="dialog-actions"><Button onClick={onClose}>Close</Button></div>
     </Dialog>
