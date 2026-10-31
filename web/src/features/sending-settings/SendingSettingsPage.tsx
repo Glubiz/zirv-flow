@@ -36,7 +36,7 @@ export function SendingSettingsPage() {
   return (
     <div className="page">
       <PageHeader
-        title="Sending limits"
+        title="Sending limits" breadcrumb={{ group: "Sending", section: "Sending limits" }}
         lede="How often one person can hear from you, and the hours when nothing is sent. Both apply to marketing messages; transactional messages skip them."
       />
       {settings.status === "loading" ? <LoadingState label="Loading the sending limits" /> : null}

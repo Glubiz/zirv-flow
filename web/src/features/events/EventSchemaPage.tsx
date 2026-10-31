@@ -1,5 +1,5 @@
 import { useState, type SyntheticEvent } from "react";
-import { Link, useParams } from "react-router";
+import { useParams } from "react-router";
 
 import { client, describeError, unwrap, useResource, type ErrorSummary } from "../../api";
 import {
@@ -26,11 +26,8 @@ export function EventSchemaPage() {
 
   return (
     <div className="page">
-      <PageHeader title={name} lede="Its mode, retention, draft and published versions." />
+      <PageHeader title={name} breadcrumb={{ group: "Data", section: "Events", to: `/w/${ws}/events` }} lede="Its mode, retention, draft and published versions." />
       <EventsNav workspaceId={ws} />
-      <p>
-        <Link to={`/w/${ws}/events`}>All schemas</Link>
-      </p>
       <SchemaView key={`${ws}/${name}`} workspaceId={ws} name={name} canManage={canManage} />
     </div>
   );

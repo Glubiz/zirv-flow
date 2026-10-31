@@ -36,7 +36,7 @@ describe("the theme editor", () => {
     mockApi(themeRoutes({ detail: themeDetail({ current_version: 3, is_default: true }) }));
     mount();
 
-    expect(await screen.findByRole("link", { name: "← Themes" })).toHaveAttribute("href", "/w/ws1/themes");
+    expect(await within(await screen.findByRole("navigation", { name: "Breadcrumb" })).findByRole("link", { name: "Content library" })).toHaveAttribute("href", "/w/ws1/themes");
     expect(screen.getByRole("heading", { level: 1, name: "Warm" })).toBeInTheDocument();
     expect(screen.getByText("Default")).toBeInTheDocument();
     expect(screen.getByText("Draft · v3 live")).toBeInTheDocument();

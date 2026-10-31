@@ -27,13 +27,13 @@ function mount() {
     [`GET ${WS}/segments/${SEGMENT_ID}`]: () => json(detail()),
   });
   return renderRoute(
-    PAGE,
+    `${PAGE}?tab=rules`,
     "/w/:ws/segments/:id",
     <>
       <SegmentPage />
       <Switcher />
     </>,
-    ["/w/ws1/segments", PAGE],
+    ["/w/ws1/segments", `${PAGE}?tab=rules`],
   );
 }
 

@@ -144,6 +144,7 @@ function NewSource({ workspaceId }: { workspaceId: string }) {
     <div className="page">
       <PageHeader
         title="New source"
+        breadcrumb={{ group: "Data", section: "Sources", to: `/w/${workspaceId}/sources` }}
         lede="Choose a type, fill in its settings, and test the connection. Then discover its streams and pick the ones to read. The credential is a shared workspace credential: stored encrypted, never shown again, and rotated in one place."
       />
       {kind && isPush(kind) ? null : <Stepper steps={STEPS} current={step} label="Source setup steps" />}
@@ -152,7 +153,7 @@ function NewSource({ workspaceId }: { workspaceId: string }) {
           {({ canAdmin }) =>
             !canAdmin ? (
               <p className="muted">
-                Only workspace admins can add sources. <Link to={`/w/${workspaceId}/sources`}>Back to sources</Link>
+                Only workspace admins can add sources.
               </p>
             ) : step === "type" ? (
               <ResourceView
@@ -162,7 +163,6 @@ function NewSource({ workspaceId }: { workspaceId: string }) {
                 empty={
                   <div className="stack">
                     <EmptyState title="No source types are available on this deployment." />
-                    <Link to={`/w/${workspaceId}/sources`}>Back to sources</Link>
                   </div>
                 }
               >

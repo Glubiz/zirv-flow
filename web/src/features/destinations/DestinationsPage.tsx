@@ -35,7 +35,7 @@ function Destinations({ workspaceId }: { workspaceId: string }) {
   return (
     <div className="page">
       <PageHeader
-        title="Destinations"
+        title="Destinations" breadcrumb={{ group: "Sending", section: "Destinations" }}
         lede="Where messages and events are delivered: a mail server, an email provider or a webhook. A destination holds its settings and uses a shared workspace credential."
         actions={<NewDestinationLink workspaceId={workspaceId} />}
       />

@@ -12,6 +12,7 @@ export function NewDestinationPage() {
       <div className="page">
         <PageHeader
           title="New destination"
+          breadcrumb={{ group: "Sending", section: "Destinations", to: `/w/${ws}/destinations` }}
           lede="Choose a type and fill in its settings. The credential is a shared workspace credential: stored encrypted, never shown again, and rotated in one place."
         />
         <Panel>

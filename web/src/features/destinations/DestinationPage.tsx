@@ -36,9 +36,6 @@ function Loaded({ workspaceId, id }: { workspaceId: string; id: string }) {
       <ResourceView resource={destination} loadingLabel="Loading the destination">
         {(data) => <DestinationDetail workspaceId={workspaceId} destination={data} onChanged={destination.reload} />}
       </ResourceView>
-      <p>
-        <Link to={`/w/${workspaceId}/destinations`}>Back to destinations</Link>
-      </p>
     </div>
   );
 }
@@ -58,6 +55,7 @@ function DestinationDetail({
     <>
       <PageHeader
         title={destination.name}
+        breadcrumb={{ group: "Sending", section: "Destinations", to: `/w/${workspaceId}/destinations` }}
         lede={`${kindLabel(kinds, destination.kind)}. ${destination.archived ? "Archived: read-only history." : "Change its settings, check it, and watch its queue."}`}
         actions={destination.archived ? <Pill tone="attention">Archived</Pill> : null}
       />

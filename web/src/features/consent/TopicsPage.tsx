@@ -17,7 +17,7 @@ export function TopicsPage() {
     <div className="page">
       <ConsentNav workspaceId={ws} />
       <PageHeader
-        title="Topics"
+        title="Topics" breadcrumb={{ group: "Audience", section: "Consent" }}
         lede="What people can subscribe to. A topic's setting decides whether silence means yes or no: opt-in topics need a subscription, opt-out topics reach everyone who has not unsubscribed."
       />
       <TopicList key={ws} workspaceId={ws} canManage={canManage} />

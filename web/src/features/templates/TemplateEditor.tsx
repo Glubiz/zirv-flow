@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router";
 
 import { ApiError, client, describeError, unwrap, type ErrorSummary } from "../../api";
-import { Button, Dialog, InlineError, Pill } from "../../ui";
+import { Button, Crumbs, Dialog, InlineError, Pill } from "../../ui";
 import { useLeaveGuard } from "../segments";
 import { ConvertDialog } from "./ConvertDialog";
 import { PreviewPane, type PersonChoice, type PreviewState } from "./PreviewPane";
@@ -50,8 +50,18 @@ const isDraftConflict = (error: unknown) => error instanceof ApiError && error.c
 export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin, canPublish: mayPublish, canRealPerson }: Props) {
   const [template, setTemplate] = useState<Template>(initial);
   const [doc, setDoc] = useState<Editable>(() => readDocument(initial.draft.document));
-  const [query] = useSearchParams();
-  const [tab, setTab] = useState<Tab>(() => (query.get("tab") === "used" ? "used" : "editor"));
+  const [query, setQuery] = useSearchParams();
+  const tab: Tab = query.get("tab") === "used" ? "used" : "editor";
+  const setTab = (next: Tab) =>
+    setQuery(
+      (current) => {
+        const params = new URLSearchParams(current);
+        if (next === "editor") params.delete("tab");
+        else params.set("tab", next);
+        return params;
+      },
+      { replace: true },
+    );
   const [save, setSave] = useState<SaveState>("saved");
   const [saveFailure, setSaveFailure] = useState<ErrorSummary | null>(null);
   const [preview, setPreview] = useState<PreviewState>({ status: "loading" });
@@ -320,7 +330,7 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin, canPu
     <SenderOptionsProvider workspaceId={workspaceId} enabled={canWrite && template.channel === "email"}>
     <div className="tp-page">
       <div className="tp-head">
-        <Link to={`/w/${workspaceId}/templates`}>← Templates</Link>
+        <Crumbs group="Messaging" section="Templates" to={`/w/${workspaceId}/templates`} />
         <h1 className="fl-name-read">{template.name}</h1>
         <span className="fl-state">
           <Pill tone={status.tone}>{status.label}</Pill>

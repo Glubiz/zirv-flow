@@ -42,7 +42,7 @@ function Forwarding({ workspaceId }: { workspaceId: string }) {
   return (
     <div className="page">
       <PageHeader
-        title="Forwarding"
+        title="Forwarding" breadcrumb={{ group: "Sending", section: "Forwarding" }}
         lede="Send the events of one name to a webhook destination, filtered and mapped to the payload you choose. Delivery is at least once; a row that keeps failing becomes a dead letter you can re-drive."
       />
       <ResourceView resource={destinations} loadingLabel="Loading destinations">

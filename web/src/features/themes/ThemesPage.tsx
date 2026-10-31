@@ -26,7 +26,7 @@ function ThemeList({ workspaceId }: { workspaceId: string }) {
     <div className="page">
       <LibraryNav workspaceId={workspaceId} />
       <PageHeader
-        title="Themes"
+        title="Themes" breadcrumb={{ group: "Messaging", section: "Content library" }}
         actions={
           access.canWrite ? (
             <Button variant="primary" onClick={() => setAdding(true)}>

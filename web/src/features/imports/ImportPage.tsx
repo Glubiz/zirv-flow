@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link, useParams } from "react-router";
+import { useParams } from "react-router";
 
 import { client, unwrap, useResource } from "../../api";
 import { formatDateTime, PageHeader, Panel, Pill, ResourceView, Stepper } from "../../ui";
@@ -70,6 +70,7 @@ function ImportView({ workspaceId, importId, pollMs }: { workspaceId: string; im
             <>
               <PageHeader
                 title={item.name}
+                breadcrumb={{ group: "Data", section: "Imports", to: `/w/${workspaceId}/imports` }}
                 lede={`${item.file_name}: ${plural(item.rows_total, "row", "rows")}, ${plural(item.header.length, "column", "columns")}.`}
                 actions={<Pill tone={statusTone(item.status)}>{statusLabel(item.status)}</Pill>}
               />
@@ -96,7 +97,7 @@ function ImportView({ workspaceId, importId, pollMs }: { workspaceId: string; im
                 {step === "run" ? <RunStep workspaceId={workspaceId} item={item} canWrite={canWrite} onChanged={changed} /> : null}
               </Panel>
               <p className="faint">
-                Uploaded {formatDateTime(item.created_at)}. <Link to={`/w/${workspaceId}/imports`}>All imports</Link>
+                Uploaded {formatDateTime(item.created_at)}.
               </p>
             </>
           );

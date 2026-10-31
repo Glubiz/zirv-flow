@@ -19,7 +19,7 @@ export function RejectsPage() {
   return (
     <div className="page">
       <PageHeader
-        title="Rejects"
+        title="Rejects" breadcrumb={{ group: "Data", section: "Events" }}
         lede="Events that were refused, newest first. Values are masked: only properties your schema marks as not personal data are shown."
       />
       <EventsNav workspaceId={ws} />

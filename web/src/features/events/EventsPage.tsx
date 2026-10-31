@@ -27,7 +27,7 @@ export function EventsPage() {
   return (
     <div className="page">
       <PageHeader
-        title="Events"
+        title="Events" breadcrumb={{ group: "Data", section: "Events" }}
         lede="What people did, as typed events. Each event name has a schema that says which properties it carries, and what happens to an event that breaks it."
       />
       <EventsNav workspaceId={ws} />

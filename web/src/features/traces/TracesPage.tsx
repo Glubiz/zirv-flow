@@ -103,7 +103,7 @@ export function TracesPage() {
 
   return (
     <div className="page">
-      <PageHeader title="Traces" lede="Look up what was decided and done under one trace in this workspace." />
+      <PageHeader title="Traces" breadcrumb={{ group: "Insights", section: "Traces" }} lede="Look up what was decided and done under one trace in this workspace." />
       <form className="inline-form" onSubmit={submit} noValidate>
         <TextField
           label="Trace ID"
