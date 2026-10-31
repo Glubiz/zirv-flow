@@ -41,3 +41,11 @@ export function formatTime(value: string): string {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
+
+/** A count for a figure: separators under 100,000, "2.4 M" above. */
+export function formatCount(value: number): string {
+  const compact = (divisor: number, unit: string) => `${(value / divisor).toFixed(1).replace(/\.0$/, "")} ${unit}`;
+  if (Math.abs(value) >= 1_000_000) return compact(1_000_000, "M");
+  if (Math.abs(value) >= 100_000) return compact(1_000, "k");
+  return value.toLocaleString("en-US");
+}

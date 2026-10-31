@@ -3553,6 +3553,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** What happened in the workspace over the last `days` days, for the Home figures. */
+        get: operations["get_workspace_summary"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/suppressions": {
         parameters: {
             query?: never;
@@ -7226,6 +7243,25 @@ export interface components {
             /** @enum {string} */
             type: "split.random";
         };
+        FlowSummaryBody: {
+            /** Format: uuid */
+            flow_id: string;
+            /**
+             * Format: int64
+             * @description Goal conversions of the flow in the window; null when the flow has no goal.
+             */
+            goals_reached?: number | null;
+            /**
+             * Format: int64
+             * @description Enrollments in flight now.
+             */
+            people_in_flow: number;
+            /**
+             * Format: int64
+             * @description Messages of the flow sent in the window.
+             */
+            sent: number;
+        };
         /** @description The result of a walk. */
         FlowTestBody: {
             /** Format: uuid */
@@ -10090,6 +10126,18 @@ export interface components {
              */
             sync_mode: string;
         };
+        SummaryWindowBody: {
+            /**
+             * Format: date-time
+             * @description Start of the window, inclusive (UTC).
+             */
+            from: string;
+            /**
+             * Format: date-time
+             * @description End of the window (UTC): when the figures were computed.
+             */
+            to: string;
+        };
         SuppressionBody: {
             /** Format: date-time */
             created_at: string;
@@ -11260,6 +11308,36 @@ export interface components {
             timezone: string;
             /** @description The automatic UTM parameter setting for email links. Off until an admin turns it on. */
             utm: components["schemas"]["UtmSettingsBody"];
+        };
+        WorkspaceSummaryBody: {
+            /**
+             * Format: date-time
+             * @description When the figures were computed; up to 60 seconds old.
+             */
+            computed_at: string;
+            /**
+             * Format: int64
+             * @description Events received in the window. Null for a caller who may not read events.
+             */
+            events_received?: number | null;
+            /** @description Published flows only. */
+            flows: components["schemas"]["FlowSummaryBody"][];
+            /**
+             * Format: int64
+             * @description Goal conversions in the window.
+             */
+            goals_reached: number;
+            /**
+             * Format: int64
+             * @description Messages that ended `sent` in the window; test sends excluded.
+             */
+            messages_sent: number;
+            /**
+             * Format: int64
+             * @description People created in the window.
+             */
+            people_created: number;
+            window: components["schemas"]["SummaryWindowBody"];
         };
     };
     responses: never;
@@ -25819,6 +25897,77 @@ export interface operations {
             };
             /** @description The source did not answer in time */
             504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_workspace_summary: {
+        parameters: {
+            query?: {
+                /** @description Days in the window, 1 to 30; default 7 */
+                days?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The figures */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceSummaryBody"];
+                };
+            };
+            /** @description days is not a number from 1 to 30 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The read ran past its time limit (`code` is `search_timeout`) */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
