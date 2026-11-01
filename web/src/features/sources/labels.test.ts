@@ -271,6 +271,7 @@ describe("streaming sources", () => {
       "kafka_auth_failed",
       "kafka_tls_failed",
       "kafka_topic_missing",
+      "kafka_compression_unsupported",
       "kafka_connect_failed",
     ]) {
       const text = runErrorText(code, 0.05);

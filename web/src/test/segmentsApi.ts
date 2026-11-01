@@ -96,6 +96,8 @@ export function segmentRow(overrides: Record<string, unknown> = {}) {
     member_count: 7,
     created_at: "2026-10-01T09:00:00Z",
     updated_at: "2026-10-01T09:00:00Z",
+    used_by_flows: 0,
+    change_7d: null,
     current_version: 1,
     ...overrides,
   };

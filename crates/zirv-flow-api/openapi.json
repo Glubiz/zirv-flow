@@ -16866,7 +16866,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/SegmentBody"
+                    "$ref": "#/components/schemas/SegmentListItemBody"
                   }
                 }
               }
@@ -18051,6 +18051,87 @@
           },
           "404": {
             "description": "No such workspace, segment or version, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/segments/{id}/where-used": {
+      "get": {
+        "tags": [
+          "segments"
+        ],
+        "summary": "The flows whose live or draft version uses the segment, and the segments that reference it.\nArchived flows are not listed.",
+        "operationId": "segment_where_used",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Segment id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Where the segment is used",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhereUsedBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or segment, or no access",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -25378,7 +25459,7 @@
         "tags": [
           "themes"
         ],
-        "summary": "Makes a published theme the workspace default, replacing the previous one. Emails that follow\nthe default use the theme's current version at their next render; emails that name a theme are\nunchanged. The theme must be a live, published theme of the workspace, else 409\n`theme_not_publishable_default`. Audited as `theme.default_set`.",
+        "summary": "Makes a published theme the workspace default, replacing the previous one. Emails that follow\nthe default use the theme's current version at their next render; emails that name a theme are\nunchanged. The theme must be a live, published theme of the workspace, else 409\n`theme_not_publishable_default`. The live templates that follow the default are validated with\nthe theme in place, at most 200 in template id order; one that would stop sending, such as a\nmarketing template when the theme has no footer, is a 422 `theme_breaks_templates` that lists up\nto 20 of them with their issue codes and the total, and writes nothing. Audited as\n`theme.default_set`.",
         "operationId": "set_default_theme",
         "parameters": [
           {
@@ -25445,6 +25526,26 @@
           },
           "409": {
             "description": "The theme is not a published, live theme of the workspace (`theme_not_publishable_default`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The theme would stop live templates that follow the default from sending (`theme_breaks_templates`, with `templates` and `total`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Rendering is not available (`render_unavailable`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -40342,6 +40443,115 @@
           }
         }
       },
+      "SegmentListItemBody": {
+        "type": "object",
+        "description": "A segment in the list, with where it is used and how its membership moved.",
+        "required": [
+          "id",
+          "name",
+          "description",
+          "current_version",
+          "cadence_minutes",
+          "member_count",
+          "created_at",
+          "updated_at",
+          "used_by_flows"
+        ],
+        "properties": {
+          "archived_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "cadence_minutes": {
+            "type": "integer",
+            "description": "How often a time-sensitive segment is recomputed in full, in minutes; default 60.",
+            "enum": [
+              5,
+              10,
+              15,
+              30,
+              60,
+              120,
+              180,
+              240,
+              360,
+              480,
+              720,
+              1440,
+              10080
+            ]
+          },
+          "change_7d": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "People entered minus people left over the last 7 days; null while the segment is less than\n7 days old."
+          },
+          "computed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the members were last computed; null before the first refresh."
+          },
+          "computed_version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The version the members were last computed from; null before the first refresh."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The user who created it; null when an API key did."
+          },
+          "current_version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The version that is current: the newest one saved."
+          },
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "member_count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many people are members now."
+          },
+          "name": {
+            "type": "string",
+            "example": "Pro customers"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "used_by_flows": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The number of flows whose live (published or paused) version uses the segment, each flow\nonce."
+          }
+        }
+      },
       "SegmentListNode": {
         "type": "object",
         "description": "The person is a member of the list.",
@@ -45218,6 +45428,88 @@
           "tolerance_seconds": {
             "type": "integer",
             "format": "int32"
+          }
+        }
+      },
+      "WhereUsedBody": {
+        "type": "object",
+        "required": [
+          "flows",
+          "segments"
+        ],
+        "properties": {
+          "flows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WhereUsedFlowBody"
+            },
+            "description": "By flow name; each flow once."
+          },
+          "segments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WhereUsedSegmentBody"
+            },
+            "description": "The other live segments whose current definition references the segment, by name."
+          }
+        }
+      },
+      "WhereUsedFlowBody": {
+        "type": "object",
+        "required": [
+          "flow_id",
+          "name",
+          "state",
+          "stage",
+          "uses"
+        ],
+        "properties": {
+          "flow_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "stage": {
+            "type": "string",
+            "description": "`live` when the live version uses the segment, `draft` when only the draft does.",
+            "example": "live"
+          },
+          "state": {
+            "type": "string",
+            "description": "The flow's lifecycle state: `draft`, `published` or `paused`."
+          },
+          "uses": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "How the version uses the segment: `trigger`, `filter`, `condition` or `goal`."
+          },
+          "version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The live version number; null for `draft`."
+          }
+        }
+      },
+      "WhereUsedSegmentBody": {
+        "type": "object",
+        "required": [
+          "segment_id",
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "segment_id": {
+            "type": "string",
+            "format": "uuid"
           }
         }
       },

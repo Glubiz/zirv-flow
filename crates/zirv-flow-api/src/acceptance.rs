@@ -12707,6 +12707,99 @@ email,b@example.com,
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_list_counts_live_flows_and_where_used_names_flows_and_segments(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let one = workspace(&router, &owner, "One").await;
+        let two = workspace(&router, &owner, "Two").await;
+        define_plan(&pool, &one).await;
+        let (_, read_key) = make_key(&router, &owner, &one, &["read"]).await;
+        let who = || Auth::Session(&owner);
+        let base = make_segment(&router, who(), &one, "Base", plan_is("x"))
+            .await
+            .body["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        make_segment(&router, who(), &one, "Child", refers_to(&base)).await;
+        let flow = call(
+            &router,
+            "POST",
+            &format!("/api/v1/workspaces/{one}/flows"),
+            Some(json!({
+                "name": "Welcome",
+                "graph": {"v": 1, "nodes": [{"id": "b", "type": "branch",
+                    "conditions": [{"segment": base}]}, {"id": "x", "type": "exit"}], "edges": []},
+                "settings": {"trigger": {"type": "segment", "segment_id": base, "on": "entered"},
+                    "reentry": {"mode": "once"}},
+            })),
+            who(),
+        )
+        .await;
+        assert_eq!(flow.status, StatusCode::CREATED, "{:?}", flow.body);
+        let uri = format!("{}/{base}/where-used", segments_uri(&one));
+
+        let draft_only = call(&router, "GET", &uri, None, who()).await;
+        let listed_draft = call(&router, "GET", &segments_uri(&one), None, who()).await;
+        let flow_id: Uuid = flow.body["id"].as_str().unwrap().parse().unwrap();
+        let workspace_id: zirv_flow_core::WorkspaceId = one.parse().unwrap();
+        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+        let locked = zirv_flow_store::lock_flow(&mut tx, workspace_id, flow_id)
+            .await
+            .unwrap();
+        zirv_flow_store::publish_flow(
+            &mut tx,
+            &zirv_flow_store::Clock::default(),
+            workspace_id,
+            &locked,
+            None,
+            &zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("t")),
+        )
+        .await
+        .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+        let live = call(&router, "GET", &uri, None, who()).await;
+        let listed_live = call(&router, "GET", &segments_uri(&one), None, who()).await;
+        let by_read_key = call(&router, "GET", &uri, None, Auth::Key(&read_key)).await;
+        let foreign = call(
+            &router,
+            "GET",
+            &format!("{}/{base}/where-used", segments_uri(&two)),
+            None,
+            who(),
+        )
+        .await;
+
+        assert_eq!(draft_only.body["flows"][0]["stage"], "draft");
+        assert_eq!(draft_only.body["flows"][0]["version"], Value::Null);
+        assert_eq!(draft_only.body["segments"][0]["name"], "Child");
+        let count = |reply: &Reply, name: &str| {
+            reply
+                .body
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|segment| segment["name"] == name)
+                .unwrap()["used_by_flows"]
+                .clone()
+        };
+        assert_eq!(count(&listed_draft, "Base"), 0);
+        assert_eq!(count(&listed_live, "Base"), 1);
+        assert_eq!(count(&listed_live, "Child"), 0);
+        assert_eq!(listed_live.body[0]["change_7d"], Value::Null);
+        assert_eq!(live.body["flows"].as_array().unwrap().len(), 1);
+        assert_eq!(live.body["flows"][0]["stage"], "live");
+        assert_eq!(live.body["flows"][0]["version"], 1);
+        assert_eq!(
+            live.body["flows"][0]["uses"],
+            json!(["trigger", "condition"])
+        );
+        assert_eq!(by_read_key.status, StatusCode::OK);
+        assert_eq!(foreign.status, StatusCode::NOT_FOUND);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn segments_are_isolated_per_workspace_and_key_scopes_decide_who_saves(pool: PgPool) {
         let router = app(&pool).await;
         let owner = owner(&pool, &router).await;

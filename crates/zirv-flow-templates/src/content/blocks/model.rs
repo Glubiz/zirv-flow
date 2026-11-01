@@ -295,6 +295,10 @@ pub struct RichText {
     pub visible_if: Option<serde_json::Value>,
 }
 
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Image {
@@ -304,6 +308,9 @@ pub struct Image {
     pub alt: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub href: Option<String>,
+    /// The link is left without UTM parameters, like `data-zf-utm="off"` on an `<a>`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub utm_off: bool,
     /// Pixels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width: Option<u32>,
@@ -317,6 +324,9 @@ pub struct Button {
     pub id: String,
     pub label: String,
     pub url: String,
+    /// The link is left without UTM parameters, like `data-zf-utm="off"` on an `<a>`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub utm_off: bool,
     #[serde(default)]
     pub align: Align,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -986,6 +996,7 @@ pub(crate) mod tests {
                 alt: String::new(),
                 href: None,
                 width: Some(801),
+                utm_off: false,
                 visible_if: None,
             }),
             Block::Divider(Divider {
