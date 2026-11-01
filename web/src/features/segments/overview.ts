@@ -51,3 +51,31 @@ export function builtFrom(
   ];
   return [{ label: "Built from", items }];
 }
+
+interface WhereUsed {
+  flows: { flow_id: string; name: string; stage: string }[];
+  segments: { segment_id: string; name: string }[];
+}
+
+/** The flows and segments that use a segment; a group with nothing in it is left empty. */
+export function usedBy(used: WhereUsed | null, workspaceId: string): RelatedGroup[] {
+  return [
+    {
+      label: "Used by flows",
+      items: (used?.flows ?? []).map((flow) => ({
+        key: `flow:${flow.flow_id}`,
+        label: flow.name,
+        to: `/w/${workspaceId}/flows/${flow.flow_id}`,
+        meta: flow.stage === "live" ? "Live" : "Draft",
+      })),
+    },
+    {
+      label: "Used by segments",
+      items: (used?.segments ?? []).map((segment) => ({
+        key: `segment:${segment.segment_id}`,
+        label: segment.name,
+        to: `/w/${workspaceId}/segments/${segment.segment_id}`,
+      })),
+    },
+  ];
+}

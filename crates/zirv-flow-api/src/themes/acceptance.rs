@@ -1101,6 +1101,10 @@ mod tests {
 
         assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(refused.body["code"], "theme_breaks_templates");
+        assert_eq!(
+            refused.body["detail"],
+            "This theme version would stop 1 live templates from sending; fix them or the version first."
+        );
         assert_eq!(refused.body["total"], 1);
         assert_eq!(ids(&refused.body["templates"]), [marketing.as_str()]);
         assert_eq!(
@@ -1147,5 +1151,169 @@ mod tests {
         assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(refused.body["code"], "theme_breaks_templates");
         assert_eq!(ids(&refused.body["templates"]), [named]);
+    }
+
+    /// A published theme whose footer carries the unsubscribe link, made the default.
+    async fn footered_default(f: &Fixture) -> String {
+        let footer = f
+            .admin(
+                "POST",
+                "/snippets",
+                Some(json!({"name": "Footer", "content": unsubscribe_content()})),
+            )
+            .await
+            .body["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        f.admin("POST", &format!("/snippets/{footer}/publish"), None)
+            .await;
+        let theme = f
+            .published("Brand", json!({"footer_snippet": footer}))
+            .await;
+        f.set_default(&theme).await;
+        theme
+    }
+
+    fn heading() -> Value {
+        section_of(json!({"type": "heading", "id": "h", "level": 1, "text": "Hi"}))
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_default_without_a_footer_is_refused_while_a_live_marketing_template_follows_it(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        footered_default(&f).await;
+        let bare = f.published("Bare", json!({})).await;
+        let marketing = f
+            .live_template("News", "marketing", json!("default"), heading())
+            .await;
+        let audited = "SELECT count(*) FROM audit_log WHERE action = 'theme.default_set'";
+        let before = f.count(audited).await;
+
+        let refused = f.set_default(&bare).await;
+        let after_refusal = f.count(audited).await;
+        let archived = f
+            .admin("DELETE", &format!("/templates/{marketing}"), None)
+            .await;
+        let accepted = f.set_default(&bare).await;
+
+        assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(refused.body["code"], "theme_breaks_templates");
+        assert_eq!(
+            refused.body["detail"],
+            "Making this theme the default would stop 1 live templates from sending; fix them or choose another theme."
+        );
+        assert_eq!(refused.body["total"], 1);
+        assert_eq!(ids(&refused.body["templates"]), [marketing.as_str()]);
+        assert_eq!(
+            refused.body["templates"][0]["codes"],
+            json!(["missing_unsubscribe"])
+        );
+        assert_eq!(after_refusal, before);
+        assert_eq!(archived.status, StatusCode::OK, "{:?}", archived.body);
+        assert_eq!(accepted.status, StatusCode::OK, "{:?}", accepted.body);
+        assert_eq!(accepted.body["is_default"], true);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_transactional_follower_does_not_block_a_new_default(pool: PgPool) {
+        let f = fixture(&pool).await;
+        footered_default(&f).await;
+        let bare = f.published("Bare", json!({})).await;
+        f.live_template("Receipt", "transactional", json!("default"), heading())
+            .await;
+
+        let accepted = f.set_default(&bare).await;
+
+        assert_eq!(accepted.status, StatusCode::OK, "{:?}", accepted.body);
+    }
+
+    /// A theme with a published version 1 written straight to the store, for a fixture that has
+    /// no render pool to publish through.
+    async fn published_without_a_pool(f: &Fixture, name: &str) -> String {
+        let id = f.create(name, tokens("#111111")).await;
+        let theme: Uuid = id.parse().unwrap();
+        sqlx::query(
+            "INSERT INTO theme_versions (workspace_id, theme_id, version, tokens, validation,                 trace_id)              SELECT workspace_id, theme_id, 1, tokens, '[]'::jsonb, gen_random_uuid()              FROM theme_drafts WHERE theme_id = $1",
+        )
+        .bind(theme)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE themes SET current_version = 1 WHERE id = $1")
+            .bind(theme)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        id
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn without_a_render_pool_a_default_switch_is_unavailable_only_when_followers_exist(
+        pool: PgPool,
+    ) {
+        let f = fixture_with(&pool, None).await;
+        let first = published_without_a_pool(&f, "First").await;
+        let second = published_without_a_pool(&f, "Second").await;
+
+        let without_followers = f.set_default(&first).await;
+        f.live_template("News", "marketing", json!("default"), heading())
+            .await;
+        let with_followers = f.set_default(&second).await;
+
+        assert_eq!(
+            without_followers.status,
+            StatusCode::OK,
+            "{:?}",
+            without_followers.body
+        );
+        assert_eq!(with_followers.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(with_followers.body["code"], "render_unavailable");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn setting_the_current_default_again_skips_the_check(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let bare = f.published("Bare", json!({})).await;
+        f.set_default(&bare).await;
+        f.live_template("News", "marketing", json!("default"), heading())
+            .await;
+
+        let again = f.set_default(&bare).await;
+
+        assert_eq!(again.status, StatusCode::OK, "{:?}", again.body);
+        assert_eq!(again.body["is_default"], true);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_template_with_only_a_draft_does_not_block_a_new_default(pool: PgPool) {
+        let f = fixture(&pool).await;
+        footered_default(&f).await;
+        let bare = f.published("Bare", json!({})).await;
+        let document = json!({"schema": 2, "channel": "email", "mode": "blocks", "blocks": {
+            "subject": "Hi", "sender": "0192b1a4-7c3e-7000-8000-00000000a001", "lang": "en",
+            "category": "marketing", "theme": "default", "sections": heading()}});
+        let created = f
+            .admin(
+                "POST",
+                "/templates",
+                Some(
+                    json!({"name": "Draft", "channel": "email", "category": "marketing",
+                    "document": document}),
+                ),
+            )
+            .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+
+        let accepted = f.set_default(&bare).await;
+
+        assert_eq!(accepted.status, StatusCode::OK, "{:?}", accepted.body);
     }
 }

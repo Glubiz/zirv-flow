@@ -1,6 +1,6 @@
 import { render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { PageHeader, RelatedPanel } from "./Page";
 
@@ -74,5 +74,38 @@ describe("the related panel", () => {
     );
 
     expect(screen.queryByRole("complementary")).not.toBeInTheDocument();
+  });
+
+  it("scrolls to its heading and focuses it once drawn under the #related hash", () => {
+    const scroll = vi.fn();
+    Element.prototype.scrollIntoView = scroll;
+    const groups = [{ label: "Built from", items: [{ key: "a", label: "city" }] }];
+    const { rerender } = render(
+      <MemoryRouter initialEntries={["/segments/s1#related"]}>
+        <RelatedPanel groups={[]} />
+      </MemoryRouter>,
+    );
+    expect(scroll).not.toHaveBeenCalled();
+
+    rerender(
+      <MemoryRouter initialEntries={["/segments/s1#related"]}>
+        <RelatedPanel groups={groups} />
+      </MemoryRouter>,
+    );
+
+    expect(scroll).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("heading", { name: "Related" })).toHaveFocus();
+  });
+
+  it("leaves the scroll alone without the hash", () => {
+    const scroll = vi.fn();
+    Element.prototype.scrollIntoView = scroll;
+    render(
+      <MemoryRouter initialEntries={["/segments/s1"]}>
+        <RelatedPanel groups={[{ label: "Built from", items: [{ key: "a", label: "city" }] }]} />
+      </MemoryRouter>,
+    );
+
+    expect(scroll).not.toHaveBeenCalled();
   });
 });

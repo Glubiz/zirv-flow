@@ -493,6 +493,10 @@ fn routes() -> Router<AppState> {
             post(segments::crud::archive),
         )
         .route(
+            "/api/v1/workspaces/{ws}/segments/{id}/where-used",
+            get(segments::uses::where_used),
+        )
+        .route(
             "/api/v1/workspaces/{ws}/segments/{id}/versions",
             get(segments::crud::versions),
         )

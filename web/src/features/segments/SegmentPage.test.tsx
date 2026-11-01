@@ -28,6 +28,7 @@ function base(kind: "writer" | "reader" = "writer"): Record<string, Handler> {
     ...catalogRoutes(),
     [`POST ${WS}/segments/preview`]: () => json(previewBody()),
     [`GET ${SEGMENT}`]: () => json(detail()),
+    [`GET ${SEGMENT}/where-used`]: () => json({ flows: [], segments: [] }),
     [`GET ${SEGMENT}/history`]: () => json({ items: [], data_age: LIVE_AGE }),
   };
 }
@@ -247,6 +248,41 @@ describe("segment page", () => {
     const related = screen.getByRole("complementary", { name: "Related" });
     expect(within(related).getByText("Built from")).toBeInTheDocument();
     expect(within(related).getByText("city")).toBeInTheDocument();
+  });
+
+  it("lists the flows and segments that use it, with Live or Draft beside a flow", async () => {
+    mockApi({
+      ...base(),
+      [`GET ${SEGMENT}/where-used`]: () =>
+        json({
+          flows: [
+            { flow_id: "f1", name: "Welcome", state: "published", stage: "live", version: 2, uses: ["trigger"] },
+            { flow_id: "f2", name: "Winback", state: "draft", stage: "draft", version: null, uses: ["condition"] },
+          ],
+          segments: [{ segment_id: "s9", name: "Big and active" }],
+        }),
+    });
+    mountPage("");
+
+    const related = await screen.findByRole("complementary", { name: "Related" });
+    expect(within(related).getByText("Used by flows")).toBeInTheDocument();
+    expect(within(related).getByRole("link", { name: "Welcome" })).toHaveAttribute("href", "/w/ws1/flows/f1");
+    expect(within(related).getByText("Live")).toBeInTheDocument();
+    expect(within(related).getByText("Draft")).toBeInTheDocument();
+    expect(within(related).getByText("Used by segments")).toBeInTheDocument();
+    expect(within(related).getByRole("link", { name: "Big and active" })).toHaveAttribute("href", "/w/ws1/segments/s9");
+  });
+
+  it("leaves out a Used by group that is empty", async () => {
+    mockApi({
+      ...base(),
+      [`GET ${SEGMENT}/where-used`]: () => json({ flows: [], segments: [{ segment_id: "s9", name: "Big and active" }] }),
+    });
+    mountPage("");
+
+    const related = await screen.findByRole("complementary", { name: "Related" });
+    expect(within(related).queryByText("Used by flows")).not.toBeInTheDocument();
+    expect(within(related).getByText("Used by segments")).toBeInTheDocument();
   });
 
   it("draws no Related panel when the version reads nothing", async () => {

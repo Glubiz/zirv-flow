@@ -1,13 +1,19 @@
 import { Link, useNavigate, useParams, useSearchParams } from "react-router";
 
 import { client, unwrap, useResource } from "../../api";
-import { Button, EmptyState, formatAgo, PageHeader, Panel, ResourceView, TabNav } from "../../ui";
+import { Button, EmptyState, formatAgo, PageHeader, Panel, ResourceView, TabNav, useTabParam } from "../../ui";
 import { useSegmentAccess } from "./access";
 import { cadenceLabel } from "./labels";
 
 function matches(segment: { name: string; description?: string | null }, query: string): boolean {
   const term = query.trim().toLowerCase();
   return term === "" || `${segment.name} ${segment.description ?? ""}`.toLowerCase().includes(term);
+}
+
+/** A signed count for the 7-day change; a segment under a week old has none. */
+function signed(change: number | null | undefined): string {
+  if (change === null || change === undefined) return "—";
+  return change > 0 ? `+${change}` : String(change);
 }
 
 export function SegmentsPage() {
@@ -25,7 +31,19 @@ function Segments({ workspaceId }: { workspaceId: string }) {
   const create = () => void navigate(`/w/${workspaceId}/segments/new`);
   const [params, setParams] = useSearchParams();
   const query = params.get("q") ?? "";
-  const shown = segments.status === "ready" ? segments.data.filter((segment) => matches(segment, query)) : [];
+  const all = segments.status === "ready" ? segments.data : [];
+  const used = all.filter((segment) => segment.used_by_flows > 0).length;
+  const tabs = [
+    { id: "all", label: "All", count: all.length },
+    { id: "used", label: "Used by a flow", count: used },
+    { id: "unused", label: "Not used", count: all.length - used },
+  ];
+  const { active } = useTabParam(tabs, "filter");
+  const shown = all.filter(
+    (segment) =>
+      matches(segment, query) &&
+      (active === "all" || (segment.used_by_flows > 0) === (active === "used")),
+  );
 
   return (
     <div className="page">
@@ -43,7 +61,7 @@ function Segments({ workspaceId }: { workspaceId: string }) {
       />
       {segments.status === "ready" && segments.data.length > 0 ? (
         <div className="row list-bar">
-          <TabNav label="Filter segments" param="filter" tabs={[{ id: "all", label: "All", count: segments.data.length }]} />
+          <TabNav label="Filter segments" param="filter" tabs={tabs} />
           <div className="field">
             <input
               className="input"
@@ -100,6 +118,12 @@ function Segments({ workspaceId }: { workspaceId: string }) {
                     <th scope="col" className="num">
                       People
                     </th>
+                    <th scope="col" className="num">
+                      Change
+                    </th>
+                    <th scope="col" className="num">
+                      Used by
+                    </th>
                     <th scope="col">Updated</th>
                     <th scope="col">Kept up to date</th>
                   </tr>
@@ -112,6 +136,14 @@ function Segments({ workspaceId }: { workspaceId: string }) {
                         {segment.description ? <div className="faint">{segment.description}</div> : null}
                       </td>
                       <td className="num">{segment.member_count}</td>
+                      <td className="num mono">{signed(segment.change_7d)}</td>
+                      <td className="num">
+                        {segment.used_by_flows > 0 ? (
+                          <Link to={`/w/${workspaceId}/segments/${segment.id}#related`}>{segment.used_by_flows}</Link>
+                        ) : (
+                          0
+                        )}
+                      </td>
                       <td>{segment.computed_at ? `computed ${formatAgo(segment.computed_at)}` : "not computed yet"}</td>
                       <td>re-evaluated {cadenceLabel(segment.cadence_minutes)}</td>
                     </tr>

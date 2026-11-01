@@ -66,6 +66,42 @@ describe("segments list", () => {
     expect(screen.getByRole("button", { name: "New segment" })).toBeInTheDocument();
   });
 
+  it("shows the 7-day change signed and the flow count, and the dash for a new segment", async () => {
+    mockApi({
+      ...actor("writer"),
+      [`GET ${WS}/segments`]: () =>
+        json([
+          segmentRow({ change_7d: 12, used_by_flows: 2 }),
+          segmentRow({ id: "x2", name: "Shrinking", change_7d: -3 }),
+          segmentRow({ id: "x3", name: "Brand new", change_7d: null }),
+        ]),
+    });
+    mount();
+
+    const rows = within(await screen.findByRole("table", { name: "Segments" })).getAllByRole("row");
+    expect(within(rows[1]!).getByText("+12")).toBeInTheDocument();
+    expect(within(rows[1]!).getByRole("link", { name: "2" })).toHaveAttribute("href", `/w/ws1/segments/${SEGMENT_ID}#related`);
+    expect(within(rows[2]!).getByText("-3")).toBeInTheDocument();
+    expect(within(rows[3]!).getByText("—")).toBeInTheDocument();
+  });
+
+  it("filters to segments used by a flow or not, with counts, in the URL", async () => {
+    mockApi({
+      ...actor("writer"),
+      [`GET ${WS}/segments`]: () =>
+        json([segmentRow({ used_by_flows: 1 }), segmentRow({ id: "x2", name: "Idle" }), segmentRow({ id: "x3", name: "Idle too" })]),
+    });
+    const user = userEvent.setup();
+    renderRoute("/w/ws1/segments?filter=unused", "/w/:ws/segments", <SegmentsPage />);
+
+    const table = await screen.findByRole("table", { name: "Segments" });
+    expect(within(table).getAllByRole("row")).toHaveLength(3);
+    expect(screen.getByRole("link", { name: "Used by a flow 1" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Not used 2" })).toHaveAttribute("aria-current", "page");
+    await user.click(screen.getByRole("link", { name: "Used by a flow 1" }));
+    expect(within(await screen.findByRole("table", { name: "Segments" })).getAllByRole("row")).toHaveLength(2);
+  });
+
   it("filters by the search term in the URL and says when nothing matches", async () => {
     mockApi({
       ...actor("writer"),
