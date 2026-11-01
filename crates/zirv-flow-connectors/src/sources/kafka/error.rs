@@ -3,7 +3,7 @@
 
 use std::error::Error;
 
-use rskafka::client::error::{Error as ClientError, ProtocolError};
+use rskafka::client::error::{Error as ClientError, ProtocolError, RequestError};
 
 use super::super::error::SourceError;
 use crate::http::HttpError;
@@ -14,6 +14,11 @@ pub(crate) const AUTH_FAILED: &str = "kafka_auth_failed";
 pub(crate) const TOPIC_MISSING: &str = "kafka_topic_missing";
 pub(crate) const OFFSET_OUT_OF_RANGE: &str = "kafka_offset_out_of_range";
 pub(crate) const TIMEOUT: &str = "kafka_timeout";
+pub(crate) const COMPRESSION_UNSUPPORTED: &str = "kafka_compression_unsupported";
+
+/// The text rskafka gives a batch whose codec it was built without. Its codec is the only variable
+/// part and comes from a fixed enum, never from broker text.
+const UNIMPLEMENTED_COMPRESSION: &str = "Unimplemented compression";
 
 /// The text of the error when the egress policy refused a broker address.
 pub(super) const EGRESS_REFUSED: &str = "the broker address is not allowed by the egress policy";
@@ -58,6 +63,13 @@ pub(super) fn classify(error: &(dyn Error + 'static)) -> FetchError {
                 return FetchError::OffsetOutOfRange;
             }
         }
+        // rskafka does not export the read error's type, so its text is the only handle on it.
+        if let Some(ClientError::Request(RequestError::ReadError(inner))) =
+            error.downcast_ref::<ClientError>()
+            && inner.to_string().contains(UNIMPLEMENTED_COMPRESSION)
+        {
+            return FetchError::Failed(COMPRESSION_UNSUPPORTED);
+        }
         if error.is::<rskafka::SaslError>() {
             return FetchError::Failed(AUTH_FAILED);
         }
@@ -90,6 +102,9 @@ pub(super) fn classify(error: &(dyn Error + 'static)) -> FetchError {
 /// or stored.
 fn classify_text(error: &(dyn Error + 'static)) -> FetchError {
     let text = format!("{error:?}").to_ascii_lowercase();
+    if text.contains(&UNIMPLEMENTED_COMPRESSION.to_ascii_lowercase()) {
+        return FetchError::Failed(COMPRESSION_UNSUPPORTED);
+    }
     if text.contains("saslfailed") || text.contains("saslerror") {
         return FetchError::Failed(AUTH_FAILED);
     }
@@ -142,6 +157,31 @@ mod tests {
         );
         assert_eq!(
             classify(&server(ProtocolError::UnknownTopicOrPartition)),
+            FetchError::Failed(CONNECT_FAILED)
+        );
+    }
+
+    #[test]
+    fn a_batch_in_a_codec_the_client_lacks_is_named_and_a_malformed_one_is_not() {
+        struct Wrapped(&'static str);
+        impl std::fmt::Debug for Wrapped {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.0)
+            }
+        }
+        impl std::fmt::Display for Wrapped {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("wrapped")
+            }
+        }
+        impl Error for Wrapped {}
+
+        assert_eq!(
+            classify(&Wrapped("Malformed(\"Unimplemented compression: Zstd\")")),
+            FetchError::Failed(COMPRESSION_UNSUPPORTED)
+        );
+        assert_eq!(
+            classify(&Wrapped("Malformed(\"bad length\")")),
             FetchError::Failed(CONNECT_FAILED)
         );
     }
