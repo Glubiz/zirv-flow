@@ -558,6 +558,7 @@ values.
 | GET | `/api/v1/workspaces/{ws}/segments/{id}/versions/{n}` | member | read |
 | GET | `/api/v1/workspaces/{ws}/segments/{id}/members` | member | read |
 | GET | `/api/v1/workspaces/{ws}/segments/{id}/history` | member | read |
+| GET | `/api/v1/workspaces/{ws}/segments/{id}/size` | member | read |
 | POST | `/api/v1/workspaces/{ws}/segments/{id}/refresh` | editor | write |
 | GET | `/api/v1/workspaces/{ws}/people/{id}/explain` | member | read |
 | GET | `/api/v1/workspaces/{ws}/event-schemas` | member | read |
