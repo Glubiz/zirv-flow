@@ -3029,15 +3029,6 @@ mod tests {
         }
     }
 
-    /// The baseline statement of a claim with or without a cap.
-    fn baseline_claim(cap: Option<i64>) -> &'static str {
-        if cap.is_some() {
-            CLAIM_WITH_PER_ROW_CAP
-        } else {
-            CLAIM_BEFORE_207
-        }
-    }
-
     /// One claim by the baseline statement, run as [`claim_job`] ran it, or by [`claim_job`];
     /// the claimed id and token.
     async fn claim_by(pool: &PgPool, before: bool, cap: Option<i64>) -> Option<(Uuid, Uuid)> {
@@ -3048,11 +3039,15 @@ mod tests {
                 .unwrap()
                 .map(|claimed| (claimed.id, claimed.lease_token));
         }
-        let query = sqlx::query_as(baseline_claim(cap))
-            .bind("bench")
-            .bind(LEASE.as_secs_f64())
-            .bind(WORKER_KINDS)
-            .bind(cap);
+        let query = sqlx::query_as(if cap.is_some() {
+            CLAIM_WITH_PER_ROW_CAP
+        } else {
+            CLAIM_BEFORE_207
+        })
+        .bind("bench")
+        .bind(LEASE.as_secs_f64())
+        .bind(WORKER_KINDS)
+        .bind(cap);
         let row: Option<ClaimedRow> = if cap.is_some() {
             let mut tx = pool.begin().await.unwrap();
             sqlx::query("SELECT pg_advisory_xact_lock($1)")
