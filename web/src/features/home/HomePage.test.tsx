@@ -15,12 +15,19 @@ const COMPLETE: SetupFacts = {
   templates: [{}], segments: [{}], flows: [{ state: "published", current_version: 1 }],
 };
 
+const SUMMARY = {
+  window: { from: "2026-10-24T00:00:00Z", to: "2026-10-31T00:00:00Z" },
+  messages_sent: 6945, goals_reached: 642, people_created: 1120, events_received: 2_400_000,
+  flows: [], computed_at: "2026-10-31T00:00:00Z",
+};
+
 function routes(overrides: Record<string, Handler> = {}, role = "admin") {
   const who = role === "admin" ? OWNER : MEMBER;
   return {
     "GET /api/v1/session": () => json(session(who)),
     "GET /api/v1/workspaces": () => json([WORKSPACE]),
     "GET /api/v1/workspaces/ws1/members": () => json([{ user_id: who.id, email: who.email, role, added_at: "2026-10-01T09:00:00Z" }]),
+    "GET /api/v1/workspaces/ws1/summary": () => json(SUMMARY),
     ...Object.fromEntries(["sources", "flows", "sending-domains", "destinations", "templates", "segments"].map((path) => [`GET /api/v1/workspaces/ws1/${path}`, () => json([])] as const)),
     ...overrides,
   };
@@ -57,7 +64,7 @@ describe("Home", () => {
   it("shows loading and empty states without invented totals", async () => {
     mockApi(routes());
     home();
-    expect(await screen.findByRole("status")).toBeInTheDocument();
+    expect((await screen.findAllByRole("status")).length).toBeGreaterThan(0);
     expect(await screen.findByText("No running flows")).toBeInTheDocument();
     expect(screen.getByText("No sources yet")).toBeInTheDocument();
     expect(screen.getByText("No sending domains need attention")).toBeInTheDocument();
@@ -87,6 +94,62 @@ describe("Home", () => {
     failed = false;
     await user.click(screen.getByRole("button", { name: "Try again" }));
     expect(await screen.findByText("No sources yet")).toBeInTheDocument();
+  });
+
+  it("shows the four figures with compact numbers, links and accessible names", async () => {
+    mockApi(routes());
+    home();
+    const tiles = await screen.findByRole("region", { name: "Last 7 days" });
+    expect(within(tiles).getByRole("link", { name: "Messages sent, 6,945, last 7 days" })).toHaveAttribute("href", "/w/ws1/flows");
+    expect(within(tiles).getByRole("link", { name: "Goals reached, 642, last 7 days" })).toHaveAttribute("href", "/w/ws1/flows");
+    expect(within(tiles).getByRole("link", { name: "New people, 1,120, last 7 days" })).toHaveAttribute("href", "/w/ws1/people");
+    expect(within(tiles).getByRole("link", { name: "Events received, 2.4 M, last 7 days" })).toHaveAttribute("href", "/w/ws1/events");
+  });
+
+  it("shows zero as a figure and No access when events are null", async () => {
+    mockApi(routes({ "GET /api/v1/workspaces/ws1/summary": () => json({ ...SUMMARY, messages_sent: 0, events_received: null }) }));
+    home();
+    const tiles = await screen.findByRole("region", { name: "Last 7 days" });
+    expect(within(tiles).getByRole("link", { name: "Messages sent, 0, last 7 days" })).toBeInTheDocument();
+    expect(within(tiles).getByRole("link", { name: "Events received, No access, last 7 days" })).toHaveTextContent("No access");
+  });
+
+  it("keeps the rest of Home when the figures fail, and retries them", async () => {
+    let failed = true;
+    mockApi(routes({ "GET /api/v1/workspaces/ws1/summary": () => failed ? problem(503, "Unavailable", "Figures are unavailable") : json(SUMMARY) }));
+    const user = userEvent.setup();
+    home();
+    const tiles = await screen.findByRole("region", { name: "Last 7 days" });
+    expect(await within(tiles).findByRole("alert")).toHaveTextContent("Could not load figures");
+    expect(screen.getByText("No sources yet")).toBeInTheDocument();
+    expect(within(tiles).queryByRole("link")).not.toBeInTheDocument();
+    failed = false;
+    await user.click(within(tiles).getByRole("button", { name: "Try again" }));
+    expect(await within(tiles).findByRole("link", { name: "Messages sent, 6,945, last 7 days" })).toBeInTheDocument();
+  });
+
+  it("shows the figures loading in the tile row only", async () => {
+    mockApi(routes({ "GET /api/v1/workspaces/ws1/summary": () => new Promise<Response>(() => {}) }));
+    home();
+    const tiles = await screen.findByRole("region", { name: "Last 7 days" });
+    expect(within(tiles).getByRole("status")).toHaveTextContent("Loading figures");
+    expect(screen.getByText("No sources yet")).toBeInTheDocument();
+  });
+
+  it("lists running flows with their figures and a dash for no goal", async () => {
+    mockApi(routes({
+      "GET /api/v1/workspaces/ws1/flows": () => json([{ id: "f1", name: "Welcome series", state: "published", current_version: 1 }, { id: "f2", name: "Newsletter", state: "published", current_version: 1 }]),
+      "GET /api/v1/workspaces/ws1/summary": () => json({ ...SUMMARY, flows: [
+        { flow_id: "f1", people_in_flow: 1284, sent: 3902, goals_reached: 642 },
+        { flow_id: "f2", people_in_flow: 12, sent: 0, goals_reached: null },
+      ] }),
+    }));
+    home();
+    const table = await screen.findByRole("table", { name: "Running flows" });
+    expect(within(table).getAllByRole("columnheader").map((header) => header.textContent)).toEqual(["Flow", "In flow", "Sent", "Goal reached"]);
+    const rows = within(table).getAllByRole("row").slice(1).map((row) => within(row).getAllByRole("cell").map((cell) => cell.textContent));
+    expect(rows[0]?.slice(1)).toEqual(["1,284", "3,902", "642"]);
+    expect(rows[1]?.slice(1)).toEqual(["12", "0", "—"]);
   });
 
   it("does not request admin-only lists or claim setup is complete for a viewer", async () => {

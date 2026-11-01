@@ -39,6 +39,7 @@ mod snippets;
 mod sources;
 mod stream_freshness;
 mod stream_offsets;
+mod summary;
 mod suppressions;
 mod sync_runs;
 mod templates;
@@ -320,6 +321,10 @@ pub use stream_freshness::{
 pub use stream_offsets::{
     LagReport, OffsetsStored, PartitionLag, PartitionOffset, commit_stream_offsets, load_offsets,
     report_stream_lag, stream_lag,
+};
+pub use summary::{
+    COMMIT_MARGIN, FlowFigures, WorkspaceSummary, refresh_workspace_summary, summary_workspaces,
+    workspace_summary,
 };
 pub use suppressions::{
     AddOutcome, BatchEntry, NewSuppression, RemoveOutcome, SUPPRESSION_KINDS, Suppression,

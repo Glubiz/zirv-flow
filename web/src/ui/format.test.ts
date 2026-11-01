@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { formatAgo } from "./format";
+import { formatAgo, formatCount } from "./format";
 
 const NOW = Date.parse("2026-10-10T12:00:00Z");
 
@@ -17,5 +17,16 @@ describe("formatAgo", () => {
   it("reads a moment in the future as just now and leaves text that is not a time alone", () => {
     expect(formatAgo("2026-10-10T13:00:00Z", NOW)).toBe("just now");
     expect(formatAgo("soon", NOW)).toBe("soon");
+  });
+});
+
+describe("formatCount", () => {
+  it("separates thousands under 100,000 and abbreviates above", () => {
+    expect(formatCount(0)).toBe("0");
+    expect(formatCount(6945)).toBe("6,945");
+    expect(formatCount(99_999)).toBe("99,999");
+    expect(formatCount(120_000)).toBe("120 k");
+    expect(formatCount(2_400_000)).toBe("2.4 M");
+    expect(formatCount(3_000_000)).toBe("3 M");
   });
 });

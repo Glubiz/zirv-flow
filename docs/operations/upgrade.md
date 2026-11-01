@@ -67,9 +67,9 @@ With all roles stopped, a lock wait is not application traffic. Check other admi
 sessions, open transactions, backups and another migrator in `pg_stat_activity` and `pg_locks`.
 End the conflicting operation deliberately before retrying. Do not kill sessions blindly.
 
-## Lock review through 0084
+## Lock review through 0085
 
-This review covers every migration added in M8, from `0060` through `0084`; there are no `0076`
+This review covers every migration added in M8, from `0060` through `0085`; there are no `0076`
 or `0080` files. Paths are relative to `crates/zirv-flow-store/migrations/`. As of 2026-10-28,
 the latest published stable release is `v0.187.0`. It includes migrations through `0083`, so an
 upgrade from that release replays only `0084`. The drill selects the latest published older
@@ -108,6 +108,7 @@ referenced tables, even when the new child table is empty.
 | `0082_drop_trait_change_cause.sql` | Checks for forbidden existing causes, then replaces four CHECKs on `jobs`, `decision_records` including partitions, `person_changes`, and `enrollments`. ACCESS EXCLUSIVE lasts through every validation scan. Keep for the stopped window. A pre-existing `trait_change` aborts the migration; investigate it, do not delete it to pass. |
 | `0083_api_idempotency.sql` | New empty table and index; foreign key locks `workspaces`. Keep. |
 | `0084_forwarding_trace.sql` | Nullable `forwarding_outbox.trace_id`, no default, scan or backfill. Brief ACCESS EXCLUSIVE catalog change. Keep. |
+| `0085_summary_rollup.sql` | Three new empty tables (their foreign keys briefly lock `workspaces`), three ordinary indexes and the `summary.rollup` schedule. No new `events` index: events are counted on `0069`'s. SHARE blocks writes through each index build. Keep and budget the builds over the retained rows, or pre-build each before the stop under the same name (the migration uses `IF NOT EXISTS`; drop an invalid index a failed build leaves, then retry): `CREATE INDEX CONCURRENTLY people_workspace_created_idx ON people (workspace_id, created_at);` `CREATE INDEX CONCURRENTLY messages_sent_completed_idx ON messages (workspace_id, completed_at) INCLUDE (flow_id) WHERE status = 'sent' AND NOT test;` `CREATE INDEX CONCURRENTLY step_executions_workspace_node_started_idx ON step_executions (workspace_id, node_id, started_at) INCLUDE (enrollment_id, outcome);`. The rollup backfills 30 days newest first, three days per five-minute run and one transaction per day, so Home figures fill in over about an hour. |
 
 **Older installs: `0033_trait_slots.sql`.** This is already present in `v0.187.0`, so that upgrade
 does not replay it. Keep its released SQL. It adds 30 nullable columns to `people`, builds 30
