@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState, type SyntheticEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type SyntheticEvent } from "react";
 import { createPortal } from "react-dom";
 import { useNavigate } from "react-router";
 
 import { ApiError, client, describeError, unwrap, type components, type DefinitionIssue, type ErrorSummary } from "../../api";
 import { Button, Dialog, ErrorState, InlineError, LoadingState, Panel, SelectField, TextAreaField, TextField } from "../../ui";
-import { AssistantDock, AssistantPanel, assistantGone, useAssistantDock } from "../assistant";
+import { AssistantDock, AssistantPanel, assistantGone, useAssistantDock, type Draft } from "../assistant";
 import {
   fromDefinition,
   isComplete,
@@ -21,6 +21,7 @@ import { Builder } from "./Builder";
 import type { PlacedIssue } from "./builderContext";
 import { traitTypes, useCatalog, useEventTypes, type Catalog } from "./catalog";
 import { namesOf } from "./describe";
+import { draftMarks } from "./draftMarks";
 import { DraftPreview } from "./DraftPreview";
 import { asCadence, CADENCES, issueMessage, type Cadence } from "./labels";
 import { LiveCount } from "./LiveCount";
@@ -116,6 +117,9 @@ function Form({ workspaceId, segment, canWrite, onSaved, assistant, onAssistantG
   const dock = useAssistantDock();
   /** The condition the assistant's explanation points at, by JSON pointer. */
   const [explaining, setExplaining] = useState<string | null>(null);
+  /** The valid draft the assistant shows and the person has not yet accepted or discarded. */
+  const [shownDraft, setShownDraft] = useState<Draft | null>(null);
+  const [draftHidden, setDraftHidden] = useState(false);
   const [saved, setSaved] = useState(segment);
   const baseline = {
     name: saved?.name ?? "",
@@ -146,6 +150,10 @@ function Form({ workspaceId, segment, canWrite, onSaved, assistant, onAssistantG
   const guard = useLeaveGuard(dirty);
   const readOnly = !canWrite;
   const dockShown = assistant === true && dockVisible && dock.open && (canWrite || saved !== null);
+
+  const drafted = useMemo(() => (shownDraft?.content != null ? fromDefinition(shownDraft.content as unknown as Definition) : null), [shownDraft]);
+  const marks = useMemo(() => (drafted !== null && shownDraft !== null ? draftMarks(drafted, shownDraft.changes) : undefined), [drafted, shownDraft]);
+  const showingDraft = dockShown && drafted !== null && !draftHidden;
 
   const preview = useLivePreview(workspaceId, complete ? root : null, (raw) => {
     setIssues(placeIssues(latestRoot.current, raw));
@@ -284,14 +292,23 @@ function Form({ workspaceId, segment, canWrite, onSaved, assistant, onAssistantG
                 </ul>
               </div>
             ) : null}
+            {dockShown && drafted !== null ? (
+              <div className="dock-legend" role="group" aria-label="The assistant's draft in the builder">
+                <span className="strong">{draftHidden ? "The assistant's draft is hidden" : "Showing the assistant's draft"}</span>
+                <span className="dock-mark">Added</span>
+                <span className="dock-mark dock-mark-changed">Changed</span>
+                <Button onClick={() => setDraftHidden((hidden) => !hidden)}>{draftHidden ? "Show the draft" : "Show without the draft"}</Button>
+              </div>
+            ) : null}
             <Builder
-              root={root}
-              readOnly={readOnly}
+              root={showingDraft && drafted !== null ? drafted : root}
+              readOnly={readOnly || showingDraft}
               selfId={saved?.id ?? null}
               catalog={catalog}
               eventTypes={eventTypes}
-              issues={issues.placed}
-              highlight={dockShown ? explaining : null}
+              issues={showingDraft ? [] : issues.placed}
+              highlight={dockShown && !definitionChanged && !showingDraft ? explaining : null}
+              marks={showingDraft ? marks : undefined}
               onEdit={edit}
             />
           </div>
@@ -346,6 +363,10 @@ function Form({ workspaceId, segment, canWrite, onSaved, assistant, onAssistantG
             kind="segment"
             segmentId={saved?.id}
             onAccept={loadDraft}
+            onDraftShown={(next) => {
+              setShownDraft(next);
+              setDraftHidden(false);
+            }}
             confirmAccept={confirmReplace}
             onFailure={(error) => {
               if (assistantGone(error)) onAssistantGone?.();

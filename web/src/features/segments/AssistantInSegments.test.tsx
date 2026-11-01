@@ -210,6 +210,7 @@ describe("drafting a segment", () => {
 
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     expect(sent(calls, "POST", `${WS}/ai/drafts/d1/accept`)).toHaveLength(0);
+    await user.click(screen.getByRole("button", { name: "Show without the draft" }));
     expect(screen.getByLabelText("Value")).toHaveValue("Roskilde");
     expect(screen.getByRole("button", { name: "Put into the draft" })).toBeEnabled();
 
@@ -255,6 +256,7 @@ describe("drafting a segment", () => {
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("This draft cannot be accepted");
     expect(alert).toHaveTextContent("The definition uses a field that does not exist in this workspace. (/all/0/trait)");
+    await user.click(screen.getByRole("button", { name: "Show without the draft" }));
     expect(screen.getByLabelText("Value")).toHaveValue("Aarhus");
   });
 
@@ -273,6 +275,64 @@ describe("drafting a segment", () => {
     const problems = await screen.findByRole("list", { name: "Problems with the last attempt" });
     expect(problems).toHaveTextContent("The definition uses a field that does not exist in this workspace. (/all/0/trait)");
     expect(screen.queryByRole("button", { name: "Put into the draft" })).not.toBeInTheDocument();
+  });
+});
+
+describe("marking a draft in the builder", () => {
+  const SECOND = { trait: "city", op: "eq", value: "Odense" };
+  const ADDING = { v: 1, all: [{ trait: "city", op: "eq", value: "Aarhus" }, SECOND] };
+  const adding = () =>
+    drafted({ content: ADDING, changes: [{ path: "/all/1", change: "added", before: null, after: SECOND }] });
+  const accepting = { id: "d1", kind: "segment", segment_id: SEGMENT_ID, source_id: null, stream: null, content: ADDING };
+
+  it("marks the added condition with the word while the draft is shown, and unmarks it on Discard", async () => {
+    mockApi({ ...base(), [DRAFT]: () => json(adding()) });
+    const user = userEvent.setup();
+    mountPage();
+    await screen.findByLabelText("Value");
+    await askToDraft(user);
+
+    await screen.findByRole("heading", { name: /^Draft ready/ });
+    const added = document.querySelector('[data-node="/all/1"]') as HTMLElement;
+    expect(added).toHaveClass("node-added");
+    expect(within(added).getByText("Added")).toBeInTheDocument();
+    expect(document.querySelector('[data-node="/all/0"]')).not.toHaveClass("node-added");
+    expect(document.querySelector('[data-node="/all/0"]')).not.toHaveClass("node-changed");
+
+    await user.click(screen.getByRole("button", { name: "Discard" }));
+
+    expect(document.querySelector(".node-added")).toBeNull();
+    expect(screen.queryByRole("group", { name: "The assistant's draft in the builder" })).not.toBeInTheDocument();
+    expect(screen.getAllByLabelText("Value")).toHaveLength(1);
+  });
+
+  it("marks a changed condition, shows the saved rules on Show without the draft, and clears the marks on accept", async () => {
+    mockApi({
+      ...base(),
+      [DRAFT]: () => json(drafted({ changes: [{ path: "/all/0/value", change: "changed", before: "Aarhus", after: "Odense" }] })),
+      [ACCEPT]: () => json({ ...accepting, content: DRAFTED }),
+    });
+    const user = userEvent.setup();
+    mountPage();
+    await screen.findByLabelText("Value");
+    await askToDraft(user);
+    await screen.findByRole("heading", { name: /^Draft ready/ });
+
+    const changed = document.querySelector('[data-node="/all/0"]') as HTMLElement;
+    expect(changed).toHaveClass("node-changed");
+    expect(within(changed).getByText("Changed")).toBeInTheDocument();
+    expect(screen.getByLabelText("Value")).toHaveValue("Odense");
+
+    await user.click(screen.getByRole("button", { name: "Show without the draft" }));
+    expect(document.querySelector(".node-changed")).toBeNull();
+    expect(screen.getByLabelText("Value")).toHaveValue("Aarhus");
+
+    await user.click(screen.getByRole("button", { name: "Show the draft" }));
+    await user.click(screen.getByRole("button", { name: "Put into the draft" }));
+    await screen.findByText("Loaded into the editor. Save to apply it.");
+    expect(document.querySelector(".node-changed")).toBeNull();
+    expect(screen.queryByRole("group", { name: "The assistant's draft in the builder" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Value")).toHaveValue("Odense");
   });
 });
 
@@ -390,6 +450,36 @@ describe("explaining a segment", () => {
     expect(document.querySelector('[data-node="/all/0"]')).toHaveClass("node-explained");
     await user.click(choices[1] as HTMLElement);
     expect(screen.queryByText("Explaining")).not.toBeInTheDocument();
+  });
+
+  it("flags no condition once the rules are edited, because the pointer belongs to the saved version", async () => {
+    const TWO = { v: 1, all: [{ trait: "city", op: "eq", value: "Aarhus" }, { trait: "city", op: "eq", value: "Odense" }] };
+    mockApi({
+      ...base(),
+      [`GET ${SEGMENT}`]: () => json(detail({}, { definition: TWO })),
+      [EXPLAIN]: () =>
+        json({
+          version: 1,
+          summary: "People who live in Aarhus or Odense.",
+          nodes: [
+            { pointer: "/all/0", text: "Lives in Aarhus." },
+            { pointer: "/all/1", text: "Lives in Odense." },
+          ],
+        }),
+    });
+    const user = userEvent.setup();
+    mountPage();
+    await screen.findAllByLabelText("Value");
+    await openExplain(user);
+    const list = await screen.findByRole("list", { name: "Condition by condition" });
+    await user.click(within(list).getAllByRole("button")[0] as HTMLElement);
+    expect(document.querySelector('[data-node="/all/0"]')).toHaveClass("node-explained");
+
+    // The condition that was second now sits at the explained position.
+    await user.click(screen.getByRole("button", { name: /^Remove Condition 1/ }));
+
+    expect(screen.queryByText("Explaining")).not.toBeInTheDocument();
+    expect(document.querySelector(".node-explained")).toBeNull();
   });
 
   it("says the segment changed when the explanation is of an older version", async () => {
