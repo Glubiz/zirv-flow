@@ -58,9 +58,7 @@ pub(crate) async fn set(
 ) -> Result<Json<FlowDetailBody>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Publish).await?;
     let id = path_id(&id)?;
-    if !(MIN_WARMUP_SECONDS..=MAX_WARMUP_SECONDS).contains(&body.seconds) {
-        return Err(ValidationError::new("seconds", "must be 60 to 86400").into());
-    }
+    check_seconds(body.seconds)?;
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
     zirv_flow_store::set_warmup(&mut tx, workspace.id, id, body.enabled, body.seconds)
         .await
@@ -131,4 +129,39 @@ async fn reread(
         .await?
         .ok_or_else(ApiError::not_found)?;
     Ok(Json(flow_detail(state, workspace, &flow).await?))
+}
+
+fn check_seconds(seconds: i32) -> Result<(), ApiError> {
+    if (MIN_WARMUP_SECONDS..=MAX_WARMUP_SECONDS).contains(&seconds) {
+        Ok(())
+    } else {
+        Err(ValidationError::new("seconds", "must be 60 to 86400").into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn a_length_is_kept_between_a_minute_and_a_day() {
+        for seconds in [60, 300, 86_400] {
+            assert!(check_seconds(seconds).is_ok(), "{seconds}");
+        }
+        for seconds in [i32::MIN, -1, 0, 59, 86_401, i32::MAX] {
+            assert!(check_seconds(seconds).is_err(), "{seconds}");
+        }
+    }
+
+    #[test]
+    fn the_request_needs_both_fields() {
+        let both: Result<WarmupRequest, _> =
+            serde_json::from_value(json!({"enabled": false, "seconds": 120}));
+        let missing: Result<WarmupRequest, _> = serde_json::from_value(json!({"enabled": true}));
+
+        assert!(both.is_ok());
+        assert!(missing.is_err());
+    }
 }
