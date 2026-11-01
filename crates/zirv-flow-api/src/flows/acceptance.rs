@@ -2251,6 +2251,7 @@ mod tests {
                 format!("/{flow}/enrollments"),
                 format!("/{flow}/enrollments/{enrollment}"),
                 format!("/{flow}/versions/1/counts"),
+                format!("/{flow}/entries"),
             ];
             for tail in &routes {
                 for (who, auth, expected) in [
@@ -2512,6 +2513,54 @@ mod tests {
                 StatusCode::NOT_FOUND,
                 "a malformed path id is not found, as everywhere"
             );
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_entries_per_day_match_the_enrollments_and_reject_bad_parameters(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let f = fixture(&pool).await;
+            let flow = published(&f, "Welcome").await;
+            for _ in 0..2 {
+                enrollment_in(&f, &flow, "active", "wait", None).await;
+            }
+
+            let reply = f
+                .lead("GET", &format!("/{flow}/entries?days=7"), None)
+                .await;
+
+            assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+            let days = reply.body["days"].as_array().unwrap();
+            assert_eq!(days.len(), 7);
+            assert_eq!(reply.body["timezone"], "UTC");
+            assert_eq!(reply.body["from"], days[0]["date"]);
+            assert_eq!(reply.body["to"], days[6]["date"]);
+            assert_eq!(days[6]["entered"], 2);
+            assert_eq!(reply.body["total"], 2);
+            assert_eq!(reply.body["previous_total"], 0);
+            let listed = f.lead("GET", &format!("/{flow}/enrollments"), None).await;
+            assert_eq!(
+                listed.body["enrollments"].as_array().unwrap().len() as i64,
+                reply.body["total"].as_i64().unwrap(),
+                "the series agrees with the enrollments list"
+            );
+            let default = f.lead("GET", &format!("/{flow}/entries"), None).await;
+            assert_eq!(default.body["days"].as_array().unwrap().len(), 30);
+            let other_version = f
+                .lead("GET", &format!("/{flow}/entries?version=2"), None)
+                .await;
+            assert_eq!(other_version.body["total"], 0);
+
+            for bad in ["days=0", "days=91", "version=0", "version=x"] {
+                let reply = f.lead("GET", &format!("/{flow}/entries?{bad}"), None).await;
+                assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{bad}");
+            }
+            let unknown = f
+                .lead("GET", &format!("/{}/entries", Uuid::now_v7()), None)
+                .await;
+            assert_eq!(unknown.status, StatusCode::NOT_FOUND);
         })
         .await;
     }

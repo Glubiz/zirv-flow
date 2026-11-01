@@ -107,6 +107,7 @@ function routes({ role = "writer", routes: extra = {}, state = "published" }: Op
   return {
     ...flowRoutes({ role, flow: { state, current_version: 2 } }),
     [`GET ${FLOW}/versions`]: () => json([versionBody(1, { graph: BUMP }), versionBody(2)]),
+    [`GET ${FLOW}/entries`]: () => json({ from: "2026-10-01", to: "2026-10-01", timezone: "UTC", days: [{ date: "2026-10-01", entered: 0 }], total: 0, previous_total: 0 }),
     [`GET ${FLOW}/versions/2/counts`]: () => json(counts(2)),
     [`GET ${FLOW}/versions/1/counts`]: () =>
       json({ version: 1, nodes: [nodeCount("bump", "action.update_trait", 4, 1, 3), nodeCount("end", "exit", 1)] }),

@@ -2,6 +2,8 @@ export { Brand } from "./Brand";
 export { Button } from "./Button";
 export { CopyButton } from "./CopyButton";
 export { Dialog } from "./Dialog";
+export { DayBars } from "./DayBars";
+export type { DayValue } from "./DayBars";
 export { SelectField, TextAreaField, TextField } from "./Field";
 export { HiddenValue } from "./HiddenValue";
 export { LibraryNav } from "./LibraryNav";
@@ -33,7 +35,7 @@ export {
   TRANSFORM_OPS,
 } from "./transforms";
 export type { Transform, TraitType, TransformDraft, TransformOp } from "./transforms";
-export { formatAgo, formatCount, formatDate, formatDateTime, formatDuration, formatTime, plural, shortId } from "./format";
+export { formatAgo, formatCount, formatDate, formatDateTime, formatDay, formatDuration, formatTime, plural, shortId } from "./format";
 export { builtInRuleText, gateLabel, reasonLabel, SEND_GATES, waitLabel } from "./sendLabels";
 export type { SendGate } from "./sendLabels";
 export { defaultEventFilters, ENGAGEMENT_PROPERTIES, isMachineFilter, MACHINE_HINT, machineFilter, OPENED_EVENT } from "./engagement";

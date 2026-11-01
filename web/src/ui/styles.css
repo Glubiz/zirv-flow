@@ -5556,6 +5556,97 @@ main:focus {
 .palette-heading { padding: 8px 12px 4px; font-size: 0.875em; }
 .palette-note { padding: 6px 12px; margin: 0; }
 
+.daybars {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+}
+
+.daybars-chart {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: 140px auto;
+  column-gap: 10px;
+  row-gap: 6px;
+}
+
+.daybars-y,
+.daybars-x {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.daybars-y {
+  flex-direction: column;
+  text-align: right;
+}
+
+.daybars-x {
+  grid-column: 2;
+}
+
+.daybars-plot {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.daybars-col {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+}
+
+.daybars-bar {
+  display: block;
+  width: 100%;
+  min-height: 1px;
+  background: var(--link);
+  border-radius: 2px 2px 0 0;
+}
+
+.daybars-col:hover .daybars-bar {
+  background: var(--focus);
+}
+
+.daybars-tip {
+  position: absolute;
+  bottom: 100%;
+  transform: translateX(-50%);
+  margin-bottom: 6px;
+  padding: 4px 8px;
+  border-radius: var(--radius-input);
+  background: var(--night);
+  color: var(--night-ink);
+  font-size: 13px;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.daybars-caption {
+  font-size: 14px;
+  color: var(--ink-2);
+}
+
+.daybars-table summary {
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--link);
+}
+
+.daybars-table table {
+  margin-top: 8px;
+}
+
 /* Assistant dock: one aside beside every editor, an overlay below 1000px. */
 .dock {
   box-sizing: border-box;
