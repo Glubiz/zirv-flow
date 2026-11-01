@@ -552,6 +552,7 @@ values.
 | GET | `/api/v1/workspaces/{ws}/segments/{id}` | member | read |
 | PATCH | `/api/v1/workspaces/{ws}/segments/{id}` | editor | write |
 | POST | `/api/v1/workspaces/{ws}/segments/{id}/archive` | editor | write |
+| GET | `/api/v1/workspaces/{ws}/segments/{id}/where-used` | member | read |
 | GET | `/api/v1/workspaces/{ws}/segments/{id}/versions` | member | read |
 | GET | `/api/v1/workspaces/{ws}/segments/{id}/versions/{n}` | member | read |
 | GET | `/api/v1/workspaces/{ws}/segments/{id}/members` | member | read |
