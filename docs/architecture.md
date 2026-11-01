@@ -2623,8 +2623,13 @@ first instant after the gap, and an overlap runs it once.
 the claim query skips a workspace that already has `worker.max_running_per_workspace`
 jobs running (default unlimited; instance-level jobs are never capped). While a
 cap is set, claims take a transaction-level advisory lock so concurrent workers
-cannot overshoot it. Weighted claiming is rejected for v1: it is more complex
-and nothing yet shows the cap is not enough. M8 validates the cap under load.
+cannot overshoot it. Such a claim reads the capped workspaces once and, while
+any is capped, walks the ready jobs one workspace and band at a time
+(`jobs_ready_workspace_idx`, a skip scan), passing over a capped workspace in one
+probe, so its backlog does not slow the others' claims (#207,
+`docs/benchmarks/m5-flows.md` section 8). Weighted claiming is rejected for v1:
+it is more complex and nothing yet shows the cap is not enough. M8 validates the
+cap under load.
 
 | Concern | Design |
 |---------|--------|

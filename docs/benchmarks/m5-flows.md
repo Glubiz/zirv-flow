@@ -180,12 +180,15 @@ ready jobs, with two plans, both growing with the queue:
 **Fix.** The claim walks the distinct priorities of the ready jobs upwards, one probe of `jobs_ready_idx`
 each (a recursive skip scan), and takes the oldest due job of the first band that has one from the
 bounded range `priority = band AND run_at <= now()`, `FOR UPDATE SKIP LOCKED`. The semantics are kept
-(priority first, then oldest; locked jobs skipped, also across bands; the per-workspace cap), the
-enqueue wake check of 0070 is unchanged, and no index is added: `jobs_ready_idx` already has the order.
-`jobs::tests::the_claim_plan_stays_bounded_whatever_the_statistics` asserts the plan has no sort, no kind
-index and no `jobs_ready_idx` scan unbounded by priority, with no statistics, with statistics taken while
-nothing was due and with fresh ones, as custom plans (cap on and off) and as the generic plan; it also
-asserts that the statement before #207 fails that check in every case.
+(priority first, then oldest; locked jobs skipped, also across bands) and the enqueue wake check of 0070
+is unchanged. Without a cap no index is added: `jobs_ready_idx` already has the order. The per-workspace
+cap kept its semantics but not a bounded cost: under a cap the band probe still stepped over a capped
+workspace's due jobs, which the cap path below fixes.
+`jobs::tests::the_claim_plan_stays_bounded_whatever_the_statistics` asserts the plan has no sort (but of
+the capped claim's per-workspace heads), no kind index and no ready index scan unbounded by priority or
+workspace, with no statistics, with statistics taken while nothing was due and with fresh ones, as custom
+plans of the claim without and with a cap and as their generic plans; it also asserts that the statement
+before #207 fails that check in every case.
 
 **Before and after.** Per claim: the `EXPLAIN (ANALYZE, BUFFERS)` execution time and shared buffers of the
 plan the connection settled on; rates from the four workers.
@@ -220,3 +223,57 @@ DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/postgres ZIRV_FLOW_BENC
 ```
 
 (The defaults are 1,000,000 and 100,000.)
+
+**Cap path.** With `worker.max_running_per_workspace` set, the band probe above also counted the running
+jobs of each row's workspace and skipped a capped workspace's rows one by one, so a workspace at its cap
+with a flood of due jobs made every claim step over the whole flood, counting for each row, before it
+reached another workspace's job, or return nothing. That is the case the queue-backlog runbook (cause 3,
+fix 3) sets the cap for. The capped claim now reads the capped workspaces once
+(`jobs_workspace_running_idx`, grouped, `HAVING count(*) >= cap`) and, while there are none, is the claim
+above. Otherwise it walks `jobs_ready_workspace_idx (workspace_id, priority, run_at)` one workspace and
+band at a time (a skip scan): a capped workspace is passed over in one probe, and each other workspace
+yields the oldest due job of its first band that has one. Instance jobs, never capped, are walked by band
+in `jobs_ready_instance_idx (priority, run_at) WHERE workspace_id IS NULL`. The heads are tried by
+priority, then age, `FOR UPDATE SKIP LOCKED`, so a claim locks only the row it takes; a head that is
+locked is passed over until the next claim, where the claim above would try that workspace's next job.
+Migration 0088 adds both indexes; each ready job is in one of them, so an enqueue writes one index entry
+more. An index on `(priority, workspace_id, run_at)` was tried first: with no statistics the planner
+put every band at one row and answered the probes from `jobs_ready_idx` with a filter or a sort, which
+steps over the flood again. Leading with the workspace, with every workspace probe a row comparison led
+by `workspace_id`, leaves no other index able to answer them.
+`jobs::tests::the_capped_claim_plan_does_not_step_over_a_capped_workspace` asserts, with no statistics,
+with statistics taken while nothing was due and with fresh ones, as the custom and the generic plan, that
+no ready index scan filters on the workspace and no running count is taken per row, and that the claim
+before this change fails that check in every case.
+
+`jobs::tests::the_capped_claim_cost_against_a_workspace_flood` puts a workspace at a cap of 10 running
+jobs with a flood of `flow.step` jobs due two to three minutes ago, ahead of eight other workspaces'
+20,000 jobs due in the last minute in the same band, with fresh statistics. The claim before and after
+run as `claim_job` runs them under the cap, on the same rows (the other workspaces' jobs are seeded again
+before each run): the plan a connection settles on, measured as above, and four capped workers for 5 s.
+
+| Flood | Due besides it | Before: ms, buffers | Claims/s | After: ms, buffers | Claims/s |
+|---|---|---|---|---|---|
+| 10,000 | 20,000 of 8 workspaces | 15.0, 20,053 | 77 | 0.22, 127 | 718 |
+| 10,000 | none | 16.5, 20,028 | 84 empty | 0.10, 23 | 1,397 empty |
+| 100,000 | 20,000 of 8 workspaces | 166.7, 200,518 | 8.2 | 0.19, 129 | 731 |
+| 100,000 | none | 165.7, 200,493 | 8.1 empty | 0.09, 24 | 1,455 empty |
+| 1,000,000 | 20,000 of 8 workspaces | 2,594, 2,004,792 | 0.5 | 0.27, 279 | 698 |
+| 1,000,000 | none | 2,569, 2,004,768 | 0.5 empty | 0.10, 24 | 1,429 empty |
+
+The claim before grew linearly with the flood, two buffers per flooded row; after, it reads about two
+probes per workspace whatever the flood, in 0.19 to 0.27 ms (its buffers rose from 127 to 279 at
+1,000,000, per probe, not per flooded row). With the flood's workspace below its cap, so that no
+workspace is capped, both claim the flood at 738 to 764 claims/s in 0.11 to 0.14 ms (the run before
+leaves about 4,000 fewer flood jobs for the run after): about 750 claims/s is this client's ceiling for
+claims serialised by the cap's lock, and the check for capped workspaces adds at most 0.02 ms. The cost
+after grows with the workspaces that have ready jobs, which this benchmark keeps at nine.
+
+```sh
+DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/postgres ZIRV_FLOW_BENCH_CLAIM=1 \
+  ZIRV_FLOW_BENCH_CLAIM_FLOOD=1000000 \
+  cargo nextest run -p zirv-flow-store --run-ignored all --no-capture \
+  -E 'test(the_capped_claim_cost_against_a_workspace_flood)'
+```
+
+(The default is 100,000.)
