@@ -13,10 +13,11 @@ pub(crate) mod signing;
 pub(crate) mod test_mode;
 pub(crate) mod triggers;
 pub(crate) mod validation;
+pub(crate) mod warmup;
 
 use serde_json::Value;
 use zirv_flow_core::flow::{FlowGraph, FlowSettings, Issue};
-use zirv_flow_core::{Cause, TraceContext, TraceId};
+use zirv_flow_core::{Cause, TraceContext, TraceId, ValidationError};
 use zirv_flow_store::{Flow, FlowError, StoreError};
 
 use crate::auth::Principal;
@@ -91,7 +92,12 @@ pub(crate) fn flow_error(error: FlowError) -> ApiError {
     match error {
         FlowError::NotFound => ApiError::not_found(),
         FlowError::Archived => ApiError::flow_archived(),
-        illegal @ FlowError::IllegalTransition { .. } => ApiError::flow_state(illegal.to_string()),
+        FlowError::WarmupOutOfBounds => {
+            ValidationError::new("seconds", "must be 60 to 86400").into()
+        }
+        illegal @ (FlowError::IllegalTransition { .. } | FlowError::WarmupNotOpenable { .. }) => {
+            ApiError::flow_state(illegal.to_string())
+        }
         FlowError::Store(error) => name_taken(error),
     }
 }

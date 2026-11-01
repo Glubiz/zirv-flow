@@ -69,6 +69,10 @@ pub const EXPORT_SECTIONS: &[(&str, &[&str])] = &[
 /// Tables that hold or name a person and are deliberately not exported, with the reason.
 pub const EXPORT_EXCLUDED: &[(&str, &str)] = &[
     ("person_changes", "internal change feed; ids and times only"),
+    (
+        "flow_warmup_waiting",
+        "ids and a place in the window of an entry not admitted yet; it joins flow_entries when admitted",
+    ),
     ("privacy_exports", "the export itself"),
     ("event_dedupe", "message ids only"),
     ("debugger_feed", "a 15-minute buffer of event ids"),

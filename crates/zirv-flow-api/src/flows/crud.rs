@@ -14,10 +14,10 @@ use utoipa::openapi::schema::{ArrayBuilder, ObjectBuilder, SchemaType, Type};
 use utoipa::openapi::{Ref, RefOr, Schema};
 use uuid::Uuid;
 use zirv_flow_connectors::destinations::{Registry, provider_profile_support};
-use zirv_flow_core::ValidationError;
 use zirv_flow_core::consent::Channel;
 use zirv_flow_core::flow::{FlowGraph, FlowSettings, NodeKind};
-use zirv_flow_store::{Flow, FlowPatch, FlowState, FlowVersion, NewFlow};
+use zirv_flow_core::{ValidationError, WorkspaceId};
+use zirv_flow_store::{Flow, FlowPatch, FlowState, FlowVersion, NewFlow, Warmup, WarmupCounts};
 
 use super::schema::{GRAPH, ISSUE, SETTINGS};
 use super::validation::{Environment, SendFacts, SyncFacts, check};
@@ -108,16 +108,71 @@ pub(crate) struct FlowDetailBody {
     graph: Value,
     #[schema(schema_with = settings_schema)]
     settings: Value,
+    /// The warm-up that ramps enrollments into the flow after it starts taking them.
+    warmup: WarmupBody,
+}
+
+/// The warm-up of a flow: its setting and the window it last started.
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct WarmupBody {
+    /// Whether a window holds back enrollments when the flow starts taking them.
+    enabled: bool,
+    /// The length of the window, 60 to 86400 seconds.
+    seconds: i32,
+    /// When the window last started: the first publish or the last resume. Null before either.
+    #[serde(with = "time::serde::rfc3339::option")]
+    #[schema(value_type = Option<String>, format = DateTime)]
+    started_at: Option<OffsetDateTime>,
+    /// When the window ends, `started_at` plus `seconds`; null before it started.
+    #[serde(with = "time::serde::rfc3339::option")]
+    #[schema(value_type = Option<String>, format = DateTime)]
+    ends_at: Option<OffsetDateTime>,
+    /// When an Admin ended the window early; null when none did.
+    #[serde(with = "time::serde::rfc3339::option")]
+    #[schema(value_type = Option<String>, format = DateTime)]
+    opened_at: Option<OffsetDateTime>,
+    /// Entries admitted since the window started.
+    admitted: i64,
+    /// Entries still waiting for their turn.
+    waiting: i64,
+}
+
+impl WarmupBody {
+    fn new(warmup: &Warmup, counts: WarmupCounts) -> Self {
+        Self {
+            enabled: warmup.enabled,
+            seconds: warmup.seconds,
+            started_at: warmup.started_at,
+            ends_at: warmup.ends_at(),
+            opened_at: warmup.opened_at,
+            admitted: counts.admitted,
+            waiting: counts.waiting,
+        }
+    }
 }
 
 impl From<&Flow> for FlowDetailBody {
+    /// The counts of the warm-up are zero here; [`flow_detail`] reads them.
     fn from(flow: &Flow) -> Self {
         Self {
             flow: FlowBody::from(flow),
             graph: flow.draft_graph.clone(),
             settings: flow.draft_settings.clone(),
+            warmup: WarmupBody::new(&flow.warmup, WarmupCounts::default()),
         }
     }
+}
+
+/// The flow with its draft and the counts of its warm-up.
+pub(crate) async fn flow_detail(
+    state: &AppState,
+    workspace: WorkspaceId,
+    flow: &Flow,
+) -> Result<FlowDetailBody, ApiError> {
+    let counts = zirv_flow_store::warmup_counts(&state.pool, workspace, flow.id).await?;
+    let mut body = FlowDetailBody::from(flow);
+    body.warmup = WarmupBody::new(&flow.warmup, counts);
+    Ok(body)
 }
 
 #[derive(Serialize, ToSchema)]
@@ -452,7 +507,10 @@ pub(crate) async fn create(
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
-    Ok((StatusCode::CREATED, Json(FlowDetailBody::from(&flow))))
+    Ok((
+        StatusCode::CREATED,
+        Json(flow_detail(&state, workspace.id, &flow).await?),
+    ))
 }
 
 /// One flow with its draft graph and settings.
@@ -482,7 +540,7 @@ pub(crate) async fn get(
     let flow = zirv_flow_store::find_flow(&state.pool, workspace.id, path_id(&id)?)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    Ok(Json(FlowDetailBody::from(&flow)))
+    Ok(Json(flow_detail(&state, workspace.id, &flow).await?))
 }
 
 /// Changes the name, the draft graph or the draft settings of a flow that is not archived.
@@ -563,7 +621,7 @@ pub(crate) async fn update(
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
-    Ok(Json(FlowDetailBody::from(&flow)))
+    Ok(Json(flow_detail(&state, workspace.id, &flow).await?))
 }
 
 /// Checks the saved draft as a publish would and returns every issue, each with a stable code and

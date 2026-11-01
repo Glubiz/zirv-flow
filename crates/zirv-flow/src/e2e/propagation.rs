@@ -453,6 +453,9 @@ mod tests {
             )
             .await
             .unwrap();
+            zirv_flow_store::set_warmup(&mut tx, world.ws, flow, false, 300)
+                .await
+                .unwrap();
             let locked = zirv_flow_store::lock_flow(&mut tx, world.ws, flow).await.unwrap();
             zirv_flow_store::publish_flow(
                 &mut tx,

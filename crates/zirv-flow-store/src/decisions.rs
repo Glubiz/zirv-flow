@@ -79,6 +79,9 @@ impl NewDecision {
 pub struct GraphPoint {
     pub version: i32,
     pub node: Option<String>,
+    /// When a deferred entry will be let in, stored in `subject_ids` as `admit_at` (RFC 3339,
+    /// UTC). A time is not personal data.
+    pub admit_at: Option<OffsetDateTime>,
 }
 
 impl GraphPoint {
@@ -87,6 +90,16 @@ impl GraphPoint {
         Self {
             version,
             node: None,
+            admit_at: None,
+        }
+    }
+
+    /// The point of a decision that holds an entry back until `admit_at`.
+    pub fn deferred_until(version: i32, admit_at: OffsetDateTime) -> Self {
+        Self {
+            version,
+            node: None,
+            admit_at: Some(admit_at),
         }
     }
 
@@ -95,6 +108,7 @@ impl GraphPoint {
         Self {
             version,
             node: Some(node.to_owned()),
+            admit_at: None,
         }
     }
 }
@@ -106,7 +120,7 @@ impl GraphPoint {
 /// match a person only through this, so a node id never reads as a reference to a person. The
 /// decision table must be aliased `d`.
 pub(crate) const ID_SUBJECTS: &str =
-    "jsonb_each_text(d.subject_ids) s WHERE s.key NOT IN ('node', 'version')";
+    "jsonb_each_text(d.subject_ids) s WHERE s.key NOT IN ('node', 'version', 'admit_at')";
 
 /// The `subject_ids` document of a record: ids by name, then the graph point.
 fn subjects_of(decision: &NewDecision) -> Value {
@@ -119,6 +133,13 @@ fn subjects_of(decision: &NewDecision) -> Value {
         subjects.insert("version".to_owned(), Value::from(point.version));
         if let Some(node) = &point.node {
             subjects.insert("node".to_owned(), Value::String(node.clone()));
+        }
+        if let Some(admit_at) = point.admit_at.and_then(|at| {
+            at.to_offset(time::UtcOffset::UTC)
+                .format(&time::format_description::well_known::Rfc3339)
+                .ok()
+        }) {
+            subjects.insert("admit_at".to_owned(), Value::String(admit_at));
         }
     }
     Value::Object(subjects)

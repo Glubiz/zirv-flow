@@ -486,7 +486,14 @@ mod tests {
         assert_eq!(ended_nodes(&env, "end").await, 0);
 
         let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
-        let again = zirv_flow_store::resume_flow(&mut tx, env.ws, flow, &trace).await;
+        let again = zirv_flow_store::resume_flow(
+            &mut tx,
+            &zirv_flow_store::Clock::default(),
+            env.ws,
+            flow,
+            &trace,
+        )
+        .await;
         assert!(matches!(again, Err(FlowError::IllegalTransition { .. })));
     }
 

@@ -11,6 +11,7 @@ use uuid::Uuid;
 use zirv_flow_core::{UserId, WorkspaceId};
 
 use super::state::{FlowAction, FlowState};
+use super::warmup::{Warmup, WarmupRow};
 use crate::StoreError;
 
 /// A flow: its lifecycle state and its editable draft. Published content is in its versions.
@@ -28,6 +29,8 @@ pub struct Flow {
     pub created_by: Option<Uuid>,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
+    /// The warm-up setting and the window it last started.
+    pub warmup: Warmup,
 }
 
 /// One immutable published version of a flow.
@@ -55,6 +58,8 @@ pub(super) struct FlowRow {
     created_by: Option<Uuid>,
     created_at: OffsetDateTime,
     updated_at: OffsetDateTime,
+    #[sqlx(flatten)]
+    warmup: WarmupRow,
 }
 
 impl FlowRow {
@@ -73,6 +78,7 @@ impl FlowRow {
             created_by: self.created_by,
             created_at: self.created_at,
             updated_at: self.updated_at,
+            warmup: self.warmup.into(),
         })
     }
 }
@@ -80,7 +86,8 @@ impl FlowRow {
 macro_rules! flow_columns {
     () => {
         "id, name, state, draft_graph, draft_settings, current_version, archived_at, created_by, \
-         created_at, updated_at"
+         created_at, updated_at, warmup_enabled, warmup_seconds, warmup_started_at, \
+         warmup_opened_at"
     };
 }
 
@@ -122,6 +129,10 @@ pub enum FlowError {
     },
     /// The flow is archived and its draft no longer changes.
     Archived,
+    /// A warm-up length outside `MIN_WARMUP_SECONDS..=MAX_WARMUP_SECONDS`.
+    WarmupOutOfBounds,
+    /// Open now is refused: only a published flow admits the entries that wait.
+    WarmupNotOpenable { state: FlowState },
     /// A name already taken is [`StoreError::is_conflict`].
     Store(StoreError),
 }
@@ -144,6 +155,15 @@ impl fmt::Display for FlowError {
                 )
             }
             Self::Archived => formatter.write_str("the flow is archived"),
+            Self::WarmupOutOfBounds => {
+                formatter.write_str("the warm-up length is outside its bounds")
+            }
+            Self::WarmupNotOpenable { state } => {
+                write!(
+                    formatter,
+                    "the flow is {state}; only a published flow can be opened"
+                )
+            }
             Self::Store(error) => error.fmt(formatter),
         }
     }

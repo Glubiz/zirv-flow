@@ -23,6 +23,20 @@ export function flowBody(overrides: Record<string, unknown> = {}) {
   };
 }
 
+/** A flow that never took anyone in, so its warm-up is on and has not started. */
+export function warmupBody(overrides: Record<string, unknown> = {}) {
+  return {
+    enabled: true,
+    seconds: 300,
+    started_at: null,
+    ends_at: null,
+    opened_at: null,
+    admitted: 0,
+    waiting: 0,
+    ...overrides,
+  };
+}
+
 /**
  * A wait, then a branch on one condition: yes goes to a trait update, no goes to a webhook, and both
  * end at the exit. Every port is wired.
@@ -52,7 +66,7 @@ export function sampleSettings() {
 }
 
 export function flowDetail(overrides: Record<string, unknown> = {}) {
-  return { ...flowBody(), graph: sampleGraph(), settings: sampleSettings(), ...overrides };
+  return { ...flowBody(), graph: sampleGraph(), settings: sampleSettings(), warmup: warmupBody(), ...overrides };
 }
 
 interface Options {

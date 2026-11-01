@@ -5541,6 +5541,17 @@ main:focus {
   }
 }
 
+.fl-warmup {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  margin: 0;
+  padding: 8px 24px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  font-weight: 600;
+}
 .palette-group { list-style: none; padding: 0; margin: 0; }
 .palette-heading { padding: 8px 12px 4px; font-size: 0.875em; }
 .palette-note { padding: 6px 12px; margin: 0; }
