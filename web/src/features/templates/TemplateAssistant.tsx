@@ -2,7 +2,7 @@ import { useState } from "react";
 
 import { ApiError } from "../../api";
 import { Button, Dialog, InlineError, previewDocument } from "../../ui";
-import { AssistantPanel, DraftChanges, assistantGone, failureText, type Failure, type AcceptedDraft, type Draft, type TemplateTask } from "../assistant";
+import { AssistantDock, AssistantPanel, DraftChanges, assistantGone, failureText, type Failure, type AcceptedDraft, type Draft, type TemplateTask } from "../assistant";
 import type { Editable, TemplateDetail } from "./model";
 
 type Width = "desktop" | "mobile";
@@ -22,6 +22,8 @@ interface Props {
   workspaceId: string;
   templateId: string;
   doc: Editable;
+  /** Keeps the dock mounted but out of sight, so a draft under review survives a look at the editor. */
+  hidden?: boolean;
   /** Whether the editor holds edits the server does not have. */
   unsaved: boolean;
   /** Saves what is waiting and waits for any save in flight; false when a save failed. */
@@ -39,7 +41,7 @@ interface Props {
 }
 
 /** The left column of the template editor while the assistant is open. */
-export function TemplateAssistant({ workspaceId, templateId, doc, unsaved, flush, hold, release, onAccepted, onReconcile, onReload, onClose }: Props) {
+export function TemplateAssistant({ workspaceId, templateId, doc, hidden, unsaved, flush, hold, release, onAccepted, onReconcile, onReload, onClose }: Props) {
   const [replacing, setReplacing] = useState<((replace: boolean) => void) | null>(null);
   const [picked, setPicked] = useState<{ id: string; subject: string } | null>(null);
   const [epoch, setEpoch] = useState(0);
@@ -93,37 +95,38 @@ export function TemplateAssistant({ workspaceId, templateId, doc, unsaved, flush
   }
 
   return (
-    <section className="stack" aria-label="Template assistant">
-      <div className="row">
-        <h2 className="tp-assistant-title">Assistant</h2>
-        <Button variant="quiet" onClick={onClose} aria-label="Close the assistant">
-          ×
-        </Button>
-      </div>
-      <AssistantPanel
-        key={epoch}
-        workspaceId={workspaceId}
-        kind="template"
-        templateId={templateId}
-        templateTasks={tasksOf(doc)}
-        onFailure={(error) => {
-          // The assistant was turned off, or is no longer this person's: the panel reads its setting again.
-          if (assistantGone(error)) setEpoch((value) => value + 1);
-        }}
-        prepare={flush}
-        onAccept={accepted}
-        confirmAccept={confirmAccept}
-        onAcceptFailed={acceptFailed}
-        renderChanges={(changes, draft) => <DraftReview changes={changes} draft={draft} onPick={(subject) => setPicked({ id: draft.id, subject })} />}
-        renderAcceptAction={(code) =>
-          code === "template_draft_changed" ? (
-            <>
-              <Button onClick={() => void reload()} disabled={reloading}>
-                {reloading ? "Reloading" : "Reload the draft"}
-              </Button>
-              {reloadFailure ? <InlineError {...reloadFailure} /> : null}
-            </>
-          ) : null
+    <>
+      <AssistantDock
+        thing="template"
+        hidden={hidden}
+        onClose={onClose}
+        draft={
+          <AssistantPanel
+            key={epoch}
+            workspaceId={workspaceId}
+            kind="template"
+            templateId={templateId}
+            templateTasks={tasksOf(doc)}
+            onFailure={(error) => {
+              // The assistant was turned off, or is no longer this person's: the panel reads its setting again.
+              if (assistantGone(error)) setEpoch((value) => value + 1);
+            }}
+            prepare={flush}
+            onAccept={accepted}
+            confirmAccept={confirmAccept}
+            onAcceptFailed={acceptFailed}
+            renderChanges={(changes, draft) => <DraftReview changes={changes} draft={draft} onPick={(subject) => setPicked({ id: draft.id, subject })} />}
+            renderAcceptAction={(code) =>
+              code === "template_draft_changed" ? (
+                <>
+                  <Button onClick={() => void reload()} disabled={reloading}>
+                    {reloading ? "Reloading" : "Reload the draft"}
+                  </Button>
+                  {reloadFailure ? <InlineError {...reloadFailure} /> : null}
+                </>
+              ) : null
+            }
+          />
         }
       />
       {replacing ? (
@@ -137,7 +140,7 @@ export function TemplateAssistant({ workspaceId, templateId, doc, unsaved, flush
           </div>
         </Dialog>
       ) : null}
-    </section>
+    </>
   );
 }
 

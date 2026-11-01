@@ -101,13 +101,13 @@ function routes({ role = "writer", enabled = true, routes: extra = {} }: Options
 async function openAssistant(user: User) {
   await screen.findByRole("group", { name: /^Wait: 1 day/ });
   await user.click(await screen.findByRole("button", { name: "Assistant" }));
-  return screen.findByRole("dialog", { name: "Assistant" });
+  return screen.findByRole("complementary", { name: "Assistant" });
 }
 
 async function draftIt(user: User, sheet: HTMLElement) {
-  await user.type(await within(sheet).findByLabelText("What do you want?"), "Wait an hour, then end");
+  await user.type(await within(sheet).findByLabelText("Ask for a change"), "Wait an hour, then end");
   await user.click(within(sheet).getByRole("button", { name: "Draft" }));
-  return within(sheet).findByRole("heading", { name: "Draft ready" });
+  return within(sheet).findByRole("heading", { name: /^Draft ready/ });
 }
 
 const calledWith = (calls: Call[], method: string, suffix: string) =>
@@ -141,7 +141,7 @@ describe("the assistant in the flow editor", () => {
     expect(within(summary).getByText(/Would change 2 things about them and make 1 outward call/)).toBeInTheDocument();
     expect(within(summary).getByRole("list", { name: "Steps no one reached" })).toHaveTextContent("ghost");
     expect(within(summary).getByText(/A goal that is reaching a segment is not checked/)).toBeInTheDocument();
-    expect(within(sheet).getByRole("button", { name: "Accept" })).toBeEnabled();
+    expect(within(sheet).getByRole("button", { name: "Put into the draft" })).toBeEnabled();
   });
 
   it("accepts into the editor's draft, saves nothing more and never publishes", async () => {
@@ -151,7 +151,7 @@ describe("the assistant in the flow editor", () => {
     const sheet = await openAssistant(user);
     await draftIt(user, sheet);
 
-    await user.click(within(sheet).getByRole("button", { name: "Accept" }));
+    await user.click(within(sheet).getByRole("button", { name: "Put into the draft" }));
 
     expect(await within(sheet).findByText(/Loaded into the editor and saved as the flow's draft. Nothing is published./)).toBeInTheDocument();
     expect(await screen.findByRole("group", { name: /^Wait: 1 hour/ })).toBeInTheDocument();
@@ -190,16 +190,16 @@ describe("the assistant in the flow editor", () => {
     expect(await screen.findByText(/Couldn.t save/, undefined, { timeout: 3000 })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Assistant" }));
-    const sheet = await screen.findByRole("dialog", { name: "Assistant" });
+    const sheet = await screen.findByRole("complementary", { name: "Assistant" });
     await draftIt(user, sheet);
-    await user.click(within(sheet).getByRole("button", { name: "Accept" }));
+    await user.click(within(sheet).getByRole("button", { name: "Put into the draft" }));
 
     const dialog = await screen.findByRole("dialog", { name: "Replace your unsaved changes?" });
     await user.click(within(dialog).getByRole("button", { name: "Keep my changes" }));
     expect(calledWith(calls, "POST", "/ai/drafts/d1/accept")).toHaveLength(0);
     expect(screen.getByText(/Couldn.t save/)).toBeInTheDocument();
 
-    await user.click(within(sheet).getByRole("button", { name: "Accept" }));
+    await user.click(within(sheet).getByRole("button", { name: "Put into the draft" }));
     const again = await screen.findByRole("dialog", { name: "Replace your unsaved changes?" });
     await user.click(within(again).getByRole("button", { name: "Replace with the draft" }));
 
@@ -249,7 +249,7 @@ describe("the assistant in the flow editor", () => {
     const user = userEvent.setup();
     mount();
     const sheet = await openAssistant(user);
-    await user.type(await within(sheet).findByLabelText("What do you want?"), "Do something");
+    await user.type(await within(sheet).findByLabelText("Ask for a change"), "Do something");
 
     await user.click(within(sheet).getByRole("button", { name: "Draft" }));
     const alert = await within(sheet).findByRole("alert");
@@ -258,7 +258,43 @@ describe("the assistant in the flow editor", () => {
     await user.click(within(sheet).getByRole("button", { name: "Draft" }));
     expect(await within(sheet).findByRole("heading", { name: /No valid draft after 1 attempt/ })).toBeInTheDocument();
     expect(within(sheet).getByRole("list", { name: "Problems with the last attempt" })).toHaveTextContent("unknown trait");
-    expect(within(sheet).queryByRole("button", { name: "Accept" })).not.toBeInTheDocument();
+    expect(within(sheet).queryByRole("button", { name: "Put into the draft" })).not.toBeInTheDocument();
+  });
+});
+
+describe("the draft on the canvas", () => {
+  it("draws the drafted steps with the words Added and Changed and a legend, and shows the canvas without them on request", async () => {
+    mockApi(routes());
+    const user = userEvent.setup();
+    mount();
+    const dock = await openAssistant(user);
+    await draftIt(user, dock);
+
+    const legend = await screen.findByRole("group", { name: "The assistant's draft on the canvas" });
+    expect(within(legend).getByText("Showing the assistant's draft")).toBeInTheDocument();
+    expect(await screen.findByRole("group", { name: /^Wait: 1 hour.*added in the assistant's draft/ })).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: /^Wait: 1 day/ })).not.toBeInTheDocument();
+    expect(document.querySelector(".fl-draft-tag")).toHaveTextContent("Added");
+
+    await user.click(within(legend).getByRole("button", { name: "Show without the draft" }));
+
+    expect(await screen.findByRole("group", { name: /^Wait: 1 day/ })).toBeInTheDocument();
+    expect(document.querySelector(".fl-draft-tag")).toBeNull();
+    expect(within(legend).getByRole("button", { name: "Show the draft" })).toBeInTheDocument();
+  });
+
+  it("takes the legend away when the draft is discarded", async () => {
+    mockApi(routes());
+    const user = userEvent.setup();
+    mount();
+    const dock = await openAssistant(user);
+    await draftIt(user, dock);
+    await screen.findByRole("group", { name: "The assistant's draft on the canvas" });
+
+    await user.click(within(dock).getByRole("button", { name: "Discard" }));
+
+    expect(screen.queryByRole("group", { name: "The assistant's draft on the canvas" })).not.toBeInTheDocument();
+    expect(await screen.findByRole("group", { name: /^Wait: 1 day/ })).toBeInTheDocument();
   });
 });
 
@@ -269,6 +305,7 @@ describe("explaining a flow", () => {
     mount();
     const sheet = await openAssistant(user);
 
+    await user.click(within(sheet).getByRole("link", { name: "Explain this flow" }));
     await user.click(within(sheet).getByRole("button", { name: "Explain the draft" }));
 
     expect(await within(sheet).findByText("Everyone waits a day, then the plan decides.")).toBeInTheDocument();
@@ -299,6 +336,7 @@ describe("explaining a flow", () => {
     mount();
     const sheet = await openAssistant(user);
 
+    await user.click(within(sheet).getByRole("link", { name: "Explain this flow" }));
     await user.click(within(sheet).getByRole("button", { name: "Explain the draft" }));
     expect(await within(sheet).findByText("The monthly AI budget is spent")).toBeInTheDocument();
 
@@ -323,7 +361,7 @@ describe("explaining a flow", () => {
     await screen.findByText("Viewing version 1 · read-only");
 
     await user.click(await screen.findByRole("button", { name: "Assistant" }));
-    const sheet = await screen.findByRole("dialog", { name: "Assistant" });
+    const sheet = await screen.findByRole("complementary", { name: "Assistant" });
     // A version is read-only: there is nothing to draft over.
     expect(within(sheet).queryByRole("button", { name: "Draft" })).not.toBeInTheDocument();
     await user.click(within(sheet).getByRole("button", { name: "Explain version 1" }));
@@ -376,9 +414,9 @@ describe("accepting while the editor has unsaved work", () => {
     await editWait(user, "3");
     expect(await screen.findByText(/Couldn.t save/, undefined, { timeout: 3000 })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Assistant" }));
-    const sheet = await screen.findByRole("dialog", { name: "Assistant" });
+    const sheet = await screen.findByRole("complementary", { name: "Assistant" });
     await draftIt(user, sheet);
-    await user.click(within(sheet).getByRole("button", { name: "Accept" }));
+    await user.click(within(sheet).getByRole("button", { name: "Put into the draft" }));
     const dialog = await screen.findByRole("dialog", { name: "Replace your unsaved changes?" });
     await user.click(within(dialog).getByRole("button", { name: "Replace with the draft" }));
     return sheet;
@@ -393,7 +431,8 @@ describe("accepting while the editor has unsaved work", () => {
 
     expect(await within(sheet).findByText("Internal Server Error")).toBeInTheDocument();
     expect(calledWith(calls, "POST", "/ai/drafts/d1/accept")).toHaveLength(1);
-    // What the person had is still there, the editor takes edits again, and undo goes back one step.
+    // The canvas shows the draft until it is hidden; what the person had is still there, the editor takes edits again, and undo goes back one step.
+    await user.click(screen.getByRole("button", { name: "Show without the draft" }));
     expect(screen.getByRole("group", { name: /^Wait: 3 days/ })).toBeInTheDocument();
     expect(screen.queryByText("Loading the draft…")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Undo" }));
@@ -450,6 +489,7 @@ describe("accepting while the editor has unsaved work", () => {
     expect(screen.getByRole("button", { name: "Retry" })).toBeDisabled();
     expect(screen.getByRole("button", { name: /^Review and publish/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Archive…" })).toBeDisabled();
+    await user.click(within(sheet).getByRole("link", { name: "Explain this flow" }));
     expect(within(sheet).getByRole("button", { name: "Explain the draft" })).toBeDisabled();
     await user.click(screen.getByRole("button", { name: "Retry" }));
     expect(saves(calls)).toHaveLength(before);
@@ -496,7 +536,7 @@ describe("accepting while the editor has unsaved work", () => {
     mount();
     const sheet = await openAssistant(user);
     await draftIt(user, sheet);
-    const accept = within(sheet).getByRole("button", { name: "Accept" });
+    const accept = within(sheet).getByRole("button", { name: "Put into the draft" });
 
     fireEvent.click(accept);
     fireEvent.click(accept);
@@ -522,6 +562,7 @@ describe("an explanation of a draft that changes", () => {
     const user = userEvent.setup();
     mount();
     const sheet = await openAssistant(user);
+    await user.click(within(sheet).getByRole("link", { name: "Explain this flow" }));
     await user.click(within(sheet).getByRole("button", { name: "Explain the draft" }));
     await within(sheet).findByText(/Asking the assistant to explain this flow/);
 
@@ -532,7 +573,7 @@ describe("an explanation of a draft that changes", () => {
     });
 
     await user.keyboard("{Escape}");
-    const back = await screen.findByRole("dialog", { name: "Assistant" });
+    const back = await screen.findByRole("complementary", { name: "Assistant" });
     expect(await within(back).findByText("The draft changed while the assistant was answering")).toBeInTheDocument();
     expect(within(back).queryByText("Everyone waits a day, then the plan decides.")).not.toBeInTheDocument();
   });
@@ -542,6 +583,7 @@ describe("an explanation of a draft that changes", () => {
     const user = userEvent.setup();
     mount();
     const sheet = await openAssistant(user);
+    await user.click(within(sheet).getByRole("link", { name: "Explain this flow" }));
     await user.click(within(sheet).getByRole("button", { name: "Explain the draft" }));
     await within(sheet).findByText("Everyone waits a day, then the plan decides.");
     // Steps the explanation does not cite are faded while it is current.
@@ -550,7 +592,7 @@ describe("an explanation of a draft that changes", () => {
     await editWait(user, "3");
     await user.keyboard("{Escape}");
 
-    const back = await screen.findByRole("dialog", { name: "Assistant" });
+    const back = await screen.findByRole("complementary", { name: "Assistant" });
     expect(await within(back).findByText(/The draft changed since this explanation/)).toBeInTheDocument();
     expect(within(back).getByRole("button", { name: "Explain again" })).toBeInTheDocument();
     await waitFor(() => expect(document.querySelector(DIMMED)).toBeNull());
@@ -576,7 +618,7 @@ describe("the assistant going away", () => {
     const user = userEvent.setup();
     mount();
     const sheet = await openAssistant(user);
-    await user.type(await within(sheet).findByLabelText("What do you want?"), "Anything");
+    await user.type(await within(sheet).findByLabelText("Ask for a change"), "Anything");
 
     await user.click(within(sheet).getByRole("button", { name: "Draft" }));
 
@@ -605,6 +647,7 @@ describe("citations", () => {
     const user = userEvent.setup();
     mount();
     const sheet = await openAssistant(user);
+    await user.click(within(sheet).getByRole("link", { name: "Explain this flow" }));
     await user.click(within(sheet).getByRole("button", { name: "Explain the draft" }));
 
     await user.click(await within(sheet).findByRole("button", { name: /^Show on the canvas: Trigger/ }));

@@ -22,6 +22,8 @@ import type { Catalog, DimensionDef, EventTypes } from "./catalog";
 import { ConsentEditor, EventEditor, IdentifierEditor, ListEditor, MessagesEditor, SegmentEditor, TraitEditor } from "./Conditions";
 import { issueMessage } from "./labels";
 
+const NO_MARKS: ReadonlyMap<string, "added" | "changed"> = new Map();
+
 const GROUP_LABELS: Record<string, string> = { all: "All of", any: "Any of", not: "Not" };
 
 const TYPE_OPTIONS: readonly { kind: Kind; label: string }[] = [
@@ -83,16 +85,24 @@ interface NodeEditorProps {
 }
 
 function NodeEditor({ node, path, removal }: NodeEditorProps) {
-  const { readOnly, issues, remove, changeKind: change, add, mode } = useBuilder();
+  const { readOnly, issues, remove, changeKind: change, add, mode, highlight, marks } = useBuilder();
   const kind = kindOf(node);
   const name = nameOf(node, path);
   const children = childrenOf(node);
   const loose = issues.filter((issue) => samePath(issue.path, path) && !claimed(kind, issue.field));
   const groupWord = kind === "all" ? "all" : "any";
+  const explained = highlight !== null && highlight === pointerOf(path);
+  const mark = marks.get(pointerOf(path));
 
   return (
-    <fieldset className={children !== null || kind === "not" ? "node node-group" : "node"} data-node={pointerOf(path) || "/"} tabIndex={-1}>
+    <fieldset
+      className={[children !== null || kind === "not" ? "node node-group" : "node", explained ? "node-explained" : "", mark ? `node-${mark}` : ""].filter(Boolean).join(" ")}
+      data-node={pointerOf(path) || "/"}
+      tabIndex={-1}
+    >
       <legend className="node-legend">{name}</legend>
+      {explained ? <span className="node-flag">Explaining</span> : null}
+      {mark ? <span className="node-flag">{mark === "added" ? "Added" : "Changed"}</span> : null}
       <div className="node-head">
         <SelectField label="Type" value={kind} onChange={(event) => change(path, event.target.value)} disabled={readOnly}>
           {TYPE_OPTIONS.filter((option) => mode === "policy" || option.kind !== "messages").map((option) => (
@@ -157,12 +167,16 @@ interface BuilderProps {
   catalog: Catalog;
   eventTypes: EventTypes;
   issues: readonly PlacedIssue[];
+  /** The condition the assistant is explaining, by JSON pointer; it is marked with the word "Explaining". */
+  highlight?: string | null;
+  /** The conditions the assistant's draft adds or changes, by JSON pointer; each is marked with the word. */
+  marks?: ReadonlyMap<string, "added" | "changed">;
   /** The tree after an edit, the node it touched, and whether the edit reshaped the tree below it. */
   onEdit: (next: Node, touched: Path, scope: "node" | "structure") => void;
 }
 
 /** Edits the definition tree in place: groups, conditions, and the pickers each condition needs. */
-export function Builder({ root, readOnly, selfId, catalog, eventTypes, issues, onEdit, mode = "segment", dimensions = [] }: BuilderProps) {
+export function Builder({ root, readOnly, selfId, catalog, eventTypes, issues, onEdit, mode = "segment", dimensions = [], highlight = null, marks = NO_MARKS }: BuilderProps) {
   const pending = useRef<string | null>(null);
   const container = useRef<HTMLDivElement>(null);
 
@@ -185,6 +199,8 @@ export function Builder({ root, readOnly, selfId, catalog, eventTypes, issues, o
     catalog,
     eventTypes,
     issues,
+    highlight,
+    marks,
     edit: (path, next) => onEdit(updateAt(root, path, () => next), path, "node"),
     add: (group, child) => {
       const parent = getAt(root, group);

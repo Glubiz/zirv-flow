@@ -3,7 +3,7 @@ import { Link, useParams, useSearchParams } from "react-router";
 
 import { ApiError, client, describeError, unwrap, useResource, type components, type ErrorSummary } from "../../api";
 import { Button, Dialog, EmptyState, ErrorState, LoadingState, Panel, plural } from "../../ui";
-import { useAssistantAccess } from "../assistant";
+import { AssistantToggle, useAssistantAccess, useAssistantDock, withoutDock, type Draft } from "../assistant";
 import { useCatalog, useLeaveGuard } from "../segments";
 import { useFlowAccess } from "./access";
 import { Canvas, type FocusRequest, type IssueItem } from "./Canvas";
@@ -34,7 +34,8 @@ import { layout } from "./layout";
 import { PublishDialog } from "./PublishDialog";
 import { VersionCanvas, VersionsView, type FlowVersion } from "./VersionsView";
 import { SettingsView, type SettingsFocus } from "./SettingsView";
-import { FlowAssistantSheet } from "./FlowAssistant";
+import { FlowAssistantDock, graphOf } from "./FlowAssistant";
+import { draftMarks } from "./FlowChanges";
 import { ResultsView } from "./ResultsView";
 import { StepPalette } from "./StepPalette";
 import { useVersionCounts } from "./counts";
@@ -198,7 +199,12 @@ function Editor({
   const [acting, setActing] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<TestResult | null>(null);
-  const [assistantOpen, setAssistantOpen] = useState(false);
+  const dock = useAssistantDock();
+  /** Only the build view has the dock; the URL may still say it is open while another view shows. */
+  const assistantOpen = dock.open && assistantOn && activeView === "build" && !versionsOpen;
+  /** The valid draft the assistant is showing, which the canvas draws with its marks until the person puts it in or discards it. */
+  const [shownDraft, setShownDraft] = useState<Draft | null>(null);
+  const [draftHidden, setDraftHidden] = useState(false);
   const [previousView, setPreviousView] = useState(activeView);
   /** Bumped when a whole new draft is loaded, so the canvas draws it afresh. */
   const [layoutEpoch, setLayoutEpoch] = useState(0);
@@ -207,18 +213,17 @@ function Editor({
   if (previousView !== activeView) {
     setPreviousView(activeView);
     setTestResult(null);
-    setAssistantOpen(false);
     setCited([]);
   }
   const [assistantSeen, setAssistantSeen] = useState(assistantOn);
   if (assistantSeen !== assistantOn) {
     setAssistantSeen(assistantOn);
-    // Turned off, or no longer the person's to use: the sheet and what it marked on the canvas go with it.
-    if (!assistantOn) {
-      setAssistantOpen(false);
-      setCited([]);
-    }
+    // Turned off, or no longer the person's to use: what the dock marked on the canvas goes with it.
+    if (!assistantOn) setCited([]);
   }
+  const drafted = shownDraft !== null && assistantOpen ? graphOf(shownDraft.content) : null;
+  /** The canvas draws the assistant's draft, read-only, until the person asks to see it without. */
+  const showingDraft = drafted !== null && !draftHidden;
   /** Set while the person is asked whether the assistant's draft may replace their unsaved edits. */
   const [replacing, setReplacing] = useState<{ resolve: (replace: boolean) => void } | null>(null);
   const nonce = useRef(0);
@@ -260,6 +265,11 @@ function Editor({
         ? { steps: new Map(cited.map((id) => [id, [] as number[]])), dimOthers: true }
         : undefined,
     [assistantOpen, cited],
+  );
+
+  const draftOverlay = useMemo<Overlay | undefined>(
+    () => (shownDraft !== null ? { draft: draftMarks(shownDraft.changes) } : undefined),
+    [shownDraft],
   );
 
   function describeStep(id: string): string {
@@ -318,13 +328,13 @@ function Editor({
   }
 
   function toggleAssistant() {
-    if (assistantOpen && selected === null) {
-      setAssistantOpen(false);
+    if (assistantOpen) {
+      dock.setOpen(false);
       setCited([]);
       return;
     }
     setSelected(null);
-    setAssistantOpen(true);
+    dock.setOpen(true);
   }
 
   /** Accepting replaces the draft, so edits that are not saved yet are asked about first, then the editor stands still. */
@@ -649,7 +659,7 @@ function Editor({
   const doomed = deleting === null ? undefined : draft.graph.nodes.find((candidate) => candidate.id === deleting);
 
   function paramsFor(next: ViewId) {
-    const params = new URLSearchParams(searchParams);
+    const params = withoutDock(searchParams);
     params.delete("tab");
     params.delete("panel");
     if (next === "build") params.delete("view");
@@ -662,7 +672,6 @@ function Editor({
       setViewing(null);
       setCited([]);
       setTestResult(null);
-      setAssistantOpen(false);
       setFocusRequest(null);
       setSettingsFocus(null);
       setInspectorFocus(false);
@@ -700,40 +709,26 @@ function Editor({
   const selectedPort = selectedNode ? portsOf(selectedNode)[0] : undefined;
   const canvas = (
     <Canvas
-      graph={draft.graph}
+      graph={showingDraft ? drafted : draft.graph}
       settings={draft.settings}
       names={names}
       placed={placed}
       issueItems={issueItems}
       checked={store.issues !== null}
       checking={store.checking}
-      editable={canEdit && !testing}
+      editable={canEdit && !testing && !showingDraft}
       layoutKey={layoutEpoch}
-      overlay={testing ? testOverlay : citedOverlay ?? countsOverlay}
-      assistant={assistantOn && !testing ? { open: assistantOpen, onToggle: toggleAssistant } : undefined}
-      selectedId={testing ? null : selected}
+      overlay={testing ? testOverlay : showingDraft ? draftOverlay : citedOverlay ?? countsOverlay}
+      selectedId={testing || showingDraft ? null : selected}
       focusRequest={focusRequest}
       canUndo={store.canUndo}
-      onOpen={testing ? () => undefined : open}
+      onOpen={testing || showingDraft ? () => undefined : open}
       onClose={closeInspector}
       onWire={wireStep}
       onUndo={store.undo}
       onDeleteRequest={(id) => setDeleting(id)}
       onPickIssue={pick}
-    >
-      {assistantOn && !testing && assistantOpen ? (
-        <div className="fl-sheet" hidden={selectedNode !== undefined}>
-          <FlowAssistantSheet
-            workspaceId={workspaceId} flowId={flow.id} version={null}
-            graph={draft.graph} revision={[draft.graph, draft.settings]} names={names}
-            onGone={reloadAssistant} busy={busy}
-            drafting={editable ? { confirmAccept: confirmAssistantAccept, onAccept: loadAssistantDraft, onAcceptFailed: reconcileAccept } : undefined}
-            prepare={editable ? store.saveNow : undefined}
-            onReveal={revealStep} onCited={setCited} onClose={toggleAssistant}
-          />
-        </div>
-      ) : null}
-    </Canvas>
+    />
   );
 
   return (
@@ -765,6 +760,7 @@ function Editor({
             </Link>
           ))}
         </nav>
+        {assistantOn && !testing && activeView === "build" && !versionsOpen ? <AssistantToggle open={assistantOpen} onToggle={toggleAssistant} /> : null}
         <Button aria-expanded={versionsOpen} aria-controls={versionsOpen ? "flow-versions" : undefined} onClick={toggleVersions}>Versions</Button>
         <div className="fl-status" role="status">
           {busy ? (
@@ -858,6 +854,14 @@ function Editor({
           ) : <EmptyState title="Testing needs an editor">You can explore the flow in Build and read its Results.</EmptyState>
         ) : (
           <>
+            {drafted !== null ? (
+              <div className="dock-legend" role="group" aria-label="The assistant's draft on the canvas">
+                <span className="strong">{draftHidden ? "The assistant's draft is hidden" : "Showing the assistant's draft"}</span>
+                <span className="dock-mark">Added</span>
+                <span className="dock-mark dock-mark-changed">Changed</span>
+                <Button onClick={() => setDraftHidden((hidden) => !hidden)}>{draftHidden ? "Show the draft" : "Show without the draft"}</Button>
+              </div>
+            ) : null}
             <div className="fl-build-bar">
               {life.version !== null ? (
                 <label className="check">
@@ -879,6 +883,18 @@ function Editor({
                     : "This step has no output. New steps start disconnected."
                   : selected === TRIGGER_ID ? "Inserts directly after the trigger." : "Select a step to insert after it, or add a disconnected step."} /> : null}
               {canvas}
+              {assistantOpen ? (
+                <FlowAssistantDock
+                  workspaceId={workspaceId} flowId={flow.id} version={null}
+                  graph={draft.graph} revision={[draft.graph, draft.settings]} names={names}
+                  onGone={reloadAssistant} busy={busy}
+                  drafting={editable ? { confirmAccept: confirmAssistantAccept, onAccept: loadAssistantDraft, onAcceptFailed: reconcileAccept } : undefined}
+                  prepare={editable ? store.saveNow : undefined}
+                  hidden={selectedNode !== undefined}
+                  onDraft={(next) => { setShownDraft(next); setDraftHidden(false); }}
+                  onReveal={revealStep} onCited={setCited} onClose={toggleAssistant}
+                />
+              ) : null}
               {selectedNode ? (
                 <StepInspector key={selectedNode.id} workspaceId={workspaceId} graph={draft.graph}
                   node={selectedNode} names={names} steps={steps} issues={issuesOfStep(selectedNode.id)}
@@ -888,7 +904,7 @@ function Editor({
                   onRemovePort={(next, prefix, index) => editGraph((graph) => removeIndexedPort(graph, next, prefix, index))}
                   onWire={(port, to) => wireStep(selectedNode.id, port, to)}
                   onDelete={() => setDeleting(selectedNode.id)} />
-              ) : (
+              ) : assistantOpen ? null : (
                 <section className="fl-inspector stack" aria-label="Flow settings">
                   <h2>Flow settings</h2>
                   <p className="faint">Starts with: {triggerWords(draft.settings, names).title}.</p>

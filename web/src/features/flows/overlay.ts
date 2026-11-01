@@ -55,6 +55,8 @@ export interface Overlay {
   dimOthers?: boolean;
   counts?: ReadonlyMap<string, NodeTally>;
   marks?: ReadonlyMap<string, NodeMark>;
+  /** The steps the assistant's draft adds or changes, drawn with a border and the word. */
+  draft?: ReadonlyMap<string, "added" | "changed">;
 }
 
 export interface PathStop {

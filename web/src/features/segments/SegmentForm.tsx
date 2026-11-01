@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState, type SyntheticEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type SyntheticEvent } from "react";
+import { createPortal } from "react-dom";
 import { useNavigate } from "react-router";
 
 import { ApiError, client, describeError, unwrap, type components, type DefinitionIssue, type ErrorSummary } from "../../api";
 import { Button, Dialog, ErrorState, InlineError, LoadingState, Panel, SelectField, TextAreaField, TextField } from "../../ui";
-import { AssistantPanel } from "../assistant";
+import { AssistantDock, AssistantPanel, assistantGone, useAssistantDock, type Draft } from "../assistant";
 import {
   fromDefinition,
   isComplete,
@@ -19,9 +20,12 @@ import {
 import { Builder } from "./Builder";
 import type { PlacedIssue } from "./builderContext";
 import { traitTypes, useCatalog, useEventTypes, type Catalog } from "./catalog";
+import { namesOf } from "./describe";
+import { draftMarks } from "./draftMarks";
 import { DraftPreview } from "./DraftPreview";
 import { asCadence, CADENCES, issueMessage, type Cadence } from "./labels";
 import { LiveCount } from "./LiveCount";
+import { SegmentExplainTab } from "./SegmentExplainTab";
 import { useLeaveGuard } from "./useLeaveGuard";
 import { useLivePreview } from "./useLivePreview";
 
@@ -72,10 +76,16 @@ interface FormProps {
    * form never asks; the page around it does, once.
    */
   assistant?: boolean;
+  /** The assistant refused a request because it is off or no longer the person's to use. */
+  onAssistantGone?: () => void;
+  /** Whether the form is on screen, so its dock may show; the page keeps the form mounted behind another tab. */
+  dockVisible?: boolean;
+  /** Where the dock goes, beside the page; absent, it follows the form. */
+  dockSlot?: HTMLElement | null;
 }
 
 /** The header fields, the builder and the live count of one segment, new or saved. */
-export function SegmentForm({ workspaceId, segment, canWrite, onSaved, assistant }: FormProps) {
+export function SegmentForm({ workspaceId, segment, canWrite, onSaved, assistant, onAssistantGone, dockVisible = true, dockSlot }: FormProps) {
   const catalog = useCatalog(workspaceId);
   if (catalog.status === "loading") {
     return <LoadingState label="Loading the fields, events and lists to choose from" />;
@@ -94,13 +104,22 @@ export function SegmentForm({ workspaceId, segment, canWrite, onSaved, assistant
       canWrite={canWrite}
       onSaved={onSaved}
       assistant={assistant}
+      onAssistantGone={onAssistantGone}
+      dockVisible={dockVisible}
+      dockSlot={dockSlot}
       catalog={catalog.catalog}
     />
   );
 }
 
-function Form({ workspaceId, segment, canWrite, onSaved, assistant, catalog }: FormProps & { catalog: Catalog }) {
+function Form({ workspaceId, segment, canWrite, onSaved, assistant, onAssistantGone, dockVisible = true, dockSlot, catalog }: FormProps & { catalog: Catalog }) {
   const navigate = useNavigate();
+  const dock = useAssistantDock();
+  /** The condition the assistant's explanation points at, by JSON pointer. */
+  const [explaining, setExplaining] = useState<string | null>(null);
+  /** The valid draft the assistant shows and the person has not yet accepted or discarded. */
+  const [shownDraft, setShownDraft] = useState<Draft | null>(null);
+  const [draftHidden, setDraftHidden] = useState(false);
   const [saved, setSaved] = useState(segment);
   const baseline = {
     name: saved?.name ?? "",
@@ -130,6 +149,11 @@ function Form({ workspaceId, segment, canWrite, onSaved, assistant, catalog }: F
   const dirty = definitionChanged || headerChanged;
   const guard = useLeaveGuard(dirty);
   const readOnly = !canWrite;
+  const dockShown = assistant === true && dockVisible && dock.open && (canWrite || saved !== null);
+
+  const drafted = useMemo(() => (shownDraft?.content != null ? fromDefinition(shownDraft.content as unknown as Definition) : null), [shownDraft]);
+  const marks = useMemo(() => (drafted !== null && shownDraft !== null ? draftMarks(drafted, shownDraft.changes) : undefined), [drafted, shownDraft]);
+  const showingDraft = dockShown && drafted !== null && !draftHidden;
 
   const preview = useLivePreview(workspaceId, complete ? root : null, (raw) => {
     setIssues(placeIssues(latestRoot.current, raw));
@@ -268,13 +292,23 @@ function Form({ workspaceId, segment, canWrite, onSaved, assistant, catalog }: F
                 </ul>
               </div>
             ) : null}
+            {dockShown && drafted !== null ? (
+              <div className="dock-legend" role="group" aria-label="The assistant's draft in the builder">
+                <span className="strong">{draftHidden ? "The assistant's draft is hidden" : "Showing the assistant's draft"}</span>
+                <span className="dock-mark">Added</span>
+                <span className="dock-mark dock-mark-changed">Changed</span>
+                <Button onClick={() => setDraftHidden((hidden) => !hidden)}>{draftHidden ? "Show the draft" : "Show without the draft"}</Button>
+              </div>
+            ) : null}
             <Builder
-              root={root}
-              readOnly={readOnly}
+              root={showingDraft ? drafted : root}
+              readOnly={readOnly || showingDraft}
               selfId={saved?.id ?? null}
               catalog={catalog}
               eventTypes={eventTypes}
-              issues={issues.placed}
+              issues={showingDraft ? [] : issues.placed}
+              highlight={dockShown && !definitionChanged && !showingDraft ? explaining : null}
+              marks={showingDraft ? marks : undefined}
               onEdit={edit}
             />
           </div>
@@ -318,21 +352,49 @@ function Form({ workspaceId, segment, canWrite, onSaved, assistant, catalog }: F
       ) : null}
     </form>
   );
-  return (
-    <div className="stack">
-      {form}
-      {assistant && canWrite ? (
-        <Panel>
+  const dockNode = dockShown ? (
+    <AssistantDock
+      thing="segment"
+      onClose={() => dock.setOpen(false)}
+      draft={
+        canWrite ? (
           <AssistantPanel
             workspaceId={workspaceId}
             kind="segment"
             segmentId={saved?.id}
             onAccept={loadDraft}
+            onDraftShown={(next) => {
+              setShownDraft(next);
+              setDraftHidden(false);
+            }}
             confirmAccept={confirmReplace}
+            onFailure={(error) => {
+              if (assistantGone(error)) onAssistantGone?.();
+            }}
             renderPreview={(content) => <DraftPreview workspaceId={workspaceId} content={content} />}
           />
-        </Panel>
-      ) : null}
+        ) : undefined
+      }
+      explain={
+        saved ? (
+          <SegmentExplainTab
+            workspaceId={workspaceId}
+            segmentId={saved.id}
+            definition={saved.current.definition}
+            version={saved.current_version}
+            names={namesOf(catalog.lists, catalog.segments)}
+            selected={explaining}
+            onSelect={setExplaining}
+            onGone={() => onAssistantGone?.()}
+          />
+        ) : undefined
+      }
+    />
+  ) : null;
+  return (
+    <div className="stack">
+      {form}
+      {dockNode && dockSlot ? createPortal(dockNode, dockSlot) : dockSlot === undefined ? dockNode : null}
       {replacing !== null ? (
         <Dialog title="Replace your unsaved changes?" onClose={() => answerReplace(false)}>
           <p className="muted">

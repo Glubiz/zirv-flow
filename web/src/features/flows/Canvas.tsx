@@ -23,6 +23,7 @@ import { wordsFor, triggerWords, type Names } from "./describe";
 import { FlowIcon, type IconName } from "./icons";
 import { issueText, type PlacedIssues } from "./issues";
 import { layout } from "./layout";
+import { ASSISTANT_TOGGLE_ID } from "../assistant";
 import { COUNT_GAP, COUNT_ROW, MARK_ROW, overlayExtra, TRIGGER_EDGE, type NodeMark, type NodeTally, type Overlay } from "./overlay";
 import {
   connectionWire,
@@ -52,6 +53,8 @@ interface StepData extends Record<string, unknown> {
   dim: boolean;
   counts: NodeTally | null;
   mark: NodeMark | null;
+  /** How the assistant's draft treats this step, when the canvas shows the draft. */
+  draft: "added" | "changed" | null;
 }
 
 type StepNode = Node<StepData, "step">;
@@ -92,6 +95,7 @@ const Step = memo(function Step({ data }: NodeProps<StepNode>) {
     data.dim ? "fl-node-dim" : "",
     data.stepNumbers.length > 0 ? "fl-node-onpath" : "",
     data.mark ? `fl-node-${data.mark.tone}` : "",
+    data.draft ? `fl-node-draft fl-node-draft-${data.draft}` : "",
   ]
     .filter(Boolean)
     .join(" ");
@@ -105,6 +109,7 @@ const Step = memo(function Step({ data }: NodeProps<StepNode>) {
           <FlowIcon name={data.icon} />
           {data.kind}
         </span>
+        {data.draft ? <span className="dock-mark fl-draft-tag" data-change={data.draft}>{data.draft === "added" ? "Added" : "Changed"}</span> : null}
         {data.issueCount > 0 ? (
           <span className="fl-badge">
             <span className="dot dot-error" aria-hidden="true" />
@@ -218,12 +223,14 @@ interface CanvasProps {
 }
 
 function Tool({
+  id,
   label,
   icon,
   onClick,
   disabled,
   pressed,
 }: {
+  id?: string;
   label: string;
   icon: IconName;
   onClick: () => void;
@@ -232,6 +239,7 @@ function Tool({
 }) {
   return (
     <button
+      id={id}
       type="button"
       className="fl-tool"
       aria-label={label}
@@ -263,7 +271,7 @@ function Rail({
       <Tool label="Zoom in" icon="zoom-in" onClick={() => void flow.zoomIn({ duration: motionDuration() })} />
       <Tool label="Zoom out" icon="zoom-out" onClick={() => void flow.zoomOut({ duration: motionDuration() })} />
       {editable ? <Tool label="Undo" icon="undo" onClick={onUndo} disabled={!canUndo} /> : null}
-      {assistant ? <Tool label="Assistant" icon="assistant" onClick={assistant.onToggle} pressed={assistant.open} /> : null}
+      {assistant ? <Tool id={ASSISTANT_TOGGLE_ID} label="Assistant" icon="assistant" onClick={assistant.onToggle} pressed={assistant.open} /> : null}
     </div>
   );
 }
@@ -379,12 +387,14 @@ function overlayFacts(overlay: Overlay | undefined, id: string) {
   const counts = overlay?.counts?.get(id) ?? null;
   const mark = overlay?.marks?.get(id) ?? null;
   const dim = overlay?.dimOthers === true && overlay.steps?.has(id) !== true;
+  const draft = overlay?.draft?.get(id) ?? null;
   const words = [
     stepNumbers.length > 0 ? `, on the path as step ${stepNumbers.join(" and ")}` : "",
     counts ? `, ${counts.entered} entered, ${counts.waiting} waiting, ${counts.failed} failed${deliveryWords(counts)}` : "",
     mark ? `, ${mark.text}` : "",
+    draft ? `, ${draft} in the assistant's draft` : "",
   ].join("");
-  return { words, data: { stepNumbers, dim, counts, mark } };
+  return { words, data: { stepNumbers, dim, counts, mark, draft } };
 }
 
 const ARROWS = ["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight"];

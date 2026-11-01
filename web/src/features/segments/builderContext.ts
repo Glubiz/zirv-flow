@@ -25,6 +25,10 @@ export interface BuilderApi {
   catalog: Catalog;
   eventTypes: EventTypes;
   issues: readonly PlacedIssue[];
+  /** The JSON pointer of the condition the assistant is explaining, which is marked; null for none. */
+  highlight: string | null;
+  /** The conditions the assistant's draft adds or changes, by JSON pointer; they are marked with the word. */
+  marks: ReadonlyMap<string, "added" | "changed">;
   /** Replaces the node at `path`. */
   edit: (path: Path, next: Node) => void;
   add: (group: Path, child: Node) => void;

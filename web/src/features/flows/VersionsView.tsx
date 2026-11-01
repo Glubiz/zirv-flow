@@ -2,11 +2,12 @@ import { useMemo, useRef, useState } from "react";
 
 import type { components, Resource } from "../../api";
 import { Button, EmptyState, formatAgo, formatDateTime, Panel, Pill, ResourceView } from "../../ui";
+import { useAssistantDock } from "../assistant";
 import { useMembers } from "../members";
 import type { Catalog } from "../segments";
 import { Canvas, type FocusRequest } from "./Canvas";
 import type { Names } from "./describe";
-import { FlowAssistantSheet } from "./FlowAssistant";
+import { FlowAssistantDock } from "./FlowAssistant";
 import { placeIssues } from "./issues";
 import { layout } from "./layout";
 import { TRIGGER_ID, type FlowDetail } from "./model";
@@ -125,7 +126,8 @@ export function VersionCanvas({ workspaceId, flowId, version, names, catalog, as
   const counts = useVersionCounts(workspaceId, flowId, version.version);
   const [selected, setSelected] = useState<string | null>(null);
   const [focusRequest, setFocusRequest] = useState<FocusRequest | null>(null);
-  const [assistantOpen, setAssistantOpen] = useState(false);
+  const dock = useAssistantDock();
+  const assistantOpen = dock.open && assistantOn;
   const [cited, setCited] = useState<readonly string[]>([]);
   const nonce = useRef(0);
   const none = useMemo(() => placeIssues([]), []);
@@ -145,13 +147,13 @@ export function VersionCanvas({ workspaceId, flowId, version, names, catalog, as
   );
 
   function toggleAssistant() {
-    if (assistantOpen && node === undefined) {
-      setAssistantOpen(false);
+    if (assistantOpen) {
+      dock.setOpen(false);
       setCited([]);
       return;
     }
     setSelected(null);
-    setAssistantOpen(true);
+    dock.setOpen(true);
   }
 
   function reveal(id: string) {
@@ -189,24 +191,22 @@ export function VersionCanvas({ workspaceId, flowId, version, names, catalog, as
         onUndo={() => undefined}
         onDeleteRequest={() => undefined}
         onPickIssue={() => undefined}
-      >
-        {assistantOn && assistantOpen ? (
-          <div className="fl-sheet" hidden={node !== undefined}>
-            <FlowAssistantSheet
-              workspaceId={workspaceId}
-              flowId={flowId}
-              version={version.version}
-              graph={graph}
-              revision={[graph]}
-              names={names}
-              onGone={onAssistantGone}
-              onReveal={reveal}
-              onCited={setCited}
-              onClose={toggleAssistant}
-            />
-          </div>
-        ) : null}
-      </Canvas>
+      />
+      {assistantOpen ? (
+        <FlowAssistantDock
+          workspaceId={workspaceId}
+          flowId={flowId}
+          version={version.version}
+          graph={graph}
+          revision={[graph]}
+          names={names}
+          onGone={onAssistantGone}
+          hidden={node !== undefined}
+          onReveal={reveal}
+          onCited={setCited}
+          onClose={toggleAssistant}
+        />
+      ) : null}
       {node ? (
         <StepInspector
           key={node.id}
@@ -226,7 +226,7 @@ export function VersionCanvas({ workspaceId, flowId, version, names, catalog, as
           onWire={() => undefined}
           onDelete={() => undefined}
         />
-      ) : (
+      ) : assistantOpen ? null : (
         <section className="fl-inspector stack" aria-label="Flow settings">
           <h2>Flow settings · version {version.version}</h2>
           <SettingsView

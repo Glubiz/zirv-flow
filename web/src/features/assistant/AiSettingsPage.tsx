@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useParams } from "react-router";
 
 import { client, unwrap, useResource } from "../../api";
@@ -9,17 +10,18 @@ import { UsagePanel } from "./UsagePanel";
 export function AiSettingsPage() {
   const { ws = "" } = useParams();
   const access = useWorkspaceAccess(ws);
+  const [saveSlot, setSaveSlot] = useState<HTMLElement | null>(null);
 
   return (
     <div className="page">
       <PageHeader
         title="AI assistant" breadcrumb={{ group: "Integrations", section: "AI assistant" }}
-        lede="Choose the model the assistant uses, what it may send to it, and how much it may spend. Every call is logged without its content."
+        primary={<span ref={setSaveSlot} />}
       />
       <ResourceView resource={access} loadingLabel="Checking your access">
         {(data) =>
           data.canAdmin ? (
-            <Settings key={ws} workspaceId={ws} />
+            <Settings key={ws} workspaceId={ws} saveSlot={saveSlot} />
           ) : (
             <Panel flush>
               <EmptyState title="You cannot manage the AI assistant here">
@@ -33,7 +35,7 @@ export function AiSettingsPage() {
   );
 }
 
-function Settings({ workspaceId }: { workspaceId: string }) {
+function Settings({ workspaceId, saveSlot }: { workspaceId: string; saveSlot: HTMLElement | null }) {
   const models = useResource(
     () => unwrap(client.GET("/api/v1/workspaces/{ws}/ai/models", { params: { path: { ws: workspaceId } } })),
     [workspaceId],
@@ -68,6 +70,7 @@ function Settings({ workspaceId }: { workspaceId: string }) {
                 models={availableModels}
                 settings={current}
                 onSaved={settings.reload}
+                saveSlot={saveSlot}
               />
               <UsagePanel workspaceId={workspaceId} version={JSON.stringify(current)} />
             </>

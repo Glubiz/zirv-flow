@@ -100,7 +100,7 @@ function mount(
 }
 
 async function ask(user: ReturnType<typeof userEvent.setup>, text = "Map the email") {
-  await user.type(await screen.findByLabelText("What do you want?"), text);
+  await user.type(await screen.findByLabelText("Ask for a change"), text);
 }
 
 describe("the assistant panel", () => {
@@ -157,12 +157,12 @@ describe("the assistant panel", () => {
     const calls = mockApi({ ...BASE, [SETTINGS]: () => json(settings(true)), [DRAFT]: () => json(VALID) });
     const user = userEvent.setup();
     mount();
-    const area = await screen.findByLabelText("What do you want?");
+    const area = await screen.findByLabelText("Ask for a change");
     expect(screen.getByRole("button", { name: "Draft" })).toBeDisabled();
 
     await user.type(area, "Map the email{Control>}{Enter}{/Control}");
 
-    expect(await screen.findByRole("heading", { name: "Draft ready" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: /^Draft ready/ })).toBeInTheDocument();
     const sent = calls.find((call) => call.path.endsWith("/ai/drafts"));
     expect(sent?.body).toMatchObject({ kind: "mapping", source_id: "src-1", stream: "contacts", prompt: "Map the email" });
   });
@@ -179,7 +179,7 @@ describe("the assistant panel", () => {
     expect(heading).toHaveFocus();
     const problems = screen.getByRole("list", { name: "Problems with the last attempt" });
     expect(problems).toHaveTextContent("The mapping uses a field that the stream does not have. (ghost)");
-    expect(screen.queryByRole("button", { name: "Accept" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Put into the draft" })).not.toBeInTheDocument();
     expect(screen.getByRole("status", { name: "" })).toHaveTextContent("No valid draft");
   });
 
@@ -191,7 +191,7 @@ describe("the assistant panel", () => {
 
     await user.click(screen.getByRole("button", { name: "Draft" }));
 
-    expect(await screen.findByRole("heading", { name: "Draft ready" })).toHaveFocus();
+    expect(await screen.findByRole("heading", { name: /^Draft ready/ })).toHaveFocus();
     const changes = screen.getByRole("table", { name: "What the draft changes" });
     expect(within(changes).getByText("columns › email")).toBeInTheDocument();
     expect(within(changes).getByText("Added")).toBeInTheDocument();
@@ -217,15 +217,15 @@ describe("the assistant panel", () => {
     await ask(user);
     await user.click(screen.getByRole("button", { name: "Draft" }));
 
-    await user.click(await screen.findByRole("button", { name: "Accept" }));
+    await user.click(await screen.findByRole("button", { name: "Put into the draft" }));
 
     expect(await screen.findByText("Loaded into the editor. Save to apply it.")).toBeInTheDocument();
     expect(onAccept).toHaveBeenCalledWith(CONTENT, expect.objectContaining({ id: "d1" }));
     expect(calls.some((call) => call.method === "PUT")).toBe(false);
-    expect(screen.queryByRole("button", { name: "Accept" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Put into the draft" })).not.toBeInTheDocument();
   });
 
-  it("sends no accept request and keeps Accept available when the host refuses the replacement", async () => {
+  it("sends no accept request and keeps Put into the draft available when the host refuses the replacement", async () => {
     const calls = mockApi({
       ...BASE,
       [SETTINGS]: () => json(settings(true)),
@@ -239,12 +239,12 @@ describe("the assistant panel", () => {
     await ask(user);
     await user.click(screen.getByRole("button", { name: "Draft" }));
 
-    await user.click(await screen.findByRole("button", { name: "Accept" }));
+    await user.click(await screen.findByRole("button", { name: "Put into the draft" }));
 
     expect(confirmAccept).toHaveBeenCalledTimes(1);
     expect(calls.some((call) => call.path.endsWith("/accept"))).toBe(false);
     expect(onAccept).not.toHaveBeenCalled();
-    expect(screen.getByRole("button", { name: "Accept" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Put into the draft" })).toBeEnabled();
     expect(screen.queryByText("Loaded into the editor. Save to apply it.")).not.toBeInTheDocument();
   });
 
@@ -258,7 +258,7 @@ describe("the assistant panel", () => {
 
     await user.click(await screen.findByRole("button", { name: "Discard" }));
 
-    expect(screen.queryByRole("heading", { name: "Draft ready" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /^Draft ready/ })).not.toBeInTheDocument();
     expect(onAccept).not.toHaveBeenCalled();
   });
 
@@ -301,7 +301,7 @@ describe("the assistant panel", () => {
     await ask(user);
     await user.click(screen.getByRole("button", { name: "Draft" }));
 
-    await screen.findByRole("heading", { name: "Draft ready" });
+    await screen.findByRole("heading", { name: /^Draft ready/ });
     const sent = calls.find((call) => call.path.endsWith("/ai/drafts"));
     expect(sent?.body).toMatchObject({ sample: [{ email: "a@example.com" }] });
   });
@@ -390,13 +390,13 @@ describe("the assistant panel for a segment", () => {
     const saved = mountSegment({ segmentId: "seg-1" });
     await ask(user, "Odense instead");
     await user.click(screen.getByRole("button", { name: "Draft" }));
-    await screen.findByRole("heading", { name: "Draft ready" });
+    await screen.findByRole("heading", { name: /^Draft ready/ });
     saved.unmount();
 
     mountSegment();
     await ask(user, "Everyone in Odense");
     await user.click(screen.getByRole("button", { name: "Draft" }));
-    await screen.findByRole("heading", { name: "Draft ready" });
+    await screen.findByRole("heading", { name: /^Draft ready/ });
 
     const bodies = calls.filter((call) => call.path.endsWith("/ai/drafts")).map((call) => call.body);
     expect(bodies).toEqual([
@@ -433,10 +433,9 @@ describe("the assistant panel for a segment", () => {
 
     await user.click(screen.getByRole("button", { name: "Draft" }));
 
-    expect(await screen.findByRole("heading", { name: "Draft ready" })).toHaveFocus();
+    expect(await screen.findByRole("heading", { name: /^Draft ready/ })).toHaveFocus();
     expect(screen.getByRole("table", { name: "What the draft changes" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Dry run" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "Preview" })).not.toBeInTheDocument();
     expect(screen.getAllByRole("status").some((node) => node.textContent === "Draft ready")).toBe(true);
   });
 
@@ -449,8 +448,7 @@ describe("the assistant panel for a segment", () => {
 
     await user.click(screen.getByRole("button", { name: "Draft" }));
 
-    expect(await screen.findByRole("heading", { name: "Preview" })).toBeInTheDocument();
-    expect(screen.getByText(`Would match ${JSON.stringify(SEGMENT_CONTENT)}`)).toBeInTheDocument();
+    expect(await screen.findByText(`Would match ${JSON.stringify(SEGMENT_CONTENT)}`)).toBeInTheDocument();
     expect(renderPreview).toHaveBeenCalledWith(SEGMENT_CONTENT, expect.objectContaining({ id: "d1", status: "valid" }));
   });
 
@@ -465,7 +463,7 @@ describe("the assistant panel for a segment", () => {
 
     const problems = await screen.findByRole("list", { name: "Problems with the last attempt" });
     expect(problems).toHaveTextContent("The definition uses a field that does not exist in this workspace. (/all/0/trait)");
-    expect(screen.queryByRole("button", { name: "Accept" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Put into the draft" })).not.toBeInTheDocument();
     expect(renderPreview).not.toHaveBeenCalled();
   });
 
@@ -488,17 +486,17 @@ describe("the assistant panel for a segment", () => {
     mountSegment({ segmentId: "seg-1", onAccept, confirmAccept });
     await ask(user);
     await user.click(screen.getByRole("button", { name: "Draft" }));
-    await user.click(await screen.findByRole("button", { name: "Accept" }));
+    await user.click(await screen.findByRole("button", { name: "Put into the draft" }));
 
     expect(confirmAccept).toHaveBeenCalledTimes(1);
     expect(calls.some((call) => call.path.endsWith("/accept"))).toBe(false);
     decide(false);
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Accept" })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Put into the draft" })).toBeEnabled());
     expect(calls.some((call) => call.path.endsWith("/accept"))).toBe(false);
     expect(onAccept).not.toHaveBeenCalled();
 
-    await user.click(screen.getByRole("button", { name: "Accept" }));
+    await user.click(screen.getByRole("button", { name: "Put into the draft" }));
     decide(true);
 
     expect(await screen.findByText("Loaded into the editor. Save to apply it.")).toBeInTheDocument();
@@ -531,10 +529,10 @@ describe("the assistant panel for a segment", () => {
       await ask(user);
       await user.click(screen.getByRole("button", { name: "Draft" }));
 
-      await user.click(await screen.findByRole("button", { name: "Accept" }));
+      await user.click(await screen.findByRole("button", { name: "Put into the draft" }));
 
       expect(await screen.findByRole("alert")).toHaveTextContent(shown);
-      expect(screen.getByRole("button", { name: "Accept" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "Put into the draft" })).toBeEnabled();
       view.unmount();
     }
   });
@@ -575,7 +573,104 @@ describe("the assistant panel for a segment", () => {
 
     await user.click(await screen.findByRole("button", { name: "Discard" }));
 
-    expect(screen.queryByRole("heading", { name: "Draft ready" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /^Draft ready/ })).not.toBeInTheDocument();
     expect(onAccept).not.toHaveBeenCalled();
+  });
+});
+
+const USAGE = "GET /api/v1/workspaces/ws1/ai/usage";
+
+function usage(spent: number, budget: number) {
+  return { budget_micros: budget, spent_micros: spent, by_feature: [], by_user: [], month_start: "2026-10-01T00:00:00Z", recent: [] };
+}
+
+describe("the footer and the draft card of the assistant dock", () => {
+  it("shows the request, a card counting the changes, the check line and the footnote", async () => {
+    mockApi({ ...BASE, [SETTINGS]: () => json(settings(true)), [USAGE]: () => json(usage(1_840_000, 20_000_000)), [DRAFT]: () => json(VALID) });
+    const user = userEvent.setup();
+    mount();
+    await ask(user, "Map the email");
+    await user.click(screen.getByRole("button", { name: "Draft" }));
+
+    expect(await screen.findByRole("heading", { name: "Draft ready · 2 changes" })).toBeInTheDocument();
+    expect(screen.getByText("Map the email", { selector: ".dock-request" })).toBeInTheDocument();
+    expect(screen.getByText("Passes the checks")).toBeInTheDocument();
+    expect(screen.getByText("Nothing goes live until you review and publish.")).toBeInTheDocument();
+    expect(screen.getByLabelText("Ask for another change")).toBeInTheDocument();
+  });
+
+  it("shows what has been spent of the monthly budget beside the Draft button", async () => {
+    mockApi({ ...BASE, [SETTINGS]: () => json(settings(true)), [USAGE]: () => json(usage(1_840_000, 20_000_000)) });
+    mount();
+
+    expect(await screen.findByText("1.84 of 20.00 used this month")).toBeInTheDocument();
+  });
+
+  it("disables the prompt and says so once the monthly budget is used", async () => {
+    mockApi({ ...BASE, [SETTINGS]: () => json(settings(true)), [USAGE]: () => json(usage(20_000_000, 20_000_000)) });
+    mount();
+
+    expect(await screen.findByText("Monthly budget used")).toBeInTheDocument();
+    expect(screen.getByLabelText("Ask for a change")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Draft" })).toBeDisabled();
+  });
+
+  it("tells the host which valid draft is showing, and none once it is discarded", async () => {
+    mockApi({ ...BASE, [SETTINGS]: () => json(settings(true)), [DRAFT]: () => json(VALID) });
+    const shown = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <SessionProvider>
+        <ShownHarness onDraftShown={shown} />
+      </SessionProvider>,
+    );
+    await user.type(await screen.findByLabelText("Ask for a change"), "Map the email");
+    await user.click(screen.getByRole("button", { name: "Draft" }));
+    await user.click(await screen.findByRole("button", { name: "Discard" }));
+
+    expect(shown.mock.calls.map((call) => (call[0] as { id: string } | null)?.id ?? null)).toEqual([null, "d1", null]);
+  });
+});
+
+function ShownHarness({ onDraftShown }: { onDraftShown: (draft: unknown) => void }) {
+  const { state } = useSession();
+  if (state.status !== "signed-in") return <p>Waiting for the session</p>;
+  return <AssistantPanel workspaceId="ws1" kind="mapping" sourceId="src-1" stream="contacts" onAccept={() => undefined} onDraftShown={onDraftShown} />;
+}
+
+describe("what the assistant may call", () => {
+  it("only reads settings and usage, drafts, and accepts a draft into the editor", async () => {
+    const calls = mockApi({
+      ...BASE,
+      [SETTINGS]: () => json(settings(true)),
+      [USAGE]: () => json(usage(0, 20_000_000)),
+      [DRAFT]: () => json(VALID),
+      [ACCEPT]: () => json({ id: "d1", kind: "mapping", source_id: "src-1", stream: "contacts", content: CONTENT }),
+    });
+    const user = userEvent.setup();
+    mount();
+    await ask(user);
+    await user.click(screen.getByRole("button", { name: "Draft" }));
+    await user.click(await screen.findByRole("button", { name: "Put into the draft" }));
+    await screen.findByText("Loaded into the editor. Save to apply it.");
+
+    const used = new Set(calls.filter((call) => call.path.includes("/ai/")).map((call) => `${call.method} ${call.path}`));
+    expect([...used].sort()).toEqual([ACCEPT, DRAFT, SETTINGS, USAGE].sort());
+    expect(calls.filter((call) => !call.path.includes("/ai/") && call.path !== "/api/v1/session")).toEqual([]);
+  });
+
+  it("has no publish, send, delete or consent call anywhere in its code", () => {
+    const sources = import.meta.glob<string>(["./*.ts", "./*.tsx", "!./*.test.ts", "!./*.test.tsx", "!./AiSettings*", "!./UsagePanel.tsx"], {
+      query: "?raw",
+      import: "default",
+      eager: true,
+    });
+    const requests = Object.values(sources).flatMap((code) => code.match(/client\.(GET|POST|PUT|PATCH|DELETE)\(\s*"[^"]+"/g) ?? []);
+
+    expect(requests.length).toBeGreaterThan(0);
+    for (const request of requests) {
+      expect(request).not.toMatch(/\.(PUT|PATCH|DELETE)\(/);
+      expect(request).not.toMatch(/publish|send|consent|archive|delete/i);
+    }
   });
 });
