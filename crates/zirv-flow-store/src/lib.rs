@@ -322,7 +322,10 @@ pub use stream_offsets::{
     LagReport, OffsetsStored, PartitionLag, PartitionOffset, commit_stream_offsets, load_offsets,
     report_stream_lag, stream_lag,
 };
-pub use summary::{FlowFigures, WorkspaceSummary, workspace_summary};
+pub use summary::{
+    COMMIT_MARGIN, FlowFigures, WorkspaceSummary, refresh_workspace_summary, summary_workspaces,
+    workspace_summary,
+};
 pub use suppressions::{
     AddOutcome, BatchEntry, NewSuppression, RemoveOutcome, SUPPRESSION_KINDS, Suppression,
     SuppressionCursor, SuppressionScope, add_organization_suppression, add_suppression,

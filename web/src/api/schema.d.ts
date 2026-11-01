@@ -3560,7 +3560,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** What happened in the workspace over the last `days` days, for the Home figures. */
+        /**
+         * What happened in the workspace over the last `days` UTC days (today included), for the Home
+         *     figures. Read from the daily rollup, not counted per request.
+         */
         get: operations["get_workspace_summary"];
         put?: never;
         post?: never;
@@ -7253,7 +7256,7 @@ export interface components {
             goals_reached?: number | null;
             /**
              * Format: int64
-             * @description Enrollments in flight now.
+             * @description Enrollments in flight (active, waiting, held or failed) at the last rollup run.
              */
             people_in_flow: number;
             /**
@@ -10129,12 +10132,12 @@ export interface components {
         SummaryWindowBody: {
             /**
              * Format: date-time
-             * @description Start of the window, inclusive (UTC).
+             * @description Start of the window, inclusive (UTC): midnight of the first day counted.
              */
             from: string;
             /**
              * Format: date-time
-             * @description End of the window (UTC): when the figures were computed.
+             * @description End of the window (UTC): the time of the request.
              */
             to: string;
         };
@@ -11312,7 +11315,9 @@ export interface components {
         WorkspaceSummaryBody: {
             /**
              * Format: date-time
-             * @description When the figures were computed; up to 60 seconds old.
+             * @description When the rollup last finished a run. The counts lag the data by up to about seven
+             *     minutes (five between runs and a two minute commit margin); a workspace the rollup has
+             *     not reached yet shows zeros and the time of the request.
              */
             computed_at: string;
             /**
@@ -25909,7 +25914,11 @@ export interface operations {
     get_workspace_summary: {
         parameters: {
             query?: {
-                /** @description Days in the window, 1 to 30; default 7 */
+                /**
+                 * @description Days in the window, 1 to 30; default 7. Whole UTC days, today included. The figures come
+                 *     from a rollup refreshed every five minutes and may lag by up to about seven minutes (see
+                 *     `computed_at`).
+                 */
                 days?: number;
             };
             header?: never;

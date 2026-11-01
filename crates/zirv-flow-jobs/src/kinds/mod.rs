@@ -33,6 +33,7 @@ mod privacy_export;
 mod segment_reevaluate;
 pub(crate) mod segment_refresh;
 mod sending_domain_verify;
+mod summary_rollup;
 mod sync_run;
 mod sync_tokens;
 mod template_test_send;
@@ -87,6 +88,7 @@ pub(crate) static ALL: &[&dyn ErasedKind] = &[
     &event_forward::EventForward,
     &sending_domain_verify::SendingDomainVerify,
     &template_test_send::TemplateTestSend,
+    &summary_rollup::SummaryRollup,
 ];
 
 /// The `workspace_id` and the uuid under `id_key` of a payload; `expected` is the error text

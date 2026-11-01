@@ -1,74 +1,35 @@
-//! The workspace summary behind the Home figures: aggregate counts over the last few days and
-//! the figures of each published flow. Counts only, never a person's data. A result is kept in
-//! memory for [`CACHE_FOR`] per workspace and window, so a busy Home does not run the counts on
-//! every load.
-
-use std::sync::{Arc, Mutex, PoisonError};
+//! The workspace summary behind the Home figures: aggregate counts over the last few UTC days and
+//! the figures of each published flow. Counts only, never a person's data. The figures are read
+//! from the daily rollup that the `summary.rollup` job fills every five minutes, so a request
+//! costs a few rollup rows and the figures are up to about seven minutes old.
 
 use axum::Json;
 use axum::extract::{Path, RawQuery, State};
-use hashbrown::HashMap;
+use axum::http::StatusCode;
 use serde::Serialize;
-use time::{Duration, OffsetDateTime};
-use utoipa::ToSchema;
+use time::OffsetDateTime;
+use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
-use zirv_flow_core::WorkspaceId;
 use zirv_flow_store::WorkspaceSummary;
 
 use crate::AppState;
 use crate::auth::{Need, Principal, authorize, path_id};
 use crate::problem::{ApiError, Problem};
 
-/// How long a computed summary is served again.
-const CACHE_FOR: Duration = Duration::seconds(60);
 const DEFAULT_DAYS: i64 = 7;
 const MAX_DAYS: i64 = 30;
 
-type CacheKey = (WorkspaceId, i64);
-
-/// A computed summary and the window it covers.
-#[derive(Clone)]
-struct Computed {
-    from: OffsetDateTime,
-    to: OffsetDateTime,
-    figures: WorkspaceSummary,
-}
-
-/// The summaries computed in the last [`CACHE_FOR`], by workspace and number of days. Per process.
-#[derive(Clone, Default)]
-pub(crate) struct SummaryCache {
-    entries: Arc<Mutex<HashMap<CacheKey, Arc<Computed>>>>,
-}
-
-impl Computed {
-    fn is_fresh(&self, now: OffsetDateTime) -> bool {
-        now >= self.to && now - self.to < CACHE_FOR
-    }
-}
-
-impl SummaryCache {
-    fn fresh(&self, key: CacheKey, now: OffsetDateTime) -> Option<Arc<Computed>> {
-        let entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-        entries
-            .get(&key)
-            .filter(|computed| computed.is_fresh(now))
-            .cloned()
-    }
-
-    fn store(&self, key: CacheKey, computed: Arc<Computed>, now: OffsetDateTime) {
-        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-        entries.retain(|_, kept| kept.is_fresh(now));
-        entries.insert(key, computed);
-    }
-}
+/// What reading events demands: the need of the event explorer routes (`rbac.rs` holds the row
+/// and a test keeps the two equal).
+const EVENTS_NEED: Need = Need::Read;
 
 #[derive(Serialize, ToSchema)]
 pub(crate) struct SummaryWindowBody {
-    /// Start of the window, inclusive (UTC).
+    /// Start of the window, inclusive (UTC): midnight of the first day counted.
     #[serde(with = "time::serde::rfc3339")]
     #[schema(value_type = String, format = DateTime)]
     from: OffsetDateTime,
-    /// End of the window (UTC): when the figures were computed.
+    /// End of the window (UTC): the time of the request.
     #[serde(with = "time::serde::rfc3339")]
     #[schema(value_type = String, format = DateTime)]
     to: OffsetDateTime,
@@ -77,7 +38,7 @@ pub(crate) struct SummaryWindowBody {
 #[derive(Serialize, ToSchema)]
 pub(crate) struct FlowSummaryBody {
     flow_id: Uuid,
-    /// Enrollments in flight now.
+    /// Enrollments in flight (active, waiting, held or failed) at the last rollup run.
     people_in_flow: i64,
     /// Messages of the flow sent in the window.
     sent: i64,
@@ -98,33 +59,57 @@ pub(crate) struct WorkspaceSummaryBody {
     events_received: Option<i64>,
     /// Published flows only.
     flows: Vec<FlowSummaryBody>,
-    /// When the figures were computed; up to 60 seconds old.
+    /// When the rollup last finished a run. The counts lag the data by up to about seven
+    /// minutes (five between runs and a two minute commit margin); a workspace the rollup has
+    /// not reached yet shows zeros and the time of the request.
     #[serde(with = "time::serde::rfc3339")]
     #[schema(value_type = String, format = DateTime)]
     computed_at: OffsetDateTime,
 }
 
-/// `days` from the query string: 1 to 30, default 7.
-fn parse_days(query: &str) -> Result<i64, ApiError> {
-    let mut days = DEFAULT_DAYS;
-    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
-        if key == "days" {
-            days = value
-                .parse::<i64>()
-                .ok()
-                .filter(|days| (1..=MAX_DAYS).contains(days))
-                .ok_or_else(|| ApiError::bad_request("days must be a number from 1 to 30"))?;
-        }
-    }
-    Ok(days)
+/// The query string of the summary route. Parsed by hand so a bad value is a problem+json 400
+/// naming the range; the struct also declares the parameter for the OpenAPI document.
+#[derive(IntoParams)]
+#[into_params(parameter_in = Query)]
+struct SummaryQuery {
+    /// Days in the window, 1 to 30; default 7. Whole UTC days, today included. The figures come
+    /// from a rollup refreshed every five minutes and may lag by up to about seven minutes (see
+    /// `computed_at`).
+    #[param(value_type = u32, required = false, minimum = 1, maximum = 30, default = 7)]
+    days: Option<String>,
 }
 
-fn body(computed: &Computed, may_read_events: bool) -> WorkspaceSummaryBody {
-    let figures = &computed.figures;
+impl SummaryQuery {
+    fn from_query(query: &str) -> Self {
+        let days = url::form_urlencoded::parse(query.as_bytes())
+            .filter(|(key, _)| key == "days")
+            .map(|(_, value)| value.into_owned())
+            .last();
+        Self { days }
+    }
+}
+
+/// `days` from the query string: 1 to 30, default 7.
+fn parse_days(query: &str) -> Result<i64, ApiError> {
+    match SummaryQuery::from_query(query).days {
+        None => Ok(DEFAULT_DAYS),
+        Some(value) => value
+            .parse::<i64>()
+            .ok()
+            .filter(|days| (1..=MAX_DAYS).contains(days))
+            .ok_or_else(|| ApiError::bad_request("days must be a number from 1 to 30")),
+    }
+}
+
+fn body(
+    figures: &WorkspaceSummary,
+    may_read_events: bool,
+    now: OffsetDateTime,
+) -> WorkspaceSummaryBody {
     WorkspaceSummaryBody {
         window: SummaryWindowBody {
-            from: computed.from,
-            to: computed.to,
+            from: figures.from,
+            to: now,
         },
         messages_sent: figures.messages_sent,
         goals_reached: figures.goals_reached,
@@ -140,11 +125,12 @@ fn body(computed: &Computed, may_read_events: bool) -> WorkspaceSummaryBody {
                 goals_reached: flow.goals_reached,
             })
             .collect(),
-        computed_at: computed.to,
+        computed_at: figures.computed_at.unwrap_or(now),
     }
 }
 
-/// What happened in the workspace over the last `days` days, for the Home figures.
+/// What happened in the workspace over the last `days` UTC days (today included), for the Home
+/// figures. Read from the daily rollup, not counted per request.
 #[utoipa::path(
     get,
     operation_id = "get_workspace_summary",
@@ -152,7 +138,7 @@ fn body(computed: &Computed, may_read_events: bool) -> WorkspaceSummaryBody {
     tag = "workspaces",
     params(
         ("ws" = Uuid, Path, description = "Workspace id"),
-        ("days" = Option<u32>, Query, description = "Days in the window, 1 to 30; default 7")
+        SummaryQuery
     ),
     responses(
         (status = 200, description = "The figures", body = WorkspaceSummaryBody),
@@ -172,27 +158,14 @@ pub(crate) async fn get(
 ) -> Result<Json<WorkspaceSummaryBody>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Read).await?;
     let days = parse_days(&query.unwrap_or_default())?;
-    let key = (workspace.id, days);
-    let now = state.clock.now_in_process();
-    let computed = match state.summaries.fresh(key, now) {
-        Some(computed) => computed,
-        None => {
-            let from = now - Duration::days(days);
-            let figures =
-                zirv_flow_store::workspace_summary(&state.pool, workspace.id, from, now).await?;
-            let computed = Arc::new(Computed {
-                from,
-                to: now,
-                figures,
-            });
-            state.summaries.store(key, computed.clone(), now);
-            computed
-        }
+    let may_read_events = match authorize(&state, &principal, workspace.id, EVENTS_NEED).await {
+        Ok(_) => true,
+        Err(error) if error.status_code() == StatusCode::FORBIDDEN => false,
+        Err(error) => return Err(error),
     };
-    // Events are read with the same need as the summary itself (the explorer is a `read`
-    // route), so every caller that gets here may see the count; the field is the seam for a
-    // role that cannot.
-    Ok(Json(body(&computed, true)))
+    let now = state.clock.now_in_process();
+    let figures = zirv_flow_store::workspace_summary(&state.pool, workspace.id, days, now).await?;
+    Ok(Json(body(&figures, may_read_events, now)))
 }
 
 #[cfg(test)]
@@ -200,35 +173,35 @@ mod tests {
     use std::sync::Arc;
 
     use axum::body::Body;
-    use axum::http::{Request, StatusCode, header};
+    use axum::http::{Request, header};
     use http_body_util::BodyExt;
     use serde_json::Value;
     use sqlx::PgPool;
+    use time::Duration;
     use time::macros::datetime;
     use tower::ServiceExt;
-    use zirv_flow_core::{Scope, Slug, WorkspaceName};
+    use zirv_flow_core::{Scope, Slug, WorkspaceId, WorkspaceName};
     use zirv_flow_store::{Clock, FlowFigures, ManualClock};
 
     use super::*;
     use crate::admin::{self, Context};
+    use crate::rbac::{Class, Method, ROUTES};
     use crate::router;
 
-    fn computed(events: i64) -> Computed {
-        Computed {
-            from: datetime!(2030-01-08 00:00 UTC),
-            to: datetime!(2030-01-15 00:00 UTC),
-            figures: WorkspaceSummary {
-                messages_sent: 6945,
-                goals_reached: 642,
-                people_created: 1120,
-                events_received: events,
-                flows: vec![FlowFigures {
-                    flow_id: Uuid::nil(),
-                    people_in_flow: 1284,
-                    sent: 3902,
-                    goals_reached: Some(642),
-                }],
-            },
+    fn figures(events: i64, computed_at: Option<OffsetDateTime>) -> WorkspaceSummary {
+        WorkspaceSummary {
+            from: datetime!(2030-01-09 00:00 UTC),
+            computed_at,
+            messages_sent: 6945,
+            goals_reached: 642,
+            people_created: 1120,
+            events_received: events,
+            flows: vec![FlowFigures {
+                flow_id: Uuid::nil(),
+                people_in_flow: 1284,
+                sent: 3902,
+                goals_reached: Some(642),
+            }],
         }
     }
 
@@ -250,25 +223,39 @@ mod tests {
 
     #[test]
     fn a_caller_who_may_not_read_events_gets_null_for_them() {
-        let value = serde_json::to_value(body(&computed(2_400_000), false)).unwrap();
+        let now = datetime!(2030-01-15 12:00 UTC);
+        let value = serde_json::to_value(body(&figures(2_400_000, None), false, now)).unwrap();
         assert_eq!(value["events_received"], Value::Null);
         assert_eq!(value["messages_sent"], 6945);
-        let value = serde_json::to_value(body(&computed(2_400_000), true)).unwrap();
+        let value = serde_json::to_value(body(&figures(2_400_000, None), true, now)).unwrap();
         assert_eq!(value["events_received"], 2_400_000);
         assert_eq!(value["flows"][0]["people_in_flow"], 1284);
     }
 
     #[test]
-    fn the_cache_serves_for_sixty_seconds_per_workspace_and_window() {
-        let cache = SummaryCache::default();
-        let ws = WorkspaceId::new();
-        let at = datetime!(2030-01-15 00:00 UTC);
-        cache.store((ws, 7), Arc::new(computed(1)), at);
+    fn computed_at_is_the_rollups_and_the_request_time_only_before_its_first_run() {
+        let now = datetime!(2030-01-15 12:00 UTC);
+        let ran = datetime!(2030-01-15 11:55 UTC);
 
-        assert!(cache.fresh((ws, 7), at + Duration::seconds(59)).is_some());
-        assert!(cache.fresh((ws, 7), at + Duration::seconds(60)).is_none());
-        assert!(cache.fresh((ws, 30), at).is_none());
-        assert!(cache.fresh((WorkspaceId::new(), 7), at).is_none());
+        let after = serde_json::to_value(body(&figures(1, Some(ran)), true, now)).unwrap();
+        let before = serde_json::to_value(body(&figures(1, None), true, now)).unwrap();
+
+        assert_eq!(after["computed_at"], "2030-01-15T11:55:00Z");
+        assert_eq!(after["window"]["to"], "2030-01-15T12:00:00Z");
+        assert_eq!(before["computed_at"], "2030-01-15T12:00:00Z");
+    }
+
+    #[test]
+    fn events_are_read_with_the_need_of_the_event_explorer() {
+        let explorer = ROUTES
+            .iter()
+            .find(|route| {
+                route.method == Method::Post
+                    && route.path == "/api/v1/workspaces/{ws}/events/explore/count"
+            })
+            .unwrap();
+
+        assert_eq!(explorer.class, Class::Need(EVENTS_NEED));
     }
 
     async fn call(router: &axum::Router, uri: &str, key: &str) -> (StatusCode, Value) {
@@ -293,9 +280,7 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn the_route_validates_days_scopes_to_the_workspace_and_serves_from_the_cache(
-        pool: PgPool,
-    ) {
+    async fn the_route_validates_days_scopes_to_the_workspace_and_sums_the_rollup(pool: PgPool) {
         zirv_flow_store::migrate(&pool).await.unwrap();
         let make = |slug: &'static str| {
             let pool = pool.clone();
@@ -315,7 +300,8 @@ mod tests {
             .await
             .unwrap()
             .plaintext;
-        let clock = ManualClock::new(datetime!(2030-01-15 12:00 UTC));
+        let now = datetime!(2030-01-15 12:00 UTC);
+        let clock = ManualClock::new(now);
         let state = AppState::new(pool.clone(), Arc::new(String::new))
             .with_clock(Clock::Manual(clock.clone()));
         let router = router(state);
@@ -335,6 +321,7 @@ mod tests {
             }
         };
         people(ours, datetime!(2030-01-14 00:00 UTC)).await;
+        people(ours, datetime!(2030-01-02 00:00 UTC)).await;
         people(theirs, datetime!(2030-01-14 00:00 UTC)).await;
 
         for bad in ["days=0", "days=31", "days=x"] {
@@ -343,21 +330,27 @@ mod tests {
                 StatusCode::BAD_REQUEST
             );
         }
-        let (status, first) = call(&router, &uri, &key).await;
+        // Before the first rollup run the figures are zero.
+        let (status, empty) = call(&router, &uri, &key).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(first["people_created"], 1);
-        assert_eq!(first["events_received"], 0);
-        assert_eq!(first["flows"], serde_json::json!([]));
+        assert_eq!(empty["people_created"], 0);
 
+        for workspace in [ours, theirs] {
+            zirv_flow_store::refresh_workspace_summary(&pool, workspace, now)
+                .await
+                .unwrap();
+        }
         people(ours, datetime!(2030-01-14 06:00 UTC)).await;
-        clock.advance(Duration::seconds(30));
-        let (_, cached) = call(&router, &uri, &key).await;
-        assert_eq!(cached["people_created"], 1);
-        assert_eq!(cached["computed_at"], first["computed_at"]);
-        clock.advance(Duration::seconds(31));
-        let (_, fresh) = call(&router, &uri, &key).await;
-        assert_eq!(fresh["people_created"], 2);
+        clock.advance(Duration::minutes(1));
+        let (_, week) = call(&router, &uri, &key).await;
+        let (_, month) = call(&router, &format!("{uri}?days=30"), &key).await;
 
+        // The row written after the run is not shown until the next run.
+        assert_eq!(week["people_created"], 1);
+        assert_eq!(month["people_created"], 2);
+        assert_eq!(week["events_received"], 0);
+        assert_eq!(week["computed_at"], "2030-01-15T12:00:00Z");
+        assert_eq!(week["flows"], serde_json::json!([]));
         let other = format!("/api/v1/workspaces/{}/summary", theirs.as_uuid());
         assert_eq!(call(&router, &other, &key).await.0, StatusCode::NOT_FOUND);
     }

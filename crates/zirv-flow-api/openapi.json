@@ -21777,7 +21777,7 @@
         "tags": [
           "workspaces"
         ],
-        "summary": "What happened in the workspace over the last `days` days, for the Home figures.",
+        "summary": "What happened in the workspace over the last `days` UTC days (today included), for the Home\nfigures. Read from the daily rollup, not counted per request.",
         "operationId": "get_workspace_summary",
         "parameters": [
           {
@@ -21793,12 +21793,14 @@
           {
             "name": "days",
             "in": "query",
-            "description": "Days in the window, 1 to 30; default 7",
+            "description": "Days in the window, 1 to 30; default 7. Whole UTC days, today included. The figures come\nfrom a rollup refreshed every five minutes and may lag by up to about seven minutes (see\n`computed_at`).",
             "required": false,
             "schema": {
               "type": "integer",
               "format": "int32",
-              "minimum": 0
+              "default": 7,
+              "maximum": 30,
+              "minimum": 1
             }
           }
         ],
@@ -34561,7 +34563,7 @@
           "people_in_flow": {
             "type": "integer",
             "format": "int64",
-            "description": "Enrollments in flight now."
+            "description": "Enrollments in flight (active, waiting, held or failed) at the last rollup run."
           },
           "sent": {
             "type": "integer",
@@ -41770,12 +41772,12 @@
           "from": {
             "type": "string",
             "format": "date-time",
-            "description": "Start of the window, inclusive (UTC)."
+            "description": "Start of the window, inclusive (UTC): midnight of the first day counted."
           },
           "to": {
             "type": "string",
             "format": "date-time",
-            "description": "End of the window (UTC): when the figures were computed."
+            "description": "End of the window (UTC): the time of the request."
           }
         }
       },
@@ -44863,7 +44865,7 @@
           "computed_at": {
             "type": "string",
             "format": "date-time",
-            "description": "When the figures were computed; up to 60 seconds old."
+            "description": "When the rollup last finished a run. The counts lag the data by up to about seven\nminutes (five between runs and a two minute commit margin); a workspace the rollup has\nnot reached yet shows zeros and the time of the request."
           },
           "events_received": {
             "type": [

@@ -149,7 +149,8 @@ mod tests {
                 "destination.erase",
                 "event.forward",
                 "sending_domain.verify",
-                "template.test_send"
+                "template.test_send",
+                "summary.rollup"
             ]
         );
         assert!(registry.get("maintenance.noop").is_some());
@@ -208,6 +209,7 @@ mod tests {
                 "event.forward",
                 "sending_domain.verify",
                 "template.test_send",
+                "summary.rollup",
                 "test.first",
                 "test.second"
             ]
