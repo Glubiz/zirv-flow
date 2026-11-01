@@ -9529,13 +9529,54 @@ export interface components {
             pointer: string;
         };
         /** @description A segment in the list, with where it is used and how its membership moved. */
-        SegmentListItemBody: components["schemas"]["SegmentBody"] & {
+        SegmentListItemBody: {
+            /** Format: date-time */
+            archived_at?: string | null;
+            /**
+             * @description How often a time-sensitive segment is recomputed in full, in minutes; default 60.
+             * @enum {integer}
+             */
+            cadence_minutes: 5 | 10 | 15 | 30 | 60 | 120 | 180 | 240 | 360 | 480 | 720 | 1440 | 10080;
             /**
              * Format: int64
              * @description People entered minus people left over the last 7 days; null while the segment is less than
              *     7 days old.
              */
             change_7d?: number | null;
+            /**
+             * Format: date-time
+             * @description When the members were last computed; null before the first refresh.
+             */
+            computed_at?: string | null;
+            /**
+             * Format: int32
+             * @description The version the members were last computed from; null before the first refresh.
+             */
+            computed_version?: number | null;
+            /** Format: date-time */
+            created_at: string;
+            /**
+             * Format: uuid
+             * @description The user who created it; null when an API key did.
+             */
+            created_by?: string | null;
+            /**
+             * Format: int32
+             * @description The version that is current: the newest one saved.
+             */
+            current_version: number;
+            description: string;
+            /** Format: uuid */
+            id: string;
+            /**
+             * Format: int32
+             * @description How many people are members now.
+             */
+            member_count: number;
+            /** @example Pro customers */
+            name: string;
+            /** Format: date-time */
+            updated_at: string;
             /**
              * Format: int64
              * @description The number of flows whose live (published or paused) version uses the segment, each flow
