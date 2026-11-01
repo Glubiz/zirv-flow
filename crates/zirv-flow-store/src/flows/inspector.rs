@@ -449,40 +449,43 @@ async fn entries_per_day_until(
     if !known {
         return Ok(None);
     }
-    let rows: Vec<(Date, i64)> = sqlx::query_as(
-        "SELECT g.day::date, COALESCE(c.entered, 0) \
-         FROM generate_series($3::date, $4::date, interval '1 day') AS g(day) \
-         LEFT JOIN (SELECT (created_at AT TIME ZONE 'UTC')::date AS day, count(*) AS entered \
-                    FROM enrollments \
-                    WHERE workspace_id = $1 AND flow_id = $2 \
-                      AND created_at >= $5 AND created_at < $6 \
-                      AND ($7::int IS NULL OR flow_version = $7) \
-                    GROUP BY 1) c ON c.day = g.day::date \
-         ORDER BY g.day",
-    )
-    .bind(workspace.as_uuid())
-    .bind(flow)
-    .bind(from)
-    .bind(today)
-    .bind(start)
-    .bind(end)
-    .bind(version)
-    .fetch_all(&mut *tx)
-    .await
-    .map_err(StoreError::bounded)?;
-    let previous_total: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM enrollments \
-         WHERE workspace_id = $1 AND flow_id = $2 AND created_at >= $3 AND created_at < $4 \
-           AND ($5::int IS NULL OR flow_version = $5)",
-    )
-    .bind(workspace.as_uuid())
-    .bind(flow)
-    .bind(before)
-    .bind(start)
-    .bind(version)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(StoreError::bounded)?;
+    // The flow check above pins the workspace, so the counts filter on `flow_id` and `created_at`
+    // alone and an unversioned count is answered from `enrollments_flow_list_idx` without the heap.
+    let (series_version, previous_version) = if version.is_some() {
+        ("AND flow_version = $6", "AND flow_version = $4")
+    } else {
+        ("", "")
+    };
+    let series_sql = format!(
+        "SELECT g.day::date, COALESCE(c.entered, 0)          FROM generate_series($2::date, $3::date, interval '1 day') AS g(day)          LEFT JOIN (SELECT (created_at AT TIME ZONE 'UTC')::date AS day, count(*) AS entered                     FROM enrollments                     WHERE flow_id = $1 AND created_at >= $4 AND created_at < $5                       {series_version}                     GROUP BY 1) c ON c.day = g.day::date          ORDER BY g.day"
+    );
+    let mut series = sqlx::query_as(sqlx::AssertSqlSafe(series_sql))
+        .bind(flow)
+        .bind(from)
+        .bind(today)
+        .bind(start)
+        .bind(end);
+    if let Some(version) = version {
+        series = series.bind(version);
+    }
+    let rows: Vec<(Date, i64)> = series
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(StoreError::bounded)?;
+    let previous_sql = format!(
+        "SELECT count(*) FROM enrollments          WHERE flow_id = $1 AND created_at >= $2 AND created_at < $3 {previous_version}"
+    );
+    let mut previous = sqlx::query_scalar(sqlx::AssertSqlSafe(previous_sql))
+        .bind(flow)
+        .bind(before)
+        .bind(start);
+    if let Some(version) = version {
+        previous = previous.bind(version);
+    }
+    let previous_total: i64 = previous
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(StoreError::bounded)?;
     drop(tx);
     let total = rows.iter().map(|(_, entered)| entered).sum();
     Ok(Some(EntriesPerDay {
@@ -926,7 +929,7 @@ mod tests {
              SELECT gen_random_uuid(), $1, $2, 1 + (p.n % 100 = 0)::int, p.id, \
                     CASE WHEN p.n % 50 = 0 THEN 'completed' ELSE 'exited' END, 'a', \
                     gen_random_uuid(), gen_random_uuid(), 'api', 't', \
-                    now() - make_interval(secs => p.n), now() \
+                    now() - make_interval(hours => p.n::int), now() \
              FROM (SELECT id, row_number() OVER () AS n FROM people WHERE workspace_id = $1) p",
         )
         .bind(ws.as_uuid())
@@ -959,7 +962,7 @@ mod tests {
             "step_executions",
             "decision_records",
         ] {
-            sqlx::query(sqlx::AssertSqlSafe(format!("ANALYZE {table}")))
+            sqlx::query(sqlx::AssertSqlSafe(format!("VACUUM ANALYZE {table}")))
                 .execute(&pool)
                 .await
                 .unwrap();
@@ -1000,6 +1003,18 @@ mod tests {
                      GROUP BY node"
                 ),
                 "enrollments_flow_state_idx".to_owned(),
+            ),
+            (
+                format!(
+                    "SELECT (created_at AT TIME ZONE 'UTC')::date, count(*) FROM enrollments                      WHERE flow_id = '{f}' AND created_at >= now() - interval '90 days'                      AND created_at < now() GROUP BY 1"
+                ),
+                "Index Only Scan using enrollments_flow_list_idx".to_owned(),
+            ),
+            (
+                format!(
+                    "SELECT count(*) FROM enrollments WHERE flow_id = '{f}'                      AND created_at >= now() - interval '180 days'                      AND created_at < now() - interval '90 days'"
+                ),
+                "Index Only Scan using enrollments_flow_list_idx".to_owned(),
             ),
             (
                 format!(
