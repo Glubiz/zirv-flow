@@ -229,6 +229,7 @@ pub(crate) const ROUTES: &[Route] = table! {
     Post   "/api/v1/workspaces/{ws}/flows/{id}/enrollments/{enrollment_id}/retry" => PUBLISH @ audited("flow.enrollment_retried");
     Post   "/api/v1/workspaces/{ws}/flows/{id}/enrollments/{enrollment_id}/skip" => PUBLISH @ audited("flow.enrollment_skipped");
     Get    "/api/v1/workspaces/{ws}/flows/{id}/versions/{n}/counts" => READ;
+    Get    "/api/v1/workspaces/{ws}/flows/{id}/entries" => READ @ not_audited("read-only query");
     Post   "/api/v1/workspaces/{ws}/flows/{id}/versions/{n}/exit-enrollments" => PUBLISH @ audited("flow.enrollments_exited");
     Post   "/api/v1/workspaces/{ws}/flows/{id}/start" => PUBLISH @ audited("flow.started");
     Post   "/api/v1/workspaces/{ws}/flows/{id}/test" => ADMIN, "Edit; a request naming a real person (person_id) also needs view_pii" @ audited("flow.test_run");

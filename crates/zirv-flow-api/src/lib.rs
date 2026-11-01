@@ -289,6 +289,10 @@ fn routes() -> Router<AppState> {
             get(flows::inspector::counts),
         )
         .route(
+            "/api/v1/workspaces/{ws}/flows/{id}/entries",
+            get(flows::inspector::entries),
+        )
+        .route(
             "/api/v1/workspaces/{ws}/flows/{id}/versions/{n}/exit-enrollments",
             post(flows::operator::exit_version),
         )

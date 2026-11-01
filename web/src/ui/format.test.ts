@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { formatAgo, formatCount } from "./format";
+import { formatAgo, formatCount, formatDay } from "./format";
 
 const NOW = Date.parse("2026-10-10T12:00:00Z");
 
@@ -28,5 +28,13 @@ describe("formatCount", () => {
     expect(formatCount(120_000)).toBe("120 k");
     expect(formatCount(2_400_000)).toBe("2.4 M");
     expect(formatCount(3_000_000)).toBe("3 M");
+  });
+});
+
+describe("formatDay", () => {
+  it("writes a calendar day as day and month, whatever the zone, and leaves other text alone", () => {
+    expect(formatDay("2026-10-01")).toBe("1 Oct");
+    expect(formatDay("2026-12-31")).toBe("31 Dec");
+    expect(formatDay("later")).toBe("later");
   });
 });

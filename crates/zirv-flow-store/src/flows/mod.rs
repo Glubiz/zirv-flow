@@ -44,8 +44,9 @@ pub use enroll::{
 pub use inputs::{UnhealthyInput, has_webhook_signing_secret, unhealthy_inputs};
 pub use inspector::{
     EnrollmentCursor, EnrollmentFilter, EnrollmentPage, EnrollmentPath, EnrollmentSummary,
-    MAX_PATH_DECISIONS, NodeCount, PathEventWait, PathStep, SETTINGS_GOAL_NODE,
-    list_flow_enrollments, load_enrollment_path, version_node_counts,
+    EntriesPerDay, MAX_ENTRY_DAYS, MAX_PATH_DECISIONS, NodeCount, PathEventWait, PathStep,
+    SETTINGS_GOAL_NODE, flow_entries_per_day, list_flow_enrollments, load_enrollment_path,
+    version_node_counts,
 };
 pub use lifecycle::{archive_flow, pause_flow, publish_flow, resume_flow};
 pub use runtime::{
