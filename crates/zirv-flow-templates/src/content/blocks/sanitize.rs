@@ -38,7 +38,7 @@ const UTM_OFF: &str = "off";
 
 /// Whether `value` is the opt-out value.
 fn is_utm_off(value: &str) -> bool {
-    value.trim().eq_ignore_ascii_case(UTM_OFF)
+    value == UTM_OFF
 }
 
 /// The URL schemes a link may use besides a merge tag.
@@ -463,8 +463,13 @@ mod tests {
     fn a_link_keeps_the_utm_opt_out_and_every_other_data_attribute_goes() {
         let kept = r#"<a href="https://a.example" data-zf-utm="off">x</a>"#;
         assert_eq!(html(kept), kept);
+        for value in ["OFF", " off ", "Off", "on", ""] {
+            let source = format!(r#"<a href="https://a.example" data-zf-utm="{value}">x</a>"#);
+            assert_eq!(html(&source), r#"<a href="https://a.example">x</a>"#);
+            assert_eq!(violations(&source), ["data-zf-utm="], "{value:?}");
+        }
         assert_eq!(
-            html(r#"<a href="https://a.example" data-zf-utm="OFF ">x</a>"#),
+            html(r#"<a href="https://a.example" data-zf-utm="&#111;ff">x</a>"#),
             kept
         );
         assert_eq!(

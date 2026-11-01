@@ -428,7 +428,7 @@ pub(crate) fn process_html(
 /// Tag the URLs of the text part the same way as the HTML part. A URL that starts inside another
 /// one (`mailto:a@b?body=https://...`) is not a link of its own: it must start the text, follow
 /// whitespace or one of `( < [ " '`. A URL equal to one in `skip` (the links the HTML part opted
-/// out) is left alone.
+/// out) is left alone, even when another HTML link to that URL is tagged: opt-out wins per URL.
 pub(crate) fn tag_text(text: &str, utm: &UtmTags<'_>, keep: &[&str], skip: &[String]) -> String {
     let mut out = String::with_capacity(text.len());
     let mut at = 0;
@@ -691,6 +691,20 @@ mod tests {
         assert!(out.contains("example.com/4?utm_source=acme"));
         assert!(out.contains(r#"data-zf-utm="on""#));
         assert!(!out.contains(r#"data-zf-utm="off""#) && !out.contains("OFF"));
+    }
+
+    #[test]
+    fn opt_out_wins_for_a_url_in_the_text_part_when_two_links_share_it() {
+        let d = domains();
+        let t = tags(&d);
+        let html = concat!(
+            r#"<a href="https://example.com/s" data-zf-utm="off">1</a>"#,
+            r#"<a href="https://example.com/s">2</a>"#,
+        );
+        let (out, skipped) = process_html(html, Some(&t), &[]);
+        assert_eq!(out.matches("utm_source=acme").count(), 1, "{out}");
+        let text = tag_text("a https://example.com/s b", &t, &[], &skipped);
+        assert_eq!(text, "a https://example.com/s b");
     }
 
     #[test]
