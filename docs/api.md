@@ -491,6 +491,7 @@ values.
 | POST | `/api/v1/workspaces/{ws}/flows/{id}/enrollments/{enrollment_id}/retry` | publisher | publish |
 | POST | `/api/v1/workspaces/{ws}/flows/{id}/enrollments/{enrollment_id}/skip` | publisher | publish |
 | GET | `/api/v1/workspaces/{ws}/flows/{id}/versions/{n}/counts` | member | read |
+| GET | `/api/v1/workspaces/{ws}/flows/{id}/entries` | member | read |
 | POST | `/api/v1/workspaces/{ws}/flows/{id}/versions/{n}/exit-enrollments` | publisher | publish |
 | POST | `/api/v1/workspaces/{ws}/flows/{id}/start` | publisher | publish |
 | POST | `/api/v1/workspaces/{ws}/flows/{id}/test` | admin | admin |

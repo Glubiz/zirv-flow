@@ -8,7 +8,7 @@ use std::time::Duration;
 use hashbrown::HashMap;
 use sqlx::prelude::FromRow;
 use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder};
-use time::OffsetDateTime;
+use time::{Date, Duration as Span, OffsetDateTime, Time};
 use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
 
@@ -385,6 +385,124 @@ pub async fn version_node_counts(
         counts.entry(node).or_default().waiting = waiting;
     }
     Ok(Some(counts))
+}
+
+/// The most days one entries series covers.
+pub const MAX_ENTRY_DAYS: u32 = 90;
+
+/// How many people entered a flow on each UTC day of a window, and in the same number of days
+/// before it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EntriesPerDay {
+    /// The first day of the window.
+    pub from: Date,
+    /// The last day of the window: the day the read ran on.
+    pub to: Date,
+    /// One item per day, oldest first, including the days nobody entered.
+    pub days: Vec<(Date, i64)>,
+    pub total: i64,
+    pub previous_total: i64,
+}
+
+/// Enrollments created per UTC day over the last `days` days (1 to [`MAX_ENTRY_DAYS`]) ending
+/// today, for every version of the flow or for one. `None` when the workspace has no such flow.
+pub async fn flow_entries_per_day(
+    pool: &PgPool,
+    workspace: WorkspaceId,
+    flow: Uuid,
+    days: u32,
+    version: Option<i32>,
+) -> Result<Option<EntriesPerDay>, StoreError> {
+    entries_per_day_until(
+        pool,
+        workspace,
+        flow,
+        days,
+        version,
+        OffsetDateTime::now_utc().date(),
+    )
+    .await
+}
+
+async fn entries_per_day_until(
+    pool: &PgPool,
+    workspace: WorkspaceId,
+    flow: Uuid,
+    days: u32,
+    version: Option<i32>,
+    today: Date,
+) -> Result<Option<EntriesPerDay>, StoreError> {
+    let span = Span::days(i64::from(days));
+    let from = today - span + Span::days(1);
+    let midnight = |day: Date| day.with_time(Time::MIDNIGHT).assume_utc();
+    let (start, end) = (midnight(from), midnight(today + Span::days(1)));
+    let before = midnight(from - span);
+    let mut tx = begin_snapshot_for(pool, TIMEOUT).await?;
+    let known: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM flows WHERE workspace_id = $1 AND id = $2)",
+    )
+    .bind(workspace.as_uuid())
+    .bind(flow)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(StoreError::bounded)?;
+    if !known {
+        return Ok(None);
+    }
+    // The flow check above pins the workspace, so the counts filter on `flow_id` and `created_at`
+    // alone and an unversioned count is answered from `enrollments_flow_list_idx` without the heap.
+    let (series_version, previous_version) = if version.is_some() {
+        ("AND flow_version = $6", "AND flow_version = $4")
+    } else {
+        ("", "")
+    };
+    let series_sql = format!(
+        "SELECT g.day::date, COALESCE(c.entered, 0) \
+         FROM generate_series($2::date, $3::date, interval '1 day') AS g(day) \
+         LEFT JOIN (SELECT (created_at AT TIME ZONE 'UTC')::date AS day, count(*) AS entered \
+         FROM enrollments \
+         WHERE flow_id = $1 AND created_at >= $4 AND created_at < $5 \
+         {series_version} \
+         GROUP BY 1) c ON c.day = g.day::date \
+         ORDER BY g.day"
+    );
+    let mut series = sqlx::query_as(sqlx::AssertSqlSafe(series_sql))
+        .bind(flow)
+        .bind(from)
+        .bind(today)
+        .bind(start)
+        .bind(end);
+    if let Some(version) = version {
+        series = series.bind(version);
+    }
+    let rows: Vec<(Date, i64)> = series
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(StoreError::bounded)?;
+    let previous_sql = format!(
+        "SELECT count(*) FROM enrollments \
+         WHERE flow_id = $1 AND created_at >= $2 AND created_at < $3 {previous_version}"
+    );
+    let mut previous = sqlx::query_scalar(sqlx::AssertSqlSafe(previous_sql))
+        .bind(flow)
+        .bind(before)
+        .bind(start);
+    if let Some(version) = version {
+        previous = previous.bind(version);
+    }
+    let previous_total: i64 = previous
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(StoreError::bounded)?;
+    drop(tx);
+    let total = rows.iter().map(|(_, entered)| entered).sum();
+    Ok(Some(EntriesPerDay {
+        from,
+        to: today,
+        days: rows,
+        total,
+        previous_total,
+    }))
 }
 
 #[cfg(test)]
@@ -819,7 +937,7 @@ mod tests {
              SELECT gen_random_uuid(), $1, $2, 1 + (p.n % 100 = 0)::int, p.id, \
                     CASE WHEN p.n % 50 = 0 THEN 'completed' ELSE 'exited' END, 'a', \
                     gen_random_uuid(), gen_random_uuid(), 'api', 't', \
-                    now() - make_interval(secs => p.n), now() \
+                    now() - make_interval(hours => p.n::int), now() \
              FROM (SELECT id, row_number() OVER () AS n FROM people WHERE workspace_id = $1) p",
         )
         .bind(ws.as_uuid())
@@ -852,7 +970,7 @@ mod tests {
             "step_executions",
             "decision_records",
         ] {
-            sqlx::query(sqlx::AssertSqlSafe(format!("ANALYZE {table}")))
+            sqlx::query(sqlx::AssertSqlSafe(format!("VACUUM ANALYZE {table}")))
                 .execute(&pool)
                 .await
                 .unwrap();
@@ -896,6 +1014,22 @@ mod tests {
             ),
             (
                 format!(
+                    "SELECT (created_at AT TIME ZONE 'UTC')::date, count(*) FROM enrollments \
+                     WHERE flow_id = '{f}' AND created_at >= now() - interval '90 days' \
+                     AND created_at < now() GROUP BY 1"
+                ),
+                "Index Only Scan using enrollments_flow_list_idx".to_owned(),
+            ),
+            (
+                format!(
+                    "SELECT count(*) FROM enrollments WHERE flow_id = '{f}' \
+                     AND created_at >= now() - interval '180 days' \
+                     AND created_at < now() - interval '90 days'"
+                ),
+                "Index Only Scan using enrollments_flow_list_idx".to_owned(),
+            ),
+            (
+                format!(
                     "SELECT id FROM decision_records WHERE workspace_id = '{w}' \
                      AND subject_ids ? 'enrollment' AND (subject_ids ->> 'enrollment') = '{e}' \
                      AND recorded_at >= now() - interval '1 day' \
@@ -910,5 +1044,91 @@ mod tests {
         for (sql, index) in checks {
             assert!(plan_uses(&pool, &sql, &index).await, "{index}: {sql}");
         }
+    }
+
+    fn day(month: time::Month, day: u8) -> Date {
+        Date::from_calendar_date(2026, month, day).unwrap()
+    }
+
+    fn utc(day: Date, hour: u8, minute: u8, second: u8) -> OffsetDateTime {
+        day.with_time(Time::from_hms(hour, minute, second).unwrap())
+            .assume_utc()
+    }
+
+    async fn enter(pool: &PgPool, ws: WorkspaceId, flow: Uuid, version: i32, at: OffsetDateTime) {
+        let mut entry = Seed::new(ws, flow, "active", "a");
+        entry.version = version;
+        entry.created_at = at;
+        seed(pool, entry).await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn entries_are_bucketed_by_utc_day_with_zero_days_and_a_previous_total(pool: PgPool) {
+        use time::Month::{October, September};
+        let (ws, flow) = published_flow(&pool, "entries").await;
+        let today = day(October, 10);
+        // 7 days: 4 to 10 October. The last second of the 3rd and the first of the 4th differ.
+        enter(&pool, ws, flow, 1, utc(day(October, 3), 23, 59, 59)).await;
+        enter(&pool, ws, flow, 1, utc(day(October, 4), 0, 0, 0)).await;
+        enter(&pool, ws, flow, 2, utc(day(October, 4), 23, 59, 59)).await;
+        enter(&pool, ws, flow, 1, utc(day(October, 10), 12, 0, 0)).await;
+        // After the window, and before the previous window.
+        enter(&pool, ws, flow, 1, utc(day(October, 11), 0, 0, 0)).await;
+        enter(&pool, ws, flow, 1, utc(day(September, 26), 23, 59, 59)).await;
+
+        let series = entries_per_day_until(&pool, ws, flow, 7, None, today)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!((series.from, series.to), (day(October, 4), today));
+        let counts: Vec<i64> = series.days.iter().map(|(_, n)| *n).collect();
+        assert_eq!(
+            counts,
+            [2, 0, 0, 0, 0, 0, 1],
+            "oldest first, zero days kept"
+        );
+        assert_eq!(series.days[0].0, day(October, 4));
+        assert_eq!(series.total, 3);
+        // 27 September to 3 October holds the entry of the 3rd at 23:59:59.
+        assert_eq!(series.previous_total, 1);
+
+        let only_v2 = entries_per_day_until(&pool, ws, flow, 7, Some(2), today)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!((only_v2.total, only_v2.previous_total), (1, 0));
+        let one = entries_per_day_until(&pool, ws, flow, 1, None, today)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(one.days, [(today, 1)]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn entries_do_not_cross_flows_or_workspaces(pool: PgPool) {
+        use time::Month::October;
+        let (ws, flow) = published_flow(&pool, "entries-a").await;
+        let (other_ws, other_flow) = published_flow(&pool, "entries-b").await;
+        let today = day(October, 10);
+        enter(&pool, ws, flow, 1, utc(today, 8, 0, 0)).await;
+        enter(&pool, other_ws, other_flow, 1, utc(today, 9, 0, 0)).await;
+        enter(&pool, other_ws, other_flow, 1, utc(today, 9, 30, 0)).await;
+
+        let mine = entries_per_day_until(&pool, ws, flow, 3, None, today)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(mine.total, 1);
+        let theirs = entries_per_day_until(&pool, other_ws, other_flow, 3, None, today)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(theirs.total, 2);
+        let wrong_workspace = entries_per_day_until(&pool, other_ws, flow, 3, None, today).await;
+        assert!(wrong_workspace.unwrap().is_none());
+        let unknown = entries_per_day_until(&pool, ws, Uuid::now_v7(), 3, None, today).await;
+        assert!(unknown.unwrap().is_none());
     }
 }

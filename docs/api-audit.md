@@ -151,6 +151,7 @@ The problem codes in use are listed in [the policy](api.md#problem-codes), and a
 | GET | `/api/v1/workspaces/{ws}/flows/{id}/versions` | `list_flow_versions` | not a creating POST | bounded collection | ok | strings G8: 1 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/flows/{id}/versions/{n}` | `get_flow_version` | not a creating POST | n/a | ok | strings G8: 1 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/flows/{id}/versions/{n}/counts` | `get_flow_version_counts` | not a creating POST | n/a | ok | ok | ok | no |
+| GET | `/api/v1/workspaces/{ws}/flows/{id}/entries` | `get_flow_entries` | not a creating POST | n/a | ok | ok | ok | no |
 | POST | `/api/v1/workspaces/{ws}/flows/{id}/versions/{n}/exit-enrollments` | `exit_flow_version_enrollments` | not a creating POST | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/forwarding/dead-letters` | `list_forwarding_dead_letters` | not a creating POST | ok | ok | ok | ok | no |
 | POST | `/api/v1/workspaces/{ws}/forwarding/re-drive` | `redrive_forwarding` | not a creating POST | n/a | ok | ok | ok | no |

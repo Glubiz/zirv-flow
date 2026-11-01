@@ -484,6 +484,128 @@ pub(crate) async fn counts(
     Ok(Json(VersionCountsBody { version, nodes }))
 }
 
+/// The days of an entries series when `days` is not given.
+const DEFAULT_ENTRY_DAYS: u32 = 30;
+
+#[derive(Serialize, ToSchema)]
+pub(crate) struct EntryDayBody {
+    /// The UTC day, `YYYY-MM-DD`.
+    #[schema(example = "2026-10-01")]
+    date: String,
+    /// People who entered the flow that day.
+    entered: i64,
+}
+
+#[derive(Serialize, ToSchema)]
+pub(crate) struct EntriesBody {
+    /// The first day of the window.
+    #[schema(example = "2026-10-01")]
+    from: String,
+    /// The last day of the window: today.
+    #[schema(example = "2026-10-30")]
+    to: String,
+    /// Always `UTC`: days are cut at midnight UTC.
+    #[schema(example = "UTC")]
+    timezone: &'static str,
+    /// One item per day, oldest first, including days nobody entered.
+    days: Vec<EntryDayBody>,
+    /// People who entered in the window.
+    total: i64,
+    /// People who entered in the same number of days before the window.
+    previous_total: i64,
+}
+
+fn format_day(day: time::Date) -> String {
+    let format = time::macros::format_description!("[year]-[month]-[day]");
+    day.format(&format).unwrap_or_default()
+}
+
+fn parse_entries_query(query: &str) -> Result<(u32, Option<i32>), ApiError> {
+    let (mut days, mut version) = (DEFAULT_ENTRY_DAYS, None);
+    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        match key.as_ref() {
+            "days" => {
+                days = value
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|days| (1..=zirv_flow_store::MAX_ENTRY_DAYS).contains(days))
+                    .ok_or_else(|| {
+                        ApiError::bad_request(format!(
+                            "days must be a whole number from 1 to {}",
+                            zirv_flow_store::MAX_ENTRY_DAYS
+                        ))
+                    })?;
+            }
+            "version" => {
+                version = Some(
+                    value
+                        .parse::<i32>()
+                        .ok()
+                        .filter(|version| *version > 0)
+                        .ok_or_else(|| {
+                            ApiError::bad_request("version must be a positive whole number")
+                        })?,
+                );
+            }
+            _ => {}
+        }
+    }
+    Ok((days, version))
+}
+
+/// How many people entered the flow on each UTC day of the last `days` days, counted by
+/// enrollment creation time, with the total of the days before for comparison. Aggregates only.
+#[utoipa::path(
+    get,
+    operation_id = "get_flow_entries",
+    path = "/api/v1/workspaces/{ws}/flows/{id}/entries",
+    tag = "flows",
+    params(
+        ("ws" = Uuid, Path, description = "Workspace id"),
+        ("id" = Uuid, Path, description = "Flow id"),
+        ("days" = Option<u32>, Query, description = "Days to cover, 1 to 90; default 30"),
+        ("version" = Option<i32>, Query, description = "Only enrollments pinned to this version; default all versions")
+    ),
+    responses(
+        (status = 200, description = "The entries per day", body = EntriesBody),
+        (status = 400, description = "days or version is out of range or malformed", body = Problem, content_type = "application/problem+json"),
+        (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "A key without the read scope", body = Problem, content_type = "application/problem+json"),
+        (status = 404, description = "No such workspace or flow, or no access", body = Problem, content_type = "application/problem+json"),
+        (status = 503, description = "The read ran past its time limit (`code` is `search_timeout`)", body = Problem, content_type = "application/problem+json")
+    ),
+    security(("session" = []), ("api_key" = []))
+)]
+pub(crate) async fn entries(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((ws, id)): Path<(String, String)>,
+    RawQuery(query): RawQuery,
+) -> Result<Json<EntriesBody>, ApiError> {
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Read).await?;
+    let flow: Uuid = path_id(&id)?;
+    let (days, version) = parse_entries_query(query.as_deref().unwrap_or_default())?;
+    let series =
+        zirv_flow_store::flow_entries_per_day(&state.pool, workspace.id, flow, days, version)
+            .await?
+            .ok_or_else(ApiError::not_found)?;
+    Ok(Json(EntriesBody {
+        from: format_day(series.from),
+        to: format_day(series.to),
+        timezone: "UTC",
+        days: series
+            .days
+            .into_iter()
+            .map(|(day, entered)| EntryDayBody {
+                date: format_day(day),
+                entered,
+            })
+            .collect(),
+        total: series.total,
+        previous_total: series.previous_total,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use axum::http::StatusCode;
@@ -619,5 +741,31 @@ mod tests {
             Some(SETTINGS_GOAL_TYPE)
         );
         assert!(matches!(graph.nodes[0].kind, NodeKind::Exit {}));
+    }
+
+    #[test]
+    fn the_entries_query_defaults_to_30_days_and_bounds_days_and_version() {
+        assert_eq!(parse_entries_query("").unwrap(), (30, None));
+        assert_eq!(
+            parse_entries_query("days=90&version=2").unwrap(),
+            (90, Some(2))
+        );
+        assert_eq!(parse_entries_query("days=1").unwrap().0, 1);
+        for bad in [
+            "days=0",
+            "days=91",
+            "days=x",
+            "days=-1",
+            "version=0",
+            "version=x",
+        ] {
+            assert!(parse_entries_query(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_day_is_written_as_year_month_day() {
+        let day = time::Date::from_calendar_date(2026, time::Month::October, 1).unwrap();
+        assert_eq!(format_day(day), "2026-10-01");
     }
 }
