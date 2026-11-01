@@ -25,7 +25,7 @@ import { fromDefinition } from "./ast";
 import { useCatalog } from "./catalog";
 import { namesOf } from "./describe";
 import { cadenceLabel, causeLabel } from "./labels";
-import { builtFrom, describeDefinition } from "./overview";
+import { builtFrom, describeDefinition, usedBy } from "./overview";
 import { DataAgeNote, personLabel } from "./LiveCount";
 import { DefinitionView, SegmentForm } from "./SegmentForm";
 import { usePaged } from "./usePaged";
@@ -159,6 +159,15 @@ function Overview({ workspaceId, segment, canWrite, editHref }: { workspaceId: s
   const catalog = useCatalog(workspaceId);
   const lists = catalog.status === "ready" ? catalog.catalog.lists : [];
   const segments = catalog.status === "ready" ? catalog.catalog.segments : [];
+  const used = useResource(
+    () =>
+      unwrap(
+        client.GET("/api/v1/workspaces/{ws}/segments/{id}/where-used", {
+          params: { path: { ws: workspaceId, id: segment.id } },
+        }),
+      ),
+    [workspaceId, segment.id],
+  );
   const sentence = describeDefinition(fromDefinition(segment.current.definition), namesOf(lists, segments));
   return (
     <div className="detail-grid">
@@ -168,7 +177,12 @@ function Overview({ workspaceId, segment, canWrite, editHref }: { workspaceId: s
           {canWrite ? <Link to={editHref}>Edit rules</Link> : null}
         </div>
       </Panel>
-      <RelatedPanel groups={builtFrom(segment.current.deps, workspaceId, lists, segments, segment.id)} />
+      <RelatedPanel
+        groups={[
+          ...builtFrom(segment.current.deps, workspaceId, lists, segments, segment.id),
+          ...usedBy(used.status === "ready" ? used.data : null, workspaceId),
+        ]}
+      />
     </div>
   );
 }

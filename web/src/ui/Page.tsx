@@ -83,7 +83,7 @@ export function RelatedPanel({ groups }: { groups: RelatedGroup[] }) {
   const shown = groups.filter((group) => group.items.length > 0);
   if (shown.length === 0) return null;
   return (
-    <aside aria-label="Related" className="related">
+    <aside id="related" aria-label="Related" className="related">
       <Panel title="Related">
         {shown.map((group) => (
           <div key={group.label} className="related-group">
