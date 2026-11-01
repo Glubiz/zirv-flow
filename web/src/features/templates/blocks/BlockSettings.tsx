@@ -5,7 +5,7 @@ import { Button, SelectField, TextAreaField, TextField } from "../../../ui";
 import { NumberField } from "./NumberField";
 import { FieldIssues } from "../IssueList";
 import { issuesAt, type TemplateIssue } from "../model";
-import { blockLabel, issuesOf, omit, withVisibleIf, type Align, type Block, type Section } from "./document";
+import { blockLabel, issuesOf, omit, withVisibleIf, type Align, type Block, type ButtonBlock, type ImageBlock, type Section } from "./document";
 import { fieldTarget, type InsertTarget } from "./insertTarget";
 import { RichTextEditor } from "./RichTextEditor";
 import { Visibility } from "./Visibility";
@@ -46,6 +46,20 @@ const ALIGNS: readonly { id: Align; label: string }[] = [
 function optional<T extends Block>(block: T, key: string, value: string | number | undefined): T {
   if (value === undefined || value === "") return omit(block, key);
   return { ...block, [key]: value };
+}
+
+function UtmOffField<T extends ImageBlock | ButtonBlock>({ block, readOnly, onChange }: { block: T; readOnly: boolean; onChange: (next: T) => void }) {
+  return (
+    <label className="check">
+      <input
+        type="checkbox"
+        checked={block.utm_off === true}
+        disabled={readOnly}
+        onChange={(event) => onChange(event.target.checked ? { ...block, utm_off: true as const } : omit(block, "utm_off"))}
+      />
+      <span>Do not add UTM parameters</span>
+    </label>
+  );
 }
 
 function AlignField({ value, onChange, readOnly, label }: { value: Align; onChange: (next: Align) => void; readOnly: boolean; label: string }) {
@@ -148,6 +162,7 @@ export function BlockSettings({ block, onChange, readOnly, onTarget, issues, onP
               onChange={(event) => onChange(optional(block, "href", event.target.value))}
             />
             <FieldIssues issues={at("href")} />
+            {block.href ? <UtmOffField block={block} readOnly={readOnly} onChange={onChange} /> : null}
             <TextField
               label="Width in pixels"
               hint="Optional, up to 800."
@@ -176,6 +191,7 @@ export function BlockSettings({ block, onChange, readOnly, onTarget, issues, onP
             onChange={(event) => onChange({ ...block, url: event.target.value })}
           />
           <FieldIssues issues={at("url")} />
+          <UtmOffField block={block} readOnly={readOnly} onChange={onChange} />
           <More tucked={tucked}>
             <AlignField label="Alignment" value={block.align} readOnly={readOnly} onChange={(align) => onChange({ ...block, align })} />
           </More>

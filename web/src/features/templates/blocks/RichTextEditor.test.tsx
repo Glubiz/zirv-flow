@@ -92,3 +92,57 @@ describe("link addresses", () => {
     expect(cleanRichText('<p><a href="{% if x %}https://a.example{% endif %}">go</a></p>')).toBe("<p>go</p>");
   });
 });
+
+describe("the UTM opt-out of a link", () => {
+  it("is the one data attribute the clean pass keeps, and only as off", () => {
+    expect(cleanRichText('<p><a href="https://a.example" data-zf-utm="off">go</a></p>')).toBe('<p><a href="https://a.example" data-zf-utm="off">go</a></p>');
+    expect(cleanRichText('<p><a href="https://a.example" data-zf-utm="OFF">go</a></p>')).toBe('<p><a href="https://a.example" data-zf-utm="off">go</a></p>');
+    expect(cleanRichText('<p><a href="https://a.example" data-zf-utm="on" data-zf-x="1" data-other="off">go</a></p>')).toBe('<p><a href="https://a.example">go</a></p>');
+    expect(cleanRichText('<p><b data-zf-utm="off">go</b></p>')).toBe("<p><b>go</b></p>");
+  });
+
+  it("is set by the link dialog checkbox and cleared without it", () => {
+    const link = vi.fn((_command: string, _ui: boolean, address?: string) => {
+      const selection = window.getSelection();
+      const root = document.querySelector<HTMLElement>("[role=textbox]");
+      const text = root?.querySelector("p")?.firstChild;
+      if (!selection || !root || !text) return false;
+      let anchor = root.querySelector("a");
+      if (!anchor) {
+        anchor = document.createElement("a");
+        anchor.textContent = text.textContent;
+        text.parentNode?.replaceChild(anchor, text);
+      }
+      anchor.setAttribute("href", address ?? "");
+      const range = document.createRange();
+      range.selectNodeContents(anchor);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      return true;
+    });
+    Object.defineProperty(document, "execCommand", { value: link, configurable: true });
+    try {
+      const { onChange, editor } = mount("plain");
+      const open = (check: boolean) => {
+        const range = document.createRange();
+        range.selectNodeContents(editor);
+        window.getSelection()?.removeAllRanges();
+        window.getSelection()?.addRange(range);
+        fireEvent.mouseUp(editor);
+        fireEvent.mouseDown(screen.getByRole("button", { name: "Add a link" }));
+        fireEvent.click(screen.getByRole("button", { name: "Add a link" }));
+        const box = screen.getByRole("checkbox", { name: "Do not add UTM parameters" });
+        if (check) fireEvent.click(box);
+        fireEvent.click(screen.getByRole("button", { name: "Apply link" }));
+      };
+
+      open(true);
+      expect(onChange).toHaveBeenLastCalledWith('<p><a href="https://" data-zf-utm="off">plain</a></p>');
+
+      open(false);
+      expect(onChange).toHaveBeenLastCalledWith('<p><a href="https://">plain</a></p>');
+    } finally {
+      Reflect.deleteProperty(document, "execCommand");
+    }
+  });
+});

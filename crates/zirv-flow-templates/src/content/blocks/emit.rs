@@ -15,6 +15,7 @@ use super::model::{
 use super::sanitize::{Cleaned, sanitize_source};
 use super::snippet::SnippetContent;
 use super::tags::escape_literals;
+use crate::content::mjml::UTM_OFF_MARK;
 
 /// The value of a plain text field: safe to put in MJML, and as plain text.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -299,6 +300,7 @@ fn emit_block<F: Fields>(
             alt,
             href,
             width,
+            utm_off,
             ..
         }) => {
             let source = fields.image_source(src)?;
@@ -313,6 +315,9 @@ fn emit_block<F: Fields>(
                 .transpose()?;
             if let Some(link) = &link {
                 mjml.push_str(&format!(" href=\"{}\"", link.html));
+                if *utm_off {
+                    mjml.push_str(UTM_OFF_MARK);
+                }
             }
             if let Some(width) = width {
                 mjml.push_str(&format!(" width=\"{width}px\""));
@@ -326,16 +331,21 @@ fn emit_block<F: Fields>(
             }
         }
         Block::Button(Button {
-            label, url, align, ..
+            label,
+            url,
+            align,
+            utm_off,
+            ..
         }) => {
             let label = fields.plain(label)?;
             let url = fields.url(url, UrlKind::Link)?;
+            let mark = if *utm_off { UTM_OFF_MARK } else { "" };
             let radius = look
                 .button_radius
                 .map(|radius| format!(" border-radius=\"{radius}px\""))
                 .unwrap_or_default();
             mjml.push_str(&format!(
-                "<mj-button{class} href=\"{}\" align=\"{}\" background-color=\"{}\" color=\"{}\"{radius}>{}</mj-button>\n",
+                "<mj-button{class} href=\"{}\"{mark} align=\"{}\" background-color=\"{}\" color=\"{}\"{radius}>{}</mj-button>\n",
                 url.html,
                 align.css(),
                 look.button,
@@ -431,6 +441,45 @@ mod tests {
     }
 
     #[test]
+    fn a_button_and_a_linked_image_carry_the_utm_opt_out_and_the_rest_do_not() {
+        let mut doc = content(vec![
+            Block::Button(Button {
+                id: "b".into(),
+                label: "Go".into(),
+                url: "https://a.example/b".into(),
+                utm_off: true,
+                align: Align::Left,
+                visible_if: None,
+            }),
+            Block::Image(Image {
+                id: "i".into(),
+                src: ImageSrc::Url("https://a.example/i.png".into()),
+                alt: "Logo".into(),
+                href: Some("https://a.example/i".into()),
+                utm_off: true,
+                width: None,
+                visible_if: None,
+            }),
+        ]);
+        let mark = crate::content::mjml::UTM_OFF_MARK;
+        let emitted = emit(&doc, &Look::of_settings(&doc.settings), &mut Sources).unwrap();
+        assert_eq!(emitted.mjml.matches(mark).count(), 2, "{}", emitted.mjml);
+        let compiled = crate::content::mjml::compile(&emitted.mjml).unwrap();
+        assert_eq!(compiled.html.matches(" data-zf-utm=\"off\"").count(), 2);
+        for section in &mut doc.sections {
+            for block in section.columns.iter_mut().flatten() {
+                match block {
+                    Block::Button(button) => button.utm_off = false,
+                    Block::Image(image) => image.utm_off = false,
+                    _ => {}
+                }
+            }
+        }
+        let emitted = emit(&doc, &Look::of_settings(&doc.settings), &mut Sources).unwrap();
+        assert!(!emitted.mjml.contains(mark));
+    }
+
+    #[test]
     fn every_block_has_its_element_and_its_text() {
         let doc = content(vec![
             Block::Heading(Heading {
@@ -451,6 +500,7 @@ mod tests {
                 src: ImageSrc::Url("https://a.example/i.png".into()),
                 alt: "Logo".into(),
                 href: Some("https://a.example".into()),
+                utm_off: false,
                 width: Some(300),
                 visible_if: None,
             }),
@@ -458,6 +508,7 @@ mod tests {
                 id: "b".into(),
                 label: "Shop".into(),
                 url: "https://a.example/shop".into(),
+                utm_off: false,
                 align: Align::Right,
                 visible_if: None,
             }),
@@ -502,6 +553,7 @@ mod tests {
                 id: "i".into(),
                 src: ImageSrc::Url("https://a.example/i.png".into()),
                 alt: alt.into(),
+                utm_off: false,
                 href: href.map(str::to_owned),
                 width: None,
                 visible_if: None,
@@ -527,6 +579,7 @@ mod tests {
             id: "b".into(),
             label: "Go, {{ person.name | default(\"you\") }} & co".into(),
             url: "{{ system.unsubscribe_url }}".into(),
+            utm_off: false,
             align: Align::Center,
             visible_if: None,
         })]);
@@ -577,6 +630,7 @@ mod tests {
                 id: "b".into(),
                 label: "Go".into(),
                 url: "https://a.example".into(),
+                utm_off: false,
                 align: Align::Left,
                 visible_if: None,
             }),

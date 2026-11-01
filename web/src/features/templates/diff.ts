@@ -41,6 +41,7 @@ const FIELD_WORDS: Record<string, string> = {
   label: "Label",
   url: "Link",
   href: "Link",
+  utm_off: "UTM tagging",
   alt: "Alt text",
   src: "Image",
   level: "Level",

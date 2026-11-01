@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState, type ClipboardEvent, type DragEvent
 
 import { Button } from "../../../ui";
 import type { InsertTarget } from "./insertTarget";
-import { editorNodes, linkAllowed, richTextFromEditor, richTextToEditor } from "./richText";
+import { editorNodes, linkAllowed, richTextFromEditor, richTextToEditor, UTM_ATTRIBUTE } from "./richText";
 
 interface Props {
   label: string;
@@ -29,6 +29,7 @@ export function RichTextEditor({ label, value, onChange, readOnly, onTarget }: P
   const [linking, setLinking] = useState(false);
   const [url, setUrl] = useState("https://");
   const [urlError, setUrlError] = useState<string | null>(null);
+  const [noUtm, setNoUtm] = useState(false);
   const urlId = useId();
 
   useEffect(() => {
@@ -64,12 +65,13 @@ export function RichTextEditor({ label, value, onChange, readOnly, onTarget }: P
     }
   }
 
-  function run(command: string, argument?: string) {
+  function run(command: string, argument?: string, after?: () => void) {
     area.current?.focus();
     restore();
     // The browser's own editing command: the one way to edit rich text in place without a library.
     const exec = (document as unknown as { execCommand?: (command: string, ui: boolean, value?: string) => boolean }).execCommand;
     if (typeof exec === "function") exec.call(document, command, false, argument);
+    after?.();
     emit();
   }
 
@@ -136,6 +138,17 @@ export function RichTextEditor({ label, value, onChange, readOnly, onTarget }: P
     };
   }
 
+  /** Sets or clears the opt-out from UTM tagging on the links the selection touches. */
+  function markLinks(off: boolean) {
+    const selection = window.getSelection();
+    if (!area.current || !selection || selection.rangeCount === 0) return;
+    for (const link of Array.from(area.current.querySelectorAll("a"))) {
+      if (!selection.getRangeAt(0).intersectsNode(link)) continue;
+      if (off) link.setAttribute(UTM_ATTRIBUTE, "off");
+      else link.removeAttribute(UTM_ATTRIBUTE);
+    }
+  }
+
   function applyLink() {
     if (!linkAllowed(url)) {
       setUrlError("A link starts with https://, http://, mailto: or a merge tag.");
@@ -143,7 +156,8 @@ export function RichTextEditor({ label, value, onChange, readOnly, onTarget }: P
     }
     setUrlError(null);
     setLinking(false);
-    run("createLink", url.trim());
+    run("createLink", url.trim(), () => markLinks(noUtm));
+    setNoUtm(false);
   }
 
   return (
@@ -188,6 +202,10 @@ export function RichTextEditor({ label, value, onChange, readOnly, onTarget }: P
             Link address
           </label>
           <input id={urlId} className="input" value={url} onChange={(event) => setUrl(event.target.value)} autoComplete="off" aria-invalid={urlError ? true : undefined} />
+          <label className="check">
+            <input type="checkbox" checked={noUtm} onChange={(event) => setNoUtm(event.target.checked)} />
+            <span>Do not add UTM parameters</span>
+          </label>
           <Button onClick={applyLink}>Apply link</Button>
           {urlError ? <span className="field-error">{urlError}</span> : null}
         </div>
