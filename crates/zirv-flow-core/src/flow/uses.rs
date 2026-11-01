@@ -192,9 +192,8 @@ mod tests {
         assert_eq!(uses(&found, 3), ["trigger"]);
         assert_eq!(uses(&found, 4), ["condition"]);
         assert_eq!(found.len(), 2);
-        let manual = self::settings(
-            json!({"trigger": {"type": "manual"}, "reentry": {"mode": "once"}}),
-        );
+        let manual =
+            self::settings(json!({"trigger": {"type": "manual"}, "reentry": {"mode": "once"}}));
         assert!(segment_uses(&self::graph(json!([])), &manual).is_empty());
     }
 }
