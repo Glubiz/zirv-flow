@@ -5,7 +5,6 @@
 
 use axum::Json;
 use axum::extract::{Path, RawQuery, State};
-use axum::http::StatusCode;
 use serde::Serialize;
 use time::OffsetDateTime;
 use utoipa::{IntoParams, ToSchema};
@@ -21,6 +20,7 @@ const MAX_DAYS: i64 = 30;
 
 /// What reading events demands: the need of the event explorer routes (`rbac.rs` holds the row
 /// and a test keeps the two equal).
+#[cfg(test)]
 const EVENTS_NEED: Need = Need::Read;
 
 #[derive(Serialize, ToSchema)]
@@ -158,11 +158,9 @@ pub(crate) async fn get(
 ) -> Result<Json<WorkspaceSummaryBody>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Read).await?;
     let days = parse_days(&query.unwrap_or_default())?;
-    let may_read_events = match authorize(&state, &principal, workspace.id, EVENTS_NEED).await {
-        Ok(_) => true,
-        Err(error) if error.status_code() == StatusCode::FORBIDDEN => false,
-        Err(error) => return Err(error),
-    };
+    // Reading events demands `EVENTS_NEED`, the `Need::Read` just checked, so no role can lack it
+    // today; the `rbac.rs` test below fails if the event routes ever ask for more.
+    let may_read_events = true;
     let now = state.clock.now_in_process();
     let figures = zirv_flow_store::workspace_summary(&state.pool, workspace.id, days, now).await?;
     Ok(Json(body(&figures, may_read_events, now)))
@@ -173,7 +171,7 @@ mod tests {
     use std::sync::Arc;
 
     use axum::body::Body;
-    use axum::http::{Request, header};
+    use axum::http::{Request, StatusCode, header};
     use http_body_util::BodyExt;
     use serde_json::Value;
     use sqlx::PgPool;
@@ -336,9 +334,11 @@ mod tests {
         assert_eq!(empty["people_created"], 0);
 
         for workspace in [ours, theirs] {
-            zirv_flow_store::refresh_workspace_summary(&pool, workspace, now)
-                .await
-                .unwrap();
+            for _ in 0..10 {
+                zirv_flow_store::refresh_workspace_summary(&pool, workspace, now)
+                    .await
+                    .unwrap();
+            }
         }
         people(ours, datetime!(2030-01-14 06:00 UTC)).await;
         clock.advance(Duration::minutes(1));

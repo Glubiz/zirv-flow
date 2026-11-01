@@ -1,12 +1,13 @@
 //! The daily rollup behind the Home summary. A scheduled job calls [`refresh_workspace_summary`]
 //! for each workspace: it adds the rows written since the last run to their UTC day, recounts a
-//! day exactly once it has closed, and refreshes the per-flow snapshot. The endpoint reads only
-//! what this module writes (`0085_summary_rollup.sql`).
+//! day exactly once it has closed, backfills the last 30 days and refreshes the per-flow
+//! snapshot. The endpoint reads only what this module writes (`0085_summary_rollup.sql`).
 //!
-//! Every count names the workspace and a time slice with an index that leads with both, so a run
-//! costs the slice and not the history: people, messages and goal step rows by their time column,
-//! events by id range on `events_workspace_id_id_idx` (ids are minted on receipt, so an id range
-//! is a received-time range).
+//! Every count names the workspace and a time slice with an index that carries what the count
+//! reads, so a run costs the slice and not the history, and each UTC day-slice commits on its own:
+//! people, messages and goal step rows by their time column (index-only), events by id range on
+//! `events_workspace_id_id_idx` (ids are minted on receipt, so an id range is a received-time
+//! range).
 
 use std::time::Duration;
 
@@ -27,8 +28,14 @@ pub const COMMIT_MARGIN: Span = Span::minutes(2);
 /// How many days the rollup keeps and backfills.
 const KEPT_DAYS: i64 = 30;
 
-/// How long one workspace's run may take.
+/// How long one day-slice transaction may take.
 const TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The day-slices of each kind one run commits (today and the incremental catch-up, closed-day
+/// recounts, backfill). A slice is a handful of index-only range counts, so three keep a run well
+/// inside the five-minute period even on a large workspace, and the 30-day backfill still
+/// finishes in ten runs, under an hour.
+const DAYS_PER_RUN: usize = 3;
 
 /// The `flow_id` of the workspace-wide metrics.
 pub(super) const WORKSPACE_WIDE: Uuid = Uuid::nil();
@@ -188,38 +195,24 @@ async fn count_slice(
     .fetch_one(&mut *conn)
     .await
     .map_err(StoreError::query)?;
-    let any_steps: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM step_executions \
-                        WHERE workspace_id = $1 AND started_at >= $2 AND started_at < $3)",
-    )
-    .bind(workspace)
-    .bind(from)
-    .bind(to)
-    .fetch_one(&mut *conn)
-    .await
-    .map_err(StoreError::query)?;
-    let flow_goals = if any_steps {
-        if goals.is_none() {
-            *goals = Some(load_goal_sets(conn, workspace).await?);
-        }
-        let Some(sets) = goals.as_ref() else {
-            return Err(StoreError::query(sqlx::Error::RowNotFound));
-        };
-        sqlx::query_as(GOALS_BY_FLOW)
-            .bind(workspace)
-            .bind(from)
-            .bind(to)
-            .bind(&sets.node_ids)
-            .bind(SETTINGS_GOAL_NODE)
-            .bind(&sets.flows)
-            .bind(&sets.versions)
-            .bind(&sets.nodes)
-            .fetch_all(&mut *conn)
-            .await
-            .map_err(StoreError::query)?
-    } else {
-        Vec::new()
+    if goals.is_none() {
+        *goals = Some(load_goal_sets(conn, workspace).await?);
+    }
+    let Some(sets) = goals.as_ref() else {
+        return Err(StoreError::query(sqlx::Error::RowNotFound));
     };
+    let flow_goals = sqlx::query_as(GOALS_BY_FLOW)
+        .bind(workspace)
+        .bind(from)
+        .bind(to)
+        .bind(&sets.node_ids)
+        .bind(SETTINGS_GOAL_NODE)
+        .bind(&sets.flows)
+        .bind(&sets.versions)
+        .bind(&sets.nodes)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(StoreError::query)?;
     Ok(Counts {
         messages: sent.iter().map(|(_, count)| count).sum(),
         people,
@@ -232,16 +225,15 @@ async fn count_slice(
     })
 }
 
-/// The goal step rows of a slice, by flow. The slice is materialised first through the time
-/// index, so the rows read are the slice's and never every row of a goal node; then the goal
-/// node ids narrow it. A graph goal counts when it ended `done` and the node is a goal of the
-/// version the enrollment entered by; the settings goal counts whatever the version.
-const GOALS_BY_FLOW: &str = "WITH slice AS MATERIALIZED ( \
-         SELECT enrollment_id, node_id, outcome FROM step_executions \
-         WHERE workspace_id = $1 AND started_at >= $2 AND started_at < $3) \
-     SELECT e.flow_id, count(*) \
-     FROM slice s JOIN enrollments e ON e.id = s.enrollment_id \
-     WHERE s.node_id = ANY($4) \
+/// The goal step rows of a slice, by flow. Only rows of a goal node id are read, inside the
+/// slice's time range, from `step_executions_workspace_node_started_idx` (which carries the
+/// enrollment and outcome, so the rows come from the index alone); the enrollment is read for the
+/// matches, for its flow and version. A graph goal counts when it ended `done` and the node is a
+/// goal of the version the enrollment entered by; the settings goal counts whatever the version.
+const GOALS_BY_FLOW: &str = "SELECT e.flow_id, count(*) \
+     FROM step_executions s JOIN enrollments e ON e.id = s.enrollment_id \
+     WHERE s.workspace_id = $1 AND s.started_at >= $2 AND s.started_at < $3 \
+       AND s.node_id = ANY($4) \
        AND (s.node_id = $5 \
             OR (s.outcome = 'done' \
                 AND EXISTS (SELECT 1 FROM unnest($6::uuid[], $7::int[], $8::text[]) \
@@ -285,17 +277,6 @@ async fn write_rows(
     .await
     .map_err(StoreError::query)?;
     Ok(())
-}
-
-/// Recounts `slice` and makes its day hold exactly that.
-async fn recount_day(
-    conn: &mut PgConnection,
-    workspace: Uuid,
-    slice: &Slice,
-    goals: &mut Option<GoalSets>,
-) -> Result<(), StoreError> {
-    let counts = count_slice(conn, workspace, slice, goals).await?;
-    write_rows(conn, workspace, slice.day, &counts, true).await
 }
 
 /// The published flows of a workspace and whether the version each runs has a goal.
@@ -345,70 +326,176 @@ const IN_FLOW_SNAPSHOT: &str = "INSERT INTO summary_flows (workspace_id, flow_id
      ON CONFLICT (workspace_id, flow_id) DO UPDATE \
      SET people_in_flow = EXCLUDED.people_in_flow, has_goal = EXCLUDED.has_goal";
 
-/// Brings the rollup of `workspace` up to `now - COMMIT_MARGIN`.
+/// Where a workspace's rollup stands; see `0085_summary_rollup.sql`.
+#[derive(Debug, Clone, Copy)]
+struct State {
+    counted_to: Option<OffsetDateTime>,
+    closed_through: Option<Date>,
+    backfilled_from: Option<Date>,
+}
+
+/// What a slice does to its day's rows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Write {
+    /// Add the slice to what the day holds.
+    Add,
+    /// Make the day hold exactly the slice.
+    Replace,
+}
+
+fn full_day(day: Date) -> Slice {
+    Slice {
+        day,
+        from: day.midnight().assume_utc(),
+        to: day.midnight().assume_utc() + Span::days(1),
+    }
+}
+
+/// Counts `slice`, writes it and moves the marks to `state`, in one transaction: the slice is
+/// either all in the rollup with its marks or not at all, so a later failure loses no progress.
+async fn commit_slice(
+    pool: &PgPool,
+    workspace: Uuid,
+    slice: &Slice,
+    write: Write,
+    goals: &mut Option<GoalSets>,
+    state: &State,
+) -> Result<(), StoreError> {
+    let mut tx = begin_bounded_for(pool, TIMEOUT).await?;
+    let counts = count_slice(&mut tx, workspace, slice, goals).await?;
+    let replace = write == Write::Replace;
+    write_rows(&mut tx, workspace, slice.day, &counts, replace).await?;
+    sqlx::query(
+        "UPDATE summary_state \
+         SET counted_to = $2, closed_through = $3, backfilled_from = $4 WHERE workspace_id = $1",
+    )
+    .bind(workspace)
+    .bind(state.counted_to)
+    .bind(state.closed_through)
+    .bind(state.backfilled_from)
+    .execute(&mut *tx)
+    .await
+    .map_err(StoreError::query)?;
+    commit(tx).await
+}
+
+/// The name a workspace's run locks on.
+fn lock_name(workspace: Uuid) -> String {
+    format!("summary.rollup:{workspace}")
+}
+
+/// Brings the rollup of `workspace` toward `now - COMMIT_MARGIN`, a bounded amount per call.
 ///
-/// The first run (or one after more than 30 days idle) recounts each of the last 30 days. A later
-/// run counts `[counted_to, now - margin)` into its days, then recounts each day that has closed
-/// since the last run, replacing its rows, which fixes a row that committed late. One
-/// transaction, serialised per workspace by the `summary_state` row.
+/// Every slice commits on its own, so progress survives a failure, and no call does more than
+/// [`DAYS_PER_RUN`] day-slices of each kind:
+/// 1. A first run (or one after more than 30 days idle) counts today so far and starts a
+///    backfill; otherwise `[counted_to, now - margin)` is counted into its days.
+/// 2. When a day has closed, it and the day before it are recounted exactly, which fixes a row
+///    that committed late (the second recount catches one that missed the first).
+/// 3. The backfill recounts days newest first, back to 30 days ago.
+///
+/// A workspace another run holds is skipped quietly: the holder is already doing this work.
 pub async fn refresh_workspace_summary(
     pool: &PgPool,
     workspace: WorkspaceId,
     now: OffsetDateTime,
 ) -> Result<(), StoreError> {
     let ws = workspace.as_uuid();
-    let mut tx = begin_bounded_for(pool, TIMEOUT).await?;
     sqlx::query("INSERT INTO summary_state (workspace_id) VALUES ($1) ON CONFLICT DO NOTHING")
         .bind(ws)
-        .execute(&mut *tx)
+        .execute(pool)
         .await
         .map_err(StoreError::query)?;
-    let (counted_to, closed_through): (Option<OffsetDateTime>, Option<Date>) = sqlx::query_as(
-        "SELECT counted_to, closed_through FROM summary_state WHERE workspace_id = $1 FOR UPDATE",
+    // A session lock, as the run spans many transactions. If it cannot be released the
+    // connection is dropped, which ends the session and the lock with it.
+    let mut lock = pool.acquire().await.map_err(StoreError::query)?;
+    let held: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock(hashtextextended($1, 0))")
+        .bind(lock_name(ws))
+        .fetch_one(&mut *lock)
+        .await
+        .map_err(StoreError::query)?;
+    if !held {
+        return Ok(());
+    }
+    let outcome = advance(pool, ws, now).await;
+    let released = sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+        .bind(lock_name(ws))
+        .execute(&mut *lock)
+        .await;
+    if released.is_err() {
+        drop(lock.detach());
+    }
+    outcome
+}
+
+async fn advance(pool: &PgPool, ws: Uuid, now: OffsetDateTime) -> Result<(), StoreError> {
+    let (counted_to, closed_through, backfilled_from) = sqlx::query_as(
+        "SELECT counted_to, closed_through, backfilled_from FROM summary_state \
+         WHERE workspace_id = $1",
     )
     .bind(ws)
-    .fetch_one(&mut *tx)
+    .fetch_one(pool)
     .await
     .map_err(StoreError::query)?;
+    let mut state = State {
+        counted_to,
+        closed_through,
+        backfilled_from,
+    };
     let upper = (now - COMMIT_MARGIN).to_offset(UtcOffset::UTC);
     let upper_day = upper.date();
+    let floor = upper_day - Span::days(KEPT_DAYS - 1);
     let mut goals = None;
-    let mut new_counted_to = counted_to;
-    let mut new_closed_through = closed_through;
-    match counted_to {
-        Some(from) if from >= upper => {}
-        Some(from) if upper - from <= Span::days(KEPT_DAYS) => {
-            for slice in day_slices(from, upper) {
-                let counts = count_slice(&mut tx, ws, &slice, &mut goals).await?;
-                write_rows(&mut tx, ws, slice.day, &counts, false).await?;
-            }
-            let oldest = upper_day - Span::days(KEPT_DAYS);
-            let mut day = closed_through
-                .and_then(Date::next_day)
-                .map_or(oldest, |first| first.max(oldest));
-            while day < upper_day {
-                let slice = Slice {
-                    day,
-                    from: day.midnight().assume_utc(),
-                    to: day.midnight().assume_utc() + Span::days(1),
-                };
-                recount_day(&mut tx, ws, &slice, &mut goals).await?;
-                day += Span::days(1);
-            }
-            new_counted_to = Some(upper);
-            new_closed_through = Some(upper_day - Span::days(1));
-        }
-        _ => {
-            let first = (upper_day - Span::days(KEPT_DAYS - 1))
-                .midnight()
-                .assume_utc();
-            for slice in day_slices(first, upper) {
-                recount_day(&mut tx, ws, &slice, &mut goals).await?;
-            }
-            new_counted_to = Some(upper);
-            new_closed_through = Some(upper_day - Span::days(1));
+
+    let stale = state
+        .counted_to
+        .is_none_or(|counted| upper - counted > Span::days(KEPT_DAYS));
+    if stale {
+        let today = Slice {
+            to: upper,
+            ..full_day(upper_day)
+        };
+        state = State {
+            counted_to: Some(upper),
+            closed_through: Some(upper_day - Span::days(1)),
+            backfilled_from: Some(upper_day),
+        };
+        commit_slice(pool, ws, &today, Write::Replace, &mut goals, &state).await?;
+    } else if let Some(from) = state.counted_to {
+        for slice in day_slices(from, upper).into_iter().take(DAYS_PER_RUN) {
+            state.counted_to = Some(slice.to);
+            commit_slice(pool, ws, &slice, Write::Add, &mut goals, &state).await?;
         }
     }
+
+    let newest_closed = upper_day - Span::days(1);
+    if let (Some(closed), Some(counted)) = (state.closed_through, state.counted_to) {
+        let mut day = closed.max(floor);
+        for _ in 0..DAYS_PER_RUN {
+            let slice = full_day(day);
+            // A day the count has not reached is still being added to.
+            if closed >= newest_closed || day > newest_closed || slice.to > counted {
+                break;
+            }
+            state.closed_through = state.closed_through.max(Some(day));
+            commit_slice(pool, ws, &slice, Write::Replace, &mut goals, &state).await?;
+            day += Span::days(1);
+        }
+    }
+
+    if let Some(mut oldest) = state.backfilled_from {
+        for _ in 0..DAYS_PER_RUN {
+            if oldest <= floor {
+                break;
+            }
+            oldest -= Span::days(1);
+            state.backfilled_from = Some(oldest);
+            let slice = full_day(oldest);
+            commit_slice(pool, ws, &slice, Write::Replace, &mut goals, &state).await?;
+        }
+    }
+
+    let mut tx = begin_bounded_for(pool, TIMEOUT).await?;
     sqlx::query("DELETE FROM summary_daily WHERE workspace_id = $1 AND day < $2")
         .bind(ws)
         .bind(upper_day - Span::days(KEPT_DAYS + 5))
@@ -416,17 +503,12 @@ pub async fn refresh_workspace_summary(
         .await
         .map_err(StoreError::query)?;
     refresh_flows(&mut tx, ws).await?;
-    sqlx::query(
-        "UPDATE summary_state \
-         SET counted_to = $2, closed_through = $3, computed_at = $4 WHERE workspace_id = $1",
-    )
-    .bind(ws)
-    .bind(new_counted_to)
-    .bind(new_closed_through)
-    .bind(now)
-    .execute(&mut *tx)
-    .await
-    .map_err(StoreError::query)?;
+    sqlx::query("UPDATE summary_state SET computed_at = $2 WHERE workspace_id = $1")
+        .bind(ws)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(StoreError::query)?;
     commit(tx).await
 }
 
@@ -624,7 +706,10 @@ mod tests {
         person(&pool, ws, datetime!(2029-12-16 23:59 UTC)).await;
         person(&pool, ws, datetime!(2030-01-05 08:00 UTC)).await;
 
-        refresh_workspace_summary(&pool, ws, T0).await.unwrap();
+        // Ten runs of three days each.
+        for _ in 0..10 {
+            refresh_workspace_summary(&pool, ws, T0).await.unwrap();
+        }
 
         assert_eq!(
             total(&pool, ws, date!(2029 - 12 - 17), PEOPLE_CREATED).await,
@@ -747,5 +832,163 @@ mod tests {
             .unwrap();
         assert_eq!(states, 1);
         assert_eq!(summary_workspaces(&pool).await.unwrap().len(), 2);
+    }
+
+    async fn people_days(pool: &PgPool, ws: WorkspaceId) -> Vec<Date> {
+        sqlx::query_scalar(
+            "SELECT day FROM summary_daily WHERE workspace_id = $1 AND metric = 'people_created' \
+             ORDER BY day DESC",
+        )
+        .bind(ws.as_uuid())
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_run_is_bounded_and_the_backfill_walks_newest_day_first(pool: PgPool) {
+        crate::migrate(&pool).await.unwrap();
+        let ws = workspace(&pool, "one").await;
+        for day in 1..=14 {
+            person(
+                &pool,
+                ws,
+                datetime!(2030-01-01 08:00 UTC) + Span::days(day - 1),
+            )
+            .await;
+        }
+
+        refresh_workspace_summary(&pool, ws, T0).await.unwrap();
+
+        // Today, then the three days before it; nothing older yet.
+        assert_eq!(
+            people_days(&pool, ws).await,
+            [
+                date!(2030 - 01 - 14),
+                date!(2030 - 01 - 13),
+                date!(2030 - 01 - 12),
+            ]
+        );
+        refresh_workspace_summary(&pool, ws, T0).await.unwrap();
+        assert_eq!(people_days(&pool, ws).await.len(), 6);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn progress_persists_when_a_run_fails_midway(pool: PgPool) {
+        crate::migrate(&pool).await.unwrap();
+        let ws = workspace(&pool, "one").await;
+        for day in [14, 13, 12] {
+            person(
+                &pool,
+                ws,
+                datetime!(2030-01-01 08:00 UTC) + Span::days(day - 1),
+            )
+            .await;
+        }
+        sqlx::query(
+            "CREATE FUNCTION refuse_day() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN RAISE EXCEPTION 'refused'; END $$",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER refuse BEFORE INSERT ON summary_daily FOR EACH ROW \
+             WHEN (NEW.day = '2030-01-13') EXECUTE FUNCTION refuse_day()",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let failed = refresh_workspace_summary(&pool, ws, T0).await;
+
+        assert!(failed.is_err());
+        assert_eq!(people_days(&pool, ws).await, [date!(2030 - 01 - 14)]);
+        let (counted_to, backfilled_from): (Option<OffsetDateTime>, Option<Date>) =
+            sqlx::query_as("SELECT counted_to, backfilled_from FROM summary_state")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(counted_to.is_some());
+        assert_eq!(backfilled_from, Some(date!(2030 - 01 - 14)));
+
+        sqlx::query("DROP TRIGGER refuse ON summary_daily")
+            .execute(&pool)
+            .await
+            .unwrap();
+        refresh_workspace_summary(&pool, ws, T0).await.unwrap();
+
+        assert_eq!(
+            people_days(&pool, ws).await,
+            [
+                date!(2030 - 01 - 14),
+                date!(2030 - 01 - 13),
+                date!(2030 - 01 - 12),
+            ]
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_workspace_another_run_holds_is_skipped_and_the_run_succeeds(pool: PgPool) {
+        crate::migrate(&pool).await.unwrap();
+        let ws = workspace(&pool, "one").await;
+        person(&pool, ws, datetime!(2030-01-15 09:00 UTC)).await;
+        let mut holder = pool.acquire().await.unwrap();
+        sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
+            .bind(lock_name(ws.as_uuid()))
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+
+        refresh_workspace_summary(&pool, ws, T0).await.unwrap();
+
+        assert_eq!(
+            total(&pool, ws, date!(2030 - 01 - 15), PEOPLE_CREATED).await,
+            0
+        );
+        sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+            .bind(lock_name(ws.as_uuid()))
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+        refresh_workspace_summary(&pool, ws, T0).await.unwrap();
+        assert_eq!(
+            total(&pool, ws, date!(2030 - 01 - 15), PEOPLE_CREATED).await,
+            1
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_last_two_closed_days_are_recounted(pool: PgPool) {
+        crate::migrate(&pool).await.unwrap();
+        let ws = workspace(&pool, "one").await;
+        refresh_workspace_summary(&pool, ws, T0).await.unwrap();
+        // The 15th closes and is recounted at 00:03 on the 16th ...
+        refresh_workspace_summary(&pool, ws, datetime!(2030-01-16 00:03 UTC))
+            .await
+            .unwrap();
+        // ... and a row that commits into it after that, stamped 10:00, is still lost to it.
+        person(&pool, ws, datetime!(2030-01-15 10:00 UTC)).await;
+        refresh_workspace_summary(&pool, ws, datetime!(2030-01-16 12:00 UTC))
+            .await
+            .unwrap();
+        assert_eq!(
+            total(&pool, ws, date!(2030 - 01 - 15), PEOPLE_CREATED).await,
+            0
+        );
+
+        // The 16th closes: the 16th and the 15th, once more, are recounted.
+        refresh_workspace_summary(&pool, ws, datetime!(2030-01-17 00:03 UTC))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            total(&pool, ws, date!(2030 - 01 - 15), PEOPLE_CREATED).await,
+            1
+        );
     }
 }

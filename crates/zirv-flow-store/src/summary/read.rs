@@ -175,7 +175,9 @@ mod tests {
         let day12 = datetime!(2030-01-12 10:00 UTC);
         message(&pool, ws, someone, None, "sent", true, day12).await;
         message(&pool, ws, someone, None, "failed", false, day12).await;
-        refresh_workspace_summary(&pool, ws, NOW).await.unwrap();
+        for _ in 0..10 {
+            refresh_workspace_summary(&pool, ws, NOW).await.unwrap();
+        }
 
         let week = workspace_summary(&pool, ws, 7, NOW).await.unwrap();
         let day = workspace_summary(&pool, ws, 1, NOW).await.unwrap();
