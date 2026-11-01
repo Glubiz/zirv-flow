@@ -724,6 +724,7 @@ mod tests {
         )
         .await;
         w.s("POST", "/flows/{id}/validate", &[u(id)], None).await;
+        w.s("GET", "/flows/{id}/entries", &[u(id)], None).await;
         w.a(
             "POST",
             "/flows/{id}/test",
