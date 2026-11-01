@@ -4,6 +4,7 @@
 mod graph;
 mod issue;
 mod settings;
+mod uses;
 mod validate;
 mod webhook;
 
@@ -16,6 +17,7 @@ pub use issue::{Issue, code};
 pub use settings::{
     Audience, ExitCriterion, FlowSettings, Goal, Reentry, SegmentChange, TRIGGER_TYPES, Trigger,
 };
+pub use uses::{SegmentUse, segment_uses};
 pub use validate::{
     MAX_ARMS, MAX_CONDITIONS, MAX_DURATION_SECONDS, MAX_EXIT_CRITERIA, MAX_ID_CHARS, MAX_ISSUES,
     MAX_NODES, MAX_SEND_DIMENSIONS, MAX_SYNC_TRAIT_KEYS, MAX_TRAIT_KEYS, MIN_ARMS, valid_id,
