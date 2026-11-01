@@ -42,7 +42,7 @@ function Segments({ workspaceId }: { workspaceId: string }) {
   const shown = all.filter(
     (segment) =>
       matches(segment, query) &&
-      (active === "all" || (active === "used") === segment.used_by_flows > 0),
+      (active === "all" || (segment.used_by_flows > 0) === (active === "used")),
   );
 
   return (
