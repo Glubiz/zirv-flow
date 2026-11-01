@@ -26,6 +26,7 @@ import { namesOf } from "./describe";
 import { cadenceLabel, causeLabel } from "./labels";
 import { builtFrom, describeDefinition, usedBy } from "./overview";
 import { DataAgeNote, personLabel } from "./LiveCount";
+import { SegmentSizePanel } from "./SegmentSize";
 import { DefinitionView, SegmentForm } from "./SegmentForm";
 import { usePaged } from "./usePaged";
 
@@ -172,12 +173,15 @@ function Overview({ workspaceId, segment, canWrite, editHref }: { workspaceId: s
   const sentence = describeDefinition(fromDefinition(segment.current.definition), namesOf(lists, segments));
   return (
     <div className="detail-grid">
-      <Panel title="Who is in it">
-        <div className="stack-tight">
-          <p>{sentence}</p>
-          {canWrite ? <Link to={editHref}>Edit rules</Link> : null}
-        </div>
-      </Panel>
+      <div className="stack">
+        <Panel title="Who is in it">
+          <div className="stack-tight">
+            <p>{sentence}</p>
+            {canWrite ? <Link to={editHref}>Edit rules</Link> : null}
+          </div>
+        </Panel>
+        <SegmentSizePanel workspaceId={workspaceId} segmentId={segment.id} />
+      </div>
       <RelatedPanel
         groups={[
           ...builtFrom(segment.current.deps, workspaceId, lists, segments, segment.id),
