@@ -66,14 +66,23 @@ FROM debugger_receipts WHERE record->>'kind' = 'started'
     DO $$ BEGIN RAISE EXCEPTION 'psql host differs from the watcher host recorded in the receipt'; END $$;
 \endif
 
-\set client_before_us `python3 -I -c "import time; print(time.time_ns() // 1000)"`
-SELECT extract(epoch FROM now()) * 1000000 AS db_now_us
+-- Process start dominates the bracket on some hosts: take ten and keep the narrowest one.
+CREATE TEMP TABLE debugger_clock_samples (before_us numeric, db_now_us numeric, after_us numeric);
+\ir debugger-clock-sample.sql
+\ir debugger-clock-sample.sql
+\ir debugger-clock-sample.sql
+\ir debugger-clock-sample.sql
+\ir debugger-clock-sample.sql
+\ir debugger-clock-sample.sql
+\ir debugger-clock-sample.sql
+\ir debugger-clock-sample.sql
+\ir debugger-clock-sample.sql
+\ir debugger-clock-sample.sql
+SELECT db_now_us FROM debugger_clock_samples ORDER BY after_us - before_us LIMIT 1
 \gset
-\set client_after_us `python3 -I -c "import time; print(time.time_ns() // 1000)"`
-
 CREATE TEMP TABLE debugger_clock AS
-SELECT (:'client_before_us'::numeric + :'client_after_us'::numeric) / 2 - :db_now_us AS offset_us,
-       (:'client_after_us'::numeric - :'client_before_us'::numeric) / 2 AS uncertainty_us;
+SELECT (before_us + after_us) / 2 - db_now_us AS offset_us, (after_us - before_us) / 2 AS uncertainty_us
+FROM debugger_clock_samples ORDER BY after_us - before_us LIMIT 1;
 
 SELECT to_timestamp(start_us / 1000000) AS client_started_at,
        to_timestamp(end_us / 1000000) AS client_finished_at,
