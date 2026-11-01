@@ -1148,4 +1148,79 @@ mod tests {
         assert_eq!(refused.body["code"], "theme_breaks_templates");
         assert_eq!(ids(&refused.body["templates"]), [named]);
     }
+
+    /// A published theme whose footer carries the unsubscribe link, made the default.
+    async fn footered_default(f: &Fixture) -> String {
+        let footer = f
+            .admin(
+                "POST",
+                "/snippets",
+                Some(json!({"name": "Footer", "content": unsubscribe_content()})),
+            )
+            .await
+            .body["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        f.admin("POST", &format!("/snippets/{footer}/publish"), None)
+            .await;
+        let theme = f
+            .published("Brand", json!({"footer_snippet": footer}))
+            .await;
+        f.set_default(&theme).await;
+        theme
+    }
+
+    fn heading() -> Value {
+        section_of(json!({"type": "heading", "id": "h", "level": 1, "text": "Hi"}))
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_default_without_a_footer_is_refused_while_a_live_marketing_template_follows_it(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        footered_default(&f).await;
+        let bare = f.published("Bare", json!({})).await;
+        let marketing = f
+            .live_template("News", "marketing", json!("default"), heading())
+            .await;
+        let audited = "SELECT count(*) FROM audit_log WHERE action = 'theme.default_set'";
+        let before = f.count(audited).await;
+
+        let refused = f.set_default(&bare).await;
+        let after_refusal = f.count(audited).await;
+        let archived = f
+            .admin("DELETE", &format!("/templates/{marketing}"), None)
+            .await;
+        let accepted = f.set_default(&bare).await;
+
+        assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(refused.body["code"], "theme_breaks_templates");
+        assert_eq!(refused.body["total"], 1);
+        assert_eq!(ids(&refused.body["templates"]), [marketing.as_str()]);
+        assert_eq!(
+            refused.body["templates"][0]["codes"],
+            json!(["missing_unsubscribe"])
+        );
+        assert_eq!(after_refusal, before);
+        assert_eq!(archived.status, StatusCode::OK, "{:?}", archived.body);
+        assert_eq!(accepted.status, StatusCode::OK, "{:?}", accepted.body);
+        assert_eq!(accepted.body["is_default"], true);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_transactional_follower_does_not_block_a_new_default(pool: PgPool) {
+        let f = fixture(&pool).await;
+        footered_default(&f).await;
+        let bare = f.published("Bare", json!({})).await;
+        f.live_template("Receipt", "transactional", json!("default"), heading())
+            .await;
+
+        let accepted = f.set_default(&bare).await;
+
+        assert_eq!(accepted.status, StatusCode::OK, "{:?}", accepted.body);
+    }
 }

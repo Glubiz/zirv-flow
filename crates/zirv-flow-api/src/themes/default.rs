@@ -8,7 +8,8 @@ use serde_json::json;
 use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
-use zirv_flow_store::{PgPool, Theme, ThemeError};
+use zirv_flow_render::RenderPool;
+use zirv_flow_store::{Candidate, Theme, ThemeError};
 
 use super::crud::ThemeBody;
 use super::theme_error;
@@ -17,6 +18,7 @@ use crate::admin::{self, Context};
 use crate::auth::{Need, Principal, authorize, path_id};
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
+use crate::templates::dependents::broken_by;
 
 #[derive(Deserialize, ToSchema)]
 pub(crate) struct SetDefaultThemeRequest {
@@ -37,12 +39,44 @@ fn default_refusal(error: ThemeError) -> ApiError {
 }
 
 /// Makes a theme the workspace default and audits it as `theme.default_set`.
+///
+/// A live, published theme that is not already the default is first checked against the live
+/// templates that follow the default (see `templates::dependents`): one the theme would stop from
+/// sending is a 422 `theme_breaks_templates`, and nothing is written or audited. A theme the store
+/// refuses is left to its own refusal.
 pub(crate) async fn set_default(
-    pool: &PgPool,
+    state: &AppState,
+    render: Option<&RenderPool>,
     context: &Context,
     workspace: WorkspaceId,
     request: SetDefaultThemeRequest,
 ) -> Result<Theme, ApiError> {
+    let pool = &state.pool;
+    let live = {
+        let mut connection = pool.acquire().await.map_err(|_| ApiError::internal())?;
+        let found =
+            zirv_flow_store::find_theme(&mut *connection, workspace, request.theme_id).await?;
+        match found {
+            Some(theme)
+                if !theme.is_default
+                    && theme.archived_at.is_none()
+                    && theme.current_version.is_some() =>
+            {
+                zirv_flow_store::default_live_templates(&mut connection, workspace).await?
+            }
+            _ => Vec::new(),
+        }
+    };
+    if !live.is_empty() {
+        let render = render.ok_or_else(ApiError::render_unavailable)?;
+        let candidate = Candidate::DefaultTheme {
+            id: request.theme_id,
+        };
+        let broken = broken_by(state, render, workspace, live, &candidate).await?;
+        if !broken.is_empty() {
+            return Err(ApiError::theme_breaks_templates(broken));
+        }
+    }
     let mut tx = zirv_flow_store::begin(pool).await?;
     let theme = zirv_flow_store::set_default_theme(&mut tx, workspace, request.theme_id)
         .await
@@ -63,7 +97,11 @@ pub(crate) async fn set_default(
 /// Makes a published theme the workspace default, replacing the previous one. Emails that follow
 /// the default use the theme's current version at their next render; emails that name a theme are
 /// unchanged. The theme must be a live, published theme of the workspace, else 409
-/// `theme_not_publishable_default`. Audited as `theme.default_set`.
+/// `theme_not_publishable_default`. The live templates that follow the default are validated with
+/// the theme in place, at most 200 in template id order; one that would stop sending, such as a
+/// marketing template when the theme has no footer, is a 422 `theme_breaks_templates` that lists up
+/// to 20 of them with their issue codes and the total, and writes nothing. Audited as
+/// `theme.default_set`.
 #[utoipa::path(
     put,
     operation_id = "set_default_theme",
@@ -76,7 +114,9 @@ pub(crate) async fn set_default(
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a key without the admin scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "The theme is not a published, live theme of the workspace (`theme_not_publishable_default`)", body = Problem, content_type = "application/problem+json")
+        (status = 409, description = "The theme is not a published, live theme of the workspace (`theme_not_publishable_default`)", body = Problem, content_type = "application/problem+json"),
+        (status = 422, description = "The theme would stop live templates that follow the default from sending (`theme_breaks_templates`, with `templates` and `total`)", body = Problem, content_type = "application/problem+json"),
+        (status = 503, description = "Rendering is not available (`render_unavailable`)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]
@@ -87,7 +127,14 @@ pub(crate) async fn put_default(
     ApiJson(body): ApiJson<SetDefaultThemeRequest>,
 ) -> Result<Json<ThemeBody>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
-    let theme = set_default(&state.pool, &principal.context(), workspace.id, body).await?;
+    let theme = set_default(
+        &state,
+        state.render_pool(),
+        &principal.context(),
+        workspace.id,
+        body,
+    )
+    .await?;
     Ok(Json(ThemeBody::from(&theme)))
 }
 

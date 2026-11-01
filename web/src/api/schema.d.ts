@@ -4141,7 +4141,11 @@ export interface paths {
          * Makes a published theme the workspace default, replacing the previous one. Emails that follow
          *     the default use the theme's current version at their next render; emails that name a theme are
          *     unchanged. The theme must be a live, published theme of the workspace, else 409
-         *     `theme_not_publishable_default`. Audited as `theme.default_set`.
+         *     `theme_not_publishable_default`. The live templates that follow the default are validated with
+         *     the theme in place, at most 200 in template id order; one that would stop sending, such as a
+         *     marketing template when the theme has no footer, is a 422 `theme_breaks_templates` that lists up
+         *     to 20 of them with their issue codes and the total, and writes nothing. Audited as
+         *     `theme.default_set`.
          */
         put: operations["set_default_theme"];
         post?: never;
@@ -28368,6 +28372,24 @@ export interface operations {
             };
             /** @description The theme is not a published, live theme of the workspace (`theme_not_publishable_default`) */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The theme would stop live templates that follow the default from sending (`theme_breaks_templates`, with `templates` and `total`) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Rendering is not available (`render_unavailable`) */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
