@@ -766,6 +766,7 @@ mod tests {
             label: "Go".into(),
             url: "https://a.example/{{ person.quote | safe }}".into(),
             align: Default::default(),
+            utm_off: false,
             visible_if: None,
         });
         assert_eq!(
@@ -784,12 +785,59 @@ mod tests {
             id: "b".into(),
             label: label.into(),
             url: "https://a.example".into(),
+            utm_off: false,
             align: Default::default(),
             visible_if: None,
         })]);
         let rendered = render_doc(&block_doc).unwrap();
         assert_eq!(rendered.text, "a pro b }}: https://a.example\n");
         assert!(rendered.html.contains("a pro b }}"), "{}", rendered.html);
+    }
+
+    #[test]
+    fn an_opted_out_link_of_a_sent_block_email_stays_untagged_and_without_the_attribute() {
+        let button = |id: &str, url: &str, utm_off: bool| {
+            Block::Button(super::super::Button {
+                id: id.into(),
+                label: "Go".into(),
+                url: url.into(),
+                utm_off,
+                align: Default::default(),
+                visible_if: None,
+            })
+        };
+        let block_doc = doc_of(vec![
+            rich(
+                "t",
+                r#"<p><a href="https://shop.example.com/rt" data-zf-utm="off">a</a> <a href="https://shop.example.com/rn">b</a></p>"#,
+            ),
+            button("b1", "https://shop.example.com/off", true),
+            button("b2", "https://shop.example.com/on", false),
+        ]);
+        let domains = vec!["example.com".to_owned()];
+        let hooks = Hooks {
+            utm: Some(crate::UtmTags {
+                source: "acme",
+                medium: "email",
+                campaign: "spring",
+                content: "hero",
+                domains: &domains,
+            }),
+            ..Hooks::untracked()
+        };
+        let out = render_email(&block_doc, &context(), &hooks).unwrap();
+        assert!(!out.html.contains("data-zf-utm"), "{}", out.html);
+        assert!(out.html.contains("href=\"https://shop.example.com/rt\""));
+        assert!(out.html.contains("href=\"https://shop.example.com/off\""));
+        assert!(
+            out.html
+                .contains("https://shop.example.com/rn?utm_source=acme")
+        );
+        assert!(
+            out.html
+                .contains("https://shop.example.com/on?utm_source=acme")
+        );
+        assert!(out.text.contains("https://shop.example.com/off\n"));
     }
 
     #[test]

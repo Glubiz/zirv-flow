@@ -1061,3 +1061,51 @@ describe("schema 2 documents on the wire", () => {
     expect(written.blocks).toEqual(stored.blocks);
   });
 });
+
+describe("the UTM opt-out of a link", () => {
+  const withLinks = () =>
+    detailOf(
+      blocksDocument(
+        [
+          {
+            id: "s",
+            columns: [
+              [
+                { type: "button", id: "b", label: "Go", url: "https://shop.example", align: "left" },
+                { type: "image", id: "i", src: { url: "https://cdn.example/a.png" }, alt: "A bag", href: "https://shop.example" },
+              ],
+            ],
+          },
+        ],
+        {},
+        2,
+        { theme: "default" },
+      ),
+    );
+  const linkOf = (calls: ReturnType<typeof mockApi>, index: number) => savedBlocks(calls).sections[0]?.columns[0]?.[index];
+
+  it("is set and cleared on a button", async () => {
+    const calls = mockApi(templateRoutes({ detail: withLinks() }));
+    const user = userEvent.setup();
+    mount();
+
+    const block = await screen.findByRole("group", { name: "Button block 1" });
+    await user.click(block);
+    const box = await screen.findByRole("checkbox", { name: "Do not add UTM parameters" });
+    await user.click(box);
+    await waitFor(() => expect(linkOf(calls, 0)?.["utm_off"]).toBe(true), WAIT);
+    await user.click(box);
+    await waitFor(() => expect(linkOf(calls, 0)).not.toHaveProperty("utm_off"), WAIT);
+  });
+
+  it("is set on a linked image", async () => {
+    const calls = mockApi(templateRoutes({ detail: withLinks() }));
+    const user = userEvent.setup();
+    mount();
+
+    const block = await screen.findByRole("group", { name: "Image block 2" });
+    await user.click(block);
+    await user.click(await screen.findByRole("checkbox", { name: "Do not add UTM parameters" }));
+    await waitFor(() => expect(linkOf(calls, 1)?.["utm_off"]).toBe(true), WAIT);
+  });
+});
