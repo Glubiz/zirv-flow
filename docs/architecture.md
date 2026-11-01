@@ -2588,6 +2588,11 @@ RETURNING id, kind, payload, attempts, lease_token;
 DELETE FROM jobs WHERE id = $id AND lease_token = $token;
 ```
 
+As built (#207): a claim takes one job. It walks the distinct priorities of the ready jobs upwards,
+one `jobs_ready_idx` probe each, and claims from the bounded range `priority = band AND run_at <=
+now()` of the first band with a due job, so its cost depends neither on the statistics nor on the due
+or future backlog (`docs/benchmarks/m5-flows.md` section 8).
+
 **Completion.** The runtime opens the handler's transaction and first takes a
 key-share lock on the job row, `SELECT 1 FROM jobs WHERE id = $1 AND
 lease_token = $2 FOR KEY SHARE`; no row means the lease was lost and the

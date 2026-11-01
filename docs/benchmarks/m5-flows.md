@@ -113,7 +113,8 @@ differ from #151's runs), so it is evidence for #151, not a new finding. The sta
    and the ingest work share the PostgreSQL instance and the worker pool. With 2,000 events/s the
    database runs at 480% CPU on average against 82% without load, and the worker's peak claim rate falls
    from 1,108 to 832 jobs/s, so the 1,667/s burst backlog grows to 91,000. After the burst (minute 20) the spread set's p99 stays above 50 s through minute 25 (about 6 minutes) and returns to about 16 s at minute 28, about 8 minutes after the burst. Before the burst the per-minute p99s range from 0.07 to 15.9 s; after recovery (minutes 28 to 39) they stay at 13 to 15 s, against about 1 s in every minute outside the burst without load. Not established: how much comes from ingest-side jobs holding the 4 worker slots and how
-   much from database contention; the sampler records the queue as a whole, not by job kind. Filed as #207.
+   much from database contention; the sampler records the queue as a whole, not by job kind. Filed as #207;
+   the claim-plan cause found later and its fix are in section 8.
 2. The no-load runs meet the target with a thin margin. The burst backlog alone produces the whole tail (57,000 jobs, 54 s): the backlog grows roughly in proportion to the burst, so one about 10% larger in the same minute would miss at this tier even unloaded (an estimate, not measured). Not extrapolated to 10 M.
 
 ## 5. Issues filed
@@ -142,3 +143,80 @@ RUN=1 scripts/bench/m5/seed.sh clean && scripts/bench/m5/stack.sh stop
 ```
 
 `shellcheck` was not installed; `bash -n` passes for every script.
+
+## 8. Cause and fix (#207)
+
+The capped A/B of draft PR #472 (branch `bench/m8-cause-ab`, data `docs/benchmarks/data/cause/207/` there;
+100,000 timers, a burst of 10,000 at 300 s, a fresh database per run) showed that ingest load alone does
+not explain the lateness: with no ingest, run E1 reached p99 412.7 s and run E2, the same setup, 1.0 s;
+with 500 events/s, F1 3.5 s and F2 1.6 s. The claim statement was then measured alone.
+
+**Method.** `jobs::tests::the_claim_cost_against_a_timer_backlog` (`crates/zirv-flow-store/src/jobs.rs`)
+seeds `flow.step` wakes due 10 to 40 minutes ahead, a burst due in the last minute, and other work
+(ingest drains, enrolments, webhook calls at priority 5, maintenance at priority -1 an hour ahead, a few
+running jobs). Autovacuum is off on `jobs`, so the statistics change only where the test analyses. For
+each statistics state it runs the statement before #207 and the new one on the same rows: the plan a
+connection settles on after six executions, by `EXPLAIN (ANALYZE, BUFFERS)`, then four workers that claim
+and complete for 5 s with the worker's 33 kinds. PostgreSQL 16.15, stock settings, a development
+machine, the debug test build: about 1,500 claims/s is that client's ceiling, so the rates compare the
+two statements, not the product.
+
+**Cause.** The claim was one `ORDER BY priority, run_at LIMIT 1 FOR UPDATE SKIP LOCKED` over the due
+ready jobs, with two plans, both growing with the queue:
+
+1. `jobs_ready_kind_idx` and a sort of every due job, on every claim (the sort is not even top-N, since
+   the row lock sits between it and the limit, and spills to disk at 100,000 rows). The planner takes it
+   when the statistics put almost nothing due. `run_at <= now()` is estimated from the `run_at`
+   histogram, and statistics taken while every timer still lay ahead (the autovacuum `ANALYZE` after the
+   timers are armed) put the due set at the histogram's floor, 0.01% of the table. The plan holds until
+   the next `ANALYZE`, which autovacuum runs after 2% of the table has changed, so whether a run stalls
+   depends on when autovacuum ran. That is consistent with E1 against E2 (their plans were not captured).
+   At 1.1 M rows the floor is 110 rows, enough to keep plan 2, which fits the unloaded 1 M runs of
+   section 3 not stalling; at 100,000 timers it is 10 to 20 rows, and the planner sorts.
+2. `jobs_ready_idx` with `run_at <= now()` as a condition on its second column only. It stops at the
+   first due job only when one sits at the lowest priority in use; an empty claim, or a claim of a job at
+   a later priority, steps over every future job ahead of it.
+
+**Fix.** The claim walks the distinct priorities of the ready jobs upwards, one probe of `jobs_ready_idx`
+each (a recursive skip scan), and takes the oldest due job of the first band that has one from the
+bounded range `priority = band AND run_at <= now()`, `FOR UPDATE SKIP LOCKED`. The semantics are kept
+(priority first, then oldest; locked jobs skipped, also across bands; the per-workspace cap), the
+enqueue wake check of 0070 is unchanged, and no index is added: `jobs_ready_idx` already has the order.
+`jobs::tests::the_claim_plan_stays_bounded_whatever_the_statistics` asserts the plan has no sort, no kind
+index and no `jobs_ready_idx` scan unbounded by priority, with no statistics, with statistics taken while
+nothing was due and with fresh ones, as custom plans (cap on and off) and as the generic plan; it also
+asserts that the statement before #207 fails that check in every case.
+
+**Before and after.** Per claim: the `EXPLAIN (ANALYZE, BUFFERS)` execution time and shared buffers of the
+plan the connection settled on; rates from the four workers.
+
+| Waiting / due | Statistics | Before: plan | ms, buffers | Claims/s | After: ms, buffers | Claims/s |
+|---|---|---|---|---|---|---|
+| 100,000 / 103,008 | taken while nothing was due | kind index, sort of 103,002 rows | 53.1, 100,855 | **70** | 0.12, 52 | 1,476 |
+| 100,000 / 23,008 | taken while nothing was due | kind index, sort of 23,002 rows | 10.3, 20,283 | **319** | 0.10, 66 | 1,493 |
+| 100,000 / 95,000 to 103,000 | none; taken with drains due; fresh | `jobs_ready_idx` | 0.07 to 0.18, 30 to 81 | 1,446 to 1,481 | 0.13 to 0.15, 119 to 215 | 1,461 to 1,508 |
+| 1,000,000 / 88,000 to 103,000 | none; with drains due; nothing due; fresh | `jobs_ready_idx` | 0.07 to 0.09, 30 to 111 | 1,433 to 1,482 | 0.11 to 0.17, 110 to 285 | 1,354 to 1,466 |
+| 1,000,000 / 1,000 at priority 5 | fresh | `jobs_ready_idx` from the start | 7.24, 4,875 | 200, and 221 empty | 0.09, 52 | 200, and 3,500 empty |
+| 1,000,000 / none | fresh | `jobs_ready_idx`, whole | 7.24, 4,865 | 462 empty | 0.06, 30 | 4,092 empty |
+
+The old sort grows linearly with the due set (10.3 ms at 23,002 due, 53.1 ms at 103,002), so a burst
+drains in quadratic time while that plan holds. The new claim costs 0.05 to 0.17 ms in every case; where
+a due job sits in the first band it reads that band's head twice (to find the band and to claim from it),
+hence its somewhat higher buffer count there. Raw output was not committed; the test reprints it.
+
+**Not established.** The loaded 1 M run of section 3 (p99 136.4 s): at 1.1 M rows the old claim kept
+plan 2 under every statistics state tried here, and plan 2 claims a priority-0 job cheaply while one is
+due, so the drain-rate drop under load that section 4 records is not explained by these measurements.
+Plan 2's empty claim cost 7 ms at 1 M waiting timers (0.06 ms now); every worker that an enqueue wakes for
+a job another worker already took pays it, which may account for part of the database CPU under load,
+not measured on the stack. The fix is verified on the claim statement; the timer benchmark itself is to
+be re-run on the M8 hardware.
+
+```sh
+DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/postgres ZIRV_FLOW_BENCH_CLAIM=1 \
+  ZIRV_FLOW_BENCH_CLAIM_FUTURE=100000 ZIRV_FLOW_BENCH_CLAIM_DUE=100000 \
+  cargo nextest run -p zirv-flow-store --run-ignored all --no-capture \
+  -E 'test(the_claim_cost_against_a_timer_backlog)'
+```
+
+(The defaults are 1,000,000 and 100,000.)
