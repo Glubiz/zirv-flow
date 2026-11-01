@@ -67,12 +67,13 @@ With all roles stopped, a lock wait is not application traffic. Check other admi
 sessions, open transactions, backups and another migrator in `pg_stat_activity` and `pg_locks`.
 End the conflicting operation deliberately before retrying. Do not kill sessions blindly.
 
-## Lock review through 0085
+## Lock review through 0088
 
-This review covers every migration added in M8, from `0060` through `0085`; there are no `0076`
-or `0080` files. Paths are relative to `crates/zirv-flow-store/migrations/`. As of 2026-10-28,
-the latest published stable release is `v0.187.0`. It includes migrations through `0083`, so an
-upgrade from that release replays only `0084`. The drill selects the latest published older
+This review covers every migration added in M8, from `0060` through `0088`; there are no `0076`,
+`0080` or `0086` files. Paths are relative to `crates/zirv-flow-store/migrations/`. Every merged
+version is published as a release. As of 2026-11-01 the latest is `v0.214.0`, which includes
+every migration through `0088`; an upgrade from an older release replays the files after its last
+one (from `v0.187.0`, `0084` through `0088`). The drill selects the latest published older
 stable release from GitHub at runtime, independently of local git tags. Its replay range can
 change as releases are published.
 
@@ -109,6 +110,8 @@ referenced tables, even when the new child table is empty.
 | `0083_api_idempotency.sql` | New empty table and index; foreign key locks `workspaces`. Keep. |
 | `0084_forwarding_trace.sql` | Nullable `forwarding_outbox.trace_id`, no default, scan or backfill. Brief ACCESS EXCLUSIVE catalog change. Keep. |
 | `0085_summary_rollup.sql` | Three new empty tables (their foreign keys briefly lock `workspaces`), three ordinary indexes and the `summary.rollup` schedule. No new `events` index: events are counted on `0069`'s. SHARE blocks writes through each index build. Keep and budget the builds over the retained rows, or pre-build each before the stop under the same name (the migration uses `IF NOT EXISTS`; drop an invalid index a failed build leaves, then retry): `CREATE INDEX CONCURRENTLY people_workspace_created_idx ON people (workspace_id, created_at);` `CREATE INDEX CONCURRENTLY messages_sent_completed_idx ON messages (workspace_id, completed_at) INCLUDE (flow_id) WHERE status = 'sent' AND NOT test;` `CREATE INDEX CONCURRENTLY step_executions_workspace_node_started_idx ON step_executions (workspace_id, node_id, started_at) INCLUDE (enrollment_id, outcome);`. The rollup backfills 30 days newest first, three days per five-minute run and one transaction per day, so Home figures fill in over about an hour. |
+| `0087_flow_warmup.sql` | Four new `flows` columns: two `NOT NULL` with constant defaults (a catalog change, no rewrite) and two nullable. ACCESS EXCLUSIVE on `flows` lasts through the scan that checks the new `warmup_seconds` CHECK; `flows` is small. New empty table `flow_warmup_waiting` with one index; its foreign keys briefly lock `people` and `flows`. Keep. |
+| `0088_jobs_capped_claim_indexes.sql` | Two partial indexes on the ready `jobs` for the capped claim (#207). SHARE blocks enqueues and claims through each build, which scans the whole `jobs` table. Keep and budget the builds, or pre-build each before the stop under the same name (the migration uses `IF NOT EXISTS`; drop an invalid index a failed build leaves, then retry): `CREATE INDEX CONCURRENTLY jobs_ready_workspace_idx ON jobs (workspace_id, priority, run_at) WHERE state = 'ready' AND workspace_id IS NOT NULL;` `CREATE INDEX CONCURRENTLY jobs_ready_instance_idx ON jobs (priority, run_at) WHERE state = 'ready' AND workspace_id IS NULL;` |
 
 **Older installs: `0033_trait_slots.sql`.** This is already present in `v0.187.0`, so that upgrade
 does not replay it. Keep its released SQL. It adds 30 nullable columns to `people`, builds 30
