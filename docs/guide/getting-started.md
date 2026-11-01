@@ -223,7 +223,9 @@ In **Build**, select the trigger to open **Flow settings** in the inspector.
 Choose *Newsletter readers* as the **Segment** and
 **Enters the segment** under **When a person**. Select **Also enroll the people
 already in the segment when the flow is published**. In **Re-entry**, keep
-**Never enters again**. No goal or exit criteria are needed for this first flow.
+**Never enters again**. Under **Warm-up**, clear **Warm up when the flow starts**
+and select **Save warm-up**, so the first mail is sent at once instead of spread over
+the warm-up window. No goal or exit criteria are needed for this first flow.
 
 Use the step palette to add **Send an email**. In its inspector, choose the
 published newsletter **Template** and *Newsletter capture*

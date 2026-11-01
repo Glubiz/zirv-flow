@@ -259,6 +259,10 @@ test("getting started on a clean Compose stack", async ({ page, request }) => {
     await page.getByLabel("When a person", { exact: true }).selectOption({ label: "Enters the segment" });
     await page.getByRole("checkbox", { name: "Also enroll the people already in the segment when the flow is published" }).check();
     await expect(page.getByLabel("A person who has been in the flow")).toHaveValue("once");
+    // The first newsletter should go out now, not spread over the warm-up window.
+    await page.getByRole("checkbox", { name: "Warm up when the flow starts" }).uncheck();
+    await page.getByRole("button", { name: "Save warm-up", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Save warm-up", exact: true })).toHaveCount(0);
     await page.getByRole("complementary", { name: "Step palette" }).getByRole("button", { name: "Send an email", exact: true }).click();
     await page.getByLabel("Template", { exact: true }).selectOption({ label: NEWSLETTER });
     await page.getByLabel("Destination", { exact: true }).selectOption({ label: "Newsletter capture" });
