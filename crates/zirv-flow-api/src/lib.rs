@@ -38,6 +38,7 @@ mod request_id;
 mod retention;
 mod segments;
 mod sending;
+mod series;
 mod session;
 mod setup;
 mod snippets;

@@ -21,6 +21,7 @@ use crate::auth::{Need, Principal, authorize, may_view_pii, path_id};
 use crate::jobs_admin::{DEFAULT_LIMIT, parse_limit};
 use crate::people::search::DisplayBody;
 use crate::problem::{ApiError, Problem};
+use crate::series::{DEFAULT_DAYS, format_day, parse_days};
 
 #[derive(Serialize, ToSchema)]
 pub(crate) struct SegmentMemberBody {
@@ -283,9 +284,6 @@ pub(crate) async fn history(
     }))
 }
 
-/// The days of a size series when `days` is not given.
-const DEFAULT_SIZE_DAYS: u32 = 30;
-
 #[derive(Serialize, ToSchema)]
 pub(crate) struct SizeDayBody {
     /// The UTC day, `YYYY-MM-DD`.
@@ -312,26 +310,12 @@ pub(crate) struct SegmentSizeBody {
     current: i64,
 }
 
-fn format_day(day: time::Date) -> String {
-    let format = time::macros::format_description!("[year]-[month]-[day]");
-    day.format(&format).unwrap_or_default()
-}
-
 /// `?days`.
 fn parse_size_days(query: &str) -> Result<u32, ApiError> {
-    let mut days = DEFAULT_SIZE_DAYS;
+    let mut days = DEFAULT_DAYS;
     for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
         if key == "days" {
-            days = value
-                .parse::<u32>()
-                .ok()
-                .filter(|days| (1..=zirv_flow_store::MAX_SIZE_DAYS).contains(days))
-                .ok_or_else(|| {
-                    ApiError::bad_request(format!(
-                        "days must be a whole number from 1 to {}",
-                        zirv_flow_store::MAX_SIZE_DAYS
-                    ))
-                })?;
+            days = parse_days(&value, zirv_flow_store::MAX_SIZE_DAYS)?;
         }
     }
     Ok(days)
@@ -485,14 +469,6 @@ mod tests {
                 "{bad}"
             );
         }
-    }
-
-    #[test]
-    fn a_day_is_written_as_year_month_day() {
-        assert_eq!(
-            format_day(time::macros::date!(2026 - 03 - 07)),
-            "2026-03-07"
-        );
     }
 
     #[test]
