@@ -26,7 +26,7 @@ export function ApiKeysPage() {
   return (
     <div className="page">
       <PageHeader
-        title="API keys"
+        title="API keys" breadcrumb={{ group: "Integrations", section: "API keys" }}
         lede="Keys let other systems call this workspace. Each key is limited to the scopes you give it."
       />
       <ResourceView resource={access} loadingLabel="Checking your access">

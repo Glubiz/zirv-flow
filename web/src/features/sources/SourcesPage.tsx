@@ -31,7 +31,7 @@ function Sources({ workspaceId }: { workspaceId: string }) {
   return (
     <div className="page">
       <PageHeader
-        title="Sources"
+        title="Sources" breadcrumb={{ group: "Data", section: "Sources" }}
         lede="The systems your people and their data come from. A source holds its connection settings and an encrypted credential, and offers streams you choose to read."
         actions={canManage ? <NewSourceLink workspaceId={workspaceId} /> : null}
       />

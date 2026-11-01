@@ -31,12 +31,8 @@ function Definition({ workspaceId }: { workspaceId: string }) {
     <div className="page">
       <PageHeader
         title="Contact definition"
+        breadcrumb={{ group: "Workspace", section: "Contact definition" }}
         lede="Which fields a contact has. Each field is a field from your registry, which gives it its type. A required field must be present on every contact; a field marked as an identifier also identifies the person."
-        actions={
-          <Link className="btn" to={`/w/${workspaceId}/contacts`}>
-            Back to contacts
-          </Link>
-        }
       />
       <ResourceView resource={schema} loadingLabel="Loading the definition">
         {(data) =>

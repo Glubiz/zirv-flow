@@ -17,7 +17,7 @@ export function PrivacyPage() {
   return (
     <div className="page">
       <PageHeader
-        title="Privacy"
+        title="Privacy" breadcrumb={{ group: "Compliance", section: "Privacy and erasure" }}
         lede="Erase a person on a data-subject request, export what is stored about them, and decide what happens to people nothing holds any more."
       />
       {access.status === "loading" ? <LoadingState label="Checking your access" /> : null}

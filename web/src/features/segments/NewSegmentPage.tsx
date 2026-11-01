@@ -1,4 +1,4 @@
-import { Link, useParams } from "react-router";
+import { useParams } from "react-router";
 
 import { EmptyState, PageHeader, Panel } from "../../ui";
 import { useAssistantEnabled } from "../assistant";
@@ -15,10 +15,7 @@ function NewSegment({ workspaceId }: { workspaceId: string }) {
   const assistantOn = useAssistantEnabled(workspaceId, canUseAssistant);
   return (
     <div className="page">
-      <p>
-        <Link to={`/w/${workspaceId}/segments`}>All segments</Link>
-      </p>
-      <PageHeader title="New segment" lede="Say who belongs, and watch the count as you build the rule." />
+      <PageHeader title="New segment" breadcrumb={{ group: "Audience", section: "Segments", to: `/w/${workspaceId}/segments` }} lede="Say who belongs, and watch the count as you build the rule." />
       {canWrite ? (
         <SegmentForm workspaceId={workspaceId} segment={null} canWrite assistant={assistantOn} />
       ) : (

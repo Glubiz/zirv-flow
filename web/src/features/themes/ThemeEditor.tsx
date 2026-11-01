@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate } from "react-router";
+import { useNavigate } from "react-router";
 
 import { ApiError, client, describeError, unwrap, type ErrorSummary } from "../../api";
-import { Button, Dialog, InlineError } from "../../ui";
+import { Button, Crumbs, Dialog, InlineError } from "../../ui";
 import { useLeaveGuard } from "../segments";
 import { IssueList, TabBar, blockingCount, isBlocking } from "../templates";
 import { asTokens, isArchived, readTokens, statusText, type Theme, type ThemeDetail, type ThemeTokens } from "./model";
@@ -209,7 +209,7 @@ export function ThemeEditor({ workspaceId, initial, canWrite, canAdmin, canPubli
   return (
     <div className="tp-page" ref={page}>
       <div className="tp-head">
-        <Link to={`/w/${workspaceId}/themes`}>← Themes</Link>
+        <Crumbs group="Messaging" section="Content library" to={`/w/${workspaceId}/themes`} />
         <h1 className="fl-name-read">{theme.name}</h1>
         {theme.is_default ? <span className="pill">Default</span> : null}
         <span className="pill">{statusText(theme)}</span>

@@ -14,7 +14,7 @@ export function TraitsPage() {
   return (
     <div className="page">
       <PageHeader
-        title="Fields"
+        title="Fields" breadcrumb={{ group: "Workspace", section: "Fields" }}
         lede="The fields your sources can fill in on a person. Each has one type and a rule for which source wins when they disagree."
       />
       <TraitList key={ws} workspaceId={ws} canManage={canManage} />

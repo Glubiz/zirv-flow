@@ -52,6 +52,7 @@ function Imports({ workspaceId }: { workspaceId: string }) {
     <div className="page">
       <PageHeader
         title="Imports"
+        breadcrumb={{ group: "Data", section: "Imports" }}
         lede="Load people from a CSV file: upload it, map its columns, check the mapping with a dry run, then run it. Running the same file again changes nothing."
         actions={canWrite ? <NewImportLink workspaceId={workspaceId} /> : null}
       />

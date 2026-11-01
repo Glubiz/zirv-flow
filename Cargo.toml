@@ -3,7 +3,7 @@ members = ["crates/*", "tools/loadgen", "tools/renderbench"]
 resolver = "3"
 
 [workspace.package]
-version = "0.194.0"
+version = "0.195.0"
 edition = "2024"
 authors = ["Jonathan Solskov <josj@zirv.io>"]
 license = "MIT"
@@ -44,7 +44,7 @@ metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 opentelemetry = { version = "0.33.1", default-features = false, features = ["trace"] }
 opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["http-proto", "trace", "reqwest-blocking-client"] }
 opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace"] }
-openidconnect = { version = "4.0.1", default-features = false, features = ["reqwest", "rustls-tls"] }
+openidconnect = { version = "4.1.0", default-features = false, features = ["reqwest", "rustls-tls"] }
 proptest = { version = "1", default-features = false, features = ["std"] }
 rand = "0.8.5"
 rlimit = "0.11.0"

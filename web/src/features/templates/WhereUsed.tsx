@@ -1,7 +1,5 @@
-import { Link } from "react-router";
-
 import { client, unwrap, useResource } from "../../api";
-import { EmptyState, Pill, ResourceView } from "../../ui";
+import { EmptyState, RelatedPanel, ResourceView, type RelatedGroup } from "../../ui";
 import type { TemplateUse } from "./model";
 
 export function useWhereUsed(workspaceId: string, templateId: string, reloadKey = 0) {
@@ -16,20 +14,20 @@ export function useWhereUsed(workspaceId: string, templateId: string, reloadKey 
   );
 }
 
-export function UseList({ workspaceId, uses }: { workspaceId: string; uses: readonly TemplateUse[] }) {
-  return (
-    <ul className="list-plain" aria-label="Flows that use this template">
-      {uses.map((use) => (
-        <li key={use.flow_id} className="row">
-          <Link to={`/w/${workspaceId}/flows/${use.flow_id}`}>{use.flow_name}</Link>
-          <Pill tone={use.active ? "attention" : "neutral"}>{use.active ? "Active" : "Not running now"}</Pill>
-          <span className="faint">
-            {use.flow_state}, {use.versions.length === 1 ? "version" : "versions"} {use.versions.join(", ")}
-          </span>
-        </li>
-      ))}
-    </ul>
-  );
+const FLOW_STATE_LABEL: Record<string, string> = { published: "Live", draft: "Draft", paused: "Paused", archived: "Archived" };
+
+export function usedByFlows(workspaceId: string, uses: readonly TemplateUse[]): RelatedGroup[] {
+  return [
+    {
+      label: "Used by flows",
+      items: uses.map((use) => ({
+        key: use.flow_id,
+        label: use.flow_name,
+        to: `/w/${workspaceId}/flows/${use.flow_id}`,
+        meta: FLOW_STATE_LABEL[use.flow_state] ?? use.flow_state,
+      })),
+    },
+  ];
 }
 
 /** The where-used tab: every flow with a version that names the template. */
@@ -42,7 +40,7 @@ export function WhereUsedView({ workspaceId, templateId, reloadKey }: { workspac
       isEmpty={(data) => data.length === 0}
       empty={<EmptyState title="No flow uses this template">Choose it in a send step of a flow and it shows here.</EmptyState>}
     >
-      {(data) => <UseList workspaceId={workspaceId} uses={data} />}
+      {(data) => <RelatedPanel groups={usedByFlows(workspaceId, data)} />}
     </ResourceView>
   );
 }
