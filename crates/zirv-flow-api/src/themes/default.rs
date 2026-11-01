@@ -74,7 +74,7 @@ pub(crate) async fn set_default(
         };
         let broken = broken_by(state, render, workspace, live, &candidate).await?;
         if !broken.is_empty() {
-            return Err(ApiError::theme_breaks_templates(broken));
+            return Err(ApiError::default_theme_breaks_templates(broken));
         }
     }
     let mut tx = zirv_flow_store::begin(pool).await?;
