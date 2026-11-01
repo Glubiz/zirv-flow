@@ -180,6 +180,8 @@ pub struct EnrollEntries<'a> {
 /// enrolls nobody. A refusal is a `flow.enroll` decision with outcome `skipped` and its reason.
 ///
 /// An entry whose `(flow, person, occurrence)` already enrolled is a replay and changes nothing.
+/// The flow row is locked `FOR KEY SHARE` and then the flow's enroll lock is taken (see
+/// [`lock_enrolls`]), the order every flow writer uses.
 /// A person who appears twice enters once, by their first entry. People are written in id order,
 /// so two enrolls that touch the same people take their rows in the same order. The people are
 /// locked `FOR KEY SHARE` first (see [`lock_people`]), so a merge or an erasure cannot commit
@@ -437,10 +439,20 @@ fn refusal(
     }
 }
 
+/// Serialises the enrolls of one flow against its warm-up and publish changes. The lock order is
+/// the flow row, then this advisory lock: the row is taken `FOR KEY SHARE` first, which a
+/// transaction already holding it `FOR UPDATE` (see `lock_flow`) passes without waiting. An enroll
+/// insert takes that same share lock through its foreign keys, so taking the advisory lock first
+/// would let it wait on a `lock_flow` holder that waits on this advisory lock.
 pub(super) async fn lock_enrolls(
     connection: &mut PgConnection,
     flow: Uuid,
 ) -> Result<(), StoreError> {
+    sqlx::query("SELECT 1 FROM flows WHERE id = $1 FOR KEY SHARE")
+        .bind(flow)
+        .execute(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('flow.enroll:' || $1::text, 0))")
         .bind(flow)
         .execute(connection)

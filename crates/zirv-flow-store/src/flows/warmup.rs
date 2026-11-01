@@ -943,4 +943,56 @@ mod tests {
         commit(enrolling).await.unwrap();
         resume.await.unwrap();
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_flow_writer_and_an_enroll_do_not_deadlock(pool: PgPool) {
+        let backlog = Backlog::new(&pool, true, 300).await;
+        let mut writer = begin(&pool).await.unwrap();
+        lock_flow(&mut writer, backlog.ws, backlog.flow)
+            .await
+            .unwrap();
+
+        let (ws, flow, people, other) = (
+            backlog.ws,
+            backlog.flow,
+            backlog.people.clone(),
+            pool.clone(),
+        );
+        let enrolling = tokio::spawn(async move {
+            let mut tx = begin(&other).await.unwrap();
+            let outcome = enroll(
+                &mut tx,
+                &EnrollRequest {
+                    workspace: ws,
+                    flow,
+                    version: 1,
+                    people: &people,
+                    occurrence: Occurrence {
+                        trigger: "manual",
+                        id: Uuid::now_v7(),
+                    },
+                    now: START,
+                    trace: &TraceContext::root(Cause::api("enter")),
+                },
+            )
+            .await;
+            match outcome {
+                Ok(_) => commit(tx).await.map_err(|error| format!("{error:?}")),
+                Err(error) => Err(format!("{error:?}")),
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        super::super::enroll::lock_enrolls(&mut writer, backlog.flow)
+            .await
+            .unwrap();
+        commit(writer).await.unwrap();
+
+        let done = tokio::time::timeout(std::time::Duration::from_secs(20), enrolling)
+            .await
+            .expect("the enroll finishes");
+        assert_eq!(done.unwrap(), Ok(()));
+        assert_eq!(backlog.counts(&pool).await.waiting, 24);
+    }
 }

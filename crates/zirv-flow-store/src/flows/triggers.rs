@@ -579,6 +579,8 @@ pub async fn audience_page(
 /// waits on it. A merge that committed between the resolve and the lock leaves a survivor out of
 /// the locked set; the round's locks are released with a savepoint rollback and the page is
 /// resolved again, up to [`super::enroll::LOCK_ROUNDS`] rounds, then it is a retryable race.
+///
+/// The flow row is locked first, then the enroll lock (see `lock_enrolls`), before any person.
 pub async fn lock_audience_page(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
