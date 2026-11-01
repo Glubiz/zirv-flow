@@ -18,6 +18,8 @@ use zirv_flow_core::{Cause, TraceContext, TraceId, WorkspaceId};
 
 use super::runtime::{StepJobInput, StepJobPayload};
 use super::state::FlowState;
+use super::triggers::TriggerKind;
+use super::warmup::{self, Deferred, Warmup, admission_offset};
 use crate::people::{PersonLock, lock_people_in_order};
 use crate::{GraphPoint, NewDecision, NewJob, StoreError, append_decisions, enqueue_many};
 
@@ -191,7 +193,7 @@ pub async fn enroll_entries(
         return Err(EnrollError::TooMany);
     }
     lock_enrolls(connection, request.flow).await?;
-    let (state, graph, settings) = read_version(connection, request).await?;
+    let (state, graph, settings, warm) = read_version(connection, request).await?;
     let entry = graph
         .entry()
         .ok_or(EnrollError::Corrupt("the graph has no entry node"))?
@@ -229,14 +231,32 @@ pub async fn enroll_entries(
         .map(|(entry, _)| entry.person)
         .collect();
 
+    // Entries held back by the warm-up wait in a table of their own until their turn: an entry
+    // that is waiting now has been deferred before, and goes through the checks when it is let in.
+    let waiting: HashSet<(Uuid, Uuid)> =
+        warmup::waiting_of(connection, request.flow, &pairs).await?;
+    let waits = |entry: &EnrollEntry, named: Uuid| {
+        waiting.contains(&(entry.person, entry.occurrence))
+            || waiting.contains(&(named, entry.occurrence))
+    };
+    let trigger = TriggerKind::parse(request.trigger);
+
     let mut outcome = EnrollOutcome::default();
     let mut accepted = Vec::new();
     // The trace each skip is decided on, parallel to `outcome.skipped`: the entry's own.
     let mut skipped_on = Vec::new();
-    for entry in entries {
+    let mut deferred = Vec::new();
+    // The waiting rows of the entries that leave the wait: admitted, or refused.
+    let mut released: Vec<(Uuid, Uuid)> = Vec::new();
+    for (entry, named) in by_person.iter().map(|(entry, named)| (entry, *named)) {
         let person = entry.person;
         if replayed.contains(&person) {
             outcome.replayed += 1;
+            continue;
+        }
+        let was_waiting = waits(entry, named);
+        // A paused flow keeps its waiting entries; the resume queues them again.
+        if was_waiting && state == FlowState::Paused {
             continue;
         }
         let refusal = refusal(
@@ -247,6 +267,30 @@ pub async fn enroll_entries(
             entered.get(&person).copied(),
             request.now,
         );
+        let offset = admission_offset(request.flow, person, entry.occurrence);
+        let turn = warm
+            .is_active(request.now)
+            .then(|| warm.admit_at(offset))
+            .flatten()
+            .filter(|turn| *turn > request.now);
+        if refusal.is_none()
+            && let (Some(admit_at), Some(_)) = (turn, trigger)
+        {
+            // Its turn has not come. A waiting entry already has its row and its job.
+            if !was_waiting {
+                deferred.push(Deferred {
+                    person,
+                    occurrence: entry.occurrence,
+                    offset,
+                    admit_at,
+                    trace: entry_trace(entry, request.trace),
+                });
+            }
+            continue;
+        }
+        if was_waiting {
+            released.extend([(person, entry.occurrence), (named, entry.occurrence)]);
+        }
         match refusal {
             Some(reason) => {
                 skipped_on.push(entry_trace(entry, request.trace));
@@ -254,6 +298,19 @@ pub async fn enroll_entries(
             }
             None => accepted.push(entry),
         }
+    }
+    warmup::release(connection, request.flow, &released).await?;
+    if let (Some(trigger), Some(started)) = (trigger, warm.started_at) {
+        warmup::defer(
+            connection,
+            request.workspace,
+            request.flow,
+            request.version,
+            trigger,
+            (started, warm.seconds),
+            &deferred,
+        )
+        .await?;
     }
 
     // A person with no row was erased: nothing is written that names them. The skip is still in
@@ -273,6 +330,15 @@ pub async fn enroll_entries(
             job: None,
         })
         .collect();
+    decisions.extend(deferred.iter().map(|entry| NewDecision {
+        graph: Some(GraphPoint::of_version(request.version)),
+        workspace_id: request.workspace,
+        trace: entry.trace.clone(),
+        spec: &decision_actions::FLOW_ENROLL_DEFERRED,
+        detail: None,
+        subject_ids: vec![("flow", request.flow), ("person", entry.person)],
+        job: None,
+    }));
     let mut occurrence_of = Vec::with_capacity(accepted.len());
     for entry in accepted {
         outcome.enrolled.push(Enrolled {
@@ -386,7 +452,7 @@ pub(super) async fn lock_enrolls(
 async fn read_version(
     connection: &mut PgConnection,
     request: &EnrollEntries<'_>,
-) -> Result<(FlowState, FlowGraph, FlowSettings), EnrollError> {
+) -> Result<(FlowState, FlowGraph, FlowSettings, Warmup), EnrollError> {
     let row: Option<(String, serde_json::Value, serde_json::Value)> = sqlx::query_as(
         "SELECT f.state, v.graph, v.settings FROM flows f \
          JOIN flow_versions v ON v.flow_id = f.id AND v.version = $3 \
@@ -395,7 +461,7 @@ async fn read_version(
     .bind(request.workspace.as_uuid())
     .bind(request.flow)
     .bind(request.version)
-    .fetch_optional(connection)
+    .fetch_optional(&mut *connection)
     .await
     .map_err(StoreError::query)?;
     let (state, graph, settings) = row.ok_or(EnrollError::NoSuchVersion)?;
@@ -403,7 +469,8 @@ async fn read_version(
     let graph = FlowGraph::from_value(graph).map_err(|_| EnrollError::Corrupt("the graph"))?;
     let settings =
         serde_json::from_value(settings).map_err(|_| EnrollError::Corrupt("the settings"))?;
-    Ok((state, graph, settings))
+    let warm = warmup::read(connection, request.workspace, request.flow).await?;
+    Ok((state, graph, settings, warm))
 }
 
 /// When each of `people` last entered the flow.

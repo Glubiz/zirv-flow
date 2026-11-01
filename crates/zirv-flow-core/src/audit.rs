@@ -53,6 +53,8 @@ pub const ACTIONS: &[&str] = &[
     "flow.started",
     "flow.test_run",
     "flow.updated",
+    "flow.warmup_changed",
+    "flow.warmup_opened",
     "forwarding.redriven",
     "forwarding.rule_created",
     "forwarding.rule_deleted",

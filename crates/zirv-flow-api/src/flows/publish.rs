@@ -16,7 +16,9 @@ use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::flow::{FlowGraph, FlowSettings, NodeKind, Trigger};
 use zirv_flow_store::{Flow, FlowAction, FlowVersion};
 
-use super::crud::{FlowBody, FlowDetailBody, FlowVersionBody, check_flow, issues_schema};
+use super::crud::{
+    FlowBody, FlowDetailBody, FlowVersionBody, check_flow, flow_detail, issues_schema,
+};
 use super::{draft_of, flow_error, issue_problems, operator_trace};
 use crate::AppState;
 use crate::admin;
@@ -284,7 +286,7 @@ async fn lifecycle(
             "flow.paused",
         ),
         FlowAction::Resume => (
-            zirv_flow_store::resume_flow(&mut tx, workspace, id, &trace).await,
+            zirv_flow_store::resume_flow(&mut tx, &state.clock, workspace, id, &trace).await,
             "flow.resumed",
         ),
         FlowAction::Archive => (
@@ -341,7 +343,7 @@ pub(crate) async fn pause(
         FlowAction::Pause,
     )
     .await?;
-    Ok(Json(FlowDetailBody::from(&flow)))
+    Ok(Json(flow_detail(&state, workspace.id, &flow).await?))
 }
 
 /// Resumes a paused flow. Records a `flow.resume` decision and is audited as `flow.resumed`.
@@ -377,7 +379,7 @@ pub(crate) async fn resume(
         FlowAction::Resume,
     )
     .await?;
-    Ok(Json(FlowDetailBody::from(&flow)))
+    Ok(Json(flow_detail(&state, workspace.id, &flow).await?))
 }
 
 /// Archives a flow. Nothing is deleted: the versions stay readable. Records a `flow.archive`
@@ -414,7 +416,7 @@ pub(crate) async fn archive(
         FlowAction::Archive,
     )
     .await?;
-    Ok(Json(FlowDetailBody::from(&flow)))
+    Ok(Json(flow_detail(&state, workspace.id, &flow).await?))
 }
 
 #[cfg(test)]
@@ -449,6 +451,7 @@ mod tests {
             created_by: None,
             created_at: OffsetDateTime::UNIX_EPOCH,
             updated_at: OffsetDateTime::UNIX_EPOCH,
+            warmup: zirv_flow_store::Warmup::default(),
         };
 
         for state in [FlowState::Draft, FlowState::Published, FlowState::Paused] {

@@ -201,6 +201,27 @@ pub(super) async fn merge_people(
     .await
     .map_err(StoreError::query)?;
 
+    // A loser's warm-up waiting entries wait for the survivor now. The queued job still names the
+    // loser, and the enroll resolves it to the survivor and finds the entry here. An entry the
+    // survivor already waits for is the same one.
+    sqlx::query(
+        "WITH moved AS ( \
+             DELETE FROM flow_warmup_waiting WHERE workspace_id = $1 AND person_id = ANY($2) \
+             RETURNING *) \
+         INSERT INTO flow_warmup_waiting \
+            (workspace_id, flow_id, person_id, occurrence_id, flow_version, trigger, \
+             admission_offset, trace_id, cause_kind, cause_id, created_at) \
+         SELECT workspace_id, flow_id, $3, occurrence_id, flow_version, trigger, \
+                admission_offset, trace_id, cause_kind, cause_id, created_at FROM moved \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(workspace.as_uuid())
+    .bind(losers)
+    .bind(survivor)
+    .execute(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+
     // Saved preview people move in the same transaction; a template that already keeps the
     // survivor just loses the loser's row.
     crate::templates::move_to_survivor(connection, workspace, losers, survivor).await?;
@@ -368,6 +389,8 @@ async fn lock_merged_and_survivor(
 ///   transaction ([`merge_people`]), not here: the two were one human, so a `once` flow that
 ///   either entered stays entered from the moment of the merge. The rewrite writes no flow row
 ///   of that table.
+/// - `flow_warmup_waiting` is **moved** to the survivor in the merge transaction, like the flow
+///   entries: a waiting entry is not dropped, and its queued job resolves to the survivor.
 /// - `enrollments` is **kept on the old id**. The in-flight ones were exited in the merge
 ///   transaction (reason `merge`) and later enrolls follow `merged_into`, so what is left are
 ///   ended enrollments, which are history of the person that was enrolled, and re-pointing them
@@ -1583,6 +1606,59 @@ mod tests {
             [message],
             "the survivor's log reads through person_merges"
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_merge_moves_the_losers_warm_up_waiting_entries_to_the_survivor(pool: PgPool) {
+        use crate::flows::tests_support::{create, publish};
+        let ws = workspace(&pool, "one").await;
+        let survivor = apply_one(
+            &pool,
+            ws,
+            record("crm", "1", &[("external:user_id", "u")], json!({})),
+        )
+        .await;
+        let loser = apply_one(
+            &pool,
+            ws,
+            record("web", "2", &[("anonymous_id", "a")], json!({})),
+        )
+        .await;
+        let flow = create(&pool, ws, "Warming").await;
+        publish(&pool, ws, flow.id).await.unwrap();
+        let occurrence = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO flow_warmup_waiting (workspace_id, flow_id, person_id, occurrence_id, \
+                flow_version, trigger, admission_offset, trace_id, cause_kind, cause_id) \
+             VALUES ($1, $2, $3, $4, 1, 'manual', 1, gen_random_uuid(), 'api', 't')",
+        )
+        .bind(ws.as_uuid())
+        .bind(flow.id)
+        .bind(loser)
+        .bind(occurrence)
+        .execute(&pool)
+        .await
+        .unwrap();
+        apply_one(
+            &pool,
+            ws,
+            record(
+                "app",
+                "3",
+                &[("external:user_id", "u"), ("anonymous_id", "a")],
+                json!({}),
+            ),
+        )
+        .await;
+
+        let waiting: Vec<(Uuid, Uuid)> =
+            sqlx::query_as("SELECT person_id, occurrence_id FROM flow_warmup_waiting")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+
+        assert_eq!(waiting, [(survivor, occurrence)]);
     }
 
     #[sqlx::test]

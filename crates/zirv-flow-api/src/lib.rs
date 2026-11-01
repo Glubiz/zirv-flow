@@ -267,6 +267,14 @@ fn routes() -> Router<AppState> {
             post(flows::publish::archive),
         )
         .route(
+            "/api/v1/workspaces/{ws}/flows/{id}/warmup",
+            put(flows::warmup::set),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/flows/{id}/warmup/open",
+            post(flows::warmup::open),
+        )
+        .route(
             "/api/v1/workspaces/{ws}/flows/{id}/enrollments",
             get(flows::inspector::list).post(flows::triggers::enroll_person),
         )

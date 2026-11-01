@@ -74,6 +74,7 @@ mod tests {
         ("FLOW_ARCHIVED", Test("the_lifecycle_moves_through_its_states_and_records_a_decision_for_each")),
         ("FLOW_ENROLLED", Test(SEND_PATH)),
         ("FLOW_ENROLL_SKIPPED", Test("once_refuses_a_person_who_entered_before_even_after_the_enrollment_ended")),
+        ("FLOW_ENROLL_DEFERRED", Test("a_published_flow_spreads_a_backlog_over_its_window")),
         ("FLOW_ENROLLMENT_COMPLETED", Test(SEND_PATH)),
         ("FLOW_ENROLLMENT_EXITED", Test("an_exit_works_in_batches_and_leaves_ended_enrollments_alone")),
         ("FLOW_ENROLLMENT_FAILED", Test("a_step_that_keeps_failing_is_retried_and_ends_failed_with_its_error_visible")),

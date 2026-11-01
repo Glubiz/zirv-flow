@@ -193,6 +193,7 @@ registry! {
     FLOW_ARCHIVED: "flow.archive", "archived", Reason::None, OPERATOR, &["flow"];
     FLOW_ENROLLED: "flow.enroll", "enrolled", Reason::None, ANY, &["flow", "person", "enrollment"];
     FLOW_ENROLL_SKIPPED: "flow.enroll", "skipped", Reason::Detail("why the person was not enrolled"), ANY, &["flow", "person"];
+    FLOW_ENROLL_DEFERRED: "flow.enroll", "deferred", Reason::Fixed("warm_up"), ANY, &["flow", "person"];
     FLOW_ENROLLMENT_COMPLETED: "flow.enrollment", "completed", Reason::None, ANY, FLOW;
     FLOW_ENROLLMENT_EXITED: "flow.enrollment", "exited", Reason::Detail("why the enrollment ended"), ANY, FLOW;
     FLOW_ENROLLMENT_FAILED: "flow.enrollment", "failed", Reason::Detail("the failure code"), ANY, FLOW;

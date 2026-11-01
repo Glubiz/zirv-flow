@@ -436,6 +436,85 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_warmup_is_changed_by_a_publisher_and_opened_by_an_admin_and_both_are_audited(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let f = fixture(&pool).await;
+            let flow = published(&f, "Welcome").await;
+            let setting = f.flows(&format!("/{flow}/warmup"));
+            let open = f.flows(&format!("/{flow}/warmup/open"));
+            let body = Some(json!({"enabled": true, "seconds": 600}));
+
+            // The flow carries its warm-up: on, five minutes, started at the publish.
+            let read = f.lead("GET", &format!("/{flow}"), None).await;
+            let warmup = &read.body["warmup"];
+            assert_eq!(
+                (&warmup["enabled"], &warmup["seconds"]),
+                (&json!(true), &json!(300))
+            );
+            assert!(warmup["started_at"].is_string() && warmup["ends_at"].is_string());
+            assert_eq!(warmup["opened_at"], Value::Null);
+            assert_eq!(
+                (&warmup["admitted"], &warmup["waiting"]),
+                (&json!(0), &json!(0))
+            );
+
+            for (who, auth) in [
+                ("write key", Auth::Key(&f.write)),
+                ("read key", Auth::Key(&f.read)),
+                ("member", Auth::Session(&f.member)),
+            ] {
+                let reply = f.call("PUT", &setting, body.clone(), auth).await;
+                assert_eq!(reply.status, StatusCode::FORBIDDEN, "set as {who}");
+            }
+            for (who, auth) in [
+                ("publish key", Auth::Key(&f.publish)),
+                ("write key", Auth::Key(&f.write)),
+                ("member", Auth::Session(&f.member)),
+            ] {
+                let reply = f.call("POST", &open, None, auth).await;
+                assert_eq!(reply.status, StatusCode::FORBIDDEN, "open as {who}");
+            }
+
+            let changed = f.call("PUT", &setting, body, Auth::Key(&f.publish)).await;
+            assert_eq!(changed.status, StatusCode::OK, "{:?}", changed.body);
+            assert_eq!(changed.body["warmup"]["seconds"], 600);
+            let too_short = f
+                .lead(
+                    "PUT",
+                    &format!("/{flow}/warmup"),
+                    Some(json!({"enabled": true, "seconds": 59})),
+                )
+                .await;
+            let too_long = f
+                .lead(
+                    "PUT",
+                    &format!("/{flow}/warmup"),
+                    Some(json!({"enabled": true, "seconds": 86_401})),
+                )
+                .await;
+            assert_eq!(too_short.status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(too_long.status, StatusCode::UNPROCESSABLE_ENTITY);
+
+            let opened = f.call("POST", &open, None, Auth::Session(&f.lead)).await;
+            assert_eq!(opened.status, StatusCode::OK, "{:?}", opened.body);
+            assert!(opened.body["warmup"]["opened_at"].is_string());
+
+            let audits: Vec<String> = sqlx::query_scalar(
+                "SELECT action FROM audit_log WHERE action LIKE 'flow.warmup%' ORDER BY id",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(audits, ["flow.warmup_changed", "flow.warmup_opened"]);
+            crate::test_support::assert_audit_log_holds_ids_only(&pool).await;
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_flow_is_drafted_validated_published_paused_resumed_and_archived(pool: PgPool) {
         zirv_flow_store::decision_testing::checked(pool, |pool| async move {
             let f = fixture(&pool).await;

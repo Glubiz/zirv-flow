@@ -1595,7 +1595,8 @@ mod tests {
                 version: 1,
                 trigger: "manual",
                 entries: &entries,
-                now: OffsetDateTime::now_utc(),
+                // After the flow's warm-up window, so the page is admitted at once.
+                now: OffsetDateTime::now_utc() + time::Duration::hours(1),
                 trace: &TraceContext::root(Cause::api("enroll")),
             },
         )
