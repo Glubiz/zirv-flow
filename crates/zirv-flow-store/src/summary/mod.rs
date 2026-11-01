@@ -10,7 +10,7 @@ pub use rollup::{COMMIT_MARGIN, refresh_workspace_summary, summary_workspaces};
 
 /// Rows and helpers the tests of both halves seed with.
 #[cfg(test)]
-pub(super) mod support {
+pub(crate) mod support {
     use serde_json::json;
     use sqlx::PgPool;
     use time::OffsetDateTime;

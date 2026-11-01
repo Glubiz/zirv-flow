@@ -68,9 +68,11 @@ CREATE INDEX IF NOT EXISTS messages_sent_completed_idx ON messages (workspace_id
 CREATE INDEX IF NOT EXISTS step_executions_workspace_started_idx
     ON step_executions (workspace_id, started_at);
 
--- The rollup job, as an instance-level schedule: every five minutes, first at the next tick.
+-- The rollup job, as an instance-level schedule: every five minutes, first at the next five-minute mark.
 INSERT INTO schedules (id, workspace_id, kind, cron, timezone, next_run_at, payload, enabled)
-SELECT gen_random_uuid(), NULL, 'summary.rollup', '*/5 * * * *', 'UTC', now(), '{}'::jsonb, true
+SELECT gen_random_uuid(), NULL, 'summary.rollup', '*/5 * * * *', 'UTC',
+       date_trunc('hour', now()) + (floor(extract(minute from now()) / 5) + 1) * interval '5 minutes',
+       '{}'::jsonb, true
 WHERE NOT EXISTS (
     SELECT 1 FROM schedules WHERE kind = 'summary.rollup' AND workspace_id IS NULL
 );
