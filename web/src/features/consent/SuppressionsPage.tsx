@@ -20,7 +20,7 @@ export function SuppressionsPage() {
     <div className="page">
       <ConsentNav workspaceId={ws} />
       <PageHeader
-        title="Suppressions"
+        title="Suppressions" breadcrumb={{ group: "Audience", section: "Suppressions" }}
         lede="Addresses and numbers that never receive a message, whatever a person has chosen: bounces, complaints, manual blocks and erased people. Only a one-way hash of each is kept."
       />
       <SuppressionList key={ws} workspaceId={ws} canManage={canManage} />

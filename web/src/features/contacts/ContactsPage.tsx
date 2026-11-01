@@ -38,6 +38,7 @@ function Contacts({ workspaceId }: { workspaceId: string }) {
     <div className="page">
       <PageHeader
         title="Contacts"
+        breadcrumb={{ group: "Audience", section: "Contacts" }}
         lede="People you keep in zirv flow itself, for companies without another customer system. A contact is a person with a record of its own, identified by your key."
         actions={
           <>

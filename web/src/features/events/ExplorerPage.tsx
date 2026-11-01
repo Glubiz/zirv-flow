@@ -75,7 +75,7 @@ export function ExplorerPage() {
   return (
     <div className="page">
       <PageHeader
-        title="Event explorer"
+        title="Event explorer" breadcrumb={{ group: "Insights", section: "Explorer" }}
         lede="Count, break down and list the stored events of a time range. Every query is bounded by time and cut off if it runs long."
       />
       <EventsNav workspaceId={ws} />

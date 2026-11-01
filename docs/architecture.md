@@ -3510,7 +3510,10 @@ they were ruled as their capabilities were added to the plan.
   classes are what decide how a layout breaks, product lists age, and a gap found before the block set
   is frozen costs a block change, not a migration. (11.5, 11.6.) **Deferred by the operator
   (2026-10-22):** the manual real-client review runs once the product is feature-complete and the
-  operator starts testing (#253); #238 merges on the automated golden tests alone.
+  operator starts testing (#253); #238 merges on the automated golden tests alone. **Deferred past
+  1.0 by the operator (2026-10-31):** v1.0 ships on the automated golden tests; the real-client
+  review of both golden sets (MJML and blocks) runs in the first release after 1.0, recording each
+  client, its version and the result here, and a defect it finds becomes a block or renderer fix.
 - **OQ-32:** Consent dimensions are a per-workspace catalog with enumerated value keys, and topics become
   the built-in `topic` dimension. The policy is an ordered, versioned list of deny-only rules over the M4
   AST, with a built-in `recorded consent` rule and new `consent` and `messages` leaves. Reason: a catalog

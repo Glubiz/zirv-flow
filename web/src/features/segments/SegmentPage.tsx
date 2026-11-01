@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { Link, useParams } from "react-router";
+import { useEffect, useRef, useState } from "react";
+import { Link, useNavigate, useParams } from "react-router";
 
 import { client, describeError, unwrap, useResource, type components, type ErrorSummary } from "../../api";
 import {
@@ -12,14 +12,20 @@ import {
   LoadingState,
   PageHeader,
   Panel,
+  RelatedPanel,
   ResourceView,
   shortId,
+  TabNav,
+  useTabParam,
 } from "../../ui";
 import { useAssistantEnabled } from "../assistant";
 import { useSegmentAccess } from "./access";
 import { AssistantExplanation } from "./AssistantExplanation";
 import { fromDefinition } from "./ast";
+import { useCatalog } from "./catalog";
+import { namesOf } from "./describe";
 import { cadenceLabel, causeLabel } from "./labels";
+import { builtFrom, describeDefinition } from "./overview";
 import { DataAgeNote, personLabel } from "./LiveCount";
 import { DefinitionView, SegmentForm } from "./SegmentForm";
 import { usePaged } from "./usePaged";
@@ -33,13 +39,11 @@ export const REFRESH_RELOAD_MS = 2000;
 const PAGE_SIZE = 50;
 
 const TABS = [
-  { id: "definition", label: "Definition" },
-  { id: "members", label: "Members" },
+  { id: "overview", label: "Overview" },
+  { id: "rules", label: "Rules" },
+  { id: "people", label: "People" },
   { id: "history", label: "History" },
-  { id: "versions", label: "Versions" },
-] as const;
-
-type TabId = (typeof TABS)[number]["id"];
+];
 
 export function SegmentPage() {
   const { ws = "", id = "" } = useParams();
@@ -55,17 +59,14 @@ function SegmentView({ workspaceId, segmentId }: { workspaceId: string; segmentI
       unwrap(client.GET("/api/v1/workspaces/{ws}/segments/{id}", { params: { path: { ws: workspaceId, id: segmentId } } })),
     [workspaceId, segmentId],
   );
-  const [tab, setTab] = useState<TabId>("definition");
-  const back = (
-    <p>
-      <Link to={`/w/${workspaceId}/segments`}>All segments</Link>
-    </p>
-  );
+  const navigate = useNavigate();
+  const { active: tab, hrefOf } = useTabParam(TABS);
+  const crumb = { group: "Audience", section: "Segments", to: `/w/${workspaceId}/segments` };
 
   if (segment.status === "loading") {
     return (
       <div className="page">
-        {back}
+        <PageHeader title="Segment" breadcrumb={crumb} />
         <LoadingState label="Loading the segment" />
       </div>
     );
@@ -73,7 +74,7 @@ function SegmentView({ workspaceId, segmentId }: { workspaceId: string; segmentI
   if (segment.status === "error") {
     return (
       <div className="page">
-        {back}
+        <PageHeader title="Segment" breadcrumb={crumb} />
         <Panel flush>
           <ErrorState {...describeError(segment.error)} onRetry={segment.reload} />
         </Panel>
@@ -82,34 +83,26 @@ function SegmentView({ workspaceId, segmentId }: { workspaceId: string; segmentI
   }
   const data = segment.data;
 
-  function onKey(event: KeyboardEvent<HTMLDivElement>) {
-    const at = TABS.findIndex((entry) => entry.id === tab);
-    const step = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
-    if (step === 0) return;
-    event.preventDefault();
-    const next = TABS[(at + step + TABS.length) % TABS.length];
-    if (next) {
-      setTab(next.id);
-      document.getElementById(`segment-tab-${next.id}`)?.focus();
-    }
-  }
-
   return (
     <div className="page">
-      {back}
       <PageHeader
         title={data.name}
+        breadcrumb={crumb}
+        status={`${data.member_count} ${data.member_count === 1 ? "person" : "people"}`}
         lede={data.description || undefined}
+        primary={
+          canWrite ? (
+            <Button variant="primary" onClick={() => void navigate(hrefOf("rules"))}>
+              Edit rules
+            </Button>
+          ) : null
+        }
+        secondary={canWrite ? <RefreshButton workspaceId={workspaceId} segmentId={segmentId} onReload={segment.reload} /> : null}
         actions={
-          canWrite || assistantOn ? (
-            <div className="row">
-              {assistantOn ? (
-                <Button onClick={() => setExplaining((open) => !open)} aria-expanded={explaining}>
-                  {explaining ? "Hide the explanation" : "Explain this segment"}
-                </Button>
-              ) : null}
-              {canWrite ? <RefreshButton workspaceId={workspaceId} segmentId={segmentId} onReload={segment.reload} /> : null}
-            </div>
+          assistantOn ? (
+            <Button onClick={() => setExplaining((open) => !open)} aria-expanded={explaining}>
+              {explaining ? "Hide the explanation" : "Explain this segment"}
+            </Button>
           ) : null
         }
       />
@@ -140,24 +133,9 @@ function SegmentView({ workspaceId, segmentId }: { workspaceId: string; segmentI
           onClose={() => setExplaining(false)}
         />
       ) : null}
-      <div className="subnav" role="tablist" aria-label="Segment" onKeyDown={onKey}>
-        {TABS.map((entry) => (
-          <button
-            key={entry.id}
-            type="button"
-            role="tab"
-            id={`segment-tab-${entry.id}`}
-            aria-selected={tab === entry.id}
-            aria-controls={`segment-panel-${entry.id}`}
-            tabIndex={tab === entry.id ? 0 : -1}
-            aria-current={tab === entry.id ? "page" : undefined}
-            onClick={() => setTab(entry.id)}
-          >
-            {entry.label}
-          </button>
-        ))}
-      </div>
-      <div role="tabpanel" id="segment-panel-definition" aria-labelledby="segment-tab-definition" hidden={tab !== "definition"}>
+      <TabNav label="Segment sections" tabs={TABS} />
+      {tab === "overview" ? <Overview workspaceId={workspaceId} segment={data} canWrite={canWrite} editHref={hrefOf("rules")} /> : null}
+      <div hidden={tab !== "rules"}>
         <SegmentForm
           workspaceId={workspaceId}
           segment={data}
@@ -166,21 +144,31 @@ function SegmentView({ workspaceId, segmentId }: { workspaceId: string; segmentI
           onSaved={() => segment.reload()}
         />
       </div>
-      {tab === "members" ? (
-        <div role="tabpanel" id="segment-panel-members" aria-labelledby="segment-tab-members">
-          <MembersPanel workspaceId={workspaceId} segmentId={segmentId} />
-        </div>
-      ) : null}
+      {tab === "people" ? <MembersPanel workspaceId={workspaceId} segmentId={segmentId} /> : null}
       {tab === "history" ? (
-        <div role="tabpanel" id="segment-panel-history" aria-labelledby="segment-tab-history">
+        <div className="stack">
           <HistoryPanel workspaceId={workspaceId} segmentId={segmentId} />
-        </div>
-      ) : null}
-      {tab === "versions" ? (
-        <div role="tabpanel" id="segment-panel-versions" aria-labelledby="segment-tab-versions">
           <VersionsPanel workspaceId={workspaceId} segment={data} />
         </div>
       ) : null}
+    </div>
+  );
+}
+
+function Overview({ workspaceId, segment, canWrite, editHref }: { workspaceId: string; segment: Segment; canWrite: boolean; editHref: string }) {
+  const catalog = useCatalog(workspaceId);
+  const lists = catalog.status === "ready" ? catalog.catalog.lists : [];
+  const segments = catalog.status === "ready" ? catalog.catalog.segments : [];
+  const sentence = describeDefinition(fromDefinition(segment.current.definition), namesOf(lists, segments));
+  return (
+    <div className="detail-grid">
+      <Panel title="Who is in it">
+        <div className="stack-tight">
+          <p>{sentence}</p>
+          {canWrite ? <Link to={editHref}>Edit rules</Link> : null}
+        </div>
+      </Panel>
+      <RelatedPanel groups={builtFrom(segment.current.deps, workspaceId, lists, segments, segment.id)} />
     </div>
   );
 }

@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Route, Routes } from "react-router";
 import { describe, expect, it } from "vitest";
@@ -28,12 +28,13 @@ function base(kind: "writer" | "reader" = "writer"): Record<string, Handler> {
     ...catalogRoutes(),
     [`POST ${WS}/segments/preview`]: () => json(previewBody()),
     [`GET ${SEGMENT}`]: () => json(detail()),
+    [`GET ${SEGMENT}/history`]: () => json({ items: [], data_age: LIVE_AGE }),
   };
 }
 
-function mountPage() {
+function mountPage(search = "?tab=rules") {
   return renderRoute(
-    `/w/ws1/segments/${SEGMENT_ID}`,
+    `/w/ws1/segments/${SEGMENT_ID}${search}`,
     "/w/:ws/*",
     <Routes>
       <Route path="segments/:id" element={<SegmentPage />} />
@@ -47,7 +48,7 @@ function bodyOf(calls: Call[], method: string, path: string): unknown {
 }
 
 async function openTab(user: ReturnType<typeof userEvent.setup>, name: string) {
-  await user.click(await screen.findByRole("tab", { name }));
+  await user.click(await screen.findByRole("link", { name }));
 }
 
 describe("saving a segment", () => {
@@ -134,7 +135,7 @@ describe("saving a segment", () => {
     expect(screen.queryByText("Unsaved changes")).not.toBeInTheDocument();
     expect(screen.getByText("Version 2 is saved.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
-    await user.click(screen.getByRole("link", { name: "All segments" }));
+    await user.click(screen.getByRole("link", { name: "Segments" }));
     expect(await screen.findByText("The segment list was reached")).toBeInTheDocument();
   });
 
@@ -180,14 +181,14 @@ describe("saving a segment", () => {
 
     const name = await screen.findByLabelText("Name");
     await user.type(name, "!");
-    await user.click(screen.getByRole("link", { name: "All segments" }));
+    await user.click(screen.getByRole("link", { name: "Segments" }));
 
     const dialog = await screen.findByRole("dialog", { name: "Leave without saving?" });
     await user.click(within(dialog).getByRole("button", { name: "Keep editing" }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(screen.queryByText("The segment list was reached")).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("link", { name: "All segments" }));
+    await user.click(screen.getByRole("link", { name: "Segments" }));
     await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Leave without saving" }));
     expect(await screen.findByText("The segment list was reached")).toBeInTheDocument();
   });
@@ -198,7 +199,7 @@ describe("saving a segment", () => {
     mountPage();
 
     await screen.findByLabelText("Name");
-    await user.click(screen.getByRole("link", { name: "All segments" }));
+    await user.click(screen.getByRole("link", { name: "Segments" }));
 
     expect(await screen.findByText("The segment list was reached")).toBeInTheDocument();
   });
@@ -220,15 +221,61 @@ describe("saving a segment", () => {
 });
 
 describe("segment page", () => {
-  it("shows the header facts and the four tabs", async () => {
+  it("shows the header facts and the four tabs, with Overview first", async () => {
     mockApi(base());
-    mountPage();
+    mountPage("");
 
     expect(await screen.findByRole("heading", { name: "Big spenders" })).toBeInTheDocument();
     expect(screen.getByText("re-evaluated every hour")).toBeInTheDocument();
     expect(screen.getByText("7")).toBeInTheDocument();
-    expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["Definition", "Members", "History", "Versions"]);
-    expect(screen.getByRole("tab", { name: "Definition" })).toHaveAttribute("aria-selected", "true");
+    const tabs = within(screen.getByRole("navigation", { name: "Segment sections" })).getAllByRole("link");
+    expect(tabs.map((tab) => tab.textContent)).toEqual(["Overview", "Rules", "People", "History"]);
+    expect(screen.getByRole("link", { name: "Overview" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("navigation", { name: "Breadcrumb" })).toHaveTextContent("Audience/Segments");
+    expect(screen.queryByText("All segments")).not.toBeInTheDocument();
+  });
+
+  it("describes who is in the segment and lists what it is built from", async () => {
+    mockApi({
+      ...base(),
+      [`GET ${SEGMENT}`]: () => json(detail({}, { deps: { traits: ["city"], lists: [], segments: [], consent: [] } })),
+    });
+    mountPage("");
+
+    const panel = await screen.findByRole("region", { name: "Who is in it" });
+    expect(within(panel).getByText(/^People who match all of these: /)).toBeInTheDocument();
+    const related = screen.getByRole("complementary", { name: "Related" });
+    expect(within(related).getByText("Built from")).toBeInTheDocument();
+    expect(within(related).getByText("city")).toBeInTheDocument();
+  });
+
+  it("draws no Related panel when the version reads nothing", async () => {
+    mockApi(base());
+    mountPage("");
+
+    await screen.findByRole("region", { name: "Who is in it" });
+    expect(screen.queryByRole("complementary", { name: "Related" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the tab in the URL and opens Overview for an unknown tab", async () => {
+    mockApi({ ...base(), [`GET ${SEGMENT}/members`]: () => json({ items: [], data_age: LIVE_AGE }) });
+    const user = userEvent.setup();
+    const view = mountPage("?tab=nonsense");
+
+    expect(await screen.findByRole("link", { name: "Overview" })).toHaveAttribute("aria-current", "page");
+    await user.click(screen.getByRole("link", { name: "People" }));
+    expect(view.router.state.location.search).toBe("?tab=people");
+    await act(() => view.router.navigate(-1));
+    await waitFor(() => expect(screen.getByRole("link", { name: "Overview" })).toHaveAttribute("aria-current", "page"));
+  });
+
+  it("hides Edit rules from someone who cannot write", async () => {
+    mockApi(base("reader"));
+    mountPage("");
+
+    await screen.findByRole("region", { name: "Who is in it" });
+    expect(screen.queryByRole("button", { name: "Edit rules" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Edit rules" })).not.toBeInTheDocument();
   });
 
   it("shows a loading state and then an error with a retry", async () => {
@@ -254,18 +301,6 @@ describe("segment page", () => {
 
     expect(await screen.findByText("Loading the segment")).toBeInTheDocument();
   });
-
-  it("moves between tabs with the arrow keys", async () => {
-    mockApi({ ...base(), [`GET ${SEGMENT}/members`]: () => json({ items: [], data_age: LIVE_AGE }) });
-    const user = userEvent.setup();
-    mountPage();
-
-    (await screen.findByRole("tab", { name: "Definition" })).focus();
-    await user.keyboard("{ArrowRight}");
-
-    expect(screen.getByRole("tab", { name: "Members" })).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByRole("tab", { name: "Members" })).toHaveFocus();
-  });
 });
 
 function memberItem(n: number) {
@@ -287,7 +322,7 @@ describe("members tab", () => {
     });
     const user = userEvent.setup();
     mountPage();
-    await openTab(user, "Members");
+    await openTab(user, "People");
 
     const table = await screen.findByRole("table", { name: "People in this segment" });
     expect(within(table).getByRole("link", { name: "person1@example.test" })).toHaveAttribute(
@@ -309,13 +344,13 @@ describe("members tab", () => {
     mockApi({ ...base(), [`GET ${SEGMENT}/members`]: () => new Promise<Response>(() => undefined) });
     const user = userEvent.setup();
     const first = mountPage();
-    await openTab(user, "Members");
+    await openTab(user, "People");
     expect(await screen.findByText("Loading members")).toBeInTheDocument();
     first.unmount();
 
     mockApi({ ...base(), [`GET ${SEGMENT}/members`]: () => json({ items: [], data_age: LIVE_AGE }) });
     mountPage();
-    await openTab(user, "Members");
+    await openTab(user, "People");
     expect(await screen.findByText("No one is in this segment")).toBeInTheDocument();
   });
 
@@ -330,7 +365,7 @@ describe("members tab", () => {
     });
     const user = userEvent.setup();
     mountPage();
-    await openTab(user, "Members");
+    await openTab(user, "People");
 
     await user.click(await screen.findByRole("button", { name: "Try again" }));
     expect(await screen.findByRole("link", { name: "person1@example.test" })).toBeInTheDocument();
@@ -408,7 +443,7 @@ describe("versions tab", () => {
     });
     const user = userEvent.setup();
     mountPage();
-    await openTab(user, "Versions");
+    await openTab(user, "History");
 
     const table = await screen.findByRole("table", { name: "Every saved version, newest first" });
     expect(within(table).getAllByRole("row")).toHaveLength(3);
@@ -426,19 +461,19 @@ describe("versions tab", () => {
     mockApi({ ...base(), [`GET ${SEGMENT}/versions`]: () => new Promise<Response>(() => undefined) });
     const user = userEvent.setup();
     const first = mountPage();
-    await openTab(user, "Versions");
+    await openTab(user, "History");
     expect(await screen.findByText("Loading versions")).toBeInTheDocument();
     first.unmount();
 
     mockApi({ ...base(), [`GET ${SEGMENT}/versions`]: () => json([]) });
     const second = mountPage();
-    await openTab(user, "Versions");
+    await openTab(user, "History");
     expect(await screen.findByText("No versions")).toBeInTheDocument();
     second.unmount();
 
     mockApi({ ...base(), [`GET ${SEGMENT}/versions`]: () => problem(500, "Internal Server Error", "internal error") });
     mountPage();
-    await openTab(user, "Versions");
+    await openTab(user, "History");
     expect(await screen.findByText("Internal Server Error")).toBeInTheDocument();
   });
 });

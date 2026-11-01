@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router";
+import { useNavigate, useParams } from "react-router";
 
 import { client, describeError, unwrap, unwrapEmpty, useResource, type ErrorSummary } from "../../api";
 import { Button, Dialog, EmptyState, formatDateTime, InlineError, Panel, Pill, ResourceView } from "../../ui";
@@ -27,9 +27,6 @@ function Loaded({ workspaceId, id }: { workspaceId: string; id: string }) {
   );
   return (
     <div className="page">
-      <p>
-        <Link to={`/w/${workspaceId}/sending-domains`}>Back to sending domains</Link>
-      </p>
       <ResourceView resource={domain} loadingLabel="Loading the sending domain">
         {(data) => <DomainView workspaceId={workspaceId} initial={data} />}
       </ResourceView>

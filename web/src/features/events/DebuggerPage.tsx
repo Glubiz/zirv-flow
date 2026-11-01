@@ -39,7 +39,7 @@ export function DebuggerPage() {
   return (
     <div className="page">
       <PageHeader
-        title="Event debugger"
+        title="Event debugger" breadcrumb={{ group: "Data", section: "Events" }}
         lede="Events as they are decided, newest first. Nothing is kept for the page: it shows what arrives while it is open."
       />
       <EventsNav workspaceId={ws} />

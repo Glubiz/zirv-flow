@@ -163,7 +163,7 @@ function PolicyView({ workspaceId }: { workspaceId: string }) {
     <div className="page">
       <ConsentNav workspaceId={workspaceId} />
       <PageHeader
-        title="Consent policy"
+        title="Consent policy" breadcrumb={{ group: "Audience", section: "Consent policy" }}
         lede="The rules that can stop a send even when a person has consented. Edit the draft, save it, and publish it when it is ready."
       />
       <div className="policy-bar">

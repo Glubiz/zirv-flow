@@ -1,8 +1,7 @@
-import { useId, type KeyboardEvent } from "react";
-import { Link, useParams, useSearchParams } from "react-router";
+import { Link, useParams } from "react-router";
 
 import { client, describeError, unwrap, useResource, type components } from "../../api";
-import { EmptyState, ErrorState, formatDateTime, HiddenValue, kindLabel, LoadingState, PageHeader, Panel, shortId } from "../../ui";
+import { EmptyState, ErrorState, formatDateTime, HiddenValue, kindLabel, LoadingState, PageHeader, Panel, shortId, TabNav, useTabParam } from "../../ui";
 import { ConsentPanel } from "../consent";
 import { PersonListsPanel } from "../lists";
 import { useWorkspaceAccess } from "../members";
@@ -26,22 +25,16 @@ function ProfileView({ workspaceId, requestedId }: { workspaceId: string; reques
       unwrap(client.GET("/api/v1/workspaces/{ws}/people/{id}", { params: { path: { ws: workspaceId, id: requestedId } } })),
     [workspaceId, requestedId],
   );
-  const [params, setParams] = useSearchParams();
-  const tab: PersonTab = params.get("tab") === "messages" ? "messages" : "profile";
-  const tabsId = useId();
+  const { active: tab } = useTabParam(TABS);
   const access = useWorkspaceAccess(workspaceId);
   const canWrite = access.status === "ready" && access.data.canEdit;
 
-  const back = (
-    <p>
-      <Link to={`/w/${workspaceId}/people`}>All people</Link>
-    </p>
-  );
+  const crumb = { group: "Audience", section: "People", to: `/w/${workspaceId}/people` };
 
   if (profile.status === "loading") {
     return (
       <div className="page">
-        {back}
+        <PageHeader title="Person" breadcrumb={crumb} />
         <LoadingState label="Loading the profile" />
       </div>
     );
@@ -49,7 +42,7 @@ function ProfileView({ workspaceId, requestedId }: { workspaceId: string; reques
   if (profile.status === "error") {
     return (
       <div className="page">
-        {back}
+        <PageHeader title="Person" breadcrumb={crumb} />
         <Panel flush>
           <ErrorState {...describeError(profile.error)} onRetry={profile.reload} />
         </Panel>
@@ -60,29 +53,17 @@ function ProfileView({ workspaceId, requestedId }: { workspaceId: string; reques
 
   return (
     <div className="page">
-      {back}
-      <PageHeader title={titleOf(data)} lede={ledeOf(data)} />
+      <PageHeader title={titleOf(data)} breadcrumb={crumb} lede={ledeOf(data)} />
       {data.merged_from ? (
         <p className="notice" role="status">
           The person you opened, {shortId(data.merged_from)}, was merged into this one. This is the combined profile.
         </p>
       ) : null}
-      <PersonTabs
-        id={tabsId}
-        tab={tab}
-        onSelect={(next) => {
-          const updated = new URLSearchParams(params);
-          if (next === "messages") updated.set("tab", "messages");
-          else updated.delete("tab");
-          setParams(updated, { replace: true });
-        }}
-      />
+      <TabNav label="Person sections" tabs={TABS} />
       {tab === "messages" ? (
-        <div role="tabpanel" id={`${tabsId}-messages-panel`} aria-labelledby={`${tabsId}-messages`}>
-          <MessageLog workspaceId={workspaceId} personId={data.id} />
-        </div>
+        <MessageLog workspaceId={workspaceId} personId={data.id} />
       ) : (
-        <div role="tabpanel" id={`${tabsId}-profile-panel`} aria-labelledby={`${tabsId}-profile`} className="stack">
+        <div className="stack">
           <div className="profile-layout">
             <div className="stack">
               <IdentitiesPanel profile={data} />
@@ -102,45 +83,10 @@ function ProfileView({ workspaceId, requestedId }: { workspaceId: string; reques
   );
 }
 
-type PersonTab = "profile" | "messages";
-
-const TABS: readonly { id: PersonTab; label: string }[] = [
+const TABS = [
   { id: "profile", label: "Profile" },
   { id: "messages", label: "Messages" },
 ];
-
-/** The views of a person: what is known about them, and the messages sent to them. */
-function PersonTabs({ id, tab, onSelect }: { id: string; tab: PersonTab; onSelect: (tab: PersonTab) => void }) {
-  function onKeyDown(event: KeyboardEvent<HTMLButtonElement>) {
-    const step = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
-    if (step === 0) return;
-    const next = TABS[(TABS.findIndex((item) => item.id === tab) + step + TABS.length) % TABS.length];
-    if (!next) return;
-    event.preventDefault();
-    onSelect(next.id);
-    document.getElementById(`${id}-${next.id}`)?.focus();
-  }
-  return (
-    <div role="tablist" aria-label="Person views" className="seg-tabs">
-      {TABS.map((item) => (
-        <button
-          key={item.id}
-          type="button"
-          role="tab"
-          id={`${id}-${item.id}`}
-          aria-selected={tab === item.id}
-          aria-controls={`${id}-${item.id}-panel`}
-          tabIndex={tab === item.id ? 0 : -1}
-          className={tab === item.id ? "seg seg-on" : "seg"}
-          onClick={() => onSelect(item.id)}
-          onKeyDown={onKeyDown}
-        >
-          {item.label}
-        </button>
-      ))}
-    </div>
-  );
-}
 
 function titleOf(profile: Profile): string {
   const display = profile.display;

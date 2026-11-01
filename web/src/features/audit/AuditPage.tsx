@@ -67,7 +67,7 @@ function AuditContent({ ws }: { ws: string }) {
   return (
     <div className="page">
       <PageHeader
-        title="Audit log"
+        title="Audit log" breadcrumb={{ group: "Compliance", section: "Audit log" }}
         lede={instance ? "Instance-level rows: sign-ins, users and keys." : "Who did what in this workspace, and when."}
         actions={
           <>

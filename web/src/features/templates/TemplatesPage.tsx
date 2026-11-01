@@ -128,6 +128,7 @@ function TemplateLibrary({ workspaceId }: { workspaceId: string }) {
     <div className="page">
       <PageHeader
         title="Template library"
+        breadcrumb={{ group: "Messaging", section: "Templates" }}
         lede="The emails and webhook payloads your flows send. Themes, snippets and images are shared, so a change reaches every template that uses them."
         actions={
           access.canWrite ? (
