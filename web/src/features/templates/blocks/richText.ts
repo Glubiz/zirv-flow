@@ -2,8 +2,8 @@
  * The client-side clean pass for rich text. It mirrors the server allowlist in
  * `crates/zirv-flow-templates/src/content/blocks/sanitize.rs`: paragraphs, bold, italic, underline,
  * links, lists and line breaks; the attributes are `href`, which is `https`, `http`, `mailto`
- * or starts with a merge tag (`{{`), and `data-zf-utm="off"`, the opt-out from UTM tagging. The server stays the authority; this keeps the toolbar from
- * emitting anything it would drop. Source is parsed in an inert document, never in the page.
+ * or starts with a merge tag (`{{`), and `data-zf-utm="off"`, the opt-out from UTM tagging. The
+ * server stays the authority; this keeps the toolbar from emitting anything it would drop. Source is parsed in an inert document, never in the page.
  *
  * Merge tags are not HTML. In the stored value they pass through exactly as written, as on the
  * server. In anything that goes into the editor's DOM they are escaped, so markup inside a tag
@@ -74,8 +74,8 @@ function inline(node: Node, context: Context): string {
     if (href === null) return inner;
     const raw = unlift(href, context).trim();
     if (!linkAllowed(raw)) return inner;
-    const off = element.getAttribute(UTM_ATTRIBUTE)?.trim().toLowerCase() === "off" ? ` ${UTM_ATTRIBUTE}="off"` : "";
-    return `<a href="${escaping(raw, context, escapeAttribute)}"${off}>${inner}</a>`;
+    const optOut = element.getAttribute(UTM_ATTRIBUTE)?.trim().toLowerCase() === "off" ? ` ${UTM_ATTRIBUTE}="off"` : "";
+    return `<a href="${escaping(raw, context, escapeAttribute)}"${optOut}>${inner}</a>`;
   }
   if (name === "b" || name === "strong" || name === "i" || name === "em" || name === "u") return inner === "" ? "" : `<${name}>${inner}</${name}>`;
   return inner;

@@ -2,8 +2,8 @@
 //! and again to what MiniJinja rendered from it.
 //!
 //! `ammonia` does the cleaning. Its allowlist here is paragraphs, bold, italic, underline, links,
-//! lists and line breaks; the attributes are `href` and `data-zf-utm="off"`, and `href` may be `https`, `http`, `mailto`
-//! or start with a merge tag. Script and style elements are dropped with their content, comments
+//! lists and line breaks; the attributes are `href` and `data-zf-utm="off"`, and `href` may be
+//! `https`, `http`, `mailto` or start with a merge tag. Script and style elements are dropped with their content, comments
 //! are dropped, and every other element is dropped with its markup but not its text.
 //!
 //! Merge tags are not HTML: `{{ a > 1 }}` would be rewritten, and `href="{{ u }}"` is not a URL.

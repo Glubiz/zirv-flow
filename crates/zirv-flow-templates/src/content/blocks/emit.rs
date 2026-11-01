@@ -461,7 +461,7 @@ mod tests {
                 visible_if: None,
             }),
         ]);
-        let mark = crate::content::mjml::UTM_OFF_MARK;
+        let mark = UTM_OFF_MARK;
         let emitted = emit(&doc, &Look::of_settings(&doc.settings), &mut Sources).unwrap();
         assert_eq!(emitted.mjml.matches(mark).count(), 2, "{}", emitted.mjml);
         let compiled = crate::content::mjml::compile(&emitted.mjml).unwrap();
