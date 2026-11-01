@@ -457,7 +457,14 @@ async fn entries_per_day_until(
         ("", "")
     };
     let series_sql = format!(
-        "SELECT g.day::date, COALESCE(c.entered, 0)          FROM generate_series($2::date, $3::date, interval '1 day') AS g(day)          LEFT JOIN (SELECT (created_at AT TIME ZONE 'UTC')::date AS day, count(*) AS entered                     FROM enrollments                     WHERE flow_id = $1 AND created_at >= $4 AND created_at < $5                       {series_version}                     GROUP BY 1) c ON c.day = g.day::date          ORDER BY g.day"
+        "SELECT g.day::date, COALESCE(c.entered, 0) \
+         FROM generate_series($2::date, $3::date, interval '1 day') AS g(day) \
+         LEFT JOIN (SELECT (created_at AT TIME ZONE 'UTC')::date AS day, count(*) AS entered \
+         FROM enrollments \
+         WHERE flow_id = $1 AND created_at >= $4 AND created_at < $5 \
+         {series_version} \
+         GROUP BY 1) c ON c.day = g.day::date \
+         ORDER BY g.day"
     );
     let mut series = sqlx::query_as(sqlx::AssertSqlSafe(series_sql))
         .bind(flow)
@@ -473,7 +480,8 @@ async fn entries_per_day_until(
         .await
         .map_err(StoreError::bounded)?;
     let previous_sql = format!(
-        "SELECT count(*) FROM enrollments          WHERE flow_id = $1 AND created_at >= $2 AND created_at < $3 {previous_version}"
+        "SELECT count(*) FROM enrollments \
+         WHERE flow_id = $1 AND created_at >= $2 AND created_at < $3 {previous_version}"
     );
     let mut previous = sqlx::query_scalar(sqlx::AssertSqlSafe(previous_sql))
         .bind(flow)
@@ -1006,13 +1014,17 @@ mod tests {
             ),
             (
                 format!(
-                    "SELECT (created_at AT TIME ZONE 'UTC')::date, count(*) FROM enrollments                      WHERE flow_id = '{f}' AND created_at >= now() - interval '90 days'                      AND created_at < now() GROUP BY 1"
+                    "SELECT (created_at AT TIME ZONE 'UTC')::date, count(*) FROM enrollments \
+                     WHERE flow_id = '{f}' AND created_at >= now() - interval '90 days' \
+                     AND created_at < now() GROUP BY 1"
                 ),
                 "Index Only Scan using enrollments_flow_list_idx".to_owned(),
             ),
             (
                 format!(
-                    "SELECT count(*) FROM enrollments WHERE flow_id = '{f}'                      AND created_at >= now() - interval '180 days'                      AND created_at < now() - interval '90 days'"
+                    "SELECT count(*) FROM enrollments WHERE flow_id = '{f}' \
+                     AND created_at >= now() - interval '180 days' \
+                     AND created_at < now() - interval '90 days'"
                 ),
                 "Index Only Scan using enrollments_flow_list_idx".to_owned(),
             ),
