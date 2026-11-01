@@ -144,6 +144,8 @@ The problem codes in use are listed in [the policy](api.md#problem-codes), and a
 | POST | `/api/v1/workspaces/{ws}/flows/{id}/resume` | `resume_flow` | not a creating POST | n/a | ok | strings G8: 1 | ok | no |
 | POST | `/api/v1/workspaces/{ws}/flows/{id}/start` | `start_flow` | not a creating POST | n/a | generic (1) | ok | ok | no |
 | POST | `/api/v1/workspaces/{ws}/flows/{id}/test` | `test_flow` | not a creating POST | n/a | ok | strings G8: 12 | ok | no |
+| PUT | `/api/v1/workspaces/{ws}/flows/{id}/warmup` | `set_flow_warmup` | not a creating POST | n/a | ok | ok | ok | no |
+| POST | `/api/v1/workspaces/{ws}/flows/{id}/warmup/open` | `open_flow_warmup` | not a creating POST | n/a | ok | ok | ok | no |
 | POST | `/api/v1/workspaces/{ws}/flows/{id}/validate` | `validate_flow` | not a creating POST | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/flows/{id}/versions` | `list_flow_versions` | not a creating POST | bounded collection | ok | strings G8: 1 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/flows/{id}/versions/{n}` | `get_flow_version` | not a creating POST | n/a | ok | strings G8: 1 | ok | no |

@@ -10999,6 +10999,198 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/flows/{id}/warmup": {
+      "put": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Turns the warm-up of a flow on or off and sets its length. A window already running keeps its\nstart and counts the new length from it; turning it off lets everyone waiting in at once.\nNeeds the publisher role and is audited as `flow.warmup_changed`.",
+        "operationId": "set_flow_warmup",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WarmupRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The flow with its new warm-up",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowDetailBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a publisher, a key without the publish scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or flow, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The flow is archived (`code` is `flow_archived`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A length outside 60 to 86400 seconds",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/flows/{id}/warmup/open": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Ends the warm-up window early: everyone waiting is admitted now, through the same checks as\nany entry. Needs the admin role and is audited as `flow.warmup_opened`.",
+        "operationId": "open_flow_warmup",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The flow, no longer warming up",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowDetailBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not an admin, a key without the admin scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or flow, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/forwarding/dead-letters": {
       "get": {
         "tags": [
@@ -33762,7 +33954,8 @@
             "type": "object",
             "required": [
               "graph",
-              "settings"
+              "settings",
+              "warmup"
             ],
             "properties": {
               "graph": {
@@ -33770,6 +33963,10 @@
               },
               "settings": {
                 "$ref": "#/components/schemas/FlowSettings"
+              },
+              "warmup": {
+                "$ref": "#/components/schemas/WarmupBody",
+                "description": "The warm-up that ramps enrollments into the flow after it starts taking them."
               }
             }
           }
@@ -44512,6 +44709,82 @@
           },
           "node": {
             "type": "string"
+          }
+        }
+      },
+      "WarmupBody": {
+        "type": "object",
+        "description": "The warm-up of a flow: its setting and the window it last started.",
+        "required": [
+          "enabled",
+          "seconds",
+          "admitted",
+          "waiting"
+        ],
+        "properties": {
+          "admitted": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Entries admitted since the window started."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether a window holds back enrollments when the flow starts taking them."
+          },
+          "ends_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the window ends, `started_at` plus `seconds`; null before it started."
+          },
+          "opened_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When an Admin ended the window early; null when none did."
+          },
+          "seconds": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The length of the window, 60 to 86400 seconds."
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the window last started: the first publish or the last resume. Null before either."
+          },
+          "waiting": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Entries still waiting for their turn."
+          }
+        }
+      },
+      "WarmupRequest": {
+        "type": "object",
+        "required": [
+          "enabled",
+          "seconds"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether a window holds back enrollments when the flow starts taking them."
+          },
+          "seconds": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The length of the window in seconds, 60 to 86400.",
+            "example": 300,
+            "maximum": 86400,
+            "minimum": 60
           }
         }
       },

@@ -43,6 +43,7 @@ import { StepInspector } from "./StepInspector";
 import { TestView } from "./TestView";
 import type { TestResult } from "./testMode";
 import { useFlowDraft } from "./useFlowDraft";
+import { WarmupLine, warmupProgress, type Warmup } from "./Warmup";
 
 /** The settings section an issue about no step or connection belongs to, if any. */
 function sectionOfIssue(issue: FlowIssue) {
@@ -51,6 +52,9 @@ function sectionOfIssue(issue: FlowIssue) {
 }
 
 type FlowBody = components["schemas"]["FlowBody"];
+
+/** How often the counts of a running warm-up are read again. */
+const WARMUP_POLL_MS = 5000;
 
 const VIEWS = [
   { id: "build", label: "Build" },
@@ -142,6 +146,9 @@ function Editor({
   canViewPii: boolean;
 }) {
   const [life, setLife] = useState<Life>({ state: flow.state, version: flow.current_version ?? null });
+  const [warmup, setWarmup] = useState<Warmup>(flow.warmup);
+  const [warmupBusy, setWarmupBusy] = useState(false);
+  const [clock, setClock] = useState(() => Date.now());
   const archived = life.state === "archived";
   const editable = canWrite && !archived;
   const store = useFlowDraft({ workspaceId, flow, editable });
@@ -428,6 +435,57 @@ function Editor({
     setNotice(summary.detail || summary.title);
   }
 
+  /** Shows the warm-up a response carries, and measures the window from this moment. */
+  function adoptWarmup(next: Warmup) {
+    setWarmup(next);
+    setClock(Date.now());
+  }
+
+  async function changeWarmup(request: () => Promise<{ warmup: Warmup }>, said: string) {
+    if (warmupBusy) return;
+    setWarmupBusy(true);
+    setNotice(null);
+    try {
+      const updated = await request();
+      if (!mounted.current) return;
+      adoptWarmup(updated.warmup);
+      announce(said);
+    } catch (error) {
+      if (mounted.current) noticeOf(error);
+    } finally {
+      if (mounted.current) setWarmupBusy(false);
+    }
+  }
+
+  function saveWarmup(enabled: boolean, seconds: number) {
+    const path = { params: { path: { ws: workspaceId, id: flow.id } } };
+    void changeWarmup(
+      () => unwrap(client.PUT("/api/v1/workspaces/{ws}/flows/{id}/warmup", { ...path, body: { enabled, seconds } })),
+      "The warm-up is saved.",
+    );
+  }
+
+  function openWarmup() {
+    const path = { params: { path: { ws: workspaceId, id: flow.id } } };
+    void changeWarmup(() => unwrap(client.POST("/api/v1/workspaces/{ws}/flows/{id}/warmup/open", path)), "The flow is open.");
+  }
+
+  const warmupState = life.state === "published" ? warmupProgress(warmup, clock) : null;
+  const warming = warmupState !== null;
+  useEffect(() => {
+    if (!warming) return;
+    // The clock moves and the counts are read again while the window runs.
+    const timer = setInterval(() => {
+      setClock(Date.now());
+      void unwrap(client.GET("/api/v1/workspaces/{ws}/flows/{id}", { params: { path: { ws: workspaceId, id: flow.id } } }))
+        .then((fresh) => {
+          if (mounted.current) setWarmup(fresh.warmup);
+        })
+        .catch(() => undefined);
+    }, WARMUP_POLL_MS);
+    return () => clearInterval(timer);
+  }, [warming, workspaceId, flow.id]);
+
   /** Says something to a screen reader; the region is cleared first so the same words are read again. */
   function announce(text: string) {
     if (!mounted.current) return;
@@ -471,6 +529,7 @@ function Editor({
             : client.POST("/api/v1/workspaces/{ws}/flows/{id}/archive", path),
       );
       applyLife(request, { state: updated.state, version: updated.current_version ?? null });
+      adoptWarmup(updated.warmup);
       announce(action === "pause" ? "The flow is paused." : action === "resume" ? "The flow is live again." : "The flow is archived.");
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
@@ -743,6 +802,10 @@ function Editor({
         ) : null}
       </div>
 
+      {warmupState ? (
+        <WarmupLine warmup={warmup} progress={warmupState} canOpen={canAdmin} busy={warmupBusy} onOpen={openWarmup} />
+      ) : null}
+
       {notice ? (
         <p className="fl-notice" role="alert">
           {notice}
@@ -817,7 +880,8 @@ function Editor({
                   <h2>Flow settings</h2>
                   <p className="faint">Starts with: {triggerWords(draft.settings, names).title}.</p>
                   <SettingsView workspaceId={workspaceId} settings={draft.settings} catalog={catalog}
-                    readOnly={!canEdit} issues={placed.bySection} focus={settingsFocus} onChange={editSettings} />
+                    readOnly={!canEdit} issues={placed.bySection} focus={settingsFocus} onChange={editSettings}
+                    warmup={{ value: warmup, canChange: canPublish && !archived, busy: warmupBusy, onSave: saveWarmup }} />
                 </section>
               )}
             </div>

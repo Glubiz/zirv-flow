@@ -5409,3 +5409,15 @@ main:focus {
     width: 100vw;
   }
 }
+
+.fl-warmup {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  margin: 0;
+  padding: 8px 24px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  font-weight: 600;
+}
