@@ -754,6 +754,7 @@ mod tests {
                     graph: Some(GraphPoint {
                         version: 1,
                         node: Some("a".into()),
+                        admit_at: None,
                     }),
                     workspace_id: ws,
                     trace: trace(),

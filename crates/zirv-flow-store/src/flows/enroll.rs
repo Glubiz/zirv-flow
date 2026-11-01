@@ -331,7 +331,7 @@ pub async fn enroll_entries(
         })
         .collect();
     decisions.extend(deferred.iter().map(|entry| NewDecision {
-        graph: Some(GraphPoint::of_version(request.version)),
+        graph: Some(GraphPoint::deferred_until(request.version, entry.admit_at)),
         workspace_id: request.workspace,
         trace: entry.trace.clone(),
         spec: &decision_actions::FLOW_ENROLL_DEFERRED,

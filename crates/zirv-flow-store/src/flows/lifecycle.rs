@@ -142,6 +142,7 @@ async fn transition(
         // Every in-flight enrollment exits, in batches of a job of their own.
         FlowAction::Archive => {
             remove_flow_schedule(connection, workspace, id).await?;
+            warmup::discard(connection, workspace, id).await?;
             enqueue_lifecycle(connection, workspace, id, LifecycleAction::Archive, trace).await?;
         }
         // Every enrollment a step was held for runs again, in batches.

@@ -515,6 +515,25 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn open_now_on_a_paused_flow_is_a_conflict(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let f = fixture(&pool).await;
+            let flow = published(&f, "Welcome").await;
+            let paused = f.lead("POST", &format!("/{flow}/pause"), None).await;
+            assert_eq!(paused.status, StatusCode::OK, "{:?}", paused.body);
+
+            let refused = f.lead("POST", &format!("/{flow}/warmup/open"), None).await;
+
+            assert_eq!(refused.status, StatusCode::CONFLICT, "{:?}", refused.body);
+            assert_eq!(refused.body["code"], "flow_state");
+            let read = f.lead("GET", &format!("/{flow}"), None).await;
+            assert_eq!(read.body["warmup"]["opened_at"], Value::Null);
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_flow_is_drafted_validated_published_paused_resumed_and_archived(pool: PgPool) {
         zirv_flow_store::decision_testing::checked(pool, |pool| async move {
             let f = fixture(&pool).await;
@@ -2403,6 +2422,7 @@ mod tests {
                         graph: Some(GraphPoint {
                             version: 1,
                             node: Some("wait".into()),
+                            admit_at: None,
                         }),
                         workspace_id: f.ws,
                         trace: trace.clone(),

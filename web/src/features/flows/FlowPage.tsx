@@ -441,6 +441,18 @@ function Editor({
     setClock(Date.now());
   }
 
+  /** The publish response does not carry the warm-up its first publish started, so it is read again. */
+  async function refreshWarmup() {
+    try {
+      const current = await unwrap(
+        client.GET("/api/v1/workspaces/{ws}/flows/{id}", { params: { path: { ws: workspaceId, id: flow.id } } }),
+      );
+      if (mounted.current) adoptWarmup(current.warmup);
+    } catch {
+      // The state line shows after the next load; the publish itself went through.
+    }
+  }
+
   async function changeWarmup(request: () => Promise<{ warmup: Warmup }>, said: string) {
     if (warmupBusy) return;
     setWarmupBusy(true);
@@ -587,6 +599,7 @@ function Editor({
     applyLife(request, { state: result.flow.state, version: result.flow.current_version ?? result.version.version });
     refocusActions();
     announce(`Version ${result.version.version} of ${draft.name} is published.`);
+    void refreshWarmup();
   }
 
   /** A publish was refused with a 409: the dialog goes and the flow is shown as it is now. */

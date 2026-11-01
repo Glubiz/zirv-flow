@@ -316,6 +316,7 @@ pub(crate) async fn start(
     flow: Uuid,
     now: OffsetDateTime,
 ) -> Result<(), StoreError> {
+    super::enroll::lock_enrolls(connection, flow).await?;
     let (enabled, seconds): (bool, i32) = sqlx::query_as(
         "UPDATE flows SET warmup_started_at = $3, warmup_opened_at = NULL \
          WHERE workspace_id = $1 AND id = $2 RETURNING warmup_enabled, warmup_seconds",
@@ -346,6 +347,7 @@ pub async fn set_warmup(
     if locked.flow().state == super::FlowState::Archived {
         return Err(FlowError::Archived);
     }
+    super::enroll::lock_enrolls(connection, flow).await?;
     let old = locked.flow().warmup;
     sqlx::query("UPDATE flows SET warmup_enabled = $3, warmup_seconds = $4, updated_at = now() WHERE workspace_id = $1 AND id = $2")
         .bind(workspace.as_uuid())
@@ -377,7 +379,14 @@ pub async fn open_warmup(
     flow: Uuid,
     now: OffsetDateTime,
 ) -> Result<u64, FlowError> {
-    super::lock_flow(connection, workspace, flow).await?;
+    let locked = super::lock_flow(connection, workspace, flow).await?;
+    // A paused flow admits nobody, and its resume restarts the window, so opening it would only
+    // be forgotten.
+    let state = locked.flow().state;
+    if state != super::FlowState::Published {
+        return Err(FlowError::WarmupNotOpenable { state });
+    }
+    super::enroll::lock_enrolls(connection, flow).await?;
     sqlx::query(
         "UPDATE flows SET warmup_opened_at = $3, updated_at = now() \
          WHERE workspace_id = $1 AND id = $2",
@@ -389,6 +398,33 @@ pub async fn open_warmup(
     .await
     .map_err(StoreError::query)?;
     Ok(queue_waiting(connection, workspace, flow, None).await?)
+}
+
+/// Drops the waiting entries of an archived flow and the jobs queued for them: an archived flow
+/// enrolls nobody, so they will never be admitted.
+pub(crate) async fn discard(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    flow: Uuid,
+) -> Result<(), StoreError> {
+    super::enroll::lock_enrolls(connection, flow).await?;
+    sqlx::query("DELETE FROM flow_warmup_waiting WHERE workspace_id = $1 AND flow_id = $2")
+        .bind(workspace.as_uuid())
+        .bind(flow)
+        .execute(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
+    sqlx::query(
+        "DELETE FROM jobs WHERE workspace_id = $1 AND kind = $2 AND state = 'ready' \
+         AND unique_key LIKE $3",
+    )
+    .bind(workspace.as_uuid())
+    .bind(ENROLL_JOB_KIND)
+    .bind(format!("flow.enroll:warmup:{flow}:%"))
+    .execute(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(())
 }
 
 /// The admitted and waiting counts of a flow's current window.
@@ -507,6 +543,7 @@ mod tests {
     use super::super::enroll::{EnrollOutcome, EnrollRequest, Occurrence, enroll};
     use super::super::tests_support::{create, trace, workspace};
     use super::super::{lock_flow, pause_flow, publish_flow, resume_flow};
+    use super::FlowError;
     use crate::{Clock, ManualClock, begin, commit};
 
     fn at(seconds: i64) -> OffsetDateTime {
@@ -776,6 +813,24 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(first, 1, "each person's log has it");
+        let times: Vec<Option<String>> = sqlx::query_scalar(
+            "SELECT subject_ids ->> 'admit_at' FROM decision_records \n             WHERE action = 'flow.enroll' AND outcome = 'deferred'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let mut times: Vec<OffsetDateTime> = times
+            .iter()
+            .map(|time| {
+                OffsetDateTime::parse(
+                    time.as_deref().unwrap(),
+                    &time::format_description::well_known::Rfc3339,
+                )
+                .unwrap()
+            })
+            .collect();
+        times.sort();
+        assert_eq!(times, queued, "the decision carries the admission time");
     }
 
     #[sqlx::test]
@@ -826,5 +881,66 @@ mod tests {
             .execute(&pool)
             .await;
         assert!(direct.is_err(), "the table refuses it too");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn archiving_drops_the_waiting_entries_and_their_jobs(pool: PgPool) {
+        let backlog = Backlog::new(&pool, true, 300).await;
+        backlog.enter(&pool, START).await;
+        assert_eq!(backlog.counts(&pool).await.waiting, 24);
+
+        let mut tx = begin(&pool).await.unwrap();
+        super::super::archive_flow(&mut tx, backlog.ws, backlog.flow, &trace())
+            .await
+            .unwrap();
+        commit(tx).await.unwrap();
+
+        assert_eq!(backlog.counts(&pool).await.waiting, 0);
+        assert!(backlog.admissions(&pool, START, 300).await.is_empty());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn open_now_is_refused_unless_the_flow_is_published(pool: PgPool) {
+        let backlog = Backlog::new(&pool, true, 300).await;
+        backlog.enter(&pool, START).await;
+        pause(&pool, backlog.ws, backlog.flow).await;
+
+        let mut connection = pool.acquire().await.unwrap();
+        let refused = open_warmup(&mut connection, backlog.ws, backlog.flow, at(1)).await;
+        drop(connection);
+
+        assert!(matches!(
+            refused,
+            Err(FlowError::WarmupNotOpenable {
+                state: super::super::FlowState::Paused
+            })
+        ));
+        assert_eq!(backlog.counts(&pool).await.waiting, 24);
+        let flow = crate::find_flow(&pool, backlog.ws, backlog.flow)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(flow.warmup.opened_at, None);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_resume_waits_for_an_enroll_in_flight(pool: PgPool) {
+        let backlog = Backlog::new(&pool, true, 300).await;
+        pause(&pool, backlog.ws, backlog.flow).await;
+        let mut enrolling = begin(&pool).await.unwrap();
+        super::super::enroll::lock_enrolls(&mut enrolling, backlog.flow)
+            .await
+            .unwrap();
+
+        let (ws, flow, other) = (backlog.ws, backlog.flow, pool.clone());
+        let mut resume = tokio::spawn(async move { resume_at(&other, ws, flow, at(10)).await });
+        let early = tokio::time::timeout(std::time::Duration::from_millis(500), &mut resume).await;
+        assert!(early.is_err(), "the resume waits for the enroll");
+
+        commit(enrolling).await.unwrap();
+        resume.await.unwrap();
     }
 }

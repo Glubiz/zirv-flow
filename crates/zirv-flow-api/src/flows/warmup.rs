@@ -91,7 +91,8 @@ pub(crate) async fn set(
         (status = 200, description = "The flow, no longer warming up", body = FlowDetailBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not an admin, a key without the admin scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
-        (status = 404, description = "No such workspace or flow, or no access", body = Problem, content_type = "application/problem+json")
+        (status = 404, description = "No such workspace or flow, or no access", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "The flow is not published: a draft, paused or archived flow cannot be opened", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]

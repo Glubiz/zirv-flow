@@ -259,10 +259,6 @@ test("getting started on a clean Compose stack", async ({ page, request }) => {
     await page.getByLabel("When a person", { exact: true }).selectOption({ label: "Enters the segment" });
     await page.getByRole("checkbox", { name: "Also enroll the people already in the segment when the flow is published" }).check();
     await expect(page.getByLabel("A person who has been in the flow")).toHaveValue("once");
-    // The first newsletter should go out now, not spread over the warm-up window.
-    await page.getByRole("checkbox", { name: "Warm up when the flow starts" }).uncheck();
-    await page.getByRole("button", { name: "Save warm-up", exact: true }).click();
-    await expect(page.getByRole("button", { name: "Save warm-up", exact: true })).toHaveCount(0);
     await page.getByRole("complementary", { name: "Step palette" }).getByRole("button", { name: "Send an email", exact: true }).click();
     await page.getByLabel("Template", { exact: true }).selectOption({ label: NEWSLETTER });
     await page.getByLabel("Destination", { exact: true }).selectOption({ label: "Newsletter capture" });
@@ -299,6 +295,10 @@ test("getting started on a clean Compose stack", async ({ page, request }) => {
     await page.getByRole("button", { name: "Review and publish (0)", exact: true }).click();
     await expect(page.getByRole("dialog")).toContainText("1 person in Newsletter readers");
     await page.getByRole("dialog").getByRole("button", { name: "Publish version 1", exact: true }).click();
+    await expect(page.getByRole("dialog")).toBeHidden();
+    // The first newsletter would arrive within the warm-up window; let everyone in at once.
+    await page.getByRole("button", { name: "Open now", exact: true }).click();
+    await page.getByRole("dialog").getByRole("button", { name: "Open now", exact: true }).click();
     await expect(page.getByRole("dialog")).toBeHidden();
     const flowMessage = await receipt(page, 1, "Spring is here");
     await expect(async () => {

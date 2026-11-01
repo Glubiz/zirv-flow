@@ -335,6 +335,7 @@ impl Walk<'_> {
             graph: Some(GraphPoint {
                 version: enrollment.flow_version,
                 node: node.map(str::to_owned),
+                admit_at: None,
             }),
             workspace_id: self.workspace,
             trace: enrollment.trace.clone(),

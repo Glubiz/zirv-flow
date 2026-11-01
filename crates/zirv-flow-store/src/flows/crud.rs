@@ -131,6 +131,8 @@ pub enum FlowError {
     Archived,
     /// A warm-up length outside `MIN_WARMUP_SECONDS..=MAX_WARMUP_SECONDS`.
     WarmupOutOfBounds,
+    /// Open now is refused: only a published flow admits the entries that wait.
+    WarmupNotOpenable { state: FlowState },
     /// A name already taken is [`StoreError::is_conflict`].
     Store(StoreError),
 }
@@ -155,6 +157,12 @@ impl fmt::Display for FlowError {
             Self::Archived => formatter.write_str("the flow is archived"),
             Self::WarmupOutOfBounds => {
                 formatter.write_str("the warm-up length is outside its bounds")
+            }
+            Self::WarmupNotOpenable { state } => {
+                write!(
+                    formatter,
+                    "the flow is {state}; only a published flow can be opened"
+                )
             }
             Self::Store(error) => error.fmt(formatter),
         }

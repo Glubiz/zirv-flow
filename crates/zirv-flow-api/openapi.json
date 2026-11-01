@@ -11179,6 +11179,16 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "The flow is not published: a draft, paused or archived flow cannot be opened",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
           }
         },
         "security": [

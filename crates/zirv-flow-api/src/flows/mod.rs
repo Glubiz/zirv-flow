@@ -95,7 +95,9 @@ pub(crate) fn flow_error(error: FlowError) -> ApiError {
         FlowError::WarmupOutOfBounds => {
             ValidationError::new("seconds", "must be 60 to 86400").into()
         }
-        illegal @ FlowError::IllegalTransition { .. } => ApiError::flow_state(illegal.to_string()),
+        illegal @ (FlowError::IllegalTransition { .. } | FlowError::WarmupNotOpenable { .. }) => {
+            ApiError::flow_state(illegal.to_string())
+        }
         FlowError::Store(error) => name_taken(error),
     }
 }

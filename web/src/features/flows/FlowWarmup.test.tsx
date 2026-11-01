@@ -2,7 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { FLOW_ID, flowDetail, flowRoutes, warmupBody, WS } from "../../test/flowsApi";
+import { FLOW_ID, flowDetail, flowRoutes, impactBody, warmupBody, WS } from "../../test/flowsApi";
 import { mountEditor as mount } from "../../test/flowsEditor";
 import { json, mockApi, problem } from "../../test/mockApi";
 import { stubReactFlow } from "../../test/reactFlowStubs";
@@ -32,6 +32,33 @@ describe("the warm-up state line", () => {
 
     expect(await screen.findByText("Warming up · 40% · 3 min left")).toBeInTheDocument();
     expect(screen.getByText("12 admitted · 30 waiting")).toBeInTheDocument();
+  });
+
+  it("appears after the first publish without a reload", async () => {
+    let published = false;
+    mockApi({
+      ...flowRoutes({ flow: { state: "draft", current_version: null } }),
+      [`GET ${WS}/flows/${FLOW_ID}`]: () =>
+        json(flowDetail(published ? { ...LIVE, warmup: running(1) } : { state: "draft", current_version: null })),
+      [`POST ${WS}/flows/${FLOW_ID}/publish`]: (request) => {
+        if (new URL(request.url).searchParams.get("dry_run") === "true") return json(impactBody());
+        published = true;
+        return json(
+          {
+            flow: flowDetail({ ...LIVE, warmup: warmupBody() }),
+            version: { version: 2, graph: { v: 1, nodes: [], edges: [] }, settings: {}, published_at: "2026-10-20T09:00:00Z", trace_id: "66666666-0000-4000-8000-000000000001" },
+          },
+          201,
+        );
+      },
+    });
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: /^Review and publish/ }));
+    await user.click(await within(await screen.findByRole("dialog")).findByRole("button", { name: /^Publish version/ }));
+
+    expect(await screen.findByText(/^Warming up/)).toBeInTheDocument();
   });
 
   it("is not shown when the window is over, off, or opened", async () => {
