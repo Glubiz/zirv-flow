@@ -2772,6 +2772,22 @@ mod tests {
         "webhook.call",
     ];
 
+    /// Stops autovacuum so the statistics change only where a test says so.
+    async fn freeze_statistics(pool: &PgPool) {
+        sqlx::query("ALTER TABLE jobs SET (autovacuum_enabled = false)")
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    async fn vacuum_and_analyze(pool: &PgPool) {
+        sqlx::query("VACUUM (PARALLEL 0) jobs")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("ANALYZE jobs").execute(pool).await.unwrap();
+    }
+
     /// Inserts `count` waiting `flow.step` wakes of `workspace`, due `from` to `to` seconds from
     /// now (negative is overdue), each with its wake key.
     async fn seed_wakes(
@@ -2994,10 +3010,7 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_claim_plan_stays_bounded_whatever_the_statistics(pool: PgPool) {
-        sqlx::query("ALTER TABLE jobs SET (autovacuum_enabled = false)")
-            .execute(&pool)
-            .await
-            .unwrap();
+        freeze_statistics(&pool).await;
         let ws = workspace(&pool, "ours").await;
         seed_wakes(&pool, ws, "f", 20_000, 600.0, 2_400.0).await;
         seed_other_work(&pool, OtherWork::Later).await;
@@ -3113,11 +3126,7 @@ mod tests {
             .await
             .unwrap();
         eprintln!("BENCH {version}; {future} future wakes, {due} due");
-        // The statistics change only where the benchmark says so.
-        sqlx::query("ALTER TABLE jobs SET (autovacuum_enabled = false)")
-            .execute(&pool)
-            .await
-            .unwrap();
+        freeze_statistics(&pool).await;
         let ws = workspace(&pool, "bench").await;
         seed_wakes(&pool, ws, "f", future, 600.0, 2_400.0).await;
         seed_other_work(&pool, OtherWork::Later).await;
@@ -3166,11 +3175,7 @@ mod tests {
                 .execute(&pool)
                 .await
                 .unwrap();
-                sqlx::query("VACUUM (PARALLEL 0) jobs")
-                    .execute(&pool)
-                    .await
-                    .unwrap();
-                sqlx::query("ANALYZE jobs").execute(&pool).await.unwrap();
+                vacuum_and_analyze(&pool).await;
                 if idle {
                     seed_other_work(&pool, OtherWork::Now).await;
                 }
@@ -3198,11 +3203,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query("VACUUM (PARALLEL 0) jobs")
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("ANALYZE jobs").execute(&pool).await.unwrap();
+        vacuum_and_analyze(&pool).await;
         for before in [true, false] {
             sqlx::query("DELETE FROM jobs WHERE kind = 'webhook.call'")
                 .execute(&pool)
