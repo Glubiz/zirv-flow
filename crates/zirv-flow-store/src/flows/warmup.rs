@@ -220,8 +220,7 @@ pub(crate) async fn waiting_of(
     flow: Uuid,
     pairs: &[(Uuid, Uuid)],
 ) -> Result<HashSet<(Uuid, Uuid)>, StoreError> {
-    let people: Vec<Uuid> = pairs.iter().map(|(person, _)| *person).collect();
-    let occurrences: Vec<Uuid> = pairs.iter().map(|(_, occurrence)| *occurrence).collect();
+    let (people, occurrences): (Vec<Uuid>, Vec<Uuid>) = pairs.iter().copied().unzip();
     let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
         "SELECT w.person_id, w.occurrence_id FROM flow_warmup_waiting w \
          JOIN unnest($2::uuid[], $3::uuid[]) AS t(person_id, occurrence_id) \
@@ -246,8 +245,7 @@ pub(crate) async fn release(
     if pairs.is_empty() {
         return Ok(());
     }
-    let people: Vec<Uuid> = pairs.iter().map(|(person, _)| *person).collect();
-    let occurrences: Vec<Uuid> = pairs.iter().map(|(_, occurrence)| *occurrence).collect();
+    let (people, occurrences): (Vec<Uuid>, Vec<Uuid>) = pairs.iter().copied().unzip();
     sqlx::query(
         "DELETE FROM flow_warmup_waiting w USING unnest($2::uuid[], $3::uuid[]) \
               AS t(person_id, occurrence_id) \
@@ -364,14 +362,10 @@ pub async fn set_warmup(
     };
     // A new length moves every place in the window, so the waiting entries are queued again for
     // their new admission times. Turning it off lets them in now.
-    match changed.started_at {
-        _ if !enabled => {
-            queue_waiting(connection, workspace, flow, None).await?;
-        }
-        Some(started) if changed.opened_at.is_none() => {
-            queue_waiting(connection, workspace, flow, Some((started, seconds))).await?;
-        }
-        _ => {}
+    if !enabled {
+        queue_waiting(connection, workspace, flow, None).await?;
+    } else if let (Some(started), None) = (changed.started_at, changed.opened_at) {
+        queue_waiting(connection, workspace, flow, Some((started, seconds))).await?;
     }
     Ok(changed)
 }

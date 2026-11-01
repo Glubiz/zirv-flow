@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde_json::json;
 use utoipa::ToSchema;
 use uuid::Uuid;
-use zirv_flow_core::ValidationError;
+use zirv_flow_core::{ValidationError, WorkspaceId};
 use zirv_flow_store::{MAX_WARMUP_SECONDS, MIN_WARMUP_SECONDS};
 
 use super::crud::{FlowDetailBody, flow_detail};
@@ -122,7 +122,7 @@ pub(crate) async fn open(
 
 async fn reread(
     state: &AppState,
-    workspace: zirv_flow_core::WorkspaceId,
+    workspace: WorkspaceId,
     id: Uuid,
 ) -> Result<Json<FlowDetailBody>, ApiError> {
     let flow = zirv_flow_store::find_flow(&state.pool, workspace, id)
