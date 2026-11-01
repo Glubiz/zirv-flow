@@ -104,3 +104,43 @@ pub(crate) async fn where_used(
     let used = zirv_flow_store::segment_where_used(&mut tx, workspace.id, id).await?;
     Ok(Json(used.into()))
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use zirv_flow_core::flow::SegmentUse;
+    use zirv_flow_store::{SegmentFlowUse, SegmentRef};
+
+    use super::*;
+
+    #[test]
+    fn the_body_names_the_stage_and_each_use_and_keeps_draft_without_a_version() {
+        let flow = |name: &str, stage, version| SegmentFlowUse {
+            flow_id: Uuid::nil(),
+            name: name.to_owned(),
+            state: "published".to_owned(),
+            stage,
+            version,
+            uses: vec![SegmentUse::Trigger, SegmentUse::Goal],
+        };
+        let body = WhereUsedBody::from(SegmentWhereUsed {
+            flows: vec![
+                flow("Live", FlowStage::Live, Some(3)),
+                flow("Draft", FlowStage::Draft, None),
+            ],
+            segments: vec![SegmentRef {
+                id: Uuid::nil(),
+                name: "Child".to_owned(),
+            }],
+        });
+
+        let wire = serde_json::to_value(&body).unwrap();
+
+        assert_eq!(wire["flows"][0]["stage"], "live");
+        assert_eq!(wire["flows"][0]["version"], 3);
+        assert_eq!(wire["flows"][0]["uses"], json!(["trigger", "goal"]));
+        assert_eq!(wire["flows"][1]["stage"], "draft");
+        assert_eq!(wire["flows"][1]["version"], serde_json::Value::Null);
+        assert_eq!(wire["segments"][0]["name"], "Child");
+    }
+}

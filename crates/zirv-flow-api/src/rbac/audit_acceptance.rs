@@ -835,6 +835,8 @@ mod tests {
             Some(segment),
         )
         .await;
+        w.s("GET", "/segments/{id}/where-used", &[u(segment)], None)
+            .await;
         w.a(
             "POST",
             "/segments/{id}/archive",
