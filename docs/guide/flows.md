@@ -376,6 +376,29 @@ known; inspect the attempt and receiver before retrying.
 **Fix:** repair the cause and retry when the action must happen; skip only when
 continuing without it is intended.
 
+## Warm-up
+
+A flow that has just started taking people does not let everyone in at once. For
+a window after the first publish, and again after a resume, entries are admitted
+along a ramp; the others wait for their turn and nobody is dropped. Segment,
+event, schedule, manual and API triggers all go through it.
+
+- **Flow settings → Warm-up** turns it on (the default) and sets the length:
+  5 minutes by default, from 1 minute to 24 hours. It belongs to the flow, so
+  changing it needs no publish. A running window keeps its start and counts the
+  new length from it; turning it off lets everyone waiting in at once.
+- While it runs, the flow page shows "Warming up · 40% · 3 min left" with how
+  many entries are admitted and how many are waiting.
+- **Open now** (Admin) ends the window and admits everyone waiting. It is audited.
+- A waiting person's decision log shows a `flow.enroll` decision, outcome
+  `deferred`, reason `warm_up`. The re-entry rule is checked again when the
+  entry is admitted.
+- A new version does not restart the window. A pause keeps the waiting entries;
+  a resume starts the window again and they keep their places in it.
+
+**Common mistake:** leaving it on for a time-critical flow, such as an order
+confirmation. **Fix:** turn it off in Flow settings.
+
 ## Pause, resume and archive
 
 **Pause** stops new enrollments and holds execution as steps observe the pause.

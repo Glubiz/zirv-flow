@@ -38,6 +38,8 @@ ensure_flow() {
     '{name: $n, graph: $g, settings: {trigger: {type: "manual"}, reentry: {mode: "once"}}}')"
   id="$(api_json POST "/workspaces/$ws/flows" "$body" | jq -r .id)"
   [ -n "$id" ] && [ "$id" != null ] || die "flow $name was not created"
+  # Benches measure the flow at full intake, so the warm-up ramp (#328) is off.
+  api_json PUT "/workspaces/$ws/flows/$id/warmup" '{"enabled":false,"seconds":300}' >/dev/null
   api POST "/workspaces/$ws/flows/$id/publish" >/dev/null
   state_put "$key" "$id"
   log "created and published flow $name ($id)"

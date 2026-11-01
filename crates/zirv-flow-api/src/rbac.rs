@@ -180,6 +180,7 @@ pub(crate) const ROUTES: &[Route] = table! {
     Get    "/api/v1/workspaces" => INSTANCE, "lists the caller's workspaces";
     Post   "/api/v1/workspaces" => OWNER @ audited("workspace.created");
     Get    "/api/v1/workspaces/{ws}" => READ;
+    Get    "/api/v1/workspaces/{ws}/summary" => READ @ not_audited("read-only query");
     Patch  "/api/v1/workspaces/{ws}" => ADMIN @ audited("workspace.updated");
     // members
     Get    "/api/v1/workspaces/{ws}/members" => READ_MEMBERS;
@@ -222,6 +223,8 @@ pub(crate) const ROUTES: &[Route] = table! {
     Post   "/api/v1/workspaces/{ws}/flows/{id}/pause" => PUBLISH @ audited("flow.paused");
     Post   "/api/v1/workspaces/{ws}/flows/{id}/resume" => PUBLISH @ audited("flow.resumed");
     Post   "/api/v1/workspaces/{ws}/flows/{id}/archive" => PUBLISH @ audited("flow.archived");
+    Put    "/api/v1/workspaces/{ws}/flows/{id}/warmup" => PUBLISH @ audited("flow.warmup_changed");
+    Post   "/api/v1/workspaces/{ws}/flows/{id}/warmup/open" => ADMIN @ audited("flow.warmup_opened");
     Get    "/api/v1/workspaces/{ws}/flows/{id}/enrollments" => READ;
     Post   "/api/v1/workspaces/{ws}/flows/{id}/enrollments" => EDIT @ not_audited("the enrollment is the record");
     Get    "/api/v1/workspaces/{ws}/flows/{id}/enrollments/{enrollment_id}" => READ;
@@ -768,11 +771,12 @@ mod tests {
     }
 
     /// The publish rows, as the matrix places them.
-    const PUBLISH_ROWS: [(&str, &str); 12] = [
+    const PUBLISH_ROWS: [(&str, &str); 13] = [
         ("post", "/api/v1/workspaces/{ws}/flows/{id}/publish"),
         ("post", "/api/v1/workspaces/{ws}/flows/{id}/pause"),
         ("post", "/api/v1/workspaces/{ws}/flows/{id}/resume"),
         ("post", "/api/v1/workspaces/{ws}/flows/{id}/archive"),
+        ("put", "/api/v1/workspaces/{ws}/flows/{id}/warmup"),
         (
             "post",
             "/api/v1/workspaces/{ws}/flows/{id}/enrollments/{enrollment_id}/retry",

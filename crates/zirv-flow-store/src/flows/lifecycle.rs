@@ -16,6 +16,7 @@ use super::crud::{
 };
 use super::state::{FlowAction, FlowState};
 use super::triggers::{enqueue_publish_fan_out, remove_flow_schedule, sync_flow_schedule};
+use super::warmup;
 use crate::{Clock, NewDecision, StoreError, append_decision};
 
 /// The state `action` leads to from the locked flow, or the refusal.
@@ -97,6 +98,11 @@ pub async fn publish_flow(
         &decision_actions::FLOW_PUBLISHED,
     )
     .await?;
+    // The window starts when the flow first takes enrollments; a new version does not restart it.
+    if flow.state == FlowState::Draft {
+        let now = clock.now(connection).await?;
+        warmup::start(connection, workspace, flow.id, now).await?;
+    }
     // A draft that does not parse was never validated, and the API refuses to publish one.
     if let Ok(settings) = serde_json::from_value::<FlowSettings>(flow.draft_settings.clone()) {
         sync_flow_schedule(connection, workspace, flow.id, &settings).await?;
@@ -110,6 +116,7 @@ pub async fn publish_flow(
 
 async fn transition(
     connection: &mut PgConnection,
+    clock: &Clock,
     workspace: WorkspaceId,
     id: Uuid,
     action: FlowAction,
@@ -135,10 +142,14 @@ async fn transition(
         // Every in-flight enrollment exits, in batches of a job of their own.
         FlowAction::Archive => {
             remove_flow_schedule(connection, workspace, id).await?;
+            warmup::discard(connection, workspace, id).await?;
             enqueue_lifecycle(connection, workspace, id, LifecycleAction::Archive, trace).await?;
         }
         // Every enrollment a step was held for runs again, in batches.
         FlowAction::Resume => {
+            // The window restarts; the entries that waited keep their places in it.
+            let now = clock.now(connection).await?;
+            warmup::start(connection, workspace, id, now).await?;
             enqueue_lifecycle(connection, workspace, id, LifecycleAction::Resume, trace).await?;
         }
         FlowAction::Publish | FlowAction::Pause => {}
@@ -155,6 +166,7 @@ pub async fn pause_flow(
 ) -> Result<Flow, FlowError> {
     transition(
         connection,
+        &Clock::default(),
         workspace,
         id,
         FlowAction::Pause,
@@ -167,12 +179,14 @@ pub async fn pause_flow(
 /// Resumes a paused flow. Records `flow.resume`.
 pub async fn resume_flow(
     connection: &mut PgConnection,
+    clock: &Clock,
     workspace: WorkspaceId,
     id: Uuid,
     trace: &TraceContext,
 ) -> Result<Flow, FlowError> {
     transition(
         connection,
+        clock,
         workspace,
         id,
         FlowAction::Resume,
@@ -192,6 +206,7 @@ pub async fn archive_flow(
 ) -> Result<Flow, FlowError> {
     transition(
         connection,
+        &Clock::default(),
         workspace,
         id,
         FlowAction::Archive,

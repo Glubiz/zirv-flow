@@ -445,6 +445,7 @@ values.
 | GET | `/api/v1/workspaces` | none or any signed-in user | none |
 | POST | `/api/v1/workspaces` | owner | none |
 | GET | `/api/v1/workspaces/{ws}` | member | read |
+| GET | `/api/v1/workspaces/{ws}/summary` | member | read |
 | PATCH | `/api/v1/workspaces/{ws}` | admin | admin |
 | GET | `/api/v1/workspaces/{ws}/members` | member | read or admin |
 | PUT | `/api/v1/workspaces/{ws}/members/{user_id}` | admin | admin |
@@ -482,6 +483,8 @@ values.
 | POST | `/api/v1/workspaces/{ws}/flows/{id}/pause` | publisher | publish |
 | POST | `/api/v1/workspaces/{ws}/flows/{id}/resume` | publisher | publish |
 | POST | `/api/v1/workspaces/{ws}/flows/{id}/archive` | publisher | publish |
+| PUT | `/api/v1/workspaces/{ws}/flows/{id}/warmup` | publisher | publish |
+| POST | `/api/v1/workspaces/{ws}/flows/{id}/warmup/open` | admin | admin |
 | GET | `/api/v1/workspaces/{ws}/flows/{id}/enrollments` | member | read |
 | POST | `/api/v1/workspaces/{ws}/flows/{id}/enrollments` | editor | write |
 | GET | `/api/v1/workspaces/{ws}/flows/{id}/enrollments/{enrollment_id}` | member | read |

@@ -43,6 +43,7 @@ mod setup;
 mod snippets;
 mod sources;
 mod state;
+mod summary;
 mod templates;
 mod test_sends;
 mod themes;
@@ -171,6 +172,7 @@ fn routes() -> Router<AppState> {
             "/api/v1/workspaces",
             get(workspaces::list).post(workspaces::create),
         )
+        .route("/api/v1/workspaces/{ws}/summary", get(summary::get))
         .route(
             "/api/v1/workspaces/{ws}",
             get(workspaces::get).patch(workspaces::update),
@@ -265,6 +267,14 @@ fn routes() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{ws}/flows/{id}/archive",
             post(flows::publish::archive),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/flows/{id}/warmup",
+            put(flows::warmup::set),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/flows/{id}/warmup/open",
+            post(flows::warmup::open),
         )
         .route(
             "/api/v1/workspaces/{ws}/flows/{id}/enrollments",

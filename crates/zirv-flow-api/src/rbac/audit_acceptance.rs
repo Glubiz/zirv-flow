@@ -749,6 +749,16 @@ mod tests {
         w.a("POST", "/flows/{id}/resume", &[u(id)], None, Some(id))
             .await;
         w.a(
+            "PUT",
+            "/flows/{id}/warmup",
+            &[u(id)],
+            j(json!({"enabled": true, "seconds": 600})),
+            Some(id),
+        )
+        .await;
+        w.a("POST", "/flows/{id}/warmup/open", &[u(id)], None, Some(id))
+            .await;
+        w.a(
             "POST",
             "/flows/{id}/start",
             &[u(s.flow)],
@@ -1084,6 +1094,7 @@ mod tests {
     }
 
     async fn events_and_consent(w: &mut Walk<'_>, s: &Seeded) {
+        w.s("GET", "/summary", &[], None).await;
         w.a(
             "POST",
             "/event-schemas",

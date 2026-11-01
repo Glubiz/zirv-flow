@@ -42,6 +42,7 @@ use crate::session::{self, SessionBody, SignInRequest, UserBody};
 use crate::setup::{self, SetupRequest, SetupStatus};
 use crate::snippets;
 use crate::sources;
+use crate::summary;
 use crate::templates;
 use crate::themes;
 use crate::traces::{self, CauseBody, DecisionBody, TraceBody};
@@ -78,6 +79,7 @@ use crate::workspaces::{
         workspaces::create,
         workspaces::get,
         workspaces::update,
+        summary::get,
         members::list,
         members::set,
         members::remove,
@@ -153,6 +155,8 @@ use crate::workspaces::{
         flows::publish::pause,
         flows::publish::resume,
         flows::publish::archive,
+        flows::warmup::set,
+        flows::warmup::open,
         flows::test_mode::test,
         flows::triggers::enroll_person,
         flows::triggers::start,
@@ -370,6 +374,9 @@ use crate::workspaces::{
         CreateWorkspaceRequest,
         UpdateWorkspaceRequest,
         WorkspaceBody,
+        summary::WorkspaceSummaryBody,
+        summary::FlowSummaryBody,
+        summary::SummaryWindowBody,
         UtmSettingsBody,
         MemberBody,
         SetRoleRequest,

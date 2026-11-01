@@ -146,6 +146,8 @@ graph="$(jq -nc --arg t "$tpl" --arg d "$dest" '{v: 1,
 flow="$(api_json POST "/workspaces/$ws/flows" "$(jq -nc --arg n "bench-$label" --argjson g "$graph" \
   '{name: $n, graph: $g, settings: {trigger: {type: "manual"}, reentry: {mode: "once"}}}')" | jq -r .id)"
 [ -n "$flow" ] && [ "$flow" != null ] || die "the flow was not created"
+# The bench measures sends at full intake, so the warm-up ramp (#328) is off.
+api_json PUT "/workspaces/$ws/flows/$flow/warmup" '{"enabled":false,"seconds":300}' >/dev/null
 api POST "/workspaces/$ws/flows/$flow/publish" >/dev/null
 
 # 4. Sampler, start, wait.

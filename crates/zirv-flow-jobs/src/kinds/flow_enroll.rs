@@ -482,8 +482,17 @@ mod tests {
             .unwrap();
         }
 
-        /// Creates a flow and publishes its first version.
+        /// Creates a flow and publishes its first version. The tests that use it are about the
+        /// enroll job, not the ramp, so its warm-up is off; `warming_flow` keeps it.
         async fn flow(&self, name: &str, settings: Value) -> Uuid {
+            self.flow_with(name, settings, false).await
+        }
+
+        async fn warming_flow(&self, name: &str, settings: Value) -> Uuid {
+            self.flow_with(name, settings, true).await
+        }
+
+        async fn flow_with(&self, name: &str, settings: Value, warm: bool) -> Uuid {
             let id = Uuid::now_v7();
             let mut connection = self.pool.acquire().await.unwrap();
             zirv_flow_store::create_flow(
@@ -499,6 +508,11 @@ mod tests {
             )
             .await
             .unwrap();
+            if !warm {
+                zirv_flow_store::set_warmup(&mut connection, self.ws, id, false, 300)
+                    .await
+                    .unwrap();
+            }
             drop(connection);
             self.publish(id).await;
             id
@@ -536,6 +550,7 @@ mod tests {
             let mut tx = zirv_flow_store::begin(&self.pool).await.unwrap();
             zirv_flow_store::resume_flow(
                 &mut tx,
+                &self.clock(),
                 self.ws,
                 id,
                 &TraceContext::root(Cause::api("r")),
@@ -1062,6 +1077,9 @@ mod tests {
             )
             .await
             .unwrap();
+            zirv_flow_store::set_warmup(&mut connection, env.ws, flow, false, 300)
+                .await
+                .unwrap();
             drop(connection);
 
             // Connection A refreshes the segment as its job does, and stays open: it holds the
@@ -1610,6 +1628,54 @@ mod tests {
             assert_eq!(env.enrolled(always).await.len(), 2);
             assert_eq!(env.enrolled(once_only).await.len(), 1);
             assert_eq!(env.decisions("skipped", Some("already_entered")).await, 2);
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_person_started_in_a_warming_flow_waits_and_the_queued_job_admits_them_at_their_turn(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            let ann = env.person("a").await;
+            let flow = env
+                .warming_flow("Warming", settings(json!({"type": "api"}), once()))
+                .await;
+            let trace = TraceContext::root(Cause::api("req"));
+            let payload = EnrollJobPayload {
+                workspace: env.ws,
+                flow,
+                version: None,
+                trigger: TriggerKind::Api,
+                work: EnrollWork::People(vec![(ann, Uuid::now_v7())]),
+            };
+
+            env.run(&payload, &trace).await;
+
+            assert_eq!(env.count("SELECT count(*) FROM enrollments").await, 0);
+            assert_eq!(env.decisions("deferred", Some("warm_up")).await, 1);
+            assert_eq!(
+                env.count("SELECT count(*) FROM flow_warmup_waiting").await,
+                1
+            );
+            assert_eq!(env.enroll_jobs().await, 1, "the entry's own job is queued");
+
+            // The turn comes: the window is over and the queued job is due.
+            env.clock.advance(time::Duration::seconds(301));
+            sqlx::query("UPDATE jobs SET run_at = now() WHERE kind = 'flow.enroll'")
+                .execute(&env.pool)
+                .await
+                .unwrap();
+            assert_eq!(env.drain(1).await, 1);
+
+            assert_eq!(env.count("SELECT count(*) FROM enrollments").await, 1);
+            assert_eq!(
+                env.count("SELECT count(*) FROM flow_warmup_waiting").await,
+                0
+            );
+            assert_eq!(env.decisions("enrolled", None).await, 1);
         })
         .await;
     }

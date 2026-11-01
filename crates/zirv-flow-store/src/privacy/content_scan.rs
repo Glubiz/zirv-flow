@@ -168,6 +168,10 @@ const VALUE_FREE: &[(&[&str], &str)] = &[
         "retention settings: day counts per workspace and the last run of each window as a row count, no person column",
     ),
     (
+        &["summary_daily", "summary_state", "summary_flows"],
+        "Home summary rollup: per workspace and day counts, high-water timestamps, and per flow counts and a goal flag; no person column",
+    ),
+    (
         &["api_idempotency"],
         "Idempotency-Key bookkeeping: hash of the caller with the key, an HMAC-keyed request hash and a response hash, a state, a lease, a status and the created resource's id; request identifiers cannot be confirmed without the server secret; no response body and no client-chosen text; 24 hour expiry",
     ),

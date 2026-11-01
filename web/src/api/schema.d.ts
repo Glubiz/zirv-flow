@@ -1875,6 +1875,47 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/flows/{id}/warmup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Turns the warm-up of a flow on or off and sets its length. A window already running keeps its
+         *     start and counts the new length from it; turning it off lets everyone waiting in at once.
+         *     Needs the publisher role and is audited as `flow.warmup_changed`.
+         */
+        put: operations["set_flow_warmup"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/flows/{id}/warmup/open": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Ends the warm-up window early: everyone waiting is admitted now, through the same checks as
+         *     any entry. Needs the admin role and is audited as `flow.warmup_opened`.
+         */
+        post: operations["open_flow_warmup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/forwarding/dead-letters": {
         parameters: {
             query?: never;
@@ -3547,6 +3588,26 @@ export interface paths {
          *     `ok` false and the reason, except an egress denial (422). Workspace admins only. Audited as `source.tested`.
          */
         post: operations["test_source"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * What happened in the workspace over the last `days` UTC days (today included), for the Home
+         *     figures. Read from the daily rollup, not counted per request.
+         */
+        get: operations["get_workspace_summary"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -7057,6 +7118,8 @@ export interface components {
         FlowDetailBody: components["schemas"]["FlowBody"] & {
             graph: components["schemas"]["FlowGraph"];
             settings: components["schemas"]["FlowSettings"];
+            /** @description The warm-up that ramps enrollments into the flow after it starts taking them. */
+            warmup: components["schemas"]["WarmupBody"];
         };
         /** @description The output port `port` of node `from` leads to node `to`. Every port of every node is wired exactly once. */
         FlowEdge: {
@@ -7225,6 +7288,25 @@ export interface components {
             id: string;
             /** @enum {string} */
             type: "split.random";
+        };
+        FlowSummaryBody: {
+            /** Format: uuid */
+            flow_id: string;
+            /**
+             * Format: int64
+             * @description Goal conversions of the flow in the window; null when the flow has no goal.
+             */
+            goals_reached?: number | null;
+            /**
+             * Format: int64
+             * @description Enrollments in flight (active, waiting, held or failed) at the last rollup run.
+             */
+            people_in_flow: number;
+            /**
+             * Format: int64
+             * @description Messages of the flow sent in the window.
+             */
+            sent: number;
         };
         /** @description The result of a walk. */
         FlowTestBody: {
@@ -10090,6 +10172,18 @@ export interface components {
              */
             sync_mode: string;
         };
+        SummaryWindowBody: {
+            /**
+             * Format: date-time
+             * @description Start of the window, inclusive (UTC): midnight of the first day counted.
+             */
+            from: string;
+            /**
+             * Format: date-time
+             * @description End of the window (UTC): the time of the request.
+             */
+            to: string;
+        };
         SuppressionBody: {
             /** Format: date-time */
             created_at: string;
@@ -11177,6 +11271,51 @@ export interface components {
             key: string;
             node: string;
         };
+        /** @description The warm-up of a flow: its setting and the window it last started. */
+        WarmupBody: {
+            /**
+             * Format: int64
+             * @description Entries admitted since the window started.
+             */
+            admitted: number;
+            /** @description Whether a window holds back enrollments when the flow starts taking them. */
+            enabled: boolean;
+            /**
+             * Format: date-time
+             * @description When the window ends, `started_at` plus `seconds`; null before it started.
+             */
+            ends_at?: string | null;
+            /**
+             * Format: date-time
+             * @description When an Admin ended the window early; null when none did.
+             */
+            opened_at?: string | null;
+            /**
+             * Format: int32
+             * @description The length of the window, 60 to 86400 seconds.
+             */
+            seconds: number;
+            /**
+             * Format: date-time
+             * @description When the window last started: the first publish or the last resume. Null before either.
+             */
+            started_at?: string | null;
+            /**
+             * Format: int64
+             * @description Entries still waiting for their turn.
+             */
+            waiting: number;
+        };
+        WarmupRequest: {
+            /** @description Whether a window holds back enrollments when the flow starts taking them. */
+            enabled: boolean;
+            /**
+             * Format: int32
+             * @description The length of the window in seconds, 60 to 86400.
+             * @example 300
+             */
+            seconds: number;
+        };
         WebhookAccepted: {
             /** @description Payloads appended to the inbox: always 1. They are durable, not yet applied. */
             accepted: number;
@@ -11260,6 +11399,38 @@ export interface components {
             timezone: string;
             /** @description The automatic UTM parameter setting for email links. Off until an admin turns it on. */
             utm: components["schemas"]["UtmSettingsBody"];
+        };
+        WorkspaceSummaryBody: {
+            /**
+             * Format: date-time
+             * @description When the rollup last finished a run. The counts lag the data by up to about seven
+             *     minutes (five between runs and a two minute commit margin); a workspace the rollup has
+             *     not reached yet shows zeros and the time of the request.
+             */
+            computed_at: string;
+            /**
+             * Format: int64
+             * @description Events received in the window. Null for a caller who may not read events.
+             */
+            events_received?: number | null;
+            /** @description Published flows only. */
+            flows: components["schemas"]["FlowSummaryBody"][];
+            /**
+             * Format: int64
+             * @description Goal conversions in the window.
+             */
+            goals_reached: number;
+            /**
+             * Format: int64
+             * @description Messages that ended `sent` in the window; test sends excluded.
+             */
+            messages_sent: number;
+            /**
+             * Format: int64
+             * @description People created in the window.
+             */
+            people_created: number;
+            window: components["schemas"]["SummaryWindowBody"];
         };
     };
     responses: never;
@@ -18696,6 +18867,141 @@ export interface operations {
             };
         };
     };
+    set_flow_warmup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Flow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WarmupRequest"];
+            };
+        };
+        responses: {
+            /** @description The flow with its new warm-up */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FlowDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a publisher, a key without the publish scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or flow, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The flow is archived (`code` is `flow_archived`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A length outside 60 to 86400 seconds */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    open_flow_warmup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Flow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The flow, no longer warming up */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FlowDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not an admin, a key without the admin scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or flow, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The flow is not published: a draft, paused or archived flow cannot be opened */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     list_forwarding_dead_letters: {
         parameters: {
             query?: {
@@ -25819,6 +26125,81 @@ export interface operations {
             };
             /** @description The source did not answer in time */
             504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_workspace_summary: {
+        parameters: {
+            query?: {
+                /**
+                 * @description Days in the window, 1 to 30; default 7. Whole UTC days, today included. The figures come
+                 *     from a rollup refreshed every five minutes and may lag by up to about seven minutes (see
+                 *     `computed_at`).
+                 */
+                days?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The figures */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceSummaryBody"];
+                };
+            };
+            /** @description days is not a number from 1 to 30 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The read ran past its time limit (`code` is `search_timeout`) */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

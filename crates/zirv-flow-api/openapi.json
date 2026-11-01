@@ -10999,6 +10999,208 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/flows/{id}/warmup": {
+      "put": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Turns the warm-up of a flow on or off and sets its length. A window already running keeps its\nstart and counts the new length from it; turning it off lets everyone waiting in at once.\nNeeds the publisher role and is audited as `flow.warmup_changed`.",
+        "operationId": "set_flow_warmup",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WarmupRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The flow with its new warm-up",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowDetailBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a publisher, a key without the publish scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or flow, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The flow is archived (`code` is `flow_archived`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A length outside 60 to 86400 seconds",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/flows/{id}/warmup/open": {
+      "post": {
+        "tags": [
+          "flows"
+        ],
+        "summary": "Ends the warm-up window early: everyone waiting is admitted now, through the same checks as\nany entry. Needs the admin role and is audited as `flow.warmup_opened`.",
+        "operationId": "open_flow_warmup",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Flow id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The flow, no longer warming up",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowDetailBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not an admin, a key without the admin scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or flow, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The flow is not published: a draft, paused or archived flow cannot be opened",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/forwarding/dead-letters": {
       "get": {
         "tags": [
@@ -21753,6 +21955,110 @@
           },
           "504": {
             "description": "The source did not answer in time",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/summary": {
+      "get": {
+        "tags": [
+          "workspaces"
+        ],
+        "summary": "What happened in the workspace over the last `days` UTC days (today included), for the Home\nfigures. Read from the daily rollup, not counted per request.",
+        "operationId": "get_workspace_summary",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "days",
+            "in": "query",
+            "description": "Days in the window, 1 to 30; default 7. Whole UTC days, today included. The figures come\nfrom a rollup refreshed every five minutes and may lag by up to about seven minutes (see\n`computed_at`).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 7,
+              "maximum": 30,
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The figures",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceSummaryBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "days is not a number from 1 to 30",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The read ran past its time limit (`code` is `search_timeout`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -33762,7 +34068,8 @@
             "type": "object",
             "required": [
               "graph",
-              "settings"
+              "settings",
+              "warmup"
             ],
             "properties": {
               "graph": {
@@ -33770,6 +34077,10 @@
               },
               "settings": {
                 "$ref": "#/components/schemas/FlowSettings"
+              },
+              "warmup": {
+                "$ref": "#/components/schemas/WarmupBody",
+                "description": "The warm-up that ramps enrollments into the flow after it starts taking them."
               }
             }
           }
@@ -34435,6 +34746,38 @@
           }
         },
         "additionalProperties": false
+      },
+      "FlowSummaryBody": {
+        "type": "object",
+        "required": [
+          "flow_id",
+          "people_in_flow",
+          "sent"
+        ],
+        "properties": {
+          "flow_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "goals_reached": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Goal conversions of the flow in the window; null when the flow has no goal."
+          },
+          "people_in_flow": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Enrollments in flight (active, waiting, held or failed) at the last rollup run."
+          },
+          "sent": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Messages of the flow sent in the window."
+          }
+        }
       },
       "FlowTestBody": {
         "type": "object",
@@ -41626,6 +41969,25 @@
           }
         }
       },
+      "SummaryWindowBody": {
+        "type": "object",
+        "required": [
+          "from",
+          "to"
+        ],
+        "properties": {
+          "from": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Start of the window, inclusive (UTC): midnight of the first day counted."
+          },
+          "to": {
+            "type": "string",
+            "format": "date-time",
+            "description": "End of the window (UTC): the time of the request."
+          }
+        }
+      },
       "SuppressionBody": {
         "type": "object",
         "required": [
@@ -44515,6 +44877,82 @@
           }
         }
       },
+      "WarmupBody": {
+        "type": "object",
+        "description": "The warm-up of a flow: its setting and the window it last started.",
+        "required": [
+          "enabled",
+          "seconds",
+          "admitted",
+          "waiting"
+        ],
+        "properties": {
+          "admitted": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Entries admitted since the window started."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether a window holds back enrollments when the flow starts taking them."
+          },
+          "ends_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the window ends, `started_at` plus `seconds`; null before it started."
+          },
+          "opened_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When an Admin ended the window early; null when none did."
+          },
+          "seconds": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The length of the window, 60 to 86400 seconds."
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the window last started: the first publish or the last resume. Null before either."
+          },
+          "waiting": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Entries still waiting for their turn."
+          }
+        }
+      },
+      "WarmupRequest": {
+        "type": "object",
+        "required": [
+          "enabled",
+          "seconds"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether a window holds back enrollments when the flow starts taking them."
+          },
+          "seconds": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The length of the window in seconds, 60 to 86400.",
+            "example": 300,
+            "maximum": 86400,
+            "minimum": 60
+          }
+        }
+      },
       "WebhookAccepted": {
         "type": "object",
         "required": [
@@ -44693,6 +45131,57 @@
           "utm": {
             "$ref": "#/components/schemas/UtmSettingsBody",
             "description": "The automatic UTM parameter setting for email links. Off until an admin turns it on."
+          }
+        }
+      },
+      "WorkspaceSummaryBody": {
+        "type": "object",
+        "required": [
+          "window",
+          "messages_sent",
+          "goals_reached",
+          "people_created",
+          "flows",
+          "computed_at"
+        ],
+        "properties": {
+          "computed_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the rollup last finished a run. The counts lag the data by up to about seven\nminutes (five between runs and a two minute commit margin); a workspace the rollup has\nnot reached yet shows zeros and the time of the request."
+          },
+          "events_received": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Events received in the window. Null for a caller who may not read events."
+          },
+          "flows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FlowSummaryBody"
+            },
+            "description": "Published flows only."
+          },
+          "goals_reached": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Goal conversions in the window."
+          },
+          "messages_sent": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Messages that ended `sent` in the window; test sends excluded."
+          },
+          "people_created": {
+            "type": "integer",
+            "format": "int64",
+            "description": "People created in the window."
+          },
+          "window": {
+            "$ref": "#/components/schemas/SummaryWindowBody"
           }
         }
       }
