@@ -376,10 +376,10 @@ pub use test_sends::{
 pub use themes::{
     EffectiveTheme, LockedTheme, NewTheme, Theme, ThemeChoice, ThemeDraft, ThemeError, ThemePatch,
     ThemeTemplate, ThemeUse, ThemeVersion, ThemeVersionSummary, archive_theme, create_theme,
-    effective_theme, find_theme, find_theme_draft, find_theme_version, footer_snippet_usable,
-    list_theme_tokens, list_theme_versions, list_themes, lock_theme, publish_theme,
-    save_theme_draft, set_default_theme, theme_live_templates, theme_template_counts,
-    theme_where_used, update_theme,
+    default_live_templates, effective_theme, find_theme, find_theme_draft, find_theme_version,
+    footer_snippet_usable, list_theme_tokens, list_theme_versions, list_themes, lock_theme,
+    publish_theme, save_theme_draft, set_default_theme, theme_live_templates,
+    theme_template_counts, theme_where_used, update_theme,
 };
 pub use tracking::{
     Engagement, PreferenceChange, PreferencesSaved, TrackedMessage, Unsubscribed,

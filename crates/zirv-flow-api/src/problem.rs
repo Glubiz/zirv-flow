@@ -965,18 +965,38 @@ impl ApiError {
 
     /// A snippet version that would stop live templates from sending.
     pub(crate) fn snippet_breaks_templates(broken: Vec<BrokenTemplateProblem>) -> Self {
-        Self::breaks_templates("snippet_breaks_templates", "snippet", broken)
+        Self::breaks_templates("snippet_breaks_templates", broken, |total| {
+            format!(
+                "This snippet version would stop {total} live templates from sending; fix \
+                 them or the version first."
+            )
+        })
     }
 
     /// A theme version that would stop live templates from sending.
     pub(crate) fn theme_breaks_templates(broken: Vec<BrokenTemplateProblem>) -> Self {
-        Self::breaks_templates("theme_breaks_templates", "theme", broken)
+        Self::breaks_templates("theme_breaks_templates", broken, |total| {
+            format!(
+                "This theme version would stop {total} live templates from sending; fix \
+                 them or the version first."
+            )
+        })
+    }
+
+    /// A default switch to a theme that would stop live templates from sending.
+    pub(crate) fn default_theme_breaks_templates(broken: Vec<BrokenTemplateProblem>) -> Self {
+        Self::breaks_templates("theme_breaks_templates", broken, |total| {
+            format!(
+                "Making this theme the default would stop {total} live templates from sending; \
+                 fix them or choose another theme."
+            )
+        })
     }
 
     fn breaks_templates(
         code: &'static str,
-        subject: &str,
         mut broken: Vec<BrokenTemplateProblem>,
+        detail: impl FnOnce(u32) -> String,
     ) -> Self {
         let total = u32::try_from(broken.len()).unwrap_or(u32::MAX);
         broken.truncate(MAX_LISTED_TEMPLATES);
@@ -986,10 +1006,7 @@ impl ApiError {
                 templates: Some((broken, total)),
                 ..SegmentExtra::default()
             })),
-            ..Self::unprocessable(format!(
-                "This {subject} version would stop {total} live templates from sending; fix \
-                 them or the version first."
-            ))
+            ..Self::unprocessable(detail(total))
         }
     }
 
