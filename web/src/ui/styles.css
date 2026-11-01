@@ -5645,6 +5645,8 @@ main:focus {
 
 .daybars-table table {
   margin-top: 8px;
+}
+
 /* Assistant dock: one aside beside every editor, an overlay below 1000px. */
 .dock {
   box-sizing: border-box;
