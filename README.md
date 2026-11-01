@@ -26,7 +26,7 @@ release requirements and [architecture](docs/architecture.md) for the design.
 - [Getting started](docs/guide/getting-started.md): setup, a first newsletter and its trace.
 - <a id="sources"></a>[Sources](docs/guide/sources.md): connect data, map it, run syncs and check freshness.
 - <a id="segments"></a>[Segments](docs/guide/segments.md): build audiences, preview, explain and maintain membership.
-- [Flows](docs/guide/flows.md): triggers, steps, test mode and running enrollments.
+- [Flows](docs/guide/flows.md): triggers, steps, warm-up, test mode and running enrollments.
 - [Templates](docs/guide/templates.md): edit, test, review and publish content.
 - [Channels](docs/guide/channels.md): domains, destinations, delivery and consent.
 - [Compliance](docs/guide/compliance.md): product controls and operator responsibilities.

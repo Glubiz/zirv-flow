@@ -987,6 +987,9 @@ archived`; enrollments stay on the version they entered, new ones use the latest
 filters; schedule (cron + time zone, audience = segment or everyone); manual
 start for an audience; API (`POST .../flows/{id}/enrollments`).
 
+**Warm-up.** Every trigger ends in `flow.enroll`, so the ramp is applied there and not in
+the triggers (9.4). The window starts at the first publish and at a resume.
+
 **Segment triggers.** The membership diff transaction (refresh and re-evaluation)
 enqueues `flow.enroll` for the published, not-paused flows triggered by that
 segment's entry or exit, ignoring `definition_change`. A payload holds at most 1,000
@@ -1082,6 +1085,7 @@ events (`message.sent`, `message.skipped`, ...) that later nodes can wait for.
 |------|-----------|
 | Fan-out | `flow.enroll` jobs of up to 1,000 people; idempotent on `(flow_id, person_id, trigger_occurrence)` (event id or schedule slot) |
 | Re-entry | `once` refuses any person with a `flow_entries` row, `once_at_a_time` refuses while an enrollment is active (partial unique index on active enrollments per flow and person), `always` checks the minimum interval. A refused enrollment is a `flow.enroll` decision with outcome `skipped` and its reason |
+| Warm-up | A per-flow window after the flow starts taking enrollments (first publish, and a resume after a pause; a new version does not restart it). On by default, 5 minutes, bounded to 1 minute to 24 hours, stored on the `flows` row so a change needs no publish. Each entry has a stable place in the window, `hash(flow, person, occurrence)` as a fraction of it; an entry whose turn has not come is stored in `flow_warmup_waiting`, recorded as a `flow.enroll` decision `deferred: warm_up`, and gets a `flow.enroll` job at its admission time, which runs the normal checks (re-entry applies then) and removes the row in the same transaction. A paused flow keeps waiting entries and a resume restarts the window with the same places. "Open now" (Admin, audited) ends the window and queues every waiting entry to run now. All five triggers go through it, since they all reach `enroll_entries` |
 | Goal | Optional per flow: a named event (same property filters as an event trigger) or entry into a chosen segment. Reaching it during an active enrollment records a conversion (ruling 4d134de2); the setting "exit on goal" ends the enrollment. Graph `goal` nodes also record a conversion |
 | Exit criteria | A list of: leaves the trigger segment (with a cause other than `definition_change`), a named event occurs, goal reached (ruling 4d134de2). All are checked from the existing hooks: the event-insert path, and the `segment.entered` and `segment.exited` writes of refresh and re-evaluation. There are no arbitrary AST goals in v1 |
 | Pause | No new enrollments (skips are counted and recorded); due timers and arrived events are held and re-enqueued on resume |
