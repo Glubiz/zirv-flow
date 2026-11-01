@@ -84,20 +84,21 @@ function ContactView({ workspaceId, contactKey }: { workspaceId: string; contact
     <div className="page">
       <PageHeader
         title={data.key}
+        breadcrumb={{ group: "Audience", section: "Contacts", to: `/w/${workspaceId}/contacts` }}
         lede={`Updated ${formatDateTime(data.updated_at)}. Created ${formatDateTime(data.created_at)}.`}
-        actions={
-          <>
-            <Link className="btn" to={`/w/${workspaceId}/people/${data.person_id}`}>
-              Open the profile
-            </Link>
-            {canWrite ? (
-              <>
-                <Button onClick={() => setEditing(true)}>Edit</Button>
-                <Button onClick={() => setDeleting(true)}>Delete</Button>
-              </>
-            ) : null}
-          </>
+        primary={
+          canWrite ? (
+            <Button variant="primary" onClick={() => setEditing(true)}>
+              Edit
+            </Button>
+          ) : null
         }
+        secondary={
+          <Link className="btn" to={`/w/${workspaceId}/people/${data.person_id}`}>
+            Open the profile
+          </Link>
+        }
+        actions={canWrite ? <Button onClick={() => setDeleting(true)}>Delete</Button> : null}
       />
       {notice ? (
         <p className="notice" role="status">

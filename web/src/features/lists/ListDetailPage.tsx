@@ -1,5 +1,5 @@
 import { useState, type SyntheticEvent } from "react";
-import { Link, useParams } from "react-router";
+import { useParams } from "react-router";
 
 import { client, describeError, unwrap, useResource, type ErrorSummary } from "../../api";
 import {
@@ -86,9 +86,6 @@ function ListDetail({ workspaceId, listId }: { workspaceId: string; listId: stri
 
   return (
     <div className="page">
-      <p>
-        <Link to={`/w/${workspaceId}/lists`}>All lists</Link>
-      </p>
       {list.status === "error" ? (
         <Panel flush>
           <ErrorState {...describeError(list.error)} onRetry={list.reload} />
@@ -97,6 +94,7 @@ function ListDetail({ workspaceId, listId }: { workspaceId: string; listId: stri
         <>
           <PageHeader
             title={title}
+            breadcrumb={{ group: "Audience", section: "Lists", to: `/w/${workspaceId}/lists` }}
             lede={lede || (list.status === "ready" ? `${plural(list.data.member_count, "person", "people")} in this list.` : undefined)}
             actions={
               canWrite ? (

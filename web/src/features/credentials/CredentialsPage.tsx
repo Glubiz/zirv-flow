@@ -20,7 +20,7 @@ export function CredentialsPage() {
   return (
     <div className="page">
       <PageHeader
-        title="Credentials"
+        title="Credentials" breadcrumb={{ group: "Integrations", section: "Credentials" }}
         lede="The keys and secrets of your external accounts. Enter one once, share it between sources and destinations, and rotate it in one place."
       />
       <ResourceView resource={access} loadingLabel="Checking your access">

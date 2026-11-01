@@ -44,7 +44,7 @@ function Lists({ workspaceId }: { workspaceId: string }) {
   return (
     <div className="page">
       <PageHeader
-        title="Lists"
+        title="Lists" breadcrumb={{ group: "Audience", section: "Lists" }}
         lede="Named sets of people you build by hand, from a CSV or through the API. When two people are merged, the list keeps both of their memberships."
         actions={
           canWrite ? (

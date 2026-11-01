@@ -13,7 +13,7 @@ export function AiSettingsPage() {
   return (
     <div className="page">
       <PageHeader
-        title="AI assistant"
+        title="AI assistant" breadcrumb={{ group: "Integrations", section: "AI assistant" }}
         lede="Choose the model the assistant uses, what it may send to it, and how much it may spend. Every call is logged without its content."
       />
       <ResourceView resource={access} loadingLabel="Checking your access">

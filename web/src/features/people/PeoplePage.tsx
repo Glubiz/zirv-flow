@@ -46,7 +46,7 @@ function People({ workspaceId }: { workspaceId: string }) {
   return (
     <div className="page">
       <PageHeader
-        title="People"
+        title="People" breadcrumb={{ group: "Audience", section: "People" }}
         lede="Find a person by an identifier, or by the value of one of your fields, and open everything the system knows and did about them."
       />
       <SearchForm workspaceId={workspaceId} onSearch={run} />

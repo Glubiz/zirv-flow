@@ -27,7 +27,7 @@ export function ConflictsPage() {
   return (
     <div className="page">
       <PageHeader
-        title="Identity conflicts"
+        title="Identity conflicts" breadcrumb={{ group: "Audience", section: "People" }}
         lede="Places where two people share an identifier but could not be merged. Decide whether they stay separate or the identifier moves."
       />
       <ConflictList key={ws} workspaceId={ws} canManage={canManage} />

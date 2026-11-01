@@ -25,7 +25,7 @@ function SnippetList({ workspaceId }: { workspaceId: string }) {
     <div className="page">
       <LibraryNav workspaceId={workspaceId} />
       <PageHeader
-        title="Snippets"
+        title="Snippets" breadcrumb={{ group: "Messaging", section: "Snippets" }}
         lede="Blocks you write once and use in many emails. Publish a snippet and every email that holds it uses the new version from its next send."
         actions={
           access.canWrite ? (

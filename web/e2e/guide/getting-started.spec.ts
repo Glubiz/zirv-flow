@@ -136,8 +136,8 @@ test("getting started on a clean Compose stack", async ({ page, request }) => {
     // The saved page does not poll membership; reload while the initial compute runs.
     await expect(async () => {
       await page.reload();
-      await page.getByRole("tab", { name: "Members", exact: true }).click();
-      await expect(page.getByRole("tabpanel", { name: "Members", exact: true }).getByRole("link", { name: RECIPIENT })).toBeVisible({ timeout: 2000 });
+      await page.getByRole("navigation", { name: "Segment sections" }).getByRole("link", { name: "People", exact: true }).click();
+      await expect(page.getByRole("table", { name: "People in this segment" }).getByRole("link", { name: RECIPIENT })).toBeVisible({ timeout: 2000 });
     }).toPass({ timeout: 90_000, intervals: [1000, 2000] });
     await page.goto(profileUrl);
     await page.getByLabel("Applies to").selectOption({ label: "All email" });

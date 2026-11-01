@@ -56,7 +56,7 @@ describe("segments list", () => {
     });
     mount();
 
-    const table = await screen.findByRole("table", { name: "Segments of this workspace" });
+    const table = await screen.findByRole("table", { name: "Segments" });
     const rows = within(table).getAllByRole("row");
     expect(within(rows[1]!).getByRole("link", { name: "Big spenders" })).toHaveAttribute("href", `/w/ws1/segments/${SEGMENT_ID}`);
     expect(within(rows[1]!).getByText("re-evaluated every hour")).toBeInTheDocument();
@@ -64,6 +64,22 @@ describe("segments list", () => {
     expect(within(rows[2]!).getByText("not computed yet")).toBeInTheDocument();
     expect(within(rows[2]!).getByText("re-evaluated every week")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "New segment" })).toBeInTheDocument();
+  });
+
+  it("filters by the search term in the URL and says when nothing matches", async () => {
+    mockApi({
+      ...actor("writer"),
+      [`GET ${WS}/segments`]: () => json([segmentRow(), segmentRow({ id: "x2", name: "Lapsed" })]),
+    });
+    const user = userEvent.setup();
+    renderRoute("/w/ws1/segments?q=laps", "/w/:ws/segments", <SegmentsPage />);
+
+    const table = await screen.findByRole("table", { name: "Segments" });
+    expect(within(table).getAllByRole("row")).toHaveLength(2);
+    expect(screen.getByRole("link", { name: "All 2" })).toHaveAttribute("aria-current", "page");
+    await user.clear(screen.getByRole("searchbox", { name: "Search segments" }));
+    await user.type(screen.getByRole("searchbox", { name: "Search segments" }), "zzz");
+    expect(await screen.findByText("No segments match")).toBeInTheDocument();
   });
 
   it("is read-only for someone who cannot write", async () => {

@@ -17,7 +17,7 @@ export function DimensionsPage() {
     <div className="page">
       <ConsentNav workspaceId={ws} />
       <PageHeader
-        title="Consent dimensions"
+        title="Consent dimensions" breadcrumb={{ group: "Audience", section: "Consent dimensions" }}
         lede="What consent is recorded on besides the channel. A topic is the built-in dimension; add your own, such as a product vertical or a purpose, and give each its values. A choice that leaves a dimension out covers all of its values."
       />
       <DimensionList key={ws} workspaceId={ws} canManage={canManage} />
