@@ -5,6 +5,8 @@ root="$(cd "$m8_dir/../../.." && pwd)"
 cd "$root"
 label='reference-resource emulation, not a reference-hardware run'
 benches=(ingest debugger explorer jobs timers decisions send render segments)
+# Git Bash rewrites container paths (/bench/..., /usr/local/...) in docker arguments; other hosts ignore this.
+export MSYS2_ARG_CONV_EXCL='/bench/;/usr/local/;/var/lib/'
 log() { echo "[m8] $*" >&2; }
 die() { log "$*"; exit 1; }
 
