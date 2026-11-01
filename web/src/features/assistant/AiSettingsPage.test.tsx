@@ -146,7 +146,7 @@ describe("AI assistant settings", () => {
     open();
 
     expect(await screen.findByText("AI is not configured on this deployment")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Save settings" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
   });
 
   it("shows a loading state while the models load", async () => {
@@ -166,7 +166,7 @@ describe("AI assistant settings", () => {
 
     expect(await screen.findByText("Loading the available models")).toBeInTheDocument();
     release();
-    expect(await screen.findByRole("button", { name: "Save settings" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Save" })).toBeInTheDocument();
   });
 
   it("shows an error state with a retry when the models fail", async () => {
@@ -186,7 +186,7 @@ describe("AI assistant settings", () => {
 
     failing = false;
     await user.click(within(alert).getByRole("button", { name: "Try again" }));
-    expect(await screen.findByRole("button", { name: "Save settings" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Save" })).toBeInTheDocument();
   });
 
   it("keeps the page from people who cannot manage the workspace", async () => {
@@ -236,9 +236,8 @@ describe("AI assistant settings", () => {
     const user = userEvent.setup();
     open();
 
-    const save = await screen.findByRole("button", { name: "Save settings" });
-    expect(save).toBeEnabled();
-    await user.click(screen.getByLabelText(/On for this workspace/));
+    const save = await screen.findByRole("button", { name: "Save" });
+    await user.click(screen.getByRole("switch", { name: "Turn on for this workspace" }));
     expect(save).toBeDisabled();
 
     await user.selectOptions(screen.getByLabelText("Provider"), "anthropic");
@@ -249,7 +248,7 @@ describe("AI assistant settings", () => {
     expect(save).toBeEnabled();
   });
 
-  it("saves every setting with the key sent only when typed, then clears the key field", async () => {
+  it("has one Save, in the header, that saves every section at once and is off while nothing changed", async () => {
     let saved = false;
     const calls = mockApi(
       admin({
@@ -264,16 +263,19 @@ describe("AI assistant settings", () => {
     const user = userEvent.setup();
     open();
 
-    await user.click(await screen.findByLabelText(/On for this workspace/));
+    expect(await screen.findByRole("button", { name: "Save" })).toBeDisabled();
+    await user.click(screen.getByRole("switch", { name: "Turn on for this workspace" }));
     await user.selectOptions(screen.getByLabelText("Provider"), "anthropic");
     await user.type(screen.getByLabelText("Provider key"), "sk-typed-key");
     await user.clear(screen.getByLabelText("Monthly budget"));
     await user.type(screen.getByLabelText("Monthly budget"), "2.5");
     await user.click(screen.getByLabelText(/Keep transcripts/));
     expect(screen.getByLabelText("Days to keep transcripts")).toHaveValue(7);
-    await user.click(screen.getByRole("button", { name: "Save settings" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => expect(calls.some((call) => call.method === "PUT")).toBe(true));
+    expect(calls.filter((call) => call.method === "PUT")).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: /^Save/ })).toHaveLength(1);
     const put = calls.find((call) => call.method === "PUT");
     expect(put?.body).toEqual({
       enabled: true,
@@ -301,7 +303,7 @@ describe("AI assistant settings", () => {
     open();
 
     await user.click(await screen.findByLabelText(/Keep transcripts/));
-    await user.click(screen.getByRole("button", { name: "Save settings" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => expect(calls.some((call) => call.method === "PUT")).toBe(true));
     const body = calls.find((call) => call.method === "PUT")?.body as Record<string, unknown>;
@@ -320,14 +322,14 @@ describe("AI assistant settings", () => {
     await user.clear(days);
     await user.type(days, "45");
     expect(screen.getByText("Enter a whole number from 1 to 30.")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Save settings" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
     await user.clear(days);
     await user.type(days, "30");
-    expect(screen.getByRole("button", { name: "Save settings" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
 
     await user.clear(screen.getByLabelText("Monthly budget"));
     expect(screen.getByText("Enter an amount of 0 or more.")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Save settings" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
   });
 
   it("lists each capability the probe found missing, with its reason", async () => {
@@ -354,10 +356,10 @@ describe("AI assistant settings", () => {
     const user = userEvent.setup();
     open();
 
-    await user.click(await screen.findByLabelText(/On for this workspace/));
+    await user.click(await screen.findByRole("switch", { name: "Turn on for this workspace" }));
     await user.selectOptions(screen.getByLabelText("Provider"), "openai");
     await user.type(screen.getByLabelText("Provider key"), "sk-x");
-    await user.click(screen.getByRole("button", { name: "Save settings" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
 
     const list = await screen.findByRole("list", { name: "Missing capabilities" });
     const items = within(list).getAllByRole("listitem");
@@ -378,16 +380,16 @@ describe("AI assistant settings", () => {
     const user = userEvent.setup();
     open();
 
-    await user.click(await screen.findByLabelText(/On for this workspace/));
+    await user.click(await screen.findByRole("switch", { name: "Turn on for this workspace" }));
     await user.selectOptions(screen.getByLabelText("Provider"), "openai");
     await user.type(screen.getByLabelText("Provider key"), "sk-x");
-    await user.click(screen.getByRole("button", { name: "Save settings" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
 
     expect(await screen.findByText("egress denied: 10.0.0.5 is a private address")).toBeInTheDocument();
     expect(screen.queryByRole("list", { name: "Missing capabilities" })).not.toBeInTheDocument();
   });
 
-  it("shows spend against the budget by feature and user, and the recent calls without content", async () => {
+  it("shows usage as a slim feature, calls and cost table with the numbers aligned right", async () => {
     mockApi(
       admin({
         "GET /api/v1/workspaces/ws1/ai/settings": () => json(ON),
@@ -396,21 +398,40 @@ describe("AI assistant settings", () => {
     );
     open();
 
-    await screen.findByRole("table", { name: "Spend by feature" });
-    const summary = screen.getByText((_, element) => element?.tagName === "P" && element.textContent === "2.10 of 5.00 spent");
-    expect(summary).toBeInTheDocument();
-    expect(screen.getByRole("progressbar", { name: "Budget used" })).toBeInTheDocument();
-    const byFeature = within(screen.getByRole("table", { name: "Spend by feature" }));
-    expect(byFeature.getByText("mapping")).toBeInTheDocument();
-    expect(byFeature.getByText("3000")).toBeInTheDocument();
-    const byUser = within(screen.getByRole("table", { name: "Spend by user" }));
+    const table = within(await screen.findByRole("table", { name: "Spend by feature" }));
+    expect(table.getAllByRole("columnheader").map((cell) => cell.textContent)).toEqual(["Feature", "Calls", "Cost"]);
+    expect(table.getByText("mapping")).toBeInTheDocument();
+    expect(table.getByText("3")).toHaveClass("num", "mono");
+    expect(table.getByText("2.10")).toHaveClass("num", "mono");
+    expect(screen.getByRole("progressbar", { name: "42 percent of the monthly budget used" })).toBeInTheDocument();
+    expect(screen.queryByRole("table", { name: "Recent calls" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("table", { name: "Spend by user" })).not.toBeInTheDocument();
+  });
+
+  it("opens every call in a sheet, with spend by user and the recent calls without content", async () => {
+    mockApi(
+      admin({
+        "GET /api/v1/workspaces/ws1/ai/settings": () => json(ON),
+        "GET /api/v1/workspaces/ws1/ai/usage": () => json(USAGE),
+      }),
+    );
+    const user = userEvent.setup();
+    open();
+
+    await user.click(await screen.findByRole("button", { name: "Every call" }));
+
+    const sheet = within(await screen.findByRole("dialog", { name: "Every call" }));
+    const byUser = within(sheet.getByRole("table", { name: "Spend by user" }));
     expect(byUser.getByText("0190…0001")).toBeInTheDocument();
-    const recent = within(screen.getByRole("table", { name: "Recent calls" }));
+    const recent = within(sheet.getByRole("table", { name: "Recent calls" }));
     expect(recent.getByText("timeout")).toBeInTheDocument();
     expect(recent.getByText("pending")).toBeInTheDocument();
     expect(recent.getByText("abandoned")).toBeInTheDocument();
     expect(recent.getByText("1000 / 300")).toBeInTheDocument();
     expect(recent.getByText("0.70")).toBeInTheDocument();
+
+    await user.click(sheet.getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("dialog", { name: "Every call" })).not.toBeInTheDocument();
   });
 
   it("says there are no calls yet when the month is empty", async () => {

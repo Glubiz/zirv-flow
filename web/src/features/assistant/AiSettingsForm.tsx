@@ -1,4 +1,5 @@
 import { useState, type SyntheticEvent } from "react";
+import { createPortal } from "react-dom";
 
 import {
   ApiError,
@@ -10,7 +11,8 @@ import {
   type ErrorSummary,
   type FieldError,
 } from "../../api";
-import { Button, formatDateTime, InlineError, Panel, Pill, SelectField, TextField } from "../../ui";
+import { Button, Dialog, formatDateTime, InlineError, Panel, Pill, SelectField, TextField } from "../../ui";
+import { useLeaveGuard } from "../segments";
 import { formatMicros, fromMicros, toMicros } from "./money";
 
 type Models = components["schemas"]["AiModelsBody"];
@@ -30,6 +32,8 @@ interface AiSettingsFormProps {
   models: Models;
   settings: Settings;
   onSaved: () => void;
+  /** Where the one Save button goes, in the page header; absent, it stays with the form. */
+  saveSlot?: HTMLElement | null;
 }
 
 interface Failure {
@@ -62,7 +66,7 @@ function SpendMeter({ workspaceId, version }: { workspaceId: string; version: st
   );
 }
 
-export function AiSettingsForm({ workspaceId, models, settings, onSaved }: AiSettingsFormProps) {
+export function AiSettingsForm({ workspaceId, models, settings, onSaved, saveSlot }: AiSettingsFormProps) {
   const [enabled, setEnabled] = useState(settings.enabled);
   const [providerId, setProviderId] = useState(settings.provider_id ?? "");
   const [model, setModel] = useState(settings.model ?? "");
@@ -81,6 +85,16 @@ export function AiSettingsForm({ workspaceId, models, settings, onSaved }: AiSet
   const daysValid = Number.isInteger(dayCount) && dayCount >= 1 && dayCount <= 30;
   const needsKey = enabled && key.trim() === "" && !settings.provider_key_set;
   const incomplete = enabled && (!provider || !chosen);
+  const changed =
+    enabled !== settings.enabled ||
+    providerId !== (settings.provider_id ?? "") ||
+    model !== (settings.model ?? "") ||
+    key.trim() !== "" ||
+    budgetMicros !== settings.monthly_budget_micros ||
+    pii !== settings.pii_opt_in ||
+    keepTranscripts !== (settings.transcript_days != null) ||
+    (keepTranscripts && dayCount !== settings.transcript_days);
+  const guard = useLeaveGuard(changed && !busy);
   const invalid = budgetMicros === null || (keepTranscripts && !daysValid) || needsKey || incomplete;
 
   function chooseProvider(id: string) {
@@ -88,9 +102,9 @@ export function AiSettingsForm({ workspaceId, models, settings, onSaved }: AiSet
     setModel(models.providers.find((entry) => entry.id === id)?.models[0]?.name ?? "");
   }
 
-  async function submit(event: SyntheticEvent) {
-    event.preventDefault();
-    if (budgetMicros === null) return;
+  async function submit(event?: SyntheticEvent) {
+    event?.preventDefault();
+    if (budgetMicros === null || invalid || !changed) return;
     setBusy(true);
     setFailure(null);
     try {
@@ -116,29 +130,30 @@ export function AiSettingsForm({ workspaceId, models, settings, onSaved }: AiSet
     }
   }
 
+  const saveButton = (
+    <Button type="button" variant="primary" disabled={busy || invalid || !changed} onClick={() => void submit()}>
+      {busy ? "Saving" : "Save"}
+    </Button>
+  );
+
   return (
     <form className="stack" onSubmit={(event) => void submit(event)} noValidate>
-      <Panel title="What it can do">
+      <Panel title="On for this workspace">
         <div className="stack">
           <label className="check">
-            <input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />
-            <span>
-              On for this workspace{" "}
-              <span className="faint">
-                Saving runs a short check that the model can call tools and reports its token use.
-              </span>
-            </span>
+            <input type="checkbox" role="switch" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />
+            <span>Turn on for this workspace</span>
           </label>
           <dl className="facts">
-            <div>
+            <div className="fact">
               <dt>Drafts</dt>
-              <dd>Changes to flows, segments, templates and mappings, for you to review.</dd>
+              <dd>Segments, flows, templates and source mappings</dd>
             </div>
-            <div>
+            <div className="fact">
               <dt>Explains</dt>
-              <dd>What a flow, a segment or a trace does, in plain words.</dd>
+              <dd>Segments, flows and why someone got a message</dd>
             </div>
-            <div>
+            <div className="fact">
               <dt>Never</dt>
               <dd>Publishes, sends, deletes or changes consent. It cannot act on its own.</dd>
             </div>
@@ -221,27 +236,11 @@ export function AiSettingsForm({ workspaceId, models, settings, onSaved }: AiSet
         <div className="stack">
           <label className="check">
             <input type="checkbox" checked={pii} onChange={(event) => setPii(event.target.checked)} />
-            <span>
-              Allow personal data in requests{" "}
-              <span className="faint">
-                Off, the assistant sees only field names, types and counts. On, it may also see identifiers and property
-                values of people, and sends them to the provider.
-              </span>
-            </span>
+            <span>Allow personal data in requests</span>
           </label>
           <label className="check">
-            <input
-              type="checkbox"
-              checked={keepTranscripts}
-              onChange={(event) => setKeepTranscripts(event.target.checked)}
-            />
-            <span>
-              Keep transcripts{" "}
-              <span className="faint">
-                Off, requests and answers are not stored; only a log of counts and names is kept. On, they are stored for
-                the days below and then deleted.
-              </span>
-            </span>
+            <input type="checkbox" checked={keepTranscripts} onChange={(event) => setKeepTranscripts(event.target.checked)} />
+            <span>Keep transcripts</span>
           </label>
           {keepTranscripts ? (
             <TextField
@@ -271,11 +270,19 @@ export function AiSettingsForm({ workspaceId, models, settings, onSaved }: AiSet
           ) : null}
         </div>
       ) : null}
-      <div className="form-actions">
-        <Button type="submit" variant="primary" disabled={busy || invalid}>
-          {busy ? "Saving" : "Save settings"}
-        </Button>
-      </div>
+      {saveSlot === undefined ? <div className="form-actions">{saveButton}</div> : null}
+      {saveSlot ? createPortal(saveButton, saveSlot) : null}
+      {guard.pending !== null ? (
+        <Dialog title="Leave without saving?" onClose={guard.stay}>
+          <p className="muted">You have changes that are not saved. If you leave now, they are lost.</p>
+          <div className="dialog-actions">
+            <Button onClick={guard.stay}>Keep editing</Button>
+            <Button variant="primary" onClick={guard.leave}>
+              Leave without saving
+            </Button>
+          </div>
+        </Dialog>
+      ) : null}
     </form>
   );
 }

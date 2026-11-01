@@ -301,7 +301,7 @@ function Form({ workspaceId, segment, canWrite, onSaved, assistant, onAssistantG
               </div>
             ) : null}
             <Builder
-              root={showingDraft && drafted !== null ? drafted : root}
+              root={showingDraft ? drafted : root}
               readOnly={readOnly || showingDraft}
               selfId={saved?.id ?? null}
               catalog={catalog}
