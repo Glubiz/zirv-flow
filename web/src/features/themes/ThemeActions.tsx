@@ -1,8 +1,9 @@
 import { useState } from "react";
 
-import { client, describeError, unwrap, type ErrorSummary } from "../../api";
+import { ApiError, client, describeError, unwrap, type BrokenTemplate, type ErrorSummary } from "../../api";
 import { Button, Dialog, ErrorState, InlineError, LoadingState, MenuButton, type MenuEntry } from "../../ui";
 import { plural } from "../../ui/format";
+import { BrokenTemplates } from "../templates";
 import type { Theme } from "./model";
 import { useDefaultFollowers } from "./useThemes";
 
@@ -63,16 +64,19 @@ export function SetDefaultDialog({
   onDone: (theme: Theme) => void;
 }) {
   const [busy, setBusy] = useState(false);
+  const [broken, setBroken] = useState<{ detail: string; templates: BrokenTemplate[]; total: number } | null>(null);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
   const followers = useDefaultFollowers(workspaceId);
 
   async function confirm() {
     setBusy(true);
     setFailure(null);
+    setBroken(null);
     try {
       onDone(await unwrap(client.PUT("/api/v1/workspaces/{ws}/themes/default", { params: { path: { ws: workspaceId } }, body: { theme_id: theme.id } })));
     } catch (error) {
-      setFailure(describeError(error));
+      if (error instanceof ApiError && error.code === "theme_breaks_templates") setBroken({ detail: error.detail, templates: error.templates, total: error.total });
+      else setFailure(describeError(error));
       setBusy(false);
     }
   }
@@ -91,6 +95,7 @@ export function SetDefaultDialog({
             </p>
           )
         ) : null}
+        {broken ? <BrokenTemplates workspaceId={workspaceId} {...broken} /> : null}
         {failure ? <InlineError {...failure} /> : null}
         <div className="dialog-actions">
           <Button onClick={onClose}>Cancel</Button>
