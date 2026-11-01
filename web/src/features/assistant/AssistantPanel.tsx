@@ -29,6 +29,10 @@ type Run =
   | { status: "failed"; failure: Failure }
   | { status: "done"; draft: Draft; accepting: boolean; accepted: boolean; acceptFailure: Failure | null; acceptCode: string | null };
 
+function done(draft: Draft, rest: Partial<Extract<Run, { status: "done" }>> = {}): Run {
+  return { status: "done", draft, accepting: false, accepted: false, acceptFailure: null, acceptCode: null, ...rest };
+}
+
 interface AssistantPanelProps {
   workspaceId: string;
   kind: DraftKindName;
@@ -163,6 +167,16 @@ function BudgetLine({ usage }: { usage: { spent: number; budget: number } | null
   );
 }
 
+function IssueList({ label, issues, kind }: { label: string; issues: Draft["issues"]; kind: DraftKindName }) {
+  return (
+    <ul className="list-plain attention" aria-label={label}>
+      {issues.map((issue, index) => (
+        <li key={`${issue.code}-${issue.at ?? ""}-${index}`}>{issueSentence(issue, kind)}</li>
+      ))}
+    </ul>
+  );
+}
+
 function Drafting({
   workspaceId,
   kind,
@@ -267,7 +281,7 @@ function Drafting({
           signal: abort.signal,
         }),
       );
-      setRun({ status: "done", draft: result, accepting: false, accepted: false, acceptFailure: null, acceptCode: null });
+      setRun(done(result));
       setAnnouncement(result.status === "valid" ? "Draft ready" : "No valid draft");
     } catch (error) {
       if (abort.signal.aborted) {
@@ -296,7 +310,7 @@ function Drafting({
 
   async function acceptOnce(current: Draft) {
     if (confirmAccept && !(await confirmAccept())) return;
-    setRun({ status: "done", draft: current, accepting: true, accepted: false, acceptFailure: null, acceptCode: null });
+    setRun(done(current, { accepting: true }));
     try {
       const accepted = await unwrap(
         client.POST("/api/v1/workspaces/{ws}/ai/drafts/{id}/accept", {
@@ -304,17 +318,17 @@ function Drafting({
         }),
       );
       onAccept(accepted.content, accepted);
-      setRun({ status: "done", draft: current, accepting: false, accepted: true, acceptFailure: null, acceptCode: null });
+      setRun(done(current, { accepted: true }));
       setAnnouncement("Loaded into the editor");
     } catch (error) {
       if ((await onAcceptFailed?.(error, current)) === true) {
-        setRun({ status: "done", draft: current, accepting: false, accepted: true, acceptFailure: null, acceptCode: null });
+        setRun(done(current, { accepted: true }));
         setLateReply(true);
         setAnnouncement("The draft was accepted, but the reply was lost. It is loaded into the editor.");
         return;
       }
       onFailure?.(error);
-      setRun({ status: "done", draft: current, accepting: false, accepted: false, acceptFailure: failureText(error), acceptCode: error instanceof ApiError ? error.code : null });
+      setRun(done(current, { acceptFailure: failureText(error), acceptCode: error instanceof ApiError ? error.code : null }));
     }
   }
 
@@ -356,11 +370,7 @@ function Drafting({
               {run.draft.issues.length === 0 ? (
                 <p className="dock-check">{kind === "flow" ? "Passes the publish checks" : "Passes the checks"}</p>
               ) : (
-                <ul className="list-plain attention" aria-label="Problems with the draft">
-                  {run.draft.issues.map((issue, index) => (
-                    <li key={`${issue.code}-${issue.at ?? ""}-${index}`}>{issueSentence(issue, kind)}</li>
-                  ))}
-                </ul>
+                <IssueList label="Problems with the draft" issues={run.draft.issues} kind={kind} />
               )}
               {run.acceptFailure ? <InlineError {...run.acceptFailure} /> : null}
               {run.acceptFailure ? renderAcceptAction?.(run.acceptCode) : null}
@@ -392,11 +402,7 @@ function Drafting({
               <h3 id="dock-draft-title" ref={heading} tabIndex={-1}>
                 {`No valid draft after ${plural(run.draft.attempts, "attempt", "attempts")}`}
               </h3>
-              <ul className="list-plain attention" aria-label="Problems with the last attempt">
-                {run.draft.issues.map((issue, index) => (
-                  <li key={`${issue.code}-${issue.at ?? ""}-${index}`}>{issueSentence(issue, kind)}</li>
-                ))}
-              </ul>
+              <IssueList label="Problems with the last attempt" issues={run.draft.issues} kind={kind} />
               <p className="faint">Say it differently, or add detail, and draft again.</p>
             </section>
           )

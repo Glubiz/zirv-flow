@@ -11,15 +11,15 @@ type Explained = components["schemas"]["AiExplainBody"];
 interface Props {
   workspaceId: string;
   segmentId: string;
-  /** The saved version\'s definition: the explanation is about it, and its conditions are described in words beside the assistant\'s text. */
+  /** The saved version's definition: the explanation is about it, and its conditions are described in words beside the assistant's text. */
   definition: Definition;
-  /** The saved version\'s number; an explanation of an older one is marked as stale. */
+  /** The saved version's number; an explanation of an older one is marked as stale. */
   version: number;
   names: Names;
   /** The condition being explained, by JSON pointer; the builder marks it. */
   selected: string | null;
   onSelect: (pointer: string | null) => void;
-  /** A request was refused because the assistant is off or no longer the person\'s to use. */
+  /** A request was refused because the assistant is off or no longer the person's to use. */
   onGone: () => void;
 }
 
@@ -27,7 +27,7 @@ type Run = { status: "idle" } | { status: "running" } | { status: "failed"; fail
 
 /**
  * The "Explain this segment" tab of the assistant dock: a summary and, for each condition, what it
- * says in words (the builder\'s own description) with the assistant\'s sentence. Choosing a condition
+ * says in words (the builder's own description) with the assistant's sentence. Choosing a condition
  * marks it in the builder. The sentences are plain text and are never rendered as markup.
  */
 export function SegmentExplainTab({ workspaceId, segmentId, definition, version, names, selected, onSelect, onGone }: Props) {
