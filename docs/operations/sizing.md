@@ -105,6 +105,7 @@ limit stays unchanged.
 | `worker.max_running_per_workspace` | Limits running jobs for a busy workspace. The OQ-8 recommendation is **not measured**, [#396](https://github.com/Glubiz/zirv-flow/issues/396): the sampler and decision table exist, the run does not. Do not infer an optimum from the cap's correctness tests. |
 | `explorer.interactive_timeout_ms` | The shipped 5 s versus envelope 15 s choice is **not measured**, [#395](https://github.com/Glubiz/zirv-flow/issues/395). These are competing limits from [config](../../crates/zirv-flow/src/config.rs) and [architecture](../architecture.md#19-scalability-envelope), not benchmark timings. Keep the shipped setting pending that decision. |
 | `render.pool_size` | Children per `serve` and `worker` process. Pool size 2 gave render p95 1.573 ms ([M7 Result](../benchmarks/m7-render.md#result), [data](../benchmarks/data/m7/render.json)); the pool-size comparison did not establish a latency gain. Increase only for concurrent render demand and available memory; use [render restarts](runbooks.md#zirvflowrenderrestarts) to diagnose failures first. |
+| Segment list "used by" | The list parses the live version of every non-archived flow in the workspace on each request, uncapped, with no measured ceiling ([#397](https://github.com/Glubiz/zirv-flow/issues/397)). Drafts are not read there. |
 
 ## PostgreSQL settings
 

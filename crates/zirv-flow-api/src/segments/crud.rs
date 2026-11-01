@@ -381,6 +381,80 @@ pub(crate) async fn archive_segment(
     Ok((segment, current))
 }
 
+/// A segment in the list, with where it is used and how its membership moved.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct SegmentListItemBody {
+    id: Uuid,
+    #[schema(example = "Pro customers")]
+    name: String,
+    description: String,
+    /// The version that is current: the newest one saved.
+    current_version: i32,
+    /// Minutes between full recomputes.
+    #[schema(schema_with = cadence_schema)]
+    cadence_minutes: i32,
+    /// The version the members were last computed from; null before the first refresh.
+    computed_version: Option<i32>,
+    /// When the members were last computed; null before the first refresh.
+    #[serde(with = "time::serde::rfc3339::option")]
+    #[schema(value_type = Option<String>, format = DateTime)]
+    computed_at: Option<OffsetDateTime>,
+    /// How many people are members now.
+    member_count: i32,
+    #[serde(with = "time::serde::rfc3339::option")]
+    #[schema(value_type = Option<String>, format = DateTime)]
+    archived_at: Option<OffsetDateTime>,
+    /// The user who created it; null when an API key did.
+    created_by: Option<Uuid>,
+    #[serde(with = "time::serde::rfc3339")]
+    #[schema(value_type = String, format = DateTime)]
+    created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    #[schema(value_type = String, format = DateTime)]
+    updated_at: OffsetDateTime,
+    /// The number of flows whose live (published or paused) version uses the segment, each flow
+    /// once.
+    used_by_flows: i64,
+    /// People entered minus people left over the last 7 days; null while the segment is less than
+    /// 7 days old.
+    change_7d: Option<i64>,
+}
+
+impl SegmentListItemBody {
+    fn new(segment: &Segment, used_by_flows: i64, change_7d: Option<i64>) -> Self {
+        let SegmentBody {
+            id,
+            name,
+            description,
+            current_version,
+            cadence_minutes,
+            computed_version,
+            computed_at,
+            member_count,
+            archived_at,
+            created_by,
+            created_at,
+            updated_at,
+        } = SegmentBody::from(segment);
+        Self {
+            id,
+            name,
+            description,
+            current_version,
+            cadence_minutes,
+            computed_version,
+            computed_at,
+            member_count,
+            archived_at,
+            created_by,
+            created_at,
+            updated_at,
+            used_by_flows,
+            change_7d,
+        }
+    }
+}
+
 /// The workspace's live segments by name; archived ones with `archived=true`.
 #[utoipa::path(
     get,
@@ -392,7 +466,7 @@ pub(crate) async fn archive_segment(
         ("archived" = Option<bool>, Query, description = "Include archived segments; default false")
     ),
     responses(
-        (status = 200, description = "The segments", body = Vec<SegmentBody>),
+        (status = 200, description = "The segments", body = Vec<SegmentListItemBody>),
         (status = 400, description = "archived is not true or false", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the read scope", body = Problem, content_type = "application/problem+json"),
@@ -405,11 +479,23 @@ pub(crate) async fn list(
     principal: Principal,
     Path(ws): Path<String>,
     RawQuery(query): RawQuery,
-) -> Result<Json<Vec<SegmentBody>>, ApiError> {
+) -> Result<Json<Vec<SegmentListItemBody>>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Read).await?;
     let archived = bool_param(query.as_deref().unwrap_or_default(), "archived")?;
-    let segments = zirv_flow_store::list_segments(&state.pool, workspace.id, archived).await?;
-    Ok(Json(segments.iter().map(SegmentBody::from).collect()))
+    let mut tx = zirv_flow_store::begin(&state.pool).await?;
+    let segments = zirv_flow_store::list_segments(&mut *tx, workspace.id, archived).await?;
+    let now = state.clock.now(&mut tx).await?;
+    let created: Vec<_> = segments.iter().map(|s| (s.id, s.created_at)).collect();
+    let stats = zirv_flow_store::segment_list_stats(&mut tx, workspace.id, &created, now).await?;
+    Ok(Json(
+        segments
+            .iter()
+            .map(|segment| {
+                let stat = stats.get(&segment.id).copied().unwrap_or_default();
+                SegmentListItemBody::new(segment, stat.used_by_flows, stat.change_7d)
+            })
+            .collect(),
+    ))
 }
 
 /// Creates a segment with its first version. The definition is checked against the workspace's

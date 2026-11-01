@@ -3017,6 +3017,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/segments/{id}/where-used": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The flows whose live or draft version uses the segment, and the segments that reference it.
+         *     Archived flows are not listed.
+         */
+        get: operations["segment_where_used"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/sender-identities": {
         parameters: {
             query?: never;
@@ -9512,6 +9532,62 @@ export interface components {
             /** @description A JSON pointer into the definition. */
             pointer: string;
         };
+        /** @description A segment in the list, with where it is used and how its membership moved. */
+        SegmentListItemBody: {
+            /** Format: date-time */
+            archived_at?: string | null;
+            /**
+             * @description How often a time-sensitive segment is recomputed in full, in minutes; default 60.
+             * @enum {integer}
+             */
+            cadence_minutes: 5 | 10 | 15 | 30 | 60 | 120 | 180 | 240 | 360 | 480 | 720 | 1440 | 10080;
+            /**
+             * Format: int64
+             * @description People entered minus people left over the last 7 days; null while the segment is less than
+             *     7 days old.
+             */
+            change_7d?: number | null;
+            /**
+             * Format: date-time
+             * @description When the members were last computed; null before the first refresh.
+             */
+            computed_at?: string | null;
+            /**
+             * Format: int32
+             * @description The version the members were last computed from; null before the first refresh.
+             */
+            computed_version?: number | null;
+            /** Format: date-time */
+            created_at: string;
+            /**
+             * Format: uuid
+             * @description The user who created it; null when an API key did.
+             */
+            created_by?: string | null;
+            /**
+             * Format: int32
+             * @description The version that is current: the newest one saved.
+             */
+            current_version: number;
+            description: string;
+            /** Format: uuid */
+            id: string;
+            /**
+             * Format: int32
+             * @description How many people are members now.
+             */
+            member_count: number;
+            /** @example Pro customers */
+            name: string;
+            /** Format: date-time */
+            updated_at: string;
+            /**
+             * Format: int64
+             * @description The number of flows whose live (published or paused) version uses the segment, each flow
+             *     once.
+             */
+            used_by_flows: number;
+        };
         /** @description The person is a member of the list. */
         SegmentListNode: {
             /** Format: uuid */
@@ -11418,6 +11494,36 @@ export interface components {
             timestamp_header?: string | null;
             /** Format: int32 */
             tolerance_seconds: number;
+        };
+        WhereUsedBody: {
+            /** @description By flow name; each flow once. */
+            flows: components["schemas"]["WhereUsedFlowBody"][];
+            /** @description The other live segments whose current definition references the segment, by name. */
+            segments: components["schemas"]["WhereUsedSegmentBody"][];
+        };
+        WhereUsedFlowBody: {
+            /** Format: uuid */
+            flow_id: string;
+            name: string;
+            /**
+             * @description `live` when the live version uses the segment, `draft` when only the draft does.
+             * @example live
+             */
+            stage: string;
+            /** @description The flow's lifecycle state: `draft`, `published` or `paused`. */
+            state: string;
+            /** @description How the version uses the segment: `trigger`, `filter`, `condition` or `goal`. */
+            uses: string[];
+            /**
+             * Format: int32
+             * @description The live version number; null for `draft`.
+             */
+            version?: number | null;
+        };
+        WhereUsedSegmentBody: {
+            name: string;
+            /** Format: uuid */
+            segment_id: string;
         };
         /** @description One retention window. */
         WindowBody: {
@@ -22757,7 +22863,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SegmentBody"][];
+                    "application/json": components["schemas"]["SegmentListItemBody"][];
                 };
             };
             /** @description archived is not true or false */
@@ -23546,6 +23652,58 @@ export interface operations {
                 };
             };
             /** @description No such workspace, segment or version, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    segment_where_used: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Segment id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Where the segment is used */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WhereUsedBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or segment, or no access */
             404: {
                 headers: {
                     [name: string]: unknown;
