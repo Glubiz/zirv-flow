@@ -63,8 +63,10 @@ pub(super) fn classify(error: &(dyn Error + 'static)) -> FetchError {
                 return FetchError::OffsetOutOfRange;
             }
         }
-        // rskafka does not export the read error's type, so its text is the only handle on it.
-        if let Some(ClientError::Request(RequestError::ReadError(inner))) =
+        // A fetch body that fails to decode arrives as `RequestError::ReadVersionedError`. The
+        // type inside it is not exported (rskafka's `protocol` module is private), so its own
+        // text is the only handle on a batch in a codec the client was built without.
+        if let Some(ClientError::Request(RequestError::ReadVersionedError(inner))) =
             error.downcast_ref::<ClientError>()
             && inner.to_string().contains(UNIMPLEMENTED_COMPRESSION)
         {
