@@ -15,6 +15,7 @@ mod preview;
 mod reevaluate;
 mod refresh;
 mod schedule;
+mod uses;
 
 pub use catalog::{
     CatalogDetails, CatalogSnapshot, EventDetail, PropertyDetail, TopicDetail, TraitDetail,
@@ -53,6 +54,10 @@ pub use refresh::{
     membership_trace,
 };
 pub use schedule::{reconcile_segment_schedules, segment_cron};
+pub use uses::{
+    FlowStage, SegmentFlowUse, SegmentListStats, SegmentWhereUsed, segment_list_stats,
+    segment_where_used,
+};
 
 /// Fixtures for the tests of this module.
 #[cfg(test)]
