@@ -40,18 +40,24 @@ pub(crate) struct SummaryCache {
     entries: Arc<Mutex<HashMap<CacheKey, Arc<Computed>>>>,
 }
 
+impl Computed {
+    fn is_fresh(&self, now: OffsetDateTime) -> bool {
+        now >= self.to && now - self.to < CACHE_FOR
+    }
+}
+
 impl SummaryCache {
     fn fresh(&self, key: CacheKey, now: OffsetDateTime) -> Option<Arc<Computed>> {
         let entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
         entries
             .get(&key)
-            .filter(|computed| now >= computed.to && now - computed.to < CACHE_FOR)
+            .filter(|computed| computed.is_fresh(now))
             .cloned()
     }
 
     fn store(&self, key: CacheKey, computed: Arc<Computed>, now: OffsetDateTime) {
         let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-        entries.retain(|_, kept| now >= kept.to && now - kept.to < CACHE_FOR);
+        entries.retain(|_, kept| kept.is_fresh(now));
         entries.insert(key, computed);
     }
 }
@@ -171,15 +177,11 @@ pub(crate) async fn get(
     let computed = match state.summaries.fresh(key, now) {
         Some(computed) => computed,
         None => {
-            let figures = zirv_flow_store::workspace_summary(
-                &state.pool,
-                workspace.id,
-                now - Duration::days(days),
-                now,
-            )
-            .await?;
+            let from = now - Duration::days(days);
+            let figures =
+                zirv_flow_store::workspace_summary(&state.pool, workspace.id, from, now).await?;
             let computed = Arc::new(Computed {
-                from: now - Duration::days(days),
+                from,
                 to: now,
                 figures,
             });

@@ -29,6 +29,10 @@ async function loadSummary(ws: string) {
 
 type Summary = Awaited<ReturnType<typeof loadSummary>>;
 
+function figureText(value: number | null | undefined, missing: string): string {
+  return value === null || value === undefined ? missing : formatCount(value);
+}
+
 const TILES = [
   { label: "Messages sent", route: "flows", value: (summary: Summary) => summary.messages_sent },
   { label: "Goals reached", route: "flows", value: (summary: Summary) => summary.goals_reached },
@@ -47,8 +51,7 @@ export function Figures({ resource, base }: { resource: Resource<Summary>; base:
         </div>
       ) : null}
       {resource.status === "ready" ? TILES.map((tile) => {
-        const value = tile.value(resource.data);
-        const text = value === null || value === undefined ? "No access" : formatCount(value);
+        const text = figureText(tile.value(resource.data), "No access");
         return (
           <Link key={tile.label} className="panel panel-pad home-tile" to={`${base}/${tile.route}`} aria-label={`${tile.label}, ${text}, last ${WINDOW_DAYS} days`}>
             <span className="home-tile-label">{tile.label}</span>
@@ -109,7 +112,6 @@ function Home({ workspaceId, canAdmin }: { workspaceId: string; canAdmin: boolea
       {({ sources, flows, setup }) => {
         const live = flows.filter((flow) => flow.state === "published");
         const figures = summary.status === "ready" ? new Map(summary.data.flows.map((flow) => [flow.flow_id, flow])) : null;
-        const cell = (value: number | null | undefined) => (value === null || value === undefined ? "—" : formatCount(value));
         const unverified = setup?.domains.filter((domain) => domain.status !== "verified") ?? [];
         return (
           <>
@@ -135,9 +137,9 @@ function Home({ workspaceId, canAdmin }: { workspaceId: string; canAdmin: boolea
                           return (
                             <tr key={flow.id}>
                               <td><Link to={`${base}/flows/${flow.id}`}>{flow.name}</Link> <Pill>Live</Pill></td>
-                              <td>{cell(row?.people_in_flow)}</td>
-                              <td>{cell(row?.sent)}</td>
-                              <td>{cell(row?.goals_reached)}</td>
+                              <td>{figureText(row?.people_in_flow, "—")}</td>
+                              <td>{figureText(row?.sent, "—")}</td>
+                              <td>{figureText(row?.goals_reached, "—")}</td>
                             </tr>
                           );
                         })}</tbody>
