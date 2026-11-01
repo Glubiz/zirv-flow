@@ -209,7 +209,7 @@ fn check(html: &str, merge: impl Fn(&str) -> bool) -> Vec<String> {
                     if element == "a" && name == UTM_ATTRIBUTE {
                         if !value
                             .as_ref()
-                            .is_some_and(|value| is_utm_off(value.as_str()))
+                            .is_some_and(|value| is_utm_off(&unescape(value.as_str())))
                         {
                             found.push(format!("{name}="));
                         }
@@ -468,10 +468,9 @@ mod tests {
             assert_eq!(html(&source), r#"<a href="https://a.example">x</a>"#);
             assert_eq!(violations(&source), ["data-zf-utm="], "{value:?}");
         }
-        assert_eq!(
-            html(r#"<a href="https://a.example" data-zf-utm="&#111;ff">x</a>"#),
-            kept
-        );
+        let encoded = r#"<a href="https://a.example" data-zf-utm="&#111;ff">x</a>"#;
+        assert_eq!(html(encoded), kept);
+        assert!(violations(encoded).is_empty());
         assert_eq!(
             html(
                 r#"<a href="https://a.example" data-zf-utm="on" data-zf-x="1" data-other="off">x</a>"#
