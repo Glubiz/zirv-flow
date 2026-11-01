@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 
 import { client, unwrap, type components } from "../../api";
-import { Button, EmptyState, InlineError, LoadingState, Sheet } from "../../ui";
-import { AssistantPanel, assistantGone, failureText, type Failure } from "../assistant";
+import { Button, EmptyState, InlineError, LoadingState } from "../../ui";
+import { AssistantDock, AssistantPanel, assistantGone, failureText, type Draft, type Failure } from "../assistant";
 import type { Names } from "./describe";
 import { FlowChanges } from "./FlowChanges";
 import { TRIGGER_ID, type Graph } from "./model";
@@ -40,6 +40,10 @@ interface Props {
   drafting?: FlowDrafting;
   /** Saves what is waiting so the server explains what is on the canvas; false when it could not. */
   prepare?: () => Promise<boolean>;
+  /** The valid draft the assistant is showing, or null: the canvas marks what it adds and changes. */
+  onDraft?: (draft: Draft | null) => void;
+  /** Keeps the dock mounted but out of sight, such as while a step's inspector takes its place. */
+  hidden?: boolean;
   /** Shows a cited step on the canvas. */
   onReveal: (id: string) => void;
   /** The steps the explanation cites that the canvas has, to be marked there; empty when none or when the sheet closes. */
@@ -48,24 +52,44 @@ interface Props {
 }
 
 /** The graph of a drafted flow document, or null when it does not look like one. */
-function graphOf(content: unknown): Graph | null {
+export function graphOf(content: unknown): Graph | null {
   if (typeof content !== "object" || content === null) return null;
   const graph = (content as { graph?: unknown }).graph;
   if (typeof graph !== "object" || graph === null) return null;
   return Array.isArray((graph as { nodes?: unknown }).nodes) ? (graph as Graph) : null;
 }
 
-/** The assistant's right-hand sheet of the flow editor: explain the flow and, for the draft, draft changes to it. */
-export function FlowAssistantSheet(props: Props) {
+/** The assistant dock of the flow editor: explain the flow and, for the draft, draft changes to it. */
+export function FlowAssistantDock(props: Props) {
   const { workspaceId, flowId, version, graph, names, drafting, onGone, busy } = props;
   return (
-    <Sheet
-      title="Assistant"
-      eyebrow={version === null ? "The draft" : `Version ${version}`}
-      closeLabel="Close the assistant"
+    <AssistantDock
+      thing="flow"
+      hidden={props.hidden}
       onClose={props.onClose}
-    >
-      <div className="fl-sheet-section">
+      draft={
+        drafting ? (
+          <AssistantPanel
+            workspaceId={workspaceId}
+            kind="flow"
+            flowId={flowId}
+            onAccept={drafting.onAccept}
+            confirmAccept={drafting.confirmAccept}
+            onAcceptFailed={drafting.onAcceptFailed}
+            onDraftShown={props.onDraft}
+            onFailure={(error) => {
+              if (assistantGone(error)) onGone();
+            }}
+            renderChanges={(changes, draft) => (
+              <FlowChanges changes={changes} before={graph} after={graphOf(draft.content)} names={names} />
+            )}
+            renderPreview={(content, draft) =>
+              draft.simulation ? <SimulationSummary simulation={draft.simulation} graph={graphOf(content)} names={names} /> : null
+            }
+          />
+        ) : undefined
+      }
+      explain={
         <FlowExplanation
           key={version ?? "draft"}
           workspaceId={workspaceId}
@@ -80,29 +104,8 @@ export function FlowAssistantSheet(props: Props) {
           onReveal={props.onReveal}
           onCited={props.onCited}
         />
-      </div>
-      {drafting ? (
-        <div className="fl-sheet-section">
-          <AssistantPanel
-            workspaceId={workspaceId}
-            kind="flow"
-            flowId={flowId}
-            onAccept={drafting.onAccept}
-            confirmAccept={drafting.confirmAccept}
-            onAcceptFailed={drafting.onAcceptFailed}
-            onFailure={(error) => {
-              if (assistantGone(error)) onGone();
-            }}
-            renderChanges={(changes, draft) => (
-              <FlowChanges changes={changes} before={graph} after={graphOf(draft.content)} names={names} />
-            )}
-            renderPreview={(content, draft) =>
-              draft.simulation ? <SimulationSummary simulation={draft.simulation} graph={graphOf(content)} names={names} /> : null
-            }
-          />
-        </div>
-      ) : null}
-    </Sheet>
+      }
+    />
   );
 }
 
@@ -216,8 +219,7 @@ function FlowExplanation({
   }
 
   return (
-    <section className="stack-tight" aria-label="Explain this flow">
-      <h3>Explain this flow</h3>
+    <section className="dock-body" aria-label="Explain this flow">
       {noSteps && version === null ? (
         <EmptyState title="Nothing to explain yet">Add a step to the flow first.</EmptyState>
       ) : (

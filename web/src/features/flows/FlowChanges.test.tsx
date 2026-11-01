@@ -2,7 +2,7 @@ import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { sampleGraph } from "../../test/flowsApi";
-import { FlowChanges } from "./FlowChanges";
+import { draftMarks, FlowChanges } from "./FlowChanges";
 import type { DraftChange } from "../assistant";
 import type { Graph } from "./model";
 
@@ -106,5 +106,31 @@ describe("FlowChanges", () => {
     const list = screen.getByRole("list", { name: "What the draft changes" });
     expect(list).not.toHaveTextContent("Settings");
     expect(screen.getByText(/Show every field/)).toBeInTheDocument();
+  });
+});
+
+describe("draftMarks", () => {
+  it("marks a whole new step as added, any other touched step as changed, and leaves removed steps and wires unmarked", () => {
+    const marks = draftMarks([
+      { path: "/graph/nodes/a1", change: "added", before: null, after: {} },
+      change("/graph/nodes/n1/seconds", 1, 2),
+      { path: "/graph/nodes/n2", change: "removed", before: {}, after: null },
+      { path: "/graph/edges/x1", change: "added", before: null, after: {} },
+      change("/settings/reentry/mode", "once", "always"),
+    ]);
+
+    expect([...marks]).toEqual([
+      ["a1", "added"],
+      ["n1", "changed"],
+    ]);
+  });
+
+  it("keeps a step added when a field inside it is also reported", () => {
+    const marks = draftMarks([
+      { path: "/graph/nodes/a1", change: "added", before: null, after: {} },
+      change("/graph/nodes/a1/seconds", 1, 2),
+    ]);
+
+    expect(marks.get("a1")).toBe("added");
   });
 });

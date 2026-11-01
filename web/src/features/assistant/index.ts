@@ -5,3 +5,6 @@ export type { Failure } from "./labels";
 export { DraftChanges } from "./DraftChanges";
 export type { AcceptedDraft, Draft, DraftChange, TemplateTask } from "./labels";
 export { useAssistantAccess, useAssistantEnabled } from "./useAssistantEnabled";
+export { AssistantDock } from "./AssistantDock";
+export { ASSISTANT_TOGGLE_ID, AssistantToggle } from "./AssistantToggle";
+export { useAssistantDock, withoutDock } from "./useAssistantDock";

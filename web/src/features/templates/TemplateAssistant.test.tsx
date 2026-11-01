@@ -90,12 +90,12 @@ describe("the template assistant", () => {
     for (const [label, task, text] of expected) {
       await user.selectOptions(await screen.findByLabelText("Task"), label);
       if (task === "translation") await user.type(screen.getByLabelText("Translate to"), "Danish");
-      await user.type(screen.getByLabelText(task === "translation" ? "Instructions" : "What do you want?"), text);
+      await user.type(screen.getByLabelText(task === "translation" ? "Instructions" : /^Ask for (a|another) change$/), text);
       await user.click(screen.getByRole("button", { name: /^Draft/ }));
       expect(await screen.findByRole("table", { name: "What the draft changes" })).toBeInTheDocument();
       expect(screen.getByTitle("Before render")).toHaveAttribute("srcdoc", previewDocument("<p>old copy</p>"));
       expect(screen.getByTitle("After render")).toHaveAttribute("srcdoc", previewDocument("<p>new copy</p>"));
-      await user.clear(screen.getByLabelText(task === "translation" ? "Instructions" : "What do you want?"));
+      await user.clear(screen.getByLabelText(task === "translation" ? "Instructions" : /^Ask for (a|another) change$/));
     }
 
     expect(asked(calls)).toEqual([
@@ -117,7 +117,7 @@ describe("the template assistant", () => {
   it("changes the frame width with the toggles and keeps the frames sandboxed", async () => {
     mount(templateRoutes({ extra: { [DRAFTS]: () => json(valid()) } }));
     const user = await open();
-    await user.type(await screen.findByLabelText("What do you want?"), "Warmer");
+    await user.type(await screen.findByLabelText("Ask for a change"), "Warmer");
     await user.click(screen.getByRole("button", { name: "Draft" }));
     await screen.findByTitle("After render");
 
@@ -144,20 +144,20 @@ describe("the template assistant", () => {
     };
     mount(templateRoutes({ extra: { [DRAFTS]: () => json(answer) } }));
     const user = await open();
-    await user.type(await screen.findByLabelText("What do you want?"), "Warmer");
+    await user.type(await screen.findByLabelText("Ask for a change"), "Warmer");
     await user.click(screen.getByRole("button", { name: "Draft" }));
 
     const list = await screen.findByRole("list", { name: "Problems with the last attempt" });
     expect(list).toHaveTextContent("person.nope: This merge field is not a field in this workspace.");
     expect(list).toHaveTextContent("/email/html");
-    expect(screen.queryByRole("button", { name: /Accept/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Put into the draft/ })).not.toBeInTheDocument();
 
     answer = valid({ attempts: 2, repaired: ["/email/subject"] });
-    await user.click(screen.getByRole("button", { name: "Draft again" }));
+    await user.click(screen.getByRole("button", { name: "Draft" }));
     const row = (await screen.findByRole("table", { name: "What the draft changes" })).querySelector("tbody tr");
     expect(row).toHaveTextContent("Repaired");
     expect(screen.getByText(/repaired a field before you saw/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Accept into draft" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Put into the draft" })).toBeEnabled();
   });
 
   it("accepts into the editor's new draft, applies the picked subject and never publishes", async () => {
@@ -172,11 +172,11 @@ describe("the template assistant", () => {
       }),
     );
     const user = await open();
-    await user.type(await screen.findByLabelText("What do you want?"), "Short");
+    await user.type(await screen.findByLabelText("Ask for a change"), "Short");
     await user.selectOptions(screen.getByLabelText("Task"), "Subject lines");
     await user.click(screen.getByRole("button", { name: "Draft" }));
     await user.click(await screen.findByRole("radio", { name: "Second" }));
-    await user.click(screen.getByRole("button", { name: "Accept into draft" }));
+    await user.click(screen.getByRole("button", { name: "Put into the draft" }));
 
     expect(await screen.findByText(/saved as the template's draft/)).toBeInTheDocument();
     await waitFor(() => expect(drafts(calls)).toHaveLength(1), WAIT);
@@ -193,7 +193,7 @@ describe("the template assistant", () => {
     const user = userEvent.setup();
     await user.type(await screen.findByRole("textbox", { name: /source/ }), "x");
     await user.click(screen.getByRole("button", { name: "Assistant" }));
-    await user.type(await screen.findByLabelText("What do you want?"), "Warmer");
+    await user.type(await screen.findByLabelText("Ask for a change"), "Warmer");
     await user.click(screen.getByRole("button", { name: "Draft" }));
 
     expect(await screen.findByText("Your latest changes could not be saved")).toBeInTheDocument();
@@ -217,9 +217,9 @@ describe("the template assistant", () => {
       }),
     );
     const user = await open();
-    await user.type(await screen.findByLabelText("What do you want?"), "Warmer");
+    await user.type(await screen.findByLabelText("Ask for a change"), "Warmer");
     await user.click(screen.getByRole("button", { name: "Draft" }));
-    await user.click(await screen.findByRole("button", { name: "Accept into draft" }));
+    await user.click(await screen.findByRole("button", { name: "Put into the draft" }));
 
     expect(await screen.findByText("The template's draft changed")).toBeInTheDocument();
     const before = calls.filter((call) => call.method === "GET" && call.path === `${WS}/templates/${TEMPLATE_ID}`).length;
@@ -247,9 +247,9 @@ describe("the template assistant", () => {
       }),
     );
     const user = await open();
-    await user.type(await screen.findByLabelText("What do you want?"), "Warmer");
+    await user.type(await screen.findByLabelText("Ask for a change"), "Warmer");
     await user.click(screen.getByRole("button", { name: "Draft" }));
-    await user.click(await screen.findByRole("button", { name: "Accept into draft" }));
+    await user.click(await screen.findByRole("button", { name: "Put into the draft" }));
     await user.click(await screen.findByRole("button", { name: "Reload the draft" }));
 
     expect(await screen.findByText("Could not read the template")).toBeInTheDocument();
@@ -273,13 +273,37 @@ describe("the template assistant", () => {
   });
 });
 
+describe("the assistant on the Where used tab", () => {
+  const settingsRoute = { [`GET ${WS}/ai/settings`]: () => json(settings()) };
+
+  it("opening the assistant from Where used returns to the editor with the dock", async () => {
+    mockApi({ ...templateRoutes(), ...settingsRoute });
+    const { router } = renderRoute(`/w/ws1/templates/${TEMPLATE_ID}?tab=used`, "/w/:ws/templates/:id", <TemplatePage />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Assistant" }));
+
+    expect(await screen.findByRole("textbox", { name: /source/ })).toBeInTheDocument();
+    expect(await screen.findByLabelText("Ask for a change")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Editor" })).toHaveAttribute("aria-selected", "true");
+    expect(router.state.location.search).toBe("?assistant=1");
+  });
+
+  it("a link that asks for both lands on the editor with the dock", async () => {
+    mockApi({ ...templateRoutes(), ...settingsRoute });
+    renderRoute(`/w/ws1/templates/${TEMPLATE_ID}?tab=used&assistant=1`, "/w/:ws/templates/:id", <TemplatePage />);
+
+    expect(await screen.findByLabelText("Ask for a change")).toBeInTheDocument();
+    expect(await screen.findByRole("tab", { name: "Editor", selected: true })).toBeInTheDocument();
+  });
+});
+
 describe("the assistant and the editor's saves", () => {
   it("saves the edits that are waiting before the draft request goes out", async () => {
     const calls = mount(templateRoutes({ extra: { [DRAFTS]: () => json(valid()) } }));
     const user = userEvent.setup();
     await user.type(await screen.findByRole("textbox", { name: /source/ }), "x");
     await user.click(screen.getByRole("button", { name: "Assistant" }));
-    await user.type(await screen.findByLabelText("What do you want?"), "Warmer");
+    await user.type(await screen.findByLabelText("Ask for a change"), "Warmer");
     await user.click(screen.getByRole("button", { name: "Draft" }));
     await screen.findByTitle("After render");
 
@@ -317,23 +341,23 @@ describe("the assistant and the editor's saves", () => {
 
   async function draftOnce() {
     const user = userEvent.setup();
-    await user.type(await screen.findByLabelText("What do you want?"), "Warmer");
+    await user.type(await screen.findByLabelText("Ask for a change"), "Warmer");
     await user.click(screen.getByRole("button", { name: "Draft" }));
-    await user.click(await screen.findByRole("button", { name: "Accept into draft" }));
+    await user.click(await screen.findByRole("button", { name: "Put into the draft" }));
     return user;
   }
 
   it("cancels the queued save when unsaved edits are replaced, and accepts", async () => {
     const calls = mount(templateRoutes({ extra: { [DRAFTS]: () => json(valid()), [ACCEPT]: () => json(accepted()) } }));
     const user = await open();
-    await user.type(await screen.findByLabelText("What do you want?"), "Warmer");
+    await user.type(await screen.findByLabelText("Ask for a change"), "Warmer");
     await user.click(screen.getByRole("button", { name: "Draft" }));
     await screen.findByTitle("After render");
     // Look at the editor, make an edit (its save is queued behind the debounce), and come back.
     await user.click(screen.getByRole("button", { name: "Assistant" }));
     await user.type(await screen.findByRole("textbox", { name: /source/ }), "x");
     await user.click(screen.getByRole("button", { name: "Assistant" }));
-    await user.click(screen.getByRole("button", { name: "Accept into draft" }));
+    await user.click(screen.getByRole("button", { name: "Put into the draft" }));
     await user.click(await screen.findByRole("button", { name: "Replace them" }));
 
     expect(await screen.findByText(/saved as the template's draft/)).toBeInTheDocument();
@@ -358,19 +382,20 @@ describe("the assistant and the editor's saves", () => {
   });
 });
 
-describe("the prompt counter of a translation", () => {
-  it("counts the text that is sent, so the counter and the Draft button agree", async () => {
+describe("the prompt length of a translation", () => {
+  it("counts the text that is sent, so the warning and the Draft button agree", async () => {
     mount(templateRoutes());
     const user = await open();
     await user.selectOptions(await screen.findByLabelText("Task"), "Translate");
     await user.type(screen.getByLabelText("Translate to"), "Danish");
     await user.type(screen.getByLabelText("Instructions"), "abc");
-    expect(screen.getByText(/^26 of 2000 characters/)).toBeInTheDocument();
+    expect(screen.queryByText(/^Too long/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Draft" })).toBeEnabled();
 
     await user.clear(screen.getByLabelText("Instructions"));
     await user.click(screen.getByLabelText("Instructions"));
     await user.paste("x".repeat(1990));
-    expect(screen.getByText(/^2013 of 2000 characters/)).toBeInTheDocument();
+    expect(screen.getByText("Too long: the most is 2000 characters, now 2013.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Draft" })).toBeDisabled();
   });
 });
@@ -398,11 +423,11 @@ describe("a lost accept reply", () => {
     renderRoute(`/w/ws1/templates/${TEMPLATE_ID}`, "/w/:ws/templates/:id", <TemplatePage />);
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "Assistant" }));
-    await user.type(await screen.findByLabelText("What do you want?"), "Short");
+    await user.type(await screen.findByLabelText("Ask for a change"), "Short");
     await user.selectOptions(screen.getByLabelText("Task"), "Subject lines");
     await user.click(screen.getByRole("button", { name: "Draft" }));
     await user.click(await screen.findByRole("radio", { name: "Second" }));
-    await user.click(screen.getByRole("button", { name: "Accept into draft" }));
+    await user.click(screen.getByRole("button", { name: "Put into the draft" }));
 
     await screen.findAllByText(/reply was lost/, undefined, WAIT);
     await waitFor(() => expect(drafts(calls).some((doc) => (doc as { email?: { subject?: string } }).email?.subject === "Second")).toBe(true), WAIT);
@@ -424,9 +449,28 @@ describe("an assistant that is turned off while the panel is open", () => {
       }),
     );
     const user = await open();
-    await user.type(await screen.findByLabelText("What do you want?"), "Warmer");
+    await user.type(await screen.findByLabelText("Ask for a change"), "Warmer");
     await user.click(screen.getByRole("button", { name: "Draft" }));
 
     expect(await screen.findByText("The assistant is off")).toBeInTheDocument();
+  });
+});
+
+describe("the Where used tab with the dock open", () => {
+  it("opens, closes the dock and keeps the draft under review", async () => {
+    mount(templateRoutes({ extra: { [DRAFTS]: () => json(valid()) } }));
+    const user = await open();
+    await user.type(await screen.findByLabelText("Ask for a change"), "Warmer");
+    await user.click(screen.getByRole("button", { name: "Draft" }));
+    await screen.findByRole("table", { name: "What the draft changes" });
+
+    await user.click(screen.getByRole("tab", { name: "Where used" }));
+
+    expect(await screen.findByRole("tab", { name: "Where used", selected: true })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Assistant" })).toHaveAttribute("aria-pressed", "false");
+
+    await user.click(screen.getByRole("button", { name: "Assistant" }));
+    expect(await screen.findByRole("tab", { name: "Editor", selected: true })).toBeInTheDocument();
+    expect(await screen.findByRole("table", { name: "What the draft changes" })).toBeInTheDocument();
   });
 });

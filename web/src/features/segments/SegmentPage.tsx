@@ -18,9 +18,8 @@ import {
   TabNav,
   useTabParam,
 } from "../../ui";
-import { useAssistantEnabled } from "../assistant";
+import { AssistantToggle, useAssistantAccess, useAssistantDock } from "../assistant";
 import { useSegmentAccess } from "./access";
-import { AssistantExplanation } from "./AssistantExplanation";
 import { fromDefinition } from "./ast";
 import { useCatalog } from "./catalog";
 import { namesOf } from "./describe";
@@ -52,8 +51,9 @@ export function SegmentPage() {
 
 function SegmentView({ workspaceId, segmentId }: { workspaceId: string; segmentId: string }) {
   const { canWrite, canUseAssistant } = useSegmentAccess(workspaceId);
-  const assistantOn = useAssistantEnabled(workspaceId, canUseAssistant);
-  const [explaining, setExplaining] = useState(false);
+  const { enabled: assistantOn, reload: reloadAssistant } = useAssistantAccess(workspaceId, canUseAssistant);
+  const dock = useAssistantDock();
+  const [dockSlot, setDockSlot] = useState<HTMLElement | null>(null);
   const segment = useResource(
     () =>
       unwrap(client.GET("/api/v1/workspaces/{ws}/segments/{id}", { params: { path: { ws: workspaceId, id: segmentId } } })),
@@ -61,6 +61,16 @@ function SegmentView({ workspaceId, segmentId }: { workspaceId: string; segmentI
   );
   const navigate = useNavigate();
   const { active: tab, hrefOf } = useTabParam(TABS);
+  /** The dock lives beside the rules, so asking for it elsewhere goes to the rules with it open. */
+  function toggleAssistant() {
+    if (tab === "rules") {
+      dock.toggle();
+      return;
+    }
+    const next = new URLSearchParams(hrefOf("rules"));
+    next.set("assistant", "1");
+    void navigate(`?${next.toString()}`);
+  }
   const crumb = { group: "Audience", section: "Segments", to: `/w/${workspaceId}/segments` };
 
   if (segment.status === "loading") {
@@ -84,6 +94,7 @@ function SegmentView({ workspaceId, segmentId }: { workspaceId: string; segmentI
   const data = segment.data;
 
   return (
+    <div className="dock-layout">
     <div className="page">
       <PageHeader
         title={data.name}
@@ -98,13 +109,7 @@ function SegmentView({ workspaceId, segmentId }: { workspaceId: string; segmentI
           ) : null
         }
         secondary={canWrite ? <RefreshButton workspaceId={workspaceId} segmentId={segmentId} onReload={segment.reload} /> : null}
-        actions={
-          assistantOn ? (
-            <Button onClick={() => setExplaining((open) => !open)} aria-expanded={explaining}>
-              {explaining ? "Hide the explanation" : "Explain this segment"}
-            </Button>
-          ) : null
-        }
+        actions={assistantOn ? <AssistantToggle open={dock.open && tab === "rules"} onToggle={toggleAssistant} /> : null}
       />
       <dl className="facts">
         <div>
@@ -124,15 +129,6 @@ function SegmentView({ workspaceId, segmentId }: { workspaceId: string; segmentI
           <dd>{data.current_version}</dd>
         </div>
       </dl>
-      {assistantOn && explaining ? (
-        <AssistantExplanation
-          key={data.current_version}
-          workspaceId={workspaceId}
-          segmentId={segmentId}
-          definition={data.current.definition}
-          onClose={() => setExplaining(false)}
-        />
-      ) : null}
       <TabNav label="Segment sections" tabs={TABS} />
       {tab === "overview" ? <Overview workspaceId={workspaceId} segment={data} canWrite={canWrite} editHref={hrefOf("rules")} /> : null}
       <div hidden={tab !== "rules"}>
@@ -141,6 +137,9 @@ function SegmentView({ workspaceId, segmentId }: { workspaceId: string; segmentI
           segment={data}
           canWrite={canWrite}
           assistant={assistantOn}
+          onAssistantGone={reloadAssistant}
+          dockVisible={tab === "rules"}
+          dockSlot={dockSlot}
           onSaved={() => segment.reload()}
         />
       </div>
@@ -151,6 +150,8 @@ function SegmentView({ workspaceId, segmentId }: { workspaceId: string; segmentI
           <VersionsPanel workspaceId={workspaceId} segment={data} />
         </div>
       ) : null}
+    </div>
+    <div className="dock-slot" ref={setDockSlot} />
     </div>
   );
 }

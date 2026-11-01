@@ -1,7 +1,7 @@
 import { useId, useState } from "react";
 
 import { client, describeError, unwrap, useResource, type components, type ErrorSummary } from "../../api";
-import { AssistantPanel } from "../assistant";
+import { AssistantDock, AssistantPanel, AssistantToggle, useAssistantDock } from "../assistant";
 import {
   Button,
   Dialog,
@@ -223,6 +223,10 @@ function Editor({ workspaceId, sourceId, stream, push = false, traits, lists, on
     </datalist>
   );
 
+  const dock = useAssistantDock();
+  /** Once opened, the dock stays mounted while closed, so a draft under review survives closing it. */
+  const [dockUsed, setDockUsed] = useState(dock.open);
+  if (dock.open && !dockUsed) setDockUsed(true);
   const assistant = (
     <AssistantPanel
       workspaceId={workspaceId}
@@ -558,13 +562,14 @@ function Editor({ workspaceId, sourceId, stream, push = false, traits, lists, on
 
       {saveFailure ? <InlineError {...saveFailure} /> : null}
       <div className="dialog-actions">
+        <AssistantToggle open={dock.open} onToggle={dock.toggle} />
         <Button onClick={onClose}>Cancel</Button>
         <Button variant="primary" onClick={() => void save()} disabled={busy || problems.length > 0}>
           {busy ? "Saving" : "Save mapping"}
         </Button>
       </div>
     </div>
-    <aside aria-label="Assistant">{assistant}</aside>
+    {dockUsed ? <AssistantDock thing="mapping" hidden={!dock.open} onClose={() => dock.setOpen(false)} draft={assistant} /> : null}
     </div>
   );
 }

@@ -61,7 +61,7 @@ export function SimulationSummary({ simulation, graph, names }: Props) {
   const title = (id: string) => stepTitle(graph, names, id);
   return (
     <div className="stack-tight" role="group" aria-label="Simulation of the draft">
-      <p className="faint">Made-up people walked through the draft on a virtual clock. Nothing was sent or changed.</p>
+      <h4>Walked through with {plural(simulation.people.length, "test person", "test people")}</h4>
       {simulation.people.length === 0 ? (
         <p className="muted">No one could be walked through this draft.</p>
       ) : (
@@ -120,6 +120,7 @@ export function SimulationSummary({ simulation, graph, names }: Props) {
           ))}
         </ul>
       ) : null}
+      <p className="faint">Made-up people, test mode. Nothing was sent or saved.</p>
     </div>
   );
 }

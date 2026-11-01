@@ -34,6 +34,19 @@ function valueWords(value: unknown): string {
   return text.length > 60 ? `${text.slice(0, 57)}…` : text;
 }
 
+/** The steps a draft adds and the steps it changes, by id, for the canvas to mark; a removed step is not on the drafted graph. */
+export function draftMarks(changes: DraftChange[]): Map<string, "added" | "changed"> {
+  const marks = new Map<string, "added" | "changed">();
+  for (const change of changes) {
+    const parts = change.path.split("/").slice(1).map(unescapePointer);
+    if (parts[0] !== "graph" || parts[1] !== "nodes" || parts[2] === undefined || change.change === "removed") continue;
+    const whole = parts.length === 3;
+    if (whole && change.change === "added") marks.set(parts[2], "added");
+    else if (marks.get(parts[2]) !== "added") marks.set(parts[2], "changed");
+  }
+  return marks;
+}
+
 /** The steps, connections and settings a flow draft changes, in the canvas's words; every field stays behind a disclosure. */
 export function FlowChanges({ changes, before, after, names }: Props) {
   if (changes.length === 0) return <p className="faint">Same as the saved draft.</p>;
@@ -88,7 +101,7 @@ export function FlowChanges({ changes, before, after, names }: Props) {
                   : `${was} → ${now}`;
           return (
             <li key={`${line.kind}-${line.id}`}>
-              <span className="strong">{line.kind}</span> · {text} <span className="faint mono fl-id">{line.id}</span>
+              <span className={`dock-mark dock-mark-${line.kind.toLowerCase()}`}>{line.kind}</span> · {text} <span className="faint mono fl-id">{line.id}</span>
             </li>
           );
         })}
