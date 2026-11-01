@@ -1662,6 +1662,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/flows/{id}/entries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * How many people entered the flow on each UTC day of the last `days` days, counted by
+         *     enrollment creation time, with the total of the days before for comparison. Aggregates only.
+         */
+        get: operations["get_flow_entries"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/flows/{id}/pause": {
         parameters: {
             query?: never;
@@ -6539,6 +6559,47 @@ export interface components {
             enrollments: components["schemas"]["EnrollmentItemBody"][];
             /** @description Pass as `cursor` for the next page; null when there is none. */
             next_cursor?: string | null;
+        };
+        EntriesBody: {
+            /** @description One item per day, oldest first, including days nobody entered. */
+            days: components["schemas"]["EntryDayBody"][];
+            /**
+             * @description The first day of the window.
+             * @example 2026-10-01
+             */
+            from: string;
+            /**
+             * Format: int64
+             * @description People who entered in the same number of days before the window.
+             */
+            previous_total: number;
+            /**
+             * @description Always `UTC`: days are cut at midnight UTC.
+             * @example UTC
+             */
+            timezone: string;
+            /**
+             * @description The last day of the window: today.
+             * @example 2026-10-30
+             */
+            to: string;
+            /**
+             * Format: int64
+             * @description People who entered in the window.
+             */
+            total: number;
+        };
+        EntryDayBody: {
+            /**
+             * @description The UTC day, `YYYY-MM-DD`.
+             * @example 2026-10-01
+             */
+            date: string;
+            /**
+             * Format: int64
+             * @description People who entered the flow that day.
+             */
+            entered: number;
         };
         ErasureBody: {
             /** Format: date-time */
@@ -18217,6 +18278,81 @@ export interface operations {
             };
             /** @description The enrollment is not failed or its failure cannot be skipped (`code` is `enrollment_state`), or the flow is archived (`flow_archived`) or paused (`flow_paused`) */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_flow_entries: {
+        parameters: {
+            query?: {
+                /** @description Days to cover, 1 to 90; default 30 */
+                days?: number;
+                /** @description Only enrollments pinned to this version; default all versions */
+                version?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Flow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The entries per day */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EntriesBody"];
+                };
+            };
+            /** @description days or version is out of range or malformed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or flow, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The read ran past its time limit (`code` is `search_timeout`) */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

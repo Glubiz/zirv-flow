@@ -49,3 +49,9 @@ export function formatCount(value: number): string {
   if (Math.abs(value) >= 100_000) return compact(1_000, "k");
   return value.toLocaleString("en-US");
 }
+
+/** A calendar day (`2026-10-01`) as "1 Oct". Days are UTC, so the zone is fixed. */
+export function formatDay(value: string): string {
+  const date = new Date(`${value}T00:00:00Z`);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: "UTC" });
+}

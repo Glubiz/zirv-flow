@@ -16,6 +16,7 @@ import {
   type Tone,
 } from "../../ui";
 
+import { EntriesPanel } from "./entries";
 import { TraceTree, traceHref, type TraceTreeRecord } from "../traces";
 import { Canvas } from "./Canvas";
 import { useVersionCounts, type VersionCounts } from "./counts";
@@ -297,6 +298,8 @@ function ResultsBody({ versions, ...props }: Omit<Props, "versions"> & { version
             </div>
           ) : null}
         </div>
+
+        <EntriesPanel workspaceId={workspaceId} flowId={flowId} published={props.current !== null} />
 
         {props.canSeePeople ? (
           <section className="panel panel-pad stack" aria-label="Person lookup">
