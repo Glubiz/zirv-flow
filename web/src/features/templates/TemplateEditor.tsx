@@ -8,7 +8,7 @@ import { ConvertDialog } from "./ConvertDialog";
 import { PreviewPane, type PersonChoice, type PreviewState } from "./PreviewPane";
 import { SourcePane } from "./SourcePane";
 import { TabBar } from "./TabBar";
-import { AssistantToggle, useAssistantDock } from "../assistant";
+import { AssistantToggle, useAssistantDock, withoutDock } from "../assistant";
 import { assistable, TemplateAssistant } from "./TemplateAssistant";
 import { SenderOptionsProvider } from "./senderOptions";
 import { WhereUsedView } from "./WhereUsed";
@@ -55,7 +55,8 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin, canPu
   const tab: Tab = query.get("tab") === "used" ? "used" : "editor";
   const setTab = (next: Tab) =>
     setQuery((current) => {
-      const params = new URLSearchParams(current);
+      /** The dock lives beside the editor only, so the other tab closes it; its panel stays mounted. */
+      const params = next === "editor" ? new URLSearchParams(current) : withoutDock(current);
       if (next === "editor") params.delete("tab");
       else params.set("tab", next);
       return params;
@@ -411,8 +412,8 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin, canPu
         </p>
       ) : null}
 
-      {tab === "editor" ? (
-        <div className="dock-layout">
+      {tab === "editor" || assistantUsed ? (
+        <div className="dock-layout" hidden={tab !== "editor" && !wantsEditor}>
         <div className="tp-split">
           <SourcePane workspaceId={workspaceId} doc={doc} onChange={change} readOnly={!editable || holding} onConvert={() => setConverting(true)} issues={issues} checked={preview.status === "ready"} template={template} onTemplate={setTemplate} goTo={goTo} />
           {canWrite ? (

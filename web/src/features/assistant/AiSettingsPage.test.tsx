@@ -1,5 +1,6 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useNavigate } from "react-router";
 import { describe, expect, it } from "vitest";
 
 import { json, MEMBER, mockApi, OWNER, problem, session, type Handler } from "../../test/mockApi";
@@ -439,5 +440,54 @@ describe("AI assistant settings", () => {
     open();
 
     expect(await screen.findByText("No calls this month")).toBeInTheDocument();
+  });
+});
+
+describe("the settings leave guard", () => {
+  function Away() {
+    const navigate = useNavigate();
+    return (
+      <button type="button" onClick={() => void navigate("/w/ws1/elsewhere")}>
+        Go away
+      </button>
+    );
+  }
+
+  function openWithAway() {
+    mockApi(admin());
+    return renderRoute(
+      "/w/ws1/ai",
+      "/w/:ws/ai",
+      <>
+        <AiSettingsPage />
+        <Away />
+      </>,
+    );
+  }
+
+  it("holds an unsaved budget, stays on Keep editing and goes on Leave", async () => {
+    const view = openWithAway();
+    const user = userEvent.setup();
+    await user.type(await screen.findByLabelText("Monthly budget"), "5");
+
+    await user.click(screen.getByRole("button", { name: "Go away" }));
+    const dialog = await screen.findByRole("dialog", { name: "Leave without saving?" });
+    await user.click(within(dialog).getByRole("button", { name: "Keep editing" }));
+    expect(view.router.state.location.pathname).toBe("/w/ws1/ai");
+
+    await user.click(screen.getByRole("button", { name: "Go away" }));
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Leave without saving" }));
+    expect(view.router.state.location.pathname).toBe("/w/ws1/elsewhere");
+  });
+
+  it("lets a clean form navigate without a dialog", async () => {
+    const view = openWithAway();
+    const user = userEvent.setup();
+    await screen.findByLabelText("Monthly budget");
+
+    await user.click(screen.getByRole("button", { name: "Go away" }));
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(view.router.state.location.pathname).toBe("/w/ws1/elsewhere");
   });
 });

@@ -5702,6 +5702,10 @@ main:focus {
   outline-offset: 2px;
 }
 
+.dock-layout[hidden] {
+  display: none;
+}
+
 .dock-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

@@ -293,7 +293,7 @@ describe("the assistant on the Where used tab", () => {
     renderRoute(`/w/ws1/templates/${TEMPLATE_ID}?tab=used&assistant=1`, "/w/:ws/templates/:id", <TemplatePage />);
 
     expect(await screen.findByLabelText("Ask for a change")).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Editor" })).toHaveAttribute("aria-selected", "true");
+    expect(await screen.findByRole("tab", { name: "Editor", selected: true })).toBeInTheDocument();
   });
 });
 
@@ -453,5 +453,24 @@ describe("an assistant that is turned off while the panel is open", () => {
     await user.click(screen.getByRole("button", { name: "Draft" }));
 
     expect(await screen.findByText("The assistant is off")).toBeInTheDocument();
+  });
+});
+
+describe("the Where used tab with the dock open", () => {
+  it("opens, closes the dock and keeps the draft under review", async () => {
+    mount(templateRoutes({ extra: { [DRAFTS]: () => json(valid()) } }));
+    const user = await open();
+    await user.type(await screen.findByLabelText("Ask for a change"), "Warmer");
+    await user.click(screen.getByRole("button", { name: "Draft" }));
+    await screen.findByRole("table", { name: "What the draft changes" });
+
+    await user.click(screen.getByRole("tab", { name: "Where used" }));
+
+    expect(await screen.findByRole("tab", { name: "Where used", selected: true })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Assistant" })).toHaveAttribute("aria-pressed", "false");
+
+    await user.click(screen.getByRole("button", { name: "Assistant" }));
+    expect(await screen.findByRole("tab", { name: "Editor", selected: true })).toBeInTheDocument();
+    expect(await screen.findByRole("table", { name: "What the draft changes" })).toBeInTheDocument();
   });
 });
