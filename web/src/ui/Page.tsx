@@ -1,5 +1,5 @@
-import { useId, type ReactNode } from "react";
-import { Link } from "react-router";
+import { useEffect, useId, useRef, type ReactNode, type Ref } from "react";
+import { Link, useLocation } from "react-router";
 
 export interface Breadcrumb {
   group: string;
@@ -56,15 +56,17 @@ export function PageHeader({ title, lede, breadcrumb, status, primary, secondary
 interface PanelProps {
   title?: string;
   flush?: boolean;
+  /** Makes the heading focusable by script, for a link that lands on the panel. */
+  headingRef?: Ref<HTMLHeadingElement>;
   children: ReactNode;
 }
 
-export function Panel({ title, flush = false, children }: PanelProps) {
+export function Panel({ title, flush = false, headingRef, children }: PanelProps) {
   const headingId = useId();
   return (
     <section className={flush ? "panel panel-flush" : "panel panel-pad"} aria-labelledby={title ? headingId : undefined}>
       {title ? (
-        <h2 className="panel-title" id={headingId}>
+        <h2 className="panel-title" id={headingId} ref={headingRef} tabIndex={headingRef ? -1 : undefined}>
           {title}
         </h2>
       ) : null}
@@ -80,11 +82,19 @@ export interface RelatedGroup {
 
 /** The things a page's subject is used by or built from; groups with no items are not drawn. */
 export function RelatedPanel({ groups }: { groups: RelatedGroup[] }) {
+  const location = useLocation();
+  const heading = useRef<HTMLHeadingElement>(null);
   const shown = groups.filter((group) => group.items.length > 0);
-  if (shown.length === 0) return null;
+  const drawn = shown.length > 0;
+  useEffect(() => {
+    if (!drawn || location.hash !== "#related") return;
+    heading.current?.scrollIntoView();
+    heading.current?.focus({ preventScroll: true });
+  }, [drawn, location.hash]);
+  if (!drawn) return null;
   return (
     <aside id="related" aria-label="Related" className="related">
-      <Panel title="Related">
+      <Panel title="Related" headingRef={heading}>
         {shown.map((group) => (
           <div key={group.label} className="related-group">
             <h3 className="related-label">{group.label}</h3>

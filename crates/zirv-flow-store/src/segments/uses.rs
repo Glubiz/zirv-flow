@@ -1,6 +1,6 @@
 //! Where a segment is used: the flows whose live or draft version names it, the other segments
 //! whose current definition references it, and the per-segment numbers of the segment list (flows
-//! using it, people gained over seven days). One rule, `zirv_flow_core::flow::segment_uses`,
+//! using it, people gained over seven days). One rule, `zirv_flow_core::flow::segment_uses_lenient`,
 //! decides what "uses" means; the store reads the versions and applies it.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -11,7 +11,7 @@ use sqlx::prelude::FromRow;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
-use zirv_flow_core::flow::{FlowGraph, FlowSettings, GRAPH_VERSION, SegmentUse, segment_uses};
+use zirv_flow_core::flow::{SegmentUse, segment_uses_lenient};
 
 use super::cycle::SegmentRef;
 use crate::StoreError;
@@ -85,18 +85,10 @@ struct FlowRow {
     live_settings: Option<serde_json::Value>,
 }
 
-/// A graph that does not parse (a draft may be half-built) is read as empty, so the settings still
-/// count; settings that do not parse name nothing.
+/// Drafts are unvalidated and a live version is read the same way, so each piece that does not
+/// parse drops only itself.
 fn uses_of(graph: &serde_json::Value, settings: &serde_json::Value) -> Uses {
-    let Ok(settings) = serde_json::from_value::<FlowSettings>(settings.clone()) else {
-        return Uses::new();
-    };
-    let graph = serde_json::from_value::<FlowGraph>(graph.clone()).unwrap_or(FlowGraph {
-        v: GRAPH_VERSION,
-        nodes: Vec::new(),
-        edges: Vec::new(),
-    });
-    segment_uses(&graph, &settings)
+    segment_uses_lenient(graph, settings)
 }
 
 /// The non-archived flows of the workspace with what their live and draft versions use. One read.
@@ -105,13 +97,7 @@ async fn load_flow_uses(
     workspace: WorkspaceId,
 ) -> Result<Vec<FlowUses>, StoreError> {
     let rows: Vec<FlowRow> = sqlx::query_as(
-        "SELECT f.id, f.name, f.state, f.current_version, f.draft_graph, f.draft_settings, \
-            v.graph AS live_graph, v.settings AS live_settings \
-         FROM flows f \
-         LEFT JOIN flow_versions v ON v.flow_id = f.id AND v.version = f.current_version \
-            AND f.state IN ('published', 'paused') \
-         WHERE f.workspace_id = $1 AND f.archived_at IS NULL \
-         ORDER BY lower(f.name), f.id",
+        "SELECT f.id, f.name, f.state, f.current_version, f.draft_graph, f.draft_settings,             v.graph AS live_graph, v.settings AS live_settings          FROM flows f          LEFT JOIN flow_versions v ON v.flow_id = f.id AND v.version = f.current_version             AND f.state IN ('published', 'paused')          WHERE f.workspace_id = $1 AND f.archived_at IS NULL          ORDER BY lower(f.name), f.id",
     )
     .bind(workspace.as_uuid())
     .fetch_all(connection)
@@ -133,6 +119,25 @@ async fn load_flow_uses(
                 live,
             }
         })
+        .collect())
+}
+
+/// What the live (published or paused) version of each non-archived flow uses; drafts are not
+/// read. One read.
+async fn load_live_uses(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+) -> Result<Vec<Uses>, StoreError> {
+    let rows: Vec<(serde_json::Value, serde_json::Value)> = sqlx::query_as(
+        "SELECT v.graph, v.settings          FROM flows f          JOIN flow_versions v ON v.flow_id = f.id AND v.version = f.current_version          WHERE f.workspace_id = $1 AND f.archived_at IS NULL             AND f.state IN ('published', 'paused')",
+    )
+    .bind(workspace.as_uuid())
+    .fetch_all(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(rows
+        .iter()
+        .map(|(graph, settings)| uses_of(graph, settings))
         .collect())
 }
 
@@ -184,7 +189,7 @@ pub async fn segment_where_used(
 }
 
 /// The list numbers of `segments` (id and creation time): two reads for the whole list, one over
-/// the flows and one over the membership history. `now` is the store clock's instant.
+/// the live flow versions and one over the membership history. `now` is the store clock's instant.
 pub async fn segment_list_stats(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -202,8 +207,8 @@ pub async fn segment_list_stats(
             (id, stat)
         })
         .collect();
-    for flow in load_flow_uses(&mut *connection, workspace).await? {
-        for segment in flow.live.keys() {
+    for live in load_live_uses(&mut *connection, workspace).await? {
+        for segment in live.keys() {
             if let Some(stat) = stats.get_mut(segment) {
                 stat.used_by_flows += 1;
             }
@@ -517,5 +522,85 @@ mod tests {
 
         assert_eq!(stats[&young.id].change_7d, None);
         assert_eq!(stats[&edge.id].change_7d, Some(1));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn used_by_flows_ignores_a_flow_whose_draft_alone_uses_the_segment(pool: PgPool) {
+        let ws = support::workspace(&pool, "one").await;
+        let segment = support::segment(&pool, ws, "Pro", 60).await;
+        let other = support::segment(&pool, ws, "Other", 60).await;
+        let flow = live_flow(&pool, ws, "Moved", other.id).await;
+        set_draft(
+            &pool,
+            ws,
+            flow,
+            branch_on(segment.id),
+            trigger_on(segment.id),
+        )
+        .await;
+        let mut connection = pool.acquire().await.unwrap();
+
+        let stats = segment_list_stats(
+            &mut connection,
+            ws,
+            &[
+                (segment.id, segment.created_at),
+                (other.id, other.created_at),
+            ],
+            segment.created_at,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(stats[&segment.id].used_by_flows, 0);
+        assert_eq!(stats[&other.id].used_by_flows, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_draft_with_a_malformed_goal_still_lists_its_trigger_use(pool: PgPool) {
+        let ws = support::workspace(&pool, "one").await;
+        let segment = support::segment(&pool, ws, "Pro", 60).await;
+        let flow = flows::create(&pool, ws, "Half built").await;
+        let mut settings = trigger_on(segment.id);
+        settings["goal"] = json!({"type": "segment"});
+        set_draft(
+            &pool,
+            ws,
+            flow.id,
+            json!({"v": 1, "nodes": [], "edges": []}),
+            settings,
+        )
+        .await;
+        let mut connection = pool.acquire().await.unwrap();
+
+        let used = segment_where_used(&mut connection, ws, segment.id)
+            .await
+            .unwrap();
+
+        assert_eq!(used.flows.len(), 1);
+        assert_eq!(used.flows[0].stage, FlowStage::Draft);
+        assert_eq!(used.flows[0].uses, [SegmentUse::Trigger]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_draft_with_one_malformed_node_still_lists_the_branch_condition(pool: PgPool) {
+        let ws = support::workspace(&pool, "one").await;
+        let segment = support::segment(&pool, ws, "Pro", 60).await;
+        let flow = flows::create(&pool, ws, "Half built").await;
+        let graph = json!({"v": 1, "edges": [], "nodes": [
+            {"id": "w", "type": "wait.until_event"},
+            {"id": "b", "type": "branch", "conditions": [{"segment": segment.id}]}]});
+        set_draft(&pool, ws, flow.id, graph, flows::settings()).await;
+        let mut connection = pool.acquire().await.unwrap();
+
+        let used = segment_where_used(&mut connection, ws, segment.id)
+            .await
+            .unwrap();
+
+        assert_eq!(used.flows.len(), 1);
+        assert_eq!(used.flows[0].uses, [SegmentUse::Condition]);
     }
 }
