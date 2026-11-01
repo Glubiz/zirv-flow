@@ -784,6 +784,17 @@ mod tests {
             ],
             "only this workspace's old row, and its cost is kept"
         );
-        assert_eq!(spent_this_month(&pool, ws, now).await.unwrap(), 1_100);
+        // Counted from the abandoned row's own month, which holds all three rows even when the
+        // test runs in the first hours of a month and that row is last month's.
+        let abandoned_at: OffsetDateTime =
+            sqlx::query_scalar("SELECT created_at FROM ai_calls WHERE id = $1")
+                .bind(stale[0])
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            spent_this_month(&pool, ws, abandoned_at).await.unwrap(),
+            1_100
+        );
     }
 }

@@ -58,6 +58,7 @@ The problem codes in use are listed in [the policy](api.md#problem-codes), and a
 | GET | `/api/v1/workspaces` | `list_workspaces` | not a creating POST | bounded collection | ok | ok | ok | no |
 | POST | `/api/v1/workspaces` | `create_workspace` | guarded | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}` | `get_workspace` | not a creating POST | n/a | ok | ok | ok | no |
+| GET | `/api/v1/workspaces/{ws}/summary` | `get_workspace_summary` | not a creating POST | n/a | ok | ok | ok | no |
 | PATCH | `/api/v1/workspaces/{ws}` | `update_workspace` | not a creating POST | n/a | ok | ok | ok | no |
 | POST | `/api/v1/workspaces/{ws}/ai/drafts` | `create_ai_draft` | has | n/a | ok | strings G8: 7 | ok | yes |
 | POST | `/api/v1/workspaces/{ws}/ai/drafts/{id}/accept` | `accept_ai_draft` | not a creating POST | n/a | ok | strings G8: 4 | ok | yes |

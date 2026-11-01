@@ -21974,6 +21974,110 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/summary": {
+      "get": {
+        "tags": [
+          "workspaces"
+        ],
+        "summary": "What happened in the workspace over the last `days` UTC days (today included), for the Home\nfigures. Read from the daily rollup, not counted per request.",
+        "operationId": "get_workspace_summary",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "days",
+            "in": "query",
+            "description": "Days in the window, 1 to 30; default 7. Whole UTC days, today included. The figures come\nfrom a rollup refreshed every five minutes and may lag by up to about seven minutes (see\n`computed_at`).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "default": 7,
+              "maximum": 30,
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The figures",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceSummaryBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "days is not a number from 1 to 30",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The read ran past its time limit (`code` is `search_timeout`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/suppressions": {
       "get": {
         "tags": [
@@ -34643,6 +34747,38 @@
         },
         "additionalProperties": false
       },
+      "FlowSummaryBody": {
+        "type": "object",
+        "required": [
+          "flow_id",
+          "people_in_flow",
+          "sent"
+        ],
+        "properties": {
+          "flow_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "goals_reached": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Goal conversions of the flow in the window; null when the flow has no goal."
+          },
+          "people_in_flow": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Enrollments in flight (active, waiting, held or failed) at the last rollup run."
+          },
+          "sent": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Messages of the flow sent in the window."
+          }
+        }
+      },
       "FlowTestBody": {
         "type": "object",
         "description": "The result of a walk.",
@@ -41833,6 +41969,25 @@
           }
         }
       },
+      "SummaryWindowBody": {
+        "type": "object",
+        "required": [
+          "from",
+          "to"
+        ],
+        "properties": {
+          "from": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Start of the window, inclusive (UTC): midnight of the first day counted."
+          },
+          "to": {
+            "type": "string",
+            "format": "date-time",
+            "description": "End of the window (UTC): the time of the request."
+          }
+        }
+      },
       "SuppressionBody": {
         "type": "object",
         "required": [
@@ -44976,6 +45131,57 @@
           "utm": {
             "$ref": "#/components/schemas/UtmSettingsBody",
             "description": "The automatic UTM parameter setting for email links. Off until an admin turns it on."
+          }
+        }
+      },
+      "WorkspaceSummaryBody": {
+        "type": "object",
+        "required": [
+          "window",
+          "messages_sent",
+          "goals_reached",
+          "people_created",
+          "flows",
+          "computed_at"
+        ],
+        "properties": {
+          "computed_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the rollup last finished a run. The counts lag the data by up to about seven\nminutes (five between runs and a two minute commit margin); a workspace the rollup has\nnot reached yet shows zeros and the time of the request."
+          },
+          "events_received": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Events received in the window. Null for a caller who may not read events."
+          },
+          "flows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FlowSummaryBody"
+            },
+            "description": "Published flows only."
+          },
+          "goals_reached": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Goal conversions in the window."
+          },
+          "messages_sent": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Messages that ended `sent` in the window; test sends excluded."
+          },
+          "people_created": {
+            "type": "integer",
+            "format": "int64",
+            "description": "People created in the window."
+          },
+          "window": {
+            "$ref": "#/components/schemas/SummaryWindowBody"
           }
         }
       }

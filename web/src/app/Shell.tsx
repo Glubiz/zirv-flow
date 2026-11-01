@@ -19,10 +19,11 @@ export function Shell() {
   const user = useSignedInUser();
   const access = useWorkspaceAccess(current?.id ?? null);
   const destinations = visibleDestinations({ canAdmin: current !== null && (user.is_owner || (access.status === "ready" && access.data.canAdmin)), isOwner: user.is_owner });
-  return <ShellLayout current={current} destinations={destinations} />;
+  const canSearchPeople = current !== null && (user.is_owner || (access.status === "ready" && access.data.role !== null));
+  return <ShellLayout current={current} destinations={destinations} canSearchPeople={canSearchPeople} />;
 }
 
-function ShellLayout({ current, destinations }: { current: Workspace | null; destinations: Destination[] }) {
+function ShellLayout({ current, destinations, canSearchPeople }: { current: Workspace | null; destinations: Destination[]; canSearchPeople: boolean }) {
   const location = useLocation();
   const navigate = useNavigate();
   const main = useRef<HTMLElement>(null);
@@ -143,7 +144,7 @@ function ShellLayout({ current, destinations }: { current: Workspace | null; des
       <aside className="sidebar">{sidebar(folded)}</aside>
       <main id="main" ref={main} tabIndex={-1}><Outlet context={{ destinations } satisfies ShellContext} /></main>
       {drawerOpen ? <Sheet title="Navigation" closeLabel="Close menu" modal onClose={() => setDrawerPath(null)}>{sidebar(false)}</Sheet> : null}
-      {paletteOpen ? <PagePalette items={destinations} base={base} onClose={() => setPaletteOpen(false)} /> : null}
+      {paletteOpen ? <PagePalette items={destinations} base={base} workspaceId={current?.id ?? null} canSearchPeople={canSearchPeople} onClose={() => setPaletteOpen(false)} /> : null}
     </div>
   );
 }

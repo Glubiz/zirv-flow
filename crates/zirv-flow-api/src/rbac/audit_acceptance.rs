@@ -1094,6 +1094,7 @@ mod tests {
     }
 
     async fn events_and_consent(w: &mut Walk<'_>, s: &Seeded) {
+        w.s("GET", "/summary", &[], None).await;
         w.a(
             "POST",
             "/event-schemas",
