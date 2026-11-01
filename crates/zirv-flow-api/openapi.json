@@ -25378,7 +25378,7 @@
         "tags": [
           "themes"
         ],
-        "summary": "Makes a published theme the workspace default, replacing the previous one. Emails that follow\nthe default use the theme's current version at their next render; emails that name a theme are\nunchanged. The theme must be a live, published theme of the workspace, else 409\n`theme_not_publishable_default`. Audited as `theme.default_set`.",
+        "summary": "Makes a published theme the workspace default, replacing the previous one. Emails that follow\nthe default use the theme's current version at their next render; emails that name a theme are\nunchanged. The theme must be a live, published theme of the workspace, else 409\n`theme_not_publishable_default`. The live templates that follow the default are validated with\nthe theme in place, at most 200 in template id order; one that would stop sending, such as a\nmarketing template when the theme has no footer, is a 422 `theme_breaks_templates` that lists up\nto 20 of them with their issue codes and the total, and writes nothing. Audited as\n`theme.default_set`.",
         "operationId": "set_default_theme",
         "parameters": [
           {
@@ -25445,6 +25445,26 @@
           },
           "409": {
             "description": "The theme is not a published, live theme of the workspace (`theme_not_publishable_default`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The theme would stop live templates that follow the default from sending (`theme_breaks_templates`, with `templates` and `total`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Rendering is not available (`render_unavailable`)",
             "content": {
               "application/problem+json": {
                 "schema": {

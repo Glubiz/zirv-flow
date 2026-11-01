@@ -86,4 +86,37 @@ describe("the set-default confirm", () => {
 
     expect(await within(dialog).findByText("No theme is the default yet.")).toBeInTheDocument();
   });
+
+  it("lists the templates the new default would break, with links, and stays open", async () => {
+    mockApi({
+      ...themeRoutes(),
+      [`GET ${WS}/themes`]: () => json(themes(FIRST)),
+      [`GET ${WS}/themes/${FIRST}/where-used`]: () => json(usedBy({ default_templates: [templateUse(1)] })),
+      [`PUT ${WS}/themes/default`]: () =>
+        new Response(
+          JSON.stringify({
+            type: "about:blank",
+            title: "Unprocessable",
+            status: 422,
+            code: "theme_breaks_templates",
+            detail: "This theme version would stop 1 live templates from sending; fix them or the version first.",
+            total: 1,
+            templates: [{ id: "t9", name: "Weekly news", codes: ["missing_unsubscribe"] }],
+          }),
+          { status: 422, headers: { "content-type": "application/problem+json" } },
+        ),
+    });
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "More actions for Cool" }));
+    await user.click(screen.getByRole("menuitem", { name: "Set as default" }));
+    const dialog = await screen.findByRole("dialog", { name: "Make Cool the default?" });
+    await user.click(await within(dialog).findByRole("button", { name: "Make default" }));
+
+    const link = await within(dialog).findByRole("link", { name: "Weekly news" });
+    expect(link.getAttribute("href")).toMatch(/\/templates\/t9$/);
+    expect(within(dialog).getByText("missing_unsubscribe")).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Cancel" })).toBeEnabled();
+  });
 });

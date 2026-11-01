@@ -194,6 +194,25 @@ pub async fn theme_live_templates(
         .collect())
 }
 
+/// The templates, not archived, whose current published version follows the workspace default.
+/// By template id.
+pub async fn default_live_templates(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+) -> Result<Vec<LiveTemplate>, StoreError> {
+    let mut live: Vec<LiveTemplate> = default_following_templates(connection, workspace)
+        .await?
+        .into_iter()
+        .filter(|template| template.in_current)
+        .map(|template| LiveTemplate {
+            id: template.id,
+            name: template.name,
+        })
+        .collect();
+    live.sort_by_key(|template| template.id);
+    Ok(live)
+}
+
 /// How many templates of the workspace, not archived, use each theme, by the rule of
 /// [`theme_where_used`]: they name it in their draft or current version, and, for the default
 /// theme only, they follow the default. A theme no template uses is absent. A fixed number of
@@ -379,6 +398,42 @@ mod tests {
             .map(|t| (t.in_draft, t.in_current))
             .collect();
         assert_eq!(flags, [(false, true)]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn default_live_templates_are_the_followers_with_a_current_version(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let live = create_template(&pool, ws, "Live").await;
+        let draft_only = create_template(&pool, ws, "Draft only").await;
+        let named = create_template(&pool, ws, "Named").await;
+        let brand = create(&pool, ws, "Brand").await;
+        set_draft(&pool, ws, live.id, &blocks(json!("default"))).await;
+        set_draft(&pool, ws, draft_only.id, &blocks(json!("default"))).await;
+        set_draft(&pool, ws, named.id, &blocks(json!({"id": brand.id}))).await;
+        for template in [live.id, named.id] {
+            sqlx::query(
+                "INSERT INTO template_versions (workspace_id, template_id, version, document, \
+                    validation, trace_id) \
+                 SELECT workspace_id, template_id, 1, document, '[]'::jsonb, gen_random_uuid() \
+                 FROM template_drafts WHERE template_id = $1",
+            )
+            .bind(template)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query("UPDATE templates SET current_version = 1 WHERE id = $1")
+                .bind(template)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        let found = default_live_templates(&mut pool.acquire().await.unwrap(), ws)
+            .await
+            .unwrap();
+
+        assert_eq!(found.iter().map(|t| t.id).collect::<Vec<_>>(), [live.id]);
     }
 
     #[sqlx::test]

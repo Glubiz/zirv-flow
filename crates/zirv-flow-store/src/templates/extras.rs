@@ -73,6 +73,9 @@ pub enum Candidate {
     /// The tokens of a theme. A theme with no published version resolves to nothing, so it has no
     /// effect then.
     Theme { id: Uuid, tokens: Value },
+    /// A theme that is about to become the workspace default: what follows the default resolves
+    /// to its current published version.
+    DefaultTheme { id: Uuid },
 }
 
 /// Loads what `request` names. `public_url` is what asset URLs are built on (`server.public_url`
@@ -97,7 +100,10 @@ pub async fn load_render_inputs_with(
 ) -> Result<LoadedInputs, StoreError> {
     let choice = match &request.theme {
         ThemeRequest::None => ThemeChoice::None,
-        ThemeRequest::Default => ThemeChoice::Default,
+        ThemeRequest::Default => match candidate {
+            Some(Candidate::DefaultTheme { id }) => ThemeChoice::Named(*id),
+            _ => ThemeChoice::Default,
+        },
         ThemeRequest::Id(id) => ThemeChoice::Named(id.parse().unwrap_or(Uuid::nil())),
     };
     let mut theme = effective_theme(connection, workspace, choice).await?;
