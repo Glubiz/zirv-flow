@@ -1,6 +1,7 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
+import { MemoryRouter } from "react-router";
 import { describe, expect, it, vi } from "vitest";
 
 import { SessionProvider, useSession } from "../session";
@@ -19,9 +20,11 @@ function Editor({ initial, sourceId }: { initial: string; sourceId?: string }) {
 
 function mount(initial: string, sourceId?: string) {
   return render(
-    <SessionProvider>
-      <Editor initial={initial} sourceId={sourceId} />
-    </SessionProvider>,
+    <MemoryRouter>
+      <SessionProvider>
+        <Editor initial={initial} sourceId={sourceId} />
+      </SessionProvider>
+    </MemoryRouter>,
   );
 }
 
@@ -223,9 +226,10 @@ describe("the sample", () => {
     const user = userEvent.setup();
     mount(starterManifest("none"));
 
-    await user.type(await screen.findByLabelText("What do you want?"), "Read my contacts");
+    await user.click(await screen.findByRole("button", { name: "Assistant" }));
+    await user.type(await screen.findByLabelText("Ask for a change"), "Read my contacts");
     await user.click(screen.getByRole("button", { name: "Draft" }));
-    await user.click(await screen.findByRole("button", { name: "Accept" }));
+    await user.click(await screen.findByRole("button", { name: "Put into the draft" }));
 
     expect(await screen.findByText("Loaded into the editor. Save to apply it.")).toBeInTheDocument();
     expect(screen.getByLabelText<HTMLTextAreaElement>("Manifest").value).toContain("https://drafted.example.test");
@@ -248,9 +252,10 @@ describe("the sample", () => {
     mount(starterManifest("none"));
 
     await user.type(await screen.findByLabelText("Manifest"), "x");
-    await user.type(await screen.findByLabelText("What do you want?"), "Read my contacts");
+    await user.click(await screen.findByRole("button", { name: "Assistant" }));
+    await user.type(await screen.findByLabelText("Ask for a change"), "Read my contacts");
     await user.click(screen.getByRole("button", { name: "Draft" }));
-    await user.click(await screen.findByRole("button", { name: "Accept" }));
+    await user.click(await screen.findByRole("button", { name: "Put into the draft" }));
 
     expect(confirm).toHaveBeenCalledTimes(1);
     expect(calls.some((call) => call.path.endsWith("/accept"))).toBe(false);

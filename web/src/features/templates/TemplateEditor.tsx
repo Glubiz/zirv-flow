@@ -8,6 +8,7 @@ import { ConvertDialog } from "./ConvertDialog";
 import { PreviewPane, type PersonChoice, type PreviewState } from "./PreviewPane";
 import { SourcePane } from "./SourcePane";
 import { TabBar } from "./TabBar";
+import { AssistantToggle, useAssistantDock } from "../assistant";
 import { assistable, TemplateAssistant } from "./TemplateAssistant";
 import { SenderOptionsProvider } from "./senderOptions";
 import { WhereUsedView } from "./WhereUsed";
@@ -69,9 +70,11 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin, canPu
   const navigate = useNavigate();
   const [converting, setConverting] = useState(false);
   const [published, setPublished] = useState<string | null>(null);
-  const [assistantOpen, setAssistantOpen] = useState(false);
+  const dock = useAssistantDock();
+  const assistantOpen = dock.open;
   /** Once opened, the panel stays mounted while hidden, so a draft under review survives a look at the editor. */
-  const [assistantUsed, setAssistantUsed] = useState(false);
+  const [assistantUsed, setAssistantUsed] = useState(assistantOpen);
+  if (assistantOpen && !assistantUsed) setAssistantUsed(true);
   /** True from the moment an assistant draft is accepted until it lands: nothing is saved or typed meanwhile. */
   const [holding, setHolding] = useState(false);
   const holdingRef = useRef(false);
@@ -357,14 +360,7 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin, canPu
             <span className="muted">Draft saved</span>
           )}
         </div>
-        {assistantEligible ? (
-          <Button aria-pressed={assistantOpen} onClick={() => {
-              setAssistantOpen((open) => !open);
-              setAssistantUsed(true);
-            }}>
-            Assistant
-          </Button>
-        ) : null}
+        {assistantEligible ? <AssistantToggle open={assistantOpen} onToggle={dock.toggle} /> : null}
         {editable ? (
           <Button onClick={saveNow} disabled={save === "saved" || save === "saving"}>
             Save draft
@@ -403,27 +399,9 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin, canPu
       ) : null}
 
       {tab === "editor" ? (
+        <div className="dock-layout">
         <div className="tp-split">
-          {assistantUsed && assistantEligible ? (
-            <div hidden={!assistantOpen}>
-            <TemplateAssistant
-              workspaceId={workspaceId}
-              templateId={template.id}
-              doc={doc}
-              unsaved={save !== "saved"}
-              flush={flush}
-              hold={hold}
-              release={release}
-              onAccepted={adopt}
-              onReconcile={reconcile}
-              onReload={reload}
-              onClose={() => setAssistantOpen(false)}
-            />
-            </div>
-          ) : null}
-          {assistantOpen && assistantEligible ? null : (
           <SourcePane workspaceId={workspaceId} doc={doc} onChange={change} readOnly={!editable || holding} onConvert={() => setConverting(true)} issues={issues} checked={preview.status === "ready"} template={template} onTemplate={setTemplate} goTo={goTo} />
-          )}
           {canWrite ? (
             <PreviewPane
               templateId={template.id}
@@ -440,6 +418,25 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin, canPu
           ) : (
             <p className="muted">Members of the workspace can preview a template.</p>
           )}
+        </div>
+        {assistantUsed && assistantEligible ? (
+          <div className="dock-slot">
+            <TemplateAssistant
+              workspaceId={workspaceId}
+              templateId={template.id}
+              doc={doc}
+              hidden={!assistantOpen}
+              unsaved={save !== "saved"}
+              flush={flush}
+              hold={hold}
+              release={release}
+              onAccepted={adopt}
+              onReconcile={reconcile}
+              onReload={reload}
+              onClose={() => dock.setOpen(false)}
+            />
+          </div>
+        ) : null}
         </div>
       ) : null}
       {tab === "used" ? <WhereUsedView workspaceId={workspaceId} templateId={template.id} reloadKey={0} /> : null}

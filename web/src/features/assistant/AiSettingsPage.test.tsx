@@ -238,7 +238,7 @@ describe("AI assistant settings", () => {
 
     const save = await screen.findByRole("button", { name: "Save settings" });
     expect(save).toBeEnabled();
-    await user.click(screen.getByLabelText(/Turn the assistant on/));
+    await user.click(screen.getByLabelText(/On for this workspace/));
     expect(save).toBeDisabled();
 
     await user.selectOptions(screen.getByLabelText("Provider"), "anthropic");
@@ -264,7 +264,7 @@ describe("AI assistant settings", () => {
     const user = userEvent.setup();
     open();
 
-    await user.click(await screen.findByLabelText(/Turn the assistant on/));
+    await user.click(await screen.findByLabelText(/On for this workspace/));
     await user.selectOptions(screen.getByLabelText("Provider"), "anthropic");
     await user.type(screen.getByLabelText("Provider key"), "sk-typed-key");
     await user.clear(screen.getByLabelText("Monthly budget"));
@@ -354,7 +354,7 @@ describe("AI assistant settings", () => {
     const user = userEvent.setup();
     open();
 
-    await user.click(await screen.findByLabelText(/Turn the assistant on/));
+    await user.click(await screen.findByLabelText(/On for this workspace/));
     await user.selectOptions(screen.getByLabelText("Provider"), "openai");
     await user.type(screen.getByLabelText("Provider key"), "sk-x");
     await user.click(screen.getByRole("button", { name: "Save settings" }));
@@ -378,7 +378,7 @@ describe("AI assistant settings", () => {
     const user = userEvent.setup();
     open();
 
-    await user.click(await screen.findByLabelText(/Turn the assistant on/));
+    await user.click(await screen.findByLabelText(/On for this workspace/));
     await user.selectOptions(screen.getByLabelText("Provider"), "openai");
     await user.type(screen.getByLabelText("Provider key"), "sk-x");
     await user.click(screen.getByRole("button", { name: "Save settings" }));

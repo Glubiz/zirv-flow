@@ -5,12 +5,13 @@ import {
   client,
   describeError,
   unwrap,
+  useResource,
   type components,
   type ErrorSummary,
   type FieldError,
 } from "../../api";
 import { Button, formatDateTime, InlineError, Panel, Pill, SelectField, TextField } from "../../ui";
-import { fromMicros, toMicros } from "./money";
+import { formatMicros, fromMicros, toMicros } from "./money";
 
 type Models = components["schemas"]["AiModelsBody"];
 type Settings = components["schemas"]["AiSettingsBody"];
@@ -40,6 +41,25 @@ interface Failure {
 function failureOf(error: unknown): Failure {
   const capabilities = error instanceof ApiError && error.code === "ai_capability_missing" ? error.errors : [];
   return { summary: describeError(error), capabilities };
+}
+
+/** How much of the monthly budget is used, as a bar and in words. Nothing while the usage cannot be read. */
+function SpendMeter({ workspaceId, version }: { workspaceId: string; version: string }) {
+  const usage = useResource(
+    () => unwrap(client.GET("/api/v1/workspaces/{ws}/ai/usage", { params: { path: { ws: workspaceId } } })),
+    [workspaceId, version],
+  );
+  if (usage.status !== "ready") return null;
+  const { spent_micros: spent, budget_micros: budget } = usage.data;
+  const percent = budget === 0 ? 100 : Math.min(100, Math.floor((spent / budget) * 100));
+  return (
+    <div className="stack-tight">
+      <progress aria-label={`${percent} percent of the monthly budget used`} max={100} value={percent} />
+      <p className="faint">
+        {formatMicros(spent)} of {formatMicros(budget)} used this month
+      </p>
+    </div>
+  );
 }
 
 export function AiSettingsForm({ workspaceId, models, settings, onSaved }: AiSettingsFormProps) {
@@ -98,17 +118,35 @@ export function AiSettingsForm({ workspaceId, models, settings, onSaved }: AiSet
 
   return (
     <form className="stack" onSubmit={(event) => void submit(event)} noValidate>
-      <Panel title="Provider and model">
+      <Panel title="What it can do">
         <div className="stack">
           <label className="check">
             <input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />
             <span>
-              Turn the assistant on{" "}
+              On for this workspace{" "}
               <span className="faint">
                 Saving runs a short check that the model can call tools and reports its token use.
               </span>
             </span>
           </label>
+          <dl className="facts">
+            <div>
+              <dt>Drafts</dt>
+              <dd>Changes to flows, segments, templates and mappings, for you to review.</dd>
+            </div>
+            <div>
+              <dt>Explains</dt>
+              <dd>What a flow, a segment or a trace does, in plain words.</dd>
+            </div>
+            <div>
+              <dt>Never</dt>
+              <dd>Publishes, sends, deletes or changes consent. It cannot act on its own.</dd>
+            </div>
+          </dl>
+        </div>
+      </Panel>
+      <Panel title="Provider and model">
+        <div className="stack">
           <SelectField label="Provider" value={providerId} onChange={(event) => chooseProvider(event.target.value)}>
             <option value="">Choose a provider</option>
             {models.providers.map((entry) => (
@@ -164,17 +202,20 @@ export function AiSettingsForm({ workspaceId, models, settings, onSaved }: AiSet
         </div>
       </Panel>
       <Panel title="Spending">
-        <TextField
-          label="Monthly budget"
-          type="number"
-          inputMode="decimal"
-          min="0"
-          step="0.01"
-          hint="In your deployment's currency, per calendar month (UTC). With 0 the assistant makes no calls."
-          value={budget}
-          onChange={(event) => setBudget(event.target.value)}
-          error={budgetMicros === null ? "Enter an amount of 0 or more." : undefined}
-        />
+        <div className="stack">
+          <TextField
+            label="Monthly budget"
+            type="number"
+            inputMode="decimal"
+            min="0"
+            step="0.01"
+            hint="In your deployment's currency, per calendar month (UTC). With 0 the assistant makes no calls."
+            value={budget}
+            onChange={(event) => setBudget(event.target.value)}
+            error={budgetMicros === null ? "Enter an amount of 0 or more." : undefined}
+          />
+          <SpendMeter workspaceId={workspaceId} version={JSON.stringify(settings)} />
+        </div>
       </Panel>
       <Panel title="Privacy">
         <div className="stack">

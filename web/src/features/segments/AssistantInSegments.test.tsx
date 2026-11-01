@@ -81,7 +81,7 @@ function base(kind: "writer" | "reader" = "writer", enabled = true): Record<stri
 
 function mountPage() {
   return renderRoute(
-    `/w/ws1/segments/${SEGMENT_ID}?tab=rules`,
+    `/w/ws1/segments/${SEGMENT_ID}?tab=rules&assistant=1`,
     "/w/:ws/*",
     <Routes>
       <Route path="segments/:id" element={<SegmentPage />} />
@@ -94,7 +94,7 @@ function sent(calls: Call[], method: string, path: string): Call[] {
 }
 
 async function askToDraft(user: ReturnType<typeof userEvent.setup>, text = "Odense instead") {
-  await user.type(await screen.findByLabelText("What do you want?"), text);
+  await user.type(await screen.findByLabelText("Ask for a change"), text);
   await user.click(screen.getByRole("button", { name: "Draft" }));
 }
 
@@ -103,8 +103,10 @@ describe("offering the assistant on a segment", () => {
     mockApi(base());
     mountPage();
 
-    expect(await screen.findByRole("button", { name: "Explain this segment" })).toBeInTheDocument();
-    expect(await screen.findByRole("heading", { name: "Draft with the assistant" })).toBeInTheDocument();
+    const dock = await screen.findByRole("complementary", { name: "Assistant" });
+    expect(within(dock).getByRole("link", { name: "Draft a change" })).toHaveAttribute("aria-current", "page");
+    expect(within(dock).getByRole("link", { name: "Explain this segment" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Assistant" })).toHaveAttribute("aria-pressed", "true");
   });
 
   it("offers nothing to a member, and never asks for the settings an admin alone may read", async () => {
@@ -113,8 +115,8 @@ describe("offering the assistant on a segment", () => {
 
     await screen.findByText("Big spenders");
     await screen.findByLabelText("Value");
-    expect(screen.queryByRole("button", { name: "Explain this segment" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "Draft with the assistant" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Assistant" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("complementary", { name: "Assistant" })).not.toBeInTheDocument();
     expect(sent(calls, "GET", `${WS}/ai/settings`)).toHaveLength(0);
   });
 
@@ -124,15 +126,15 @@ describe("offering the assistant on a segment", () => {
 
     await screen.findByLabelText("Value");
     await waitFor(() => expect(sent(calls, "GET", `${WS}/ai/settings`).length).toBeGreaterThan(0));
-    expect(screen.queryByRole("button", { name: "Explain this segment" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "Draft with the assistant" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Assistant" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("complementary", { name: "Assistant" })).not.toBeInTheDocument();
   });
 
   it("offers the draft panel on a new segment, with no segment to name", async () => {
     const calls = mockApi({ ...base(), [DRAFT]: () => json(drafted()) });
     const user = userEvent.setup();
     renderRoute(
-      "/w/ws1/segments/new",
+      "/w/ws1/segments/new?assistant=1",
       "/w/:ws/*",
       <Routes>
         <Route path="segments/new" element={<NewSegmentPage />} />
@@ -141,8 +143,8 @@ describe("offering the assistant on a segment", () => {
 
     await askToDraft(user, "Everyone in Odense");
 
-    expect(await screen.findByRole("heading", { name: "Draft ready" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Explain this segment" })).not.toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: /^Draft ready/ })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Explain this segment" })).not.toBeInTheDocument();
     expect(sent(calls, "POST", `${WS}/ai/drafts`)[0]?.body).toEqual({ kind: "segment", prompt: "Everyone in Odense" });
   });
 });
@@ -164,7 +166,7 @@ describe("drafting a segment", () => {
 
     await askToDraft(user);
 
-    expect(await screen.findByRole("heading", { name: "Draft ready" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: /^Draft ready/ })).toBeInTheDocument();
     expect(sent(calls, "POST", `${WS}/ai/drafts`)[0]?.body).toEqual({
       kind: "segment",
       prompt: "Odense instead",
@@ -173,13 +175,12 @@ describe("drafting a segment", () => {
     const changes = screen.getByRole("table", { name: "What the draft changes" });
     expect(within(changes).getByText("Changed")).toBeInTheDocument();
     // The draft is counted with the builder's own preview request.
-    expect(screen.getByRole("heading", { name: "Preview" })).toBeInTheDocument();
     await waitFor(() => expect(previewed(calls)).toContainEqual(DRAFTED));
-    // The count shown beside the draft is the draft's own, not the saved definition's.
-    const draftPreview = screen.getByRole("heading", { name: "Preview" }).nextElementSibling as HTMLElement;
-    expect(await within(draftPreview).findByText(count(`${DRAFTED_COUNT} people match`))).toBeInTheDocument();
+    // The count shown in the dock is the draft's own, not the saved definition's.
+    const dock = screen.getByRole("complementary", { name: "Assistant" });
+    expect(await within(dock).findByText(count(`${DRAFTED_COUNT} people match`))).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Accept" }));
+    await user.click(screen.getByRole("button", { name: "Put into the draft" }));
 
     expect(await screen.findByText("Loaded into the editor. Save to apply it.")).toBeInTheDocument();
     expect(screen.getByLabelText("Value")).toHaveValue("Odense");
@@ -202,7 +203,7 @@ describe("drafting a segment", () => {
     await user.clear(value);
     await user.type(value, "Roskilde");
     await askToDraft(user);
-    await user.click(await screen.findByRole("button", { name: "Accept" }));
+    await user.click(await screen.findByRole("button", { name: "Put into the draft" }));
 
     const dialog = await screen.findByRole("dialog", { name: "Replace your unsaved changes?" });
     await user.click(within(dialog).getByRole("button", { name: "Keep my changes" }));
@@ -210,9 +211,9 @@ describe("drafting a segment", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     expect(sent(calls, "POST", `${WS}/ai/drafts/d1/accept`)).toHaveLength(0);
     expect(screen.getByLabelText("Value")).toHaveValue("Roskilde");
-    expect(screen.getByRole("button", { name: "Accept" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Put into the draft" })).toBeEnabled();
 
-    await user.click(screen.getByRole("button", { name: "Accept" }));
+    await user.click(screen.getByRole("button", { name: "Put into the draft" }));
     const again = await screen.findByRole("dialog", { name: "Replace your unsaved changes?" });
     await user.click(within(again).getByRole("button", { name: "Replace with the draft" }));
 
@@ -232,7 +233,7 @@ describe("drafting a segment", () => {
     await screen.findByLabelText("Value");
     await askToDraft(user);
 
-    await user.click(await screen.findByRole("button", { name: "Accept" }));
+    await user.click(await screen.findByRole("button", { name: "Put into the draft" }));
 
     expect(await screen.findByText("Loaded into the editor. Save to apply it.")).toBeInTheDocument();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
@@ -249,7 +250,7 @@ describe("drafting a segment", () => {
     await screen.findByLabelText("Value");
     await askToDraft(user);
 
-    await user.click(await screen.findByRole("button", { name: "Accept" }));
+    await user.click(await screen.findByRole("button", { name: "Put into the draft" }));
 
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("This draft cannot be accepted");
@@ -271,10 +272,14 @@ describe("drafting a segment", () => {
 
     const problems = await screen.findByRole("list", { name: "Problems with the last attempt" });
     expect(problems).toHaveTextContent("The definition uses a field that does not exist in this workspace. (/all/0/trait)");
-    expect(screen.queryByRole("button", { name: "Accept" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "Preview" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Put into the draft" })).not.toBeInTheDocument();
   });
 });
+
+async function openExplain(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(await screen.findByRole("link", { name: "Explain this segment" }));
+  await user.click(await screen.findByRole("button", { name: "Explain this segment" }));
+}
 
 describe("explaining a segment", () => {
   const EXPLAINED = {
@@ -298,7 +303,7 @@ describe("explaining a segment", () => {
     const user = userEvent.setup();
     mountPage();
 
-    await user.click(await screen.findByRole("button", { name: "Explain this segment" }));
+    await openExplain(user);
 
     expect(await screen.findByText(/Asking the assistant to explain this segment/)).toBeInTheDocument();
     await waitFor(() => expect(sent(calls, "POST", `${SEGMENT}/ai/explain`)).toHaveLength(1));
@@ -316,7 +321,7 @@ describe("explaining a segment", () => {
     expect(list.querySelector("b")).toBeNull();
   });
 
-  it("names the failure in words and asks again on retry", async () => {
+  it("names the failure in words and asks again on Explain again", async () => {
     let attempts = 0;
     mockApi({
       ...base(),
@@ -327,11 +332,11 @@ describe("explaining a segment", () => {
     });
     const user = userEvent.setup();
     mountPage();
-    await user.click(await screen.findByRole("button", { name: "Explain this segment" }));
+    await openExplain(user);
 
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("The assistant could not explain this");
-    await user.click(within(alert).getByRole("button", { name: "Try again" }));
+    await user.click(screen.getByRole("button", { name: "Explain again" }));
 
     expect(await screen.findByText("People who live in Aarhus.")).toBeInTheDocument();
     expect(attempts).toBe(2);
@@ -346,24 +351,53 @@ describe("explaining a segment", () => {
       mockApi({ ...base(), [EXPLAIN]: () => refusal(status, code) });
       const user = userEvent.setup();
       const view = mountPage();
-      await user.click(await screen.findByRole("button", { name: "Explain this segment" }));
+      await openExplain(user);
 
       expect(await screen.findByRole("alert")).toHaveTextContent(shown);
       view.unmount();
     }
   });
 
-  it("closes, and asks nothing until it is opened again", async () => {
+  it("asks nothing until the person asks, and closes with focus back on the toggle", async () => {
     const calls = mockApi({ ...base(), [EXPLAIN]: () => json(EXPLAINED) });
     const user = userEvent.setup();
     mountPage();
-    await user.click(await screen.findByRole("button", { name: "Explain this segment" }));
+    await user.click(await screen.findByRole("link", { name: "Explain this segment" }));
+    expect(sent(calls, "POST", `${SEGMENT}/ai/explain`)).toHaveLength(0);
+    await user.click(screen.getByRole("button", { name: "Explain this segment" }));
     await screen.findByText("People who live in Aarhus.");
 
-    await user.click(screen.getByRole("button", { name: "Hide the explanation" }));
+    await user.click(screen.getByRole("button", { name: "Close the assistant" }));
 
     expect(screen.queryByText("People who live in Aarhus.")).not.toBeInTheDocument();
     expect(sent(calls, "POST", `${SEGMENT}/ai/explain`)).toHaveLength(1);
-    expect(screen.getByRole("button", { name: "Explain this segment" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Assistant" })).toHaveFocus();
+  });
+
+  it("marks the chosen condition in the builder with the word Explaining, and unmarks it on a second choice", async () => {
+    mockApi({ ...base(), [EXPLAIN]: () => json(EXPLAINED) });
+    const user = userEvent.setup();
+    mountPage();
+    await screen.findByLabelText("Value");
+    await openExplain(user);
+    const list = await screen.findByRole("list", { name: "Condition by condition" });
+    const choices = within(list).getAllByRole("button");
+
+    await user.click(choices[1] as HTMLElement);
+
+    expect(choices[1]).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getAllByText("Explaining")).toHaveLength(1);
+    expect(document.querySelector('[data-node="/all/0"]')).toHaveClass("node-explained");
+    await user.click(choices[1] as HTMLElement);
+    expect(screen.queryByText("Explaining")).not.toBeInTheDocument();
+  });
+
+  it("says the segment changed when the explanation is of an older version", async () => {
+    mockApi({ ...base(), [EXPLAIN]: () => json({ ...EXPLAINED, version: 0 }) });
+    const user = userEvent.setup();
+    mountPage();
+    await openExplain(user);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("The segment changed since this explanation");
   });
 });

@@ -25,6 +25,8 @@ export interface BuilderApi {
   catalog: Catalog;
   eventTypes: EventTypes;
   issues: readonly PlacedIssue[];
+  /** The JSON pointer of the condition the assistant is explaining, which is marked; null for none. */
+  highlight: string | null;
   /** Replaces the node at `path`. */
   edit: (path: Path, next: Node) => void;
   add: (group: Path, child: Node) => void;
