@@ -140,6 +140,7 @@ fn read_failure(error: &SourceError) -> ReadFailure {
             "kafka_auth_failed" => ReadFailure::Final("kafka_auth_failed"),
             "kafka_tls_failed" => ReadFailure::Final("kafka_tls_failed"),
             "kafka_topic_missing" => ReadFailure::Final("kafka_topic_missing"),
+            "kafka_compression_unsupported" => ReadFailure::Final("kafka_compression_unsupported"),
             "kafka_connect_failed" => ReadFailure::Retry(coded("kafka_connect_failed")),
             "kafka_timeout" => ReadFailure::Retry(coded("kafka_connect_failed")),
             _ => ReadFailure::Retry(source_failure("the source could not be read")),
@@ -608,6 +609,7 @@ mod tests {
             "kafka_auth_failed",
             "kafka_tls_failed",
             "kafka_topic_missing",
+            "kafka_compression_unsupported",
         ] {
             assert!(
                 matches!(read_failure(&other(code)), ReadFailure::Final(found) if found == code),

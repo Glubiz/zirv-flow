@@ -1,9 +1,9 @@
 /**
  * The client-side clean pass for rich text. It mirrors the server allowlist in
  * `crates/zirv-flow-templates/src/content/blocks/sanitize.rs`: paragraphs, bold, italic, underline,
- * links, lists and line breaks; the only attribute is `href`, and it is `https`, `http`, `mailto`
- * or starts with a merge tag (`{{`). The server stays the authority; this keeps the toolbar from
- * emitting anything it would drop. Source is parsed in an inert document, never in the page.
+ * links, lists and line breaks; the attributes are `href`, which is `https`, `http`, `mailto`
+ * or starts with a merge tag (`{{`), and `data-zf-utm="off"`, the opt-out from UTM tagging. The
+ * server stays the authority; this keeps the toolbar from emitting anything it would drop. Source is parsed in an inert document, never in the page.
  *
  * Merge tags are not HTML. In the stored value they pass through exactly as written, as on the
  * server. In anything that goes into the editor's DOM they are escaped, so markup inside a tag
@@ -14,6 +14,9 @@ const DROP_WITH_CONTENT = new Set(["script", "style", "template", "noscript"]);
 const BLOCKS = new Set(["p", "ul", "ol", "div", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre", "section", "article", "table", "tr"]);
 const MERGE = /\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}/g;
 const HOLDER = /(\d+)/g;
+
+/** The one data attribute a link keeps, and the one value it keeps it with. */
+export const UTM_ATTRIBUTE = "data-zf-utm";
 
 /** Whether a link target may stay: an allowed scheme, or a merge tag (`{{`) first, as the server reads it. */
 export function linkAllowed(url: string): boolean {
@@ -70,7 +73,9 @@ function inline(node: Node, context: Context): string {
     const href = element.getAttribute("href");
     if (href === null) return inner;
     const raw = unlift(href, context).trim();
-    return linkAllowed(raw) ? `<a href="${escaping(raw, context, escapeAttribute)}">${inner}</a>` : inner;
+    if (!linkAllowed(raw)) return inner;
+    const optOut = element.getAttribute(UTM_ATTRIBUTE)?.trim().toLowerCase() === "off" ? ` ${UTM_ATTRIBUTE}="off"` : "";
+    return `<a href="${escaping(raw, context, escapeAttribute)}"${optOut}>${inner}</a>`;
   }
   if (name === "b" || name === "strong" || name === "i" || name === "em" || name === "u") return inner === "" ? "" : `<${name}>${inner}</${name}>`;
   return inner;

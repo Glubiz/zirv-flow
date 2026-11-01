@@ -2,8 +2,8 @@
 //! and again to what MiniJinja rendered from it.
 //!
 //! `ammonia` does the cleaning. Its allowlist here is paragraphs, bold, italic, underline, links,
-//! lists and line breaks; the only attribute is `href`, and it may be `https`, `http`, `mailto`
-//! or start with a merge tag. Script and style elements are dropped with their content, comments
+//! lists and line breaks; the attributes are `href` and `data-zf-utm="off"`, and `href` may be
+//! `https`, `http`, `mailto` or start with a merge tag. Script and style elements are dropped with their content, comments
 //! are dropped, and every other element is dropped with its markup but not its text.
 //!
 //! Merge tags are not HTML: `{{ a > 1 }}` would be rewritten, and `href="{{ u }}"` is not a URL.
@@ -30,6 +30,16 @@ use crate::links::unescape;
 pub(crate) const TAGS: [&str; 11] = [
     "p", "b", "strong", "i", "em", "u", "a", "ul", "ol", "li", "br",
 ];
+
+/// The one attribute besides `href` a link may carry, with its one value: the opt-out from UTM
+/// tagging, which the tagging step reads and removes from the message.
+const UTM_ATTRIBUTE: &str = "data-zf-utm";
+const UTM_OFF: &str = "off";
+
+/// Whether `value` is the opt-out value.
+fn is_utm_off(value: &str) -> bool {
+    value == UTM_OFF
+}
 
 /// The URL schemes a link may use besides a merge tag.
 const SCHEMES: [&str; 3] = ["https", "http", "mailto"];
@@ -58,7 +68,14 @@ fn builder(keep: impl Fn(&str) -> bool + Send + Sync + 'static) -> Builder<'stat
         .add_tags(TAGS)
         .generic_attributes(Default::default())
         .tag_attributes(Default::default())
-        .add_tag_attributes("a", ["href"])
+        .add_tag_attributes("a", ["href", UTM_ATTRIBUTE])
+        .attribute_filter(|element, attribute, value| {
+            if element == "a" && attribute == UTM_ATTRIBUTE {
+                is_utm_off(value).then_some(Cow::Borrowed(UTM_OFF))
+            } else {
+                Some(Cow::Borrowed(value))
+            }
+        })
         .url_schemes(SCHEMES.into_iter().collect())
         .add_clean_content_tags(["script", "style"])
         .link_rel(None)
@@ -189,7 +206,14 @@ fn check(html: &str, merge: impl Fn(&str) -> bool) -> Vec<String> {
                 }
                 Token::Attribute { local, value, .. } => {
                     let name = local.as_str().to_ascii_lowercase();
-                    if element != "a" || name != "href" {
+                    if element == "a" && name == UTM_ATTRIBUTE {
+                        if !value
+                            .as_ref()
+                            .is_some_and(|value| is_utm_off(&unescape(value.as_str())))
+                        {
+                            found.push(format!("{name}="));
+                        }
+                    } else if element != "a" || name != "href" {
                         found.push(format!("{name}="));
                     } else if !value
                         .as_ref()
@@ -433,6 +457,32 @@ mod tests {
             assert_eq!(html_to_text(source), "x", "{source}");
             assert_eq!(enforce(source), clean_rendered(source), "{source}");
         }
+    }
+
+    #[test]
+    fn a_link_keeps_the_utm_opt_out_and_every_other_data_attribute_goes() {
+        let kept = r#"<a href="https://a.example" data-zf-utm="off">x</a>"#;
+        assert_eq!(html(kept), kept);
+        for value in ["OFF", " off ", "Off", "on", ""] {
+            let source = format!(r#"<a href="https://a.example" data-zf-utm="{value}">x</a>"#);
+            assert_eq!(html(&source), r#"<a href="https://a.example">x</a>"#);
+            assert_eq!(violations(&source), ["data-zf-utm="], "{value:?}");
+        }
+        let encoded = r#"<a href="https://a.example" data-zf-utm="&#111;ff">x</a>"#;
+        assert_eq!(html(encoded), kept);
+        assert!(violations(encoded).is_empty());
+        assert_eq!(
+            html(
+                r#"<a href="https://a.example" data-zf-utm="on" data-zf-x="1" data-other="off">x</a>"#
+            ),
+            r#"<a href="https://a.example">x</a>"#
+        );
+        assert_eq!(html(r#"<b data-zf-utm="off">x</b>"#), "<b>x</b>");
+        assert!(violations(kept).is_empty());
+        assert_eq!(
+            violations(r#"<a href="https://a.example" data-zf-utm="on" data-zf-x="1">x</a>"#),
+            ["data-zf-utm=", "data-zf-x="]
+        );
     }
 
     #[test]

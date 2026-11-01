@@ -577,12 +577,13 @@ read with `source_error`, counted in `zirv_flow_egress_denied_total`. While a re
 process on the same machine could use the relay to reach any destination the policy allows. A broker
 that is private needs an `egress.allow` entry like any private destination. Errors are static
 codes (`kafka_connect_failed`, `kafka_tls_failed`, `kafka_auth_failed`, `kafka_topic_missing`,
-`kafka_timeout`) and never a broker's own text. The client logs host names, never messages. The
+`kafka_timeout`, `kafka_compression_unsupported`) and never a broker's own text. The client logs host names, never messages. The
 SASL password lives in plain memory inside the client while it runs and cannot be wiped there.
 
 **Limits.** JSON only (no Avro, Protobuf or schema registry), no consumer groups, no producing,
-no topic patterns. Gzip, Snappy and LZ4 compression only: a zstd-compressed batch fails the read
-until the Kafka client moves to a fixed zstd (#338). At most 1 MiB is fetched per partition per request. Messages are checked after
+no topic patterns. Gzip, Snappy and LZ4 compression only: zstd-compressed topics are not read in 1.0, and
+a zstd batch fails the read with `kafka_compression_unsupported`. Zstd returns once the Kafka client
+releases a version on zstd 0.14.3 or later (#338). At most 1 MiB is fetched per partition per request. Messages are checked after
 decompression only for the 1 MiB record limit.
 
 ### Source freshness

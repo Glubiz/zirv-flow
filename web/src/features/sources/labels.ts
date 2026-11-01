@@ -170,6 +170,8 @@ export function runErrorText(code: string, threshold: number): string {
     kafka_tls_failed:
       "The secure connection to the brokers failed. Check the certificate authority and the client certificate, then run the stream again.",
     kafka_topic_missing: "A topic of this stream does not exist on the brokers. Check the topic names, then run the stream again.",
+    kafka_compression_unsupported:
+      "A topic of this stream holds zstd-compressed messages, which this version cannot read. The run stopped at a zstd-compressed batch. Producers need to use gzip, Snappy or LZ4 for these topics.",
     kafka_connect_failed:
       "The brokers could not be reached after several tries. Test the connection, then run the stream again.",
   };

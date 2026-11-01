@@ -1053,6 +1053,7 @@ mod tests {
                 alt: " ".into(),
                 href: None,
                 width: None,
+                utm_off: false,
                 visible_if: None,
             }));
         });

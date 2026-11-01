@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createMemoryRouter, RouterProvider, useLocation } from "react-router";
 import { describe, expect, it } from "vitest";
@@ -66,11 +66,11 @@ describe("the tab nav", () => {
     await user.click(screen.getByRole("link", { name: "Rules" }));
     await user.click(screen.getByRole("link", { name: "People" }));
     await router.navigate(-1);
-    expect(await screen.findByRole("link", { name: "Rules" })).toHaveAttribute("aria-current", "page");
+    await waitFor(() => expect(screen.getByRole("link", { name: "Rules" })).toHaveAttribute("aria-current", "page"));
     await router.navigate(-1);
-    expect(await screen.findByRole("link", { name: "Overview" })).toHaveAttribute("aria-current", "page");
+    await waitFor(() => expect(screen.getByRole("link", { name: "Overview" })).toHaveAttribute("aria-current", "page"));
     await router.navigate(1);
-    expect(await screen.findByRole("link", { name: "Rules" })).toHaveAttribute("aria-current", "page");
+    await waitFor(() => expect(screen.getByRole("link", { name: "Rules" })).toHaveAttribute("aria-current", "page"));
   });
 
   it("moves focus with the arrow keys and leaves the nav with Tab", async () => {

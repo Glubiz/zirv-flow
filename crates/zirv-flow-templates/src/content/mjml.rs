@@ -17,6 +17,7 @@ use mrml::prelude::render::RenderOptions;
 use super::{RenderKind, TemplateContent, with_tokenizer};
 use crate::document::{Channel, Mode, Syntax, TemplateDocument};
 use crate::issue::{FieldCatalog, Issue};
+use crate::links::opt_out_marks;
 
 pub(super) struct Mjml;
 
@@ -175,6 +176,30 @@ pub(crate) fn nesting_depth(text: &str) -> Option<usize> {
     })
 }
 
+/// The attribute `mj-button` and `mj-image` can carry onto their `<a>` (they drop a `data-*`
+/// attribute): a link marked with it leaves [`compile`] as `data-zf-utm="off"`, the opt-out the
+/// tagging step reads. Block mode emits it for a button or image link that opts out.
+pub(crate) const UTM_OFF_MARK: &str = " rel=\"zf-utm-off\"";
+
+const UTM_OFF_ATTRIBUTE: &str = " data-zf-utm=\"off\"";
+
+/// Turn the mark into the opt-out attribute, on `<a>` tags only: the same text in another
+/// element or inside an attribute value stays as it was.
+fn convert_marks(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut copied = 0;
+    for span in opt_out_marks(html) {
+        if &html[span.clone()] != UTM_OFF_MARK {
+            continue;
+        }
+        out.push_str(&html[copied..span.start]);
+        out.push_str(UTM_OFF_ATTRIBUTE);
+        copied = span.end;
+    }
+    out.push_str(&html[copied..]);
+    out
+}
+
 /// The pinned `mrml` render options. Spelled out so a change of the crate's defaults cannot
 /// change the bytes of a message.
 fn render_options() -> RenderOptions {
@@ -210,6 +235,7 @@ pub(crate) fn compile(rendered: &str) -> Result<Compiled, MjmlError> {
         .element
         .render(&render_options())
         .map_err(|_| MjmlError::Render)?;
+    let html = convert_marks(&html);
     let lang = parsed
         .element
         .attributes
@@ -294,6 +320,29 @@ mod tests {
     use crate::document::{EmailContent, WebhookContent};
 
     const MINIMAL: &str = r#"<mjml lang="en"><mj-body><mj-section><mj-column><mj-text>Hi</mj-text></mj-column></mj-section></mj-body></mjml>"#;
+
+    #[test]
+    fn the_utm_mark_on_a_button_or_image_link_leaves_the_compile_as_the_opt_out_attribute() {
+        let source = format!(
+            r#"<mjml><mj-body><mj-section><mj-column><mj-button href="https://a.example/b"{UTM_OFF_MARK}>Go</mj-button><mj-image src="https://a.example/i.png" href="https://a.example/i"{UTM_OFF_MARK} /><mj-button href="https://a.example/c">No</mj-button></mj-column></mj-section></mj-body></mjml>"#
+        );
+        let html = compile(&source).unwrap().html;
+        assert_eq!(html.matches("data-zf-utm=\"off\"").count(), 2, "{html}");
+        assert!(!html.contains("zf-utm-off"));
+    }
+
+    #[test]
+    fn the_utm_mark_converts_only_inside_an_anchor_tag() {
+        let html = format!(
+            r#"<a href="https://a.example"{UTM_OFF_MARK}>x</a><a title='x{UTM_OFF_MARK}' href="https://b.example">y</a><link{UTM_OFF_MARK} href="z"><p title='{UTM_OFF_MARK}'>z{UTM_OFF_MARK}</p>"#
+        );
+        assert_eq!(
+            convert_marks(&html),
+            format!(
+                r#"<a href="https://a.example"{UTM_OFF_ATTRIBUTE}>x</a><a title='x{UTM_OFF_MARK}' href="https://b.example">y</a><link{UTM_OFF_MARK} href="z"><p title='{UTM_OFF_MARK}'>z{UTM_OFF_MARK}</p>"#
+            )
+        );
+    }
 
     #[test]
     fn it_owns_mjml_syntax_email_only() {

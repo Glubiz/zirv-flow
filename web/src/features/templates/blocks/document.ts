@@ -36,6 +36,8 @@ export interface ImageBlock {
   src: ImageSrc;
   alt: string;
   href?: string;
+  /** Leave the link without UTM parameters. Absent when off. */
+  utm_off?: true;
   width?: number;
   visible_if?: VisibleIf;
 }
@@ -44,6 +46,8 @@ export interface ButtonBlock {
   id: string;
   label: string;
   url: string;
+  /** Leave the link without UTM parameters. Absent when off. */
+  utm_off?: true;
   align: Align;
   visible_if?: VisibleIf;
 }

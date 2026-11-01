@@ -122,11 +122,18 @@ pub(crate) fn opt_outs(html: &str) -> Vec<OptOut> {
     anchors(html).1
 }
 
-/// The links and the opt-out attributes of every `<a>` tag, from one scan.
-fn anchors(html: &str) -> (Vec<Href>, Vec<OptOut>) {
+/// The span of every `rel="zf-utm-off"` attribute (with the whitespace before it) on an `<a>`
+/// tag, in document order.
+pub(crate) fn opt_out_marks(html: &str) -> Vec<Range<usize>> {
+    anchors(html).2
+}
+
+/// The links, the opt-out attributes and the opt-out marks of every `<a>` tag, from one scan.
+fn anchors(html: &str) -> (Vec<Href>, Vec<OptOut>, Vec<Range<usize>>) {
     let bytes = html.as_bytes();
     let mut found = Vec::new();
     let mut opted_out = Vec::new();
+    let mut marks = Vec::new();
     let mut at = 0;
     while let Some(offset) = html[at..].find('<') {
         let start = at + offset;
@@ -142,7 +149,7 @@ fn anchors(html: &str) -> (Vec<Href>, Vec<OptOut>) {
                 .get(start + 2)
                 .is_some_and(|b| b.is_ascii_whitespace() || matches!(*b, b'/' | 0));
         if is_anchor {
-            at = scan_tag(html, start + 2, &mut found, &mut opted_out);
+            at = scan_tag(html, start + 2, &mut found, &mut opted_out, &mut marks);
             continue;
         }
         // Any other tag is walked over with the same quote-aware attribute scan, so markup inside
@@ -152,14 +159,26 @@ fn anchors(html: &str) -> (Vec<Href>, Vec<OptOut>) {
             let name_end = html[name_start..]
                 .find(|c: char| c.is_ascii_whitespace() || matches!(c, '/' | '>' | '\0'))
                 .map_or(html.len(), |n| name_start + n);
-            at = scan_tag(html, name_end, &mut Vec::new(), &mut Vec::new());
+            at = scan_tag(
+                html,
+                name_end,
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut Vec::new(),
+            );
         }
     }
-    (found, opted_out)
+    (found, opted_out, marks)
 }
 
 /// Scan the attributes of one tag from `from`; returns the position after the tag.
-fn scan_tag(html: &str, from: usize, found: &mut Vec<Href>, opted_out: &mut Vec<OptOut>) -> usize {
+fn scan_tag(
+    html: &str,
+    from: usize,
+    found: &mut Vec<Href>,
+    opted_out: &mut Vec<OptOut>,
+    marks: &mut Vec<Range<usize>>,
+) -> usize {
     let bytes = html.as_bytes();
     let mut at = from;
     // Browsers use the first `href` of a tag and ignore the rest.
@@ -226,6 +245,8 @@ fn scan_tag(html: &str, from: usize, found: &mut Vec<Href>, opted_out: &mut Vec<
             && html[value.clone()].trim().eq_ignore_ascii_case("off")
         {
             offs.push(gap_start..at);
+        } else if name.eq_ignore_ascii_case("rel") && &html[value.clone()] == "zf-utm-off" {
+            marks.push(gap_start..at);
         }
     };
     let href = found.get(first_found).map(|href| href.value.clone());
