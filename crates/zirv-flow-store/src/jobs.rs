@@ -2719,8 +2719,8 @@ mod tests {
     /// scan of `jobs_ready_idx` that only filters on `run_at` and so steps over every future job
     /// ahead of the first due one, or, when the statistics put almost nothing due,
     /// `jobs_ready_kind_idx` and a sort of every due job on each claim.
-    const CLAIM_BEFORE_207: &str =
-        "UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, \
+    const CLAIM_BEFORE_207: &str = "UPDATE jobs SET state = 'running', \
+         attempts = attempts + 1, locked_by = $1, \
          lease_token = gen_random_uuid(), \
          lease_expires_at = now() + make_interval(secs => $2) \
          WHERE id = (SELECT j.id FROM jobs j \
