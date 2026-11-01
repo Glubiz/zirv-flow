@@ -273,6 +273,30 @@ describe("the template assistant", () => {
   });
 });
 
+describe("the assistant on the Where used tab", () => {
+  const settingsRoute = { [`GET ${WS}/ai/settings`]: () => json(settings()) };
+
+  it("opening the assistant from Where used returns to the editor with the dock", async () => {
+    mockApi({ ...templateRoutes(), ...settingsRoute });
+    const { router } = renderRoute(`/w/ws1/templates/${TEMPLATE_ID}?tab=used`, "/w/:ws/templates/:id", <TemplatePage />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Assistant" }));
+
+    expect(await screen.findByRole("textbox", { name: /source/ })).toBeInTheDocument();
+    expect(await screen.findByLabelText("Ask for a change")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Editor" })).toHaveAttribute("aria-selected", "true");
+    expect(router.state.location.search).toBe("?assistant=1");
+  });
+
+  it("a link that asks for both lands on the editor with the dock", async () => {
+    mockApi({ ...templateRoutes(), ...settingsRoute });
+    renderRoute(`/w/ws1/templates/${TEMPLATE_ID}?tab=used&assistant=1`, "/w/:ws/templates/:id", <TemplatePage />);
+
+    expect(await screen.findByLabelText("Ask for a change")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Editor" })).toHaveAttribute("aria-selected", "true");
+  });
+});
+
 describe("the assistant and the editor's saves", () => {
   it("saves the edits that are waiting before the draft request goes out", async () => {
     const calls = mount(templateRoutes({ extra: { [DRAFTS]: () => json(valid()) } }));

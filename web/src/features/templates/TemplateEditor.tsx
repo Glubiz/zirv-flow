@@ -88,6 +88,19 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin, canPu
   const editable = canWrite && !archived;
   /** Only an admin may draft with the assistant; when it is off the panel says so. */
   const assistantEligible = editable && canAdmin && template.channel === "email" && assistable(doc);
+  /** The dock lives beside the editor, so opening the assistant from the other tab, or a link that asks for both, lands on the editor. */
+  const wantsEditor = assistantOpen && assistantEligible && query.get("tab") === "used";
+  useEffect(() => {
+    if (!wantsEditor) return;
+    setQuery(
+      (current) => {
+        const params = new URLSearchParams(current);
+        params.delete("tab");
+        return params;
+      },
+      { replace: true },
+    );
+  }, [wantsEditor, setQuery]);
   const docRef = useRef(doc);
   const personRef = useRef<string | null>(null);
   const dirty = useRef(false);
