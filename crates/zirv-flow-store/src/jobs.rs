@@ -293,6 +293,38 @@ pub async fn enqueue_many<'e>(
     Ok(u64::try_from(inserted.len()).unwrap_or(u64::MAX))
 }
 
+/// The claim: the oldest due job of one of `$3` with the lowest priority number.
+///
+/// `bands` walks the distinct priorities of the ready jobs upwards, one `jobs_ready_idx` probe
+/// each, and the lateral takes the oldest due job of the first band that has one: a bounded
+/// range of `(priority, run_at)`. A claim's cost therefore does not grow with the due or the
+/// future jobs, whatever the statistics say (#207, `docs/benchmarks/m5-flows.md`). The
+/// recursion yields the bands in ascending order and the outer `LIMIT 1` stops at the first
+/// band that yields a job. Due jobs of kinds outside `$3` in a band are stepped over.
+const CLAIM: &str = "WITH RECURSIVE bands (priority) AS ( \
+        (SELECT priority FROM jobs WHERE state = 'ready' ORDER BY priority LIMIT 1) \
+        UNION ALL \
+        SELECT (SELECT j.priority FROM jobs j WHERE j.state = 'ready' AND j.priority > b.priority \
+                ORDER BY j.priority LIMIT 1) \
+        FROM bands b WHERE b.priority IS NOT NULL) \
+    UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, \
+        lease_token = gen_random_uuid(), \
+        lease_expires_at = now() + make_interval(secs => $2) \
+    WHERE id = (SELECT c.id FROM bands b CROSS JOIN LATERAL ( \
+        SELECT j.id FROM jobs j \
+        WHERE j.state = 'ready' AND j.priority = b.priority AND j.run_at <= now() \
+        AND j.kind = ANY($3) \
+        AND ($4::bigint IS NULL OR j.workspace_id IS NULL \
+        OR (SELECT count(*) FROM jobs r \
+        WHERE r.workspace_id = j.workspace_id AND r.state = 'running') < $4) \
+        ORDER BY j.run_at \
+        LIMIT 1 \
+        FOR UPDATE SKIP LOCKED) c \
+        LIMIT 1) \
+    RETURNING id, workspace_id, kind, payload, attempts, max_attempts, lease_token, \
+        unique_key, trace_id, cause_kind, cause_id, \
+        EXTRACT(EPOCH FROM now() - run_at)::float8 AS claim_lag_seconds";
+
 /// Claims the next runnable job of one of `kinds`, or none.
 ///
 /// A short transaction of its own, committed before the handler runs. With
@@ -318,26 +350,11 @@ pub async fn claim_job(
             .map_err(StoreError::query)?;
         tx = Some(started);
     }
-    let query = sqlx::query_as(
-        "UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, \
-            lease_token = gen_random_uuid(), \
-            lease_expires_at = now() + make_interval(secs => $2) \
-            WHERE id = (SELECT j.id FROM jobs j \
-            WHERE j.state = 'ready' AND j.run_at <= now() AND j.kind = ANY($3) \
-            AND ($4::bigint IS NULL OR j.workspace_id IS NULL \
-            OR (SELECT count(*) FROM jobs r \
-            WHERE r.workspace_id = j.workspace_id AND r.state = 'running') < $4) \
-            ORDER BY j.priority, j.run_at \
-            LIMIT 1 \
-            FOR UPDATE SKIP LOCKED) \
-            RETURNING id, workspace_id, kind, payload, attempts, max_attempts, lease_token, \
-            unique_key, trace_id, cause_kind, cause_id, \
-            EXTRACT(EPOCH FROM now() - run_at)::float8 AS claim_lag_seconds",
-    )
-    .bind(worker)
-    .bind(lease.as_secs_f64())
-    .bind(kinds)
-    .bind(cap);
+    let query = sqlx::query_as(CLAIM)
+        .bind(worker)
+        .bind(lease.as_secs_f64())
+        .bind(kinds)
+        .bind(cap);
     let claimed: Option<ClaimedRow> = match tx {
         Some(mut tx) => {
             let claimed = query
@@ -940,7 +957,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     use serde_json::json;
-    use sqlx::PgPool;
+    use sqlx::{PgPool, Row};
     use zirv_flow_core::{Slug, WorkspaceName};
 
     use super::*;
@@ -2695,5 +2712,509 @@ mod tests {
         assert_eq!(woken.payload(), "b.kind");
         let more = tokio::time::timeout(Duration::from_millis(300), listener.recv()).await;
         assert!(more.is_err(), "a.kind is busy");
+    }
+
+    /// The claim statement before #207, the baseline of the claim benchmark and of the plan
+    /// check. Its `ORDER BY priority, run_at` has two plans, both growing with the queue: a
+    /// scan of `jobs_ready_idx` that only filters on `run_at` and so steps over every future job
+    /// ahead of the first due one, or, when the statistics put almost nothing due,
+    /// `jobs_ready_kind_idx` and a sort of every due job on each claim.
+    const CLAIM_BEFORE_207: &str =
+        "UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, \
+         lease_token = gen_random_uuid(), \
+         lease_expires_at = now() + make_interval(secs => $2) \
+         WHERE id = (SELECT j.id FROM jobs j \
+         WHERE j.state = 'ready' AND j.run_at <= now() AND j.kind = ANY($3) \
+         AND ($4::bigint IS NULL OR j.workspace_id IS NULL \
+         OR (SELECT count(*) FROM jobs r \
+         WHERE r.workspace_id = j.workspace_id AND r.state = 'running') < $4) \
+         ORDER BY j.priority, j.run_at \
+         LIMIT 1 \
+         FOR UPDATE SKIP LOCKED) \
+         RETURNING id, workspace_id, kind, payload, attempts, max_attempts, lease_token, \
+         unique_key, trace_id, cause_kind, cause_id, \
+         EXTRACT(EPOCH FROM now() - run_at)::float8 AS claim_lag_seconds";
+
+    /// What a production worker claims: every kind in its registry.
+    const WORKER_KINDS: &[&str] = &[
+        "audit.retention",
+        "decisions.retention",
+        "delivery.send",
+        "delivery.sync",
+        "destination.erase",
+        "event.forward",
+        "events.retention",
+        "flow.enroll",
+        "flow.lifecycle",
+        "flow.settle",
+        "flow.step",
+        "import.dry_run",
+        "import.run",
+        "ingest.drain",
+        "ingest.replay",
+        "jobs.retention",
+        "kafka.consume",
+        "maintenance.ai_transcripts",
+        "maintenance.noop",
+        "messages.retention",
+        "person.merge.rewrite",
+        "privacy.erase",
+        "privacy.export",
+        "segment.reevaluate",
+        "segment.refresh",
+        "sending_domain.verify",
+        "summary.rollup",
+        "sync.run",
+        "template.test_send",
+        "traits.recompute",
+        "traits.slot_backfill",
+        "traits.slot_clear",
+        "webhook.call",
+    ];
+
+    /// Inserts `count` waiting `flow.step` wakes of `workspace`, due `from` to `to` seconds from
+    /// now (negative is overdue), each with its wake key.
+    async fn seed_wakes(
+        pool: &PgPool,
+        workspace: WorkspaceId,
+        tag: &str,
+        count: i64,
+        from: f64,
+        to: f64,
+    ) {
+        sqlx::query(
+            "INSERT INTO jobs (id, workspace_id, kind, payload, priority, run_at, unique_key, \
+                trace_id, cause_kind, cause_id) \
+             SELECT gen_random_uuid(), $1, 'flow.step', \
+                    jsonb_build_object('enrollment_id', gen_random_uuid(), 'state_version', 1), 0, \
+                    now() + make_interval(secs => $3 + ($4 - $3) * (g::float8 / $5)), \
+                    'wake:' || $2 || ':' || g, gen_random_uuid(), 'event', 'bench' \
+             FROM generate_series(1, $5) g ORDER BY random()",
+        )
+        .bind(workspace.as_uuid())
+        .bind(tag)
+        .bind(from)
+        .bind(to)
+        .bind(count)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// Work of other kinds beside the timers.
+    #[derive(Clone, Copy)]
+    enum OtherWork {
+        /// Refreshes due later, and maintenance at an earlier priority but not due for an hour.
+        Later,
+        /// Ingest drains due now, and a few running jobs.
+        Now,
+        /// Enrolment work due now, and webhook calls due at a later priority.
+        Busy,
+        /// The webhook calls alone.
+        LaterPriority,
+    }
+
+    async fn seed_other_work(pool: &PgPool, work: OtherWork) {
+        let rows: &[(&str, i32, i16, f64, &str)] = match work {
+            OtherWork::Later => &[
+                ("segment.refresh", 500, 0, 600.0, "ready"),
+                ("maintenance.noop", 200, -1, 3_600.0, "ready"),
+            ],
+            OtherWork::Now => &[
+                ("ingest.drain", 8, 0, -5.0, "ready"),
+                ("delivery.send", 4, 0, -60.0, "running"),
+            ],
+            OtherWork::Busy => &[
+                ("flow.enroll", 2_000, 0, -30.0, "ready"),
+                ("webhook.call", 1_000, 5, -30.0, "ready"),
+            ],
+            OtherWork::LaterPriority => &[("webhook.call", 1_000, 5, -30.0, "ready")],
+        };
+        for (kind, count, priority, from, state) in rows {
+            sqlx::query(
+                "INSERT INTO jobs (id, kind, payload, priority, run_at, state, trace_id, \
+                    cause_kind, cause_id) \
+                 SELECT gen_random_uuid(), $1, '{}', $3, \
+                        now() + make_interval(secs => $4 + g * 0.01), $5, gen_random_uuid(), \
+                        'api', 'x' \
+                 FROM generate_series(1, $2) g",
+            )
+            .bind(kind)
+            .bind(count)
+            .bind(priority)
+            .bind(from)
+            .bind(state)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+    }
+
+    /// One claim by the statement before #207 or by [`claim_job`]; the claimed id and token.
+    async fn claim_by(pool: &PgPool, before: bool) -> Option<(Uuid, Uuid)> {
+        if before {
+            let row: Option<ClaimedRow> = sqlx::query_as(CLAIM_BEFORE_207)
+                .bind("bench")
+                .bind(LEASE.as_secs_f64())
+                .bind(WORKER_KINDS)
+                .bind(None::<i64>)
+                .fetch_optional(pool)
+                .await
+                .unwrap();
+            return row.map(|row| (row.id, row.lease_token));
+        }
+        claim_job(pool, "bench", WORKER_KINDS, LEASE, None)
+            .await
+            .unwrap()
+            .map(|claimed| (claimed.id, claimed.lease_token))
+    }
+
+    /// Four workers claim and complete for `run_for`: claims and empty claims per second.
+    async fn claim_rate(pool: &PgPool, before: bool, run_for: Duration) -> (f64, f64) {
+        let started = std::time::Instant::now();
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..4 {
+            let pool = pool.clone();
+            tasks.spawn(async move {
+                let (mut claimed, mut empty) = (0_u64, 0_u64);
+                while started.elapsed() < run_for {
+                    match claim_by(&pool, before).await {
+                        Some((id, token)) => {
+                            complete_job(&pool, id, token).await.unwrap();
+                            claimed += 1;
+                        }
+                        None => empty += 1,
+                    }
+                }
+                (claimed, empty)
+            });
+        }
+        let (mut claimed, mut empty) = (0, 0);
+        while let Some(result) = tasks.join_next().await {
+            let (done, none) = result.unwrap();
+            claimed += done;
+            empty += none;
+        }
+        let elapsed = started.elapsed().as_secs_f64();
+        (claimed as f64 / elapsed, empty as f64 / elapsed)
+    }
+
+    /// The plan a worker's connection runs: the statement prepared once and run six times,
+    /// so the plan cache has made its generic-or-custom choice, then `EXPLAIN (ANALYZE,
+    /// BUFFERS)` of the next execution. All inside a transaction that is rolled back.
+    async fn cached_claim_plan(pool: &PgPool, sql: &'static str) -> String {
+        let mut tx = pool.begin().await.unwrap();
+        for _ in 0..6 {
+            sqlx::query(sql)
+                .bind("bench")
+                .bind(LEASE.as_secs_f64())
+                .bind(WORKER_KINDS)
+                .bind(None::<i64>)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+        }
+        let (name, generic, custom): (String, i64, i64) = sqlx::query_as(
+            "SELECT name, generic_plans, custom_plans FROM pg_prepared_statements \
+             WHERE statement = $1",
+        )
+        .bind(sql)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        let kinds = WORKER_KINDS
+            .iter()
+            .map(|kind| format!("'{kind}'"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let lines: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN (ANALYZE, BUFFERS) EXECUTE {name}('bench', 30, ARRAY[{kinds}]::text[], NULL)"
+        )))
+        .fetch_all(&mut *tx)
+        .await
+        .unwrap();
+        tx.rollback().await.unwrap();
+        format!(
+            "generic_plans={generic} custom_plans={custom}\n{}",
+            lines.join("\n")
+        )
+    }
+
+    /// Every node of an `EXPLAIN (FORMAT JSON)` plan.
+    fn plan_nodes(plan: &Value) -> Vec<&serde_json::Map<String, Value>> {
+        let mut nodes = Vec::new();
+        let mut stack = vec![plan];
+        while let Some(node) = stack.pop() {
+            match node {
+                Value::Object(map) => {
+                    if map.contains_key("Node Type") {
+                        nodes.push(map);
+                    }
+                    stack.extend(map.values());
+                }
+                Value::Array(items) => stack.extend(items),
+                _ => {}
+            }
+        }
+        nodes
+    }
+
+    /// The step of a claim plan whose cost grows with the queue, if any: a sort, a sequential
+    /// scan of `jobs`, the kind index (whose order is not the claim's), or a scan of
+    /// `jobs_ready_idx` that does not start at a priority and stop at the first entry.
+    fn unbounded_step(plan: &Value) -> Option<String> {
+        for node in plan_nodes(plan) {
+            let text = |key: &str| node.get(key).and_then(Value::as_str).unwrap_or("");
+            let step = text("Node Type");
+            if step.ends_with("Sort") || (step == "Seq Scan" && text("Relation Name") == "jobs") {
+                return Some(step.to_owned());
+            }
+            match text("Index Name") {
+                "jobs_ready_kind_idx" => return Some("jobs_ready_kind_idx".to_owned()),
+                "jobs_ready_idx" => {
+                    let bound = text("Index Cond");
+                    let from_a_priority =
+                        bound.contains("priority =") || bound.contains("priority >");
+                    let first_entry = bound.is_empty() && text("Filter").is_empty();
+                    if !from_a_priority && !first_entry {
+                        return Some(format!("jobs_ready_idx on {bound:?}"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// #207: the claim reads a bounded range per priority band whatever the statistics: none
+    /// yet, taken while nothing was due (the old claim then sorted every due job), or fresh; as
+    /// the custom plan of either cap setting and as the generic plan a worker's prepared
+    /// statement can settle on. The statement before #207 is checked the same way, so the check
+    /// is known to catch it.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_claim_plan_stays_bounded_whatever_the_statistics(pool: PgPool) {
+        sqlx::query("ALTER TABLE jobs SET (autovacuum_enabled = false)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let ws = workspace(&pool, "ours").await;
+        seed_wakes(&pool, ws, "f", 20_000, 600.0, 2_400.0).await;
+        seed_other_work(&pool, OtherWork::Later).await;
+        let check = |stage: &'static str| {
+            let pool = pool.clone();
+            async move {
+                for (statement, sql) in [("current", CLAIM), ("before #207", CLAIM_BEFORE_207)] {
+                    let mut plans = Vec::new();
+                    for cap in [None, Some(2_i64)] {
+                        let custom: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                            "EXPLAIN (FORMAT JSON) {sql}"
+                        )))
+                        .bind("w")
+                        .bind(LEASE.as_secs_f64())
+                        .bind(WORKER_KINDS)
+                        .bind(cap)
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                        plans.push((format!("custom, cap {cap:?}"), custom));
+                    }
+                    // Simple protocol: a prepared EXPLAIN would expect the placeholders bound.
+                    let generic: Value = sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+                        "EXPLAIN (FORMAT JSON, GENERIC_PLAN) {sql}"
+                    )))
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+                    .get(0);
+                    plans.push(("generic".to_owned(), generic));
+                    for (mode, plan) in plans {
+                        let step = unbounded_step(&plan);
+                        if statement == "current" {
+                            assert!(step.is_none(), "{stage}, {mode}: {step:?}\n{plan}");
+                        } else {
+                            assert!(step.is_some(), "{stage}, {mode}: not caught\n{plan}");
+                        }
+                    }
+                }
+            }
+        };
+
+        seed_wakes(&pool, ws, "b0", 5_000, -60.0, 0.0).await;
+        seed_other_work(&pool, OtherWork::Busy).await;
+        check("no statistics").await;
+
+        sqlx::query("DELETE FROM jobs WHERE run_at <= now()")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("ANALYZE jobs").execute(&pool).await.unwrap();
+        seed_wakes(&pool, ws, "b1", 5_000, -60.0, 0.0).await;
+        seed_other_work(&pool, OtherWork::Busy).await;
+        check("statistics taken while nothing was due").await;
+
+        sqlx::query("ANALYZE jobs").execute(&pool).await.unwrap();
+        check("fresh statistics").await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_claim_skips_locked_jobs_within_a_band_and_falls_through_to_the_next(pool: PgPool) {
+        for (name, priority, age) in [("first", 0_i16, 20), ("second", 0, 10), ("later", 3, 30)] {
+            let mut new = job("a.kind");
+            new.priority = priority;
+            new.payload = json!({ "n": name });
+            new.run_at = Some(OffsetDateTime::now_utc() - time::Duration::seconds(age));
+            enqueue(&pool, &new).await.unwrap();
+        }
+        // Another claimer holds the oldest job of the first band.
+        let mut holder = pool.begin().await.unwrap();
+        sqlx::query("SELECT id FROM jobs WHERE payload ->> 'n' = 'first' FOR UPDATE")
+            .fetch_one(&mut *holder)
+            .await
+            .unwrap();
+
+        let second = claim(&pool, &["a.kind"]).await.unwrap();
+        let later = claim(&pool, &["a.kind"]).await.unwrap();
+        holder.rollback().await.unwrap();
+        let first = claim(&pool, &["a.kind"]).await.unwrap();
+
+        assert_eq!(second.payload, json!({"n": "second"}));
+        assert_eq!(later.payload, json!({"n": "later"}));
+        assert_eq!(first.payload, json!({"n": "first"}));
+    }
+
+    /// Reproduces #207 at small scale: a million waiting timers and a burst of due ones, with
+    /// other work beside them. The claim before #207 and the current one run on the same rows,
+    /// with no statistics, with statistics taken while only a little other work was due, with
+    /// statistics taken while nothing was due, with fresh ones, and then once the burst is gone,
+    /// with only later-priority work due and with nothing due. Prints the plan each worker
+    /// connection settles on and the claim rate of four workers; asserts nothing.
+    /// `ZIRV_FLOW_BENCH_CLAIM_FUTURE` and `ZIRV_FLOW_BENCH_CLAIM_DUE` set the sizes; at 100,000
+    /// waiting the old claim sorts once the statistics put nothing due.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL; set ZIRV_FLOW_BENCH_CLAIM to measure"]
+    async fn the_claim_cost_against_a_timer_backlog(pool: PgPool) {
+        if std::env::var_os("ZIRV_FLOW_BENCH_CLAIM").is_none() {
+            eprintln!("ZIRV_FLOW_BENCH_CLAIM is not set: skipping the claim benchmark");
+            return;
+        }
+        let setting = |name: &str, default: i64| {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(default)
+        };
+        let future = setting("ZIRV_FLOW_BENCH_CLAIM_FUTURE", 1_000_000);
+        let due = setting("ZIRV_FLOW_BENCH_CLAIM_DUE", 100_000);
+        let run_for = Duration::from_secs(5);
+        let version: String = sqlx::query_scalar("SELECT version()")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        eprintln!("BENCH {version}; {future} future wakes, {due} due");
+        // The statistics change only where the benchmark says so.
+        sqlx::query("ALTER TABLE jobs SET (autovacuum_enabled = false)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let ws = workspace(&pool, "bench").await;
+        seed_wakes(&pool, ws, "f", future, 600.0, 2_400.0).await;
+        seed_other_work(&pool, OtherWork::Later).await;
+        seed_other_work(&pool, OtherWork::Now).await;
+        let measure = |label: &'static str, before: bool| {
+            let pool = pool.clone();
+            async move {
+                let due_now: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM jobs WHERE state = 'ready' AND run_at <= now()",
+                )
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                let statement = if before { "before" } else { "after" };
+                let plan =
+                    cached_claim_plan(&pool, if before { CLAIM_BEFORE_207 } else { CLAIM }).await;
+                eprintln!("PLAN {label} {statement} due={due_now}\n{plan}");
+                let (claims, empty) = claim_rate(&pool, before, run_for).await;
+                eprintln!(
+                    "RATE {label} {statement} due={due_now}: {claims:.0} claims/s, \
+                     {empty:.0} empty claims/s"
+                );
+            }
+        };
+        let report = |label: &'static str| async move {
+            measure(label, true).await;
+            measure(label, false).await;
+        };
+        let burst = |tag: &'static str| {
+            let pool = pool.clone();
+            async move {
+                seed_wakes(&pool, ws, tag, due, -60.0, 0.0).await;
+                seed_other_work(&pool, OtherWork::Busy).await;
+            }
+        };
+        // The burst and the busy work leave (with `idle`, everything due goes), the table is
+        // vacuumed and analysed, and what left comes back.
+        let restage = |idle: bool| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query(
+                    "DELETE FROM jobs WHERE unique_key LIKE 'wake:b%' \
+                     OR kind IN ('flow.enroll', 'webhook.call') OR ($1 AND run_at <= now())",
+                )
+                .bind(idle)
+                .execute(&pool)
+                .await
+                .unwrap();
+                sqlx::query("VACUUM (PARALLEL 0) jobs")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                sqlx::query("ANALYZE jobs").execute(&pool).await.unwrap();
+                if idle {
+                    seed_other_work(&pool, OtherWork::Now).await;
+                }
+            }
+        };
+
+        burst("b0").await;
+        report("no-statistics").await;
+
+        restage(false).await;
+        burst("b1").await;
+        report("stale-statistics-drains-due").await;
+
+        restage(true).await;
+        burst("b2").await;
+        report("stale-statistics-nothing-due").await;
+
+        sqlx::query("ANALYZE jobs").execute(&pool).await.unwrap();
+        report("fresh-statistics").await;
+
+        sqlx::query(
+            "DELETE FROM jobs WHERE unique_key LIKE 'wake:b%' \
+             OR kind IN ('flow.enroll', 'ingest.drain')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("VACUUM (PARALLEL 0) jobs")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("ANALYZE jobs").execute(&pool).await.unwrap();
+        for before in [true, false] {
+            sqlx::query("DELETE FROM jobs WHERE kind = 'webhook.call'")
+                .execute(&pool)
+                .await
+                .unwrap();
+            seed_other_work(&pool, OtherWork::LaterPriority).await;
+            measure("only-later-priority-due", before).await;
+        }
+        sqlx::query("DELETE FROM jobs WHERE kind = 'webhook.call'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        report("nothing-due").await;
     }
 }
