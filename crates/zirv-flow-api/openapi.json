@@ -17895,6 +17895,118 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/segments/{id}/size": {
+      "get": {
+        "tags": [
+          "segments"
+        ],
+        "summary": "How many members the segment had at the end of each UTC day of the last `days` days,\nworked back from the current count through the entries and exits. Aggregates only.",
+        "operationId": "get_segment_size",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Segment id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "days",
+            "in": "query",
+            "description": "Days to cover, 1 to 90; default 30",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The size per day",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SegmentSizeBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "days is out of range or malformed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or segment, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The read ran past its time limit (`code` is `segment_preview_timeout`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/segments/{id}/versions": {
       "get": {
         "tags": [
@@ -40862,6 +40974,45 @@
         },
         "additionalProperties": false
       },
+      "SegmentSizeBody": {
+        "type": "object",
+        "required": [
+          "from",
+          "to",
+          "timezone",
+          "days",
+          "current"
+        ],
+        "properties": {
+          "current": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The member count now: the size at the end of the last day."
+          },
+          "days": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SizeDayBody"
+            },
+            "description": "One item per day, oldest first, including days nothing changed."
+          },
+          "from": {
+            "type": "string",
+            "description": "The first day of the window.",
+            "example": "2026-10-01"
+          },
+          "timezone": {
+            "type": "string",
+            "description": "Always `UTC`: days are cut at midnight UTC.",
+            "example": "UTC"
+          },
+          "to": {
+            "type": "string",
+            "description": "The last day of the window: today.",
+            "example": "2026-10-30"
+          }
+        }
+      },
       "SegmentTraitNode": {
         "type": "object",
         "description": "A condition on a person's trait. Beside `trait` go `op` and, for most operators, `value`.",
@@ -41422,6 +41573,25 @@
               "type": "string"
             },
             "description": "The nodes none of the synthetic people reached."
+          }
+        }
+      },
+      "SizeDayBody": {
+        "type": "object",
+        "required": [
+          "date",
+          "size"
+        ],
+        "properties": {
+          "date": {
+            "type": "string",
+            "description": "The UTC day, `YYYY-MM-DD`.",
+            "example": "2026-10-01"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Members at the end of that day."
           }
         }
       },

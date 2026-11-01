@@ -513,6 +513,10 @@ fn routes() -> Router<AppState> {
             get(segments::members::history),
         )
         .route(
+            "/api/v1/workspaces/{ws}/segments/{id}/size",
+            get(segments::members::size),
+        )
+        .route(
             "/api/v1/workspaces/{ws}/segments/{id}/refresh",
             post(segments::members::refresh),
         )

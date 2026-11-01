@@ -2,7 +2,7 @@
 //! merged or deleted. The refresh writes the rows (see `refresh`).
 
 use sqlx::PgConnection;
-use time::OffsetDateTime;
+use time::{Date, Duration, OffsetDateTime, Time};
 use uuid::Uuid;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
@@ -161,6 +161,76 @@ pub async fn segment_history_page(
         })
         .collect();
     Ok((history, more))
+}
+
+/// The most days one size series covers.
+pub const MAX_SIZE_DAYS: u32 = 90;
+
+/// A segment's size at the end of each UTC day of a window.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SizePerDay {
+    /// The first day of the window.
+    pub from: Date,
+    /// The last day of the window: the day the read ran on.
+    pub to: Date,
+    /// One item per day, oldest first, including the days nothing changed.
+    pub days: Vec<(Date, i64)>,
+    /// The member count now, which is the size at the end of the last day.
+    pub current: i64,
+}
+
+/// The size at the end of each UTC day of the last `days` days (1 to [`MAX_SIZE_DAYS`]) ending
+/// today, worked back from the current member count through the entries and exits after each
+/// day. Reads in the caller's connection; `None` when the workspace has no such segment.
+pub async fn segment_size_per_day(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    segment: Uuid,
+    days: u32,
+) -> Result<Option<SizePerDay>, StoreError> {
+    size_per_day_until(
+        connection,
+        workspace,
+        segment,
+        days,
+        OffsetDateTime::now_utc().date(),
+    )
+    .await
+}
+
+async fn size_per_day_until(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    segment: Uuid,
+    days: u32,
+    today: Date,
+) -> Result<Option<SizePerDay>, StoreError> {
+    let from = today - Duration::days(i64::from(days) - 1);
+    let midnight = |day: Date| day.with_time(Time::MIDNIGHT).assume_utc();
+    let (start, end) = (midnight(from), midnight(today + Duration::days(1)));
+    // One statement reads the count and the changes, so they agree. A day's size is the count
+    // less the net entries of every later day.
+    let rows: Vec<(Date, i64, i64)> = sqlx::query_as(
+        "SELECT g.day::date,                 (s.member_count - COALESCE(SUM(COALESCE(e.n, 0) - COALESCE(x.n, 0))                     OVER (ORDER BY g.day ROWS BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING), 0))::bigint,                 s.member_count::bigint          FROM segments s          CROSS JOIN generate_series($3::date, $4::date, interval '1 day') AS g(day)          LEFT JOIN (SELECT (entered_at AT TIME ZONE 'UTC')::date AS day, count(*) AS n                     FROM segment_members                     WHERE workspace_id = $1 AND segment_id = $2                       AND entered_at >= $5 AND entered_at < $6                     GROUP BY 1) e ON e.day = g.day::date          LEFT JOIN (SELECT (exited_at AT TIME ZONE 'UTC')::date AS day, count(*) AS n                     FROM segment_members                     WHERE workspace_id = $1 AND segment_id = $2                       AND exited_at >= $5 AND exited_at < $6                     GROUP BY 1) x ON x.day = g.day::date          WHERE s.workspace_id = $1 AND s.id = $2          ORDER BY g.day",
+    )
+    .bind(workspace.as_uuid())
+    .bind(segment)
+    .bind(from)
+    .bind(today)
+    .bind(start)
+    .bind(end)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    let Some(current) = rows.first().map(|row| row.2) else {
+        return Ok(None);
+    };
+    Ok(Some(SizePerDay {
+        from,
+        to: today,
+        days: rows.into_iter().map(|(day, size, _)| (day, size)).collect(),
+        current,
+    }))
 }
 
 /// Closes the open rows of a merged person, in the caller's transaction: `exited_at` is the
@@ -358,6 +428,83 @@ mod tests {
         assert!(!more);
         assert_eq!(page.len() + rest.len(), 3);
         assert_eq!((rest[0].kind, rest[0].person_id), ("entered", ada));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_size_is_worked_back_from_the_count_by_utc_day_with_quiet_days_kept(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let seg = segment(&pool, ws, "Pros", 60).await;
+        let today = time::macros::date!(2026 - 10 - 10);
+        let at = |day: u8, hour: u8, minute: u8, second: u8| {
+            time::macros::datetime!(2026 - 10 - 01 00:00 UTC)
+                .replace_day(day)
+                .unwrap()
+                .replace_time(Time::from_hms(hour, minute, second).unwrap())
+        };
+        let (ada, bob, cy, dee) = (
+            person(&pool, ws, "ada@example.com", "pro").await,
+            person(&pool, ws, "bob@example.com", "pro").await,
+            person(&pool, ws, "cy@example.com", "pro").await,
+            person(&pool, ws, "dee@example.com", "pro").await,
+        );
+        // Ada is in from before the window. Cy enters in the last second of the 8th and leaves
+        // at midnight. Dee enters, leaves and enters again, so the count now is three.
+        enter(&pool, ws, seg.id, ada, at(1, 12, 0, 0)).await;
+        enter(&pool, ws, seg.id, bob, at(6, 0, 0, 0)).await;
+        enter(&pool, ws, seg.id, dee, at(6, 10, 0, 0)).await;
+        leave(&pool, seg.id, dee, at(7, 10, 0, 0)).await;
+        enter(&pool, ws, seg.id, cy, at(8, 23, 59, 59)).await;
+        leave(&pool, seg.id, cy, at(9, 0, 0, 0)).await;
+        enter(&pool, ws, seg.id, dee, at(9, 9, 0, 0)).await;
+        sqlx::query("UPDATE segments SET member_count = 3 WHERE id = $1")
+            .bind(seg.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+
+        let series = size_per_day_until(&mut connection, ws, seg.id, 6, today)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let sizes: Vec<i64> = series.days.iter().map(|(_, size)| *size).collect();
+        assert_eq!(series.from, time::macros::date!(2026 - 10 - 05));
+        assert_eq!(series.to, today);
+        // The 5th to the 10th: before Bob and Dee, both in, Dee out, Cy in, Cy out and Dee back
+        // in, and a quiet day.
+        assert_eq!(sizes, [1, 3, 2, 3, 3, 3]);
+        assert_eq!(series.current, 3);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_one_day_window_is_the_current_count_and_other_workspaces_have_no_series(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let other = workspace(&pool, "two").await;
+        let seg = segment(&pool, ws, "Pros", 60).await;
+        let ada = person(&pool, ws, "ada@example.com", "pro").await;
+        let today = OffsetDateTime::now_utc().date();
+        enter(&pool, ws, seg.id, ada, OffsetDateTime::now_utc()).await;
+        let mut connection = pool.acquire().await.unwrap();
+
+        let one = size_per_day_until(&mut connection, ws, seg.id, 1, today)
+            .await
+            .unwrap()
+            .unwrap();
+        let foreign = size_per_day_until(&mut connection, other, seg.id, 1, today)
+            .await
+            .unwrap();
+        let unknown = size_per_day_until(&mut connection, ws, Uuid::now_v7(), 1, today)
+            .await
+            .unwrap();
+
+        assert_eq!(one.days, [(today, 1)]);
+        assert_eq!((one.from, one.to, one.current), (today, today, 1));
+        assert!(foreign.is_none() && unknown.is_none());
     }
 
     #[sqlx::test]

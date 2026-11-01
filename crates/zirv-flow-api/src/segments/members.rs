@@ -283,6 +283,115 @@ pub(crate) async fn history(
     }))
 }
 
+/// The days of a size series when `days` is not given.
+const DEFAULT_SIZE_DAYS: u32 = 30;
+
+#[derive(Serialize, ToSchema)]
+pub(crate) struct SizeDayBody {
+    /// The UTC day, `YYYY-MM-DD`.
+    #[schema(example = "2026-10-01")]
+    date: String,
+    /// Members at the end of that day.
+    size: i64,
+}
+
+#[derive(Serialize, ToSchema)]
+pub(crate) struct SegmentSizeBody {
+    /// The first day of the window.
+    #[schema(example = "2026-10-01")]
+    from: String,
+    /// The last day of the window: today.
+    #[schema(example = "2026-10-30")]
+    to: String,
+    /// Always `UTC`: days are cut at midnight UTC.
+    #[schema(example = "UTC")]
+    timezone: &'static str,
+    /// One item per day, oldest first, including days nothing changed.
+    days: Vec<SizeDayBody>,
+    /// The member count now: the size at the end of the last day.
+    current: i64,
+}
+
+fn format_day(day: time::Date) -> String {
+    let format = time::macros::format_description!("[year]-[month]-[day]");
+    day.format(&format).unwrap_or_default()
+}
+
+/// `?days`.
+fn parse_size_days(query: &str) -> Result<u32, ApiError> {
+    let mut days = DEFAULT_SIZE_DAYS;
+    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        if key == "days" {
+            days = value
+                .parse::<u32>()
+                .ok()
+                .filter(|days| (1..=zirv_flow_store::MAX_SIZE_DAYS).contains(days))
+                .ok_or_else(|| {
+                    ApiError::bad_request(format!(
+                        "days must be a whole number from 1 to {}",
+                        zirv_flow_store::MAX_SIZE_DAYS
+                    ))
+                })?;
+        }
+    }
+    Ok(days)
+}
+
+/// How many members the segment had at the end of each UTC day of the last `days` days,
+/// worked back from the current count through the entries and exits. Aggregates only.
+#[utoipa::path(
+    get,
+    operation_id = "get_segment_size",
+    path = "/api/v1/workspaces/{ws}/segments/{id}/size",
+    tag = "segments",
+    params(
+        ("ws" = Uuid, Path, description = "Workspace id"),
+        ("id" = Uuid, Path, description = "Segment id"),
+        ("days" = Option<u32>, Query, description = "Days to cover, 1 to 90; default 30")
+    ),
+    responses(
+        (status = 200, description = "The size per day", body = SegmentSizeBody),
+        (status = 400, description = "days is out of range or malformed", body = Problem, content_type = "application/problem+json"),
+        (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "A key without the read scope", body = Problem, content_type = "application/problem+json"),
+        (status = 404, description = "No such workspace or segment, or no access", body = Problem, content_type = "application/problem+json"),
+        (status = 503, description = "The read ran past its time limit (`code` is `segment_preview_timeout`)", body = Problem, content_type = "application/problem+json")
+    ),
+    security(("session" = []), ("api_key" = []))
+)]
+pub(crate) async fn size(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((ws, id)): Path<(String, String)>,
+    RawQuery(query): RawQuery,
+) -> Result<Json<SegmentSizeBody>, ApiError> {
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Read).await?;
+    let segment: Uuid = path_id(&id)?;
+    let days = parse_size_days(query.as_deref().unwrap_or_default())?;
+
+    let (mut tx, _) = snapshot(&state, workspace.id, segment).await?;
+    let series = zirv_flow_store::segment_size_per_day(&mut tx, workspace.id, segment, days)
+        .await
+        .map_err(read_error)?
+        .ok_or_else(ApiError::not_found)?;
+    drop(tx);
+
+    Ok(Json(SegmentSizeBody {
+        from: format_day(series.from),
+        to: format_day(series.to),
+        timezone: "UTC",
+        days: series
+            .days
+            .into_iter()
+            .map(|(day, size)| SizeDayBody {
+                date: format_day(day),
+                size,
+            })
+            .collect(),
+        current: series.current,
+    }))
+}
+
 /// Queues a full refresh of the segment now. The trace's cause is `manual`: the signed-in user,
 /// or the request for an API key. Audited as `segment.refresh_requested`.
 #[utoipa::path(
@@ -362,6 +471,28 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn the_size_query_defaults_to_30_days_and_bounds_days_to_1_through_90() {
+        assert_eq!(parse_size_days("").unwrap(), 30);
+        assert_eq!(parse_size_days("days=1").unwrap(), 1);
+        assert_eq!(parse_size_days("days=90&other=x").unwrap(), 90);
+        for bad in ["days=0", "days=91", "days=x", "days=-1", "days="] {
+            assert_eq!(
+                parse_size_days(bad).unwrap_err().status(),
+                StatusCode::BAD_REQUEST,
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_day_is_written_as_year_month_day() {
+        assert_eq!(
+            format_day(time::macros::date!(2026 - 03 - 07)),
+            "2026-03-07"
+        );
     }
 
     #[test]
