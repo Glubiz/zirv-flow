@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link, useNavigate, useParams, useSearchParams } from "react-router";
+import { useNavigate, useParams, useSearchParams } from "react-router";
 
 import { client, describeError, unwrap, unwrapEmpty, useResource, type ErrorSummary } from "../../api";
 import { Button, Dialog, EmptyState, formatDateTime, InlineError, PageHeader, Panel, Pill, ResourceView } from "../../ui";
@@ -132,6 +132,7 @@ function SourceDetail({ workspaceId, sourceId }: { workspaceId: string; sourceId
             <>
               <PageHeader
                 title={data.name}
+                breadcrumb={{ group: "Data", section: "Sources", to: `/w/${workspaceId}/sources` }}
                 lede={`${kindName(known, data.kind)} source, updated ${formatDateTime(data.updated_at)}.`}
                 actions={
                   canManage && !push ? (
@@ -277,9 +278,6 @@ function SourceDetail({ workspaceId, sourceId }: { workspaceId: string; sourceId
                 )}
               </Panel>
               {!canManage ? <p className="muted">You can look at this source but not change it.</p> : null}
-              <p>
-                <Link to={`/w/${workspaceId}/sources`}>Back to sources</Link>
-              </p>
               {editing && kind ? (
                 <EditSourceDialog
                   workspaceId={workspaceId}

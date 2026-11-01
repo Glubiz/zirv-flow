@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link } from "react-router";
 
 import { ApiError, client, describeError, unwrap, type ErrorSummary } from "../../api";
-import { Button, Dialog, InlineError } from "../../ui";
+import { Button, Crumbs, Dialog, InlineError } from "../../ui";
 import { plural } from "../../ui/format";
 import { useLeaveGuard } from "../segments";
 import { BlockEditor, TabBar, blockingCount, snippetContent, snippetEditable, type Editable, type TemplateIssue } from "../templates";
@@ -177,7 +176,7 @@ export function SnippetEditor({ workspaceId, initial, canWrite, canPublish: mayP
   return (
     <div className="tp-page">
       <div className="tp-head">
-        <Link to={`/w/${workspaceId}/snippets`}>← Snippets</Link>
+        <Crumbs group="Messaging" section="Snippets" to={`/w/${workspaceId}/snippets`} />
         <h1 className="fl-name-read">{snippet.name}</h1>
         <span className="fl-state faint">{statusText(snippet)}</span>
         <TabBar label="Snippet views" variant="page" tabs={TABS} tab={tab} onTab={setTab} />

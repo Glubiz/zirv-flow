@@ -393,7 +393,7 @@ describe("the run step", () => {
     expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
     const facts = screen.getByText("Unchanged").closest("div")!;
     expect(within(facts).getByText("1")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Back to imports" })).toHaveAttribute("href", "/w/ws1/imports");
+    expect(within(screen.getByRole("navigation", { name: "Breadcrumb" })).getByRole("link", { name: "Imports" })).toHaveAttribute("href", "/w/ws1/imports");
   });
 
   it("does not call a run with rejected rows a plain success: it counts them and links the rejects", async () => {

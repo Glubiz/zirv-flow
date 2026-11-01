@@ -67,7 +67,7 @@ describe("a list", () => {
     expect(within(table).getByText("Email address")).toBeInTheDocument();
     expect(within(table).getByText("External ID (crm)")).toBeInTheDocument();
     expect(within(table).getByText("CSV import")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "All lists" })).toHaveAttribute("href", "/w/ws1/lists");
+    expect(within(screen.getByRole("navigation", { name: "Breadcrumb" })).getByRole("link", { name: "Lists" })).toHaveAttribute("href", "/w/ws1/lists");
     expect(screen.queryByText(/hidden from you/)).not.toBeInTheDocument();
   });
 

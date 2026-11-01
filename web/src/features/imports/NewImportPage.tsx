@@ -87,13 +87,14 @@ function NewImport({ workspaceId }: { workspaceId: string }) {
     <div className="page">
       <PageHeader
         title="New import"
+        breadcrumb={{ group: "Data", section: "Imports", to: `/w/${workspaceId}/imports` }}
         lede="Upload a CSV file of people. The first row names the columns. You choose what each column becomes in the next step; nothing is written until you run the import."
       />
       <Stepper steps={STEPS} current="upload" label="Import steps" />
       <Panel>
         {!ready ? null : !canWrite ? (
           <p className="muted">
-            You can look at imports but not start one. <Link to={`/w/${workspaceId}/imports`}>Back to imports</Link>
+            You can look at imports but not start one.
           </p>
         ) : (
           <form

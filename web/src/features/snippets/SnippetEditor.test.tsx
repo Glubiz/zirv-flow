@@ -135,7 +135,7 @@ describe("the snippet page", () => {
     mockApi(snippetRoutes({ detail: snippetDetail({ current_version: 3 }), uses: usedBy({ templates: [templateUse(1), templateUse(2)] }) }));
     mount();
 
-    expect(await screen.findByRole("link", { name: "← Snippets" })).toHaveAttribute("href", "/w/ws1/snippets");
+    expect(await within(await screen.findByRole("navigation", { name: "Breadcrumb" })).findByRole("link", { name: "Snippets" })).toHaveAttribute("href", "/w/ws1/snippets");
     expect(screen.getByText("Draft · v3 live")).toBeInTheDocument();
     expect(await screen.findByRole("button", { name: "Used in 2 templates" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Where used" })).toBeInTheDocument();

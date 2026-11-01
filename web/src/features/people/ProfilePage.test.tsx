@@ -145,7 +145,7 @@ describe("a person's profile", () => {
     const city = within(table).getByRole("row", { name: /city/ });
     expect(within(city).getByText("Aarhus")).toBeInTheDocument();
     expect(within(city).getByText("crm")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "All people" })).toHaveAttribute("href", "/w/ws1/people");
+    expect(within(screen.getByRole("navigation", { name: "Breadcrumb" })).getByRole("link", { name: "People" })).toHaveAttribute("href", "/w/ws1/people");
     expect(screen.queryByText(/was merged into this one/)).not.toBeInTheDocument();
   });
 
@@ -455,15 +455,15 @@ describe("a person's timeline", () => {
     const user = userEvent.setup();
     mount();
 
-    const profileTab = await screen.findByRole("tab", { name: "Profile" });
-    expect(profileTab).toHaveAttribute("aria-selected", "true");
+    const profileTab = await screen.findByRole("link", { name: "Profile" });
+    expect(profileTab).toHaveAttribute("aria-current", "page");
     expect(screen.queryByText("No messages to this person yet.")).not.toBeInTheDocument();
-    await user.click(screen.getByRole("tab", { name: "Messages" }));
+    await user.click(screen.getByRole("link", { name: "Messages" }));
 
-    expect(screen.getByRole("tab", { name: "Messages" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("link", { name: "Messages" })).toHaveAttribute("aria-current", "page");
     expect(await screen.findByText("No messages to this person yet.")).toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "Identities from crm" })).not.toBeInTheDocument();
-    await user.click(screen.getByRole("tab", { name: "Profile" }));
+    await user.click(screen.getByRole("link", { name: "Profile" }));
     expect(await screen.findByRole("region", { name: "Identities from crm" })).toBeInTheDocument();
   });
 });

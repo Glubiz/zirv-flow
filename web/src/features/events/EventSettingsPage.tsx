@@ -17,7 +17,7 @@ export function EventSettingsPage() {
   return (
     <div className="page">
       <PageHeader
-        title="Event settings"
+        title="Event settings" breadcrumb={{ group: "Events", section: "Event settings" }}
         lede="How the workspace treats events without a schema, events with odd timestamps, and personal data in event properties."
       />
       <EventsNav workspaceId={ws} />

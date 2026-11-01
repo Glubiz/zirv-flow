@@ -96,7 +96,7 @@ function WorkspaceMembers({ ws }: { ws: string }) {
   return (
     <div className="page">
       <PageHeader
-        title="Members"
+        title="Members" breadcrumb={{ group: "Workspace", section: "Members and roles" }}
         lede={name ? `People who can work in ${name}.` : "People who can work in this workspace."}
         actions={
           canAdmin ? (

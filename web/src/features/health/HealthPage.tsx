@@ -76,7 +76,7 @@ export function HealthPage() {
   return (
     <div className="page">
       <PageHeader
-        title="Health"
+        title="Health" breadcrumb={{ group: "System", section: "Health" }}
         lede="Whether this instance is up and able to serve work."
         actions={<Button onClick={refresh}>Refresh</Button>}
       />

@@ -81,7 +81,7 @@ function base(kind: "writer" | "reader" = "writer", enabled = true): Record<stri
 
 function mountPage() {
   return renderRoute(
-    `/w/ws1/segments/${SEGMENT_ID}`,
+    `/w/ws1/segments/${SEGMENT_ID}?tab=rules`,
     "/w/:ws/*",
     <Routes>
       <Route path="segments/:id" element={<SegmentPage />} />

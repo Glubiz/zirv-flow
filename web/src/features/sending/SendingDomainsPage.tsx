@@ -32,7 +32,7 @@ function Domains({ workspaceId }: { workspaceId: string }) {
   return (
     <div className="page">
       <PageHeader
-        title="Sending domains"
+        title="Sending domains" breadcrumb={{ group: "Sending", section: "Sending domains" }}
         lede="A domain you send email from. Publish its DKIM, SPF and DMARC records; once all three match, its sender identities can send."
         actions={add}
       />

@@ -35,7 +35,7 @@ export function JobsPage() {
   if (!user.is_owner) {
     return (
       <div className="page">
-        <PageHeader title="Jobs" />
+        <PageHeader title="Jobs" breadcrumb={{ group: "System", section: "Jobs" }} />
         <Panel flush>
           <EmptyState title="Only the instance owner can see jobs">
             Background work is shared across every workspace, so it is managed by the owner of this instance.
