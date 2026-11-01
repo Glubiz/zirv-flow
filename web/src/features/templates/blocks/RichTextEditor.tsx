@@ -149,15 +149,27 @@ export function RichTextEditor({ label, value, onChange, readOnly, onTarget }: P
     }
   }
 
+  /** Opens the dialog with the opt-out of the first link under the remembered selection. */
+  function openDialog() {
+    const selected = range.current;
+    const link = selected && area.current ? Array.from(area.current.querySelectorAll("a")).find((a) => selected.intersectsNode(a)) : undefined;
+    setNoUtm(link?.getAttribute(UTM_ATTRIBUTE) === "off");
+    setLinking(true);
+  }
+
+  function closeDialog() {
+    setLinking(false);
+    setNoUtm(false);
+  }
+
   function applyLink() {
     if (!linkAllowed(url)) {
       setUrlError("A link starts with https://, http://, mailto: or a merge tag.");
       return;
     }
     setUrlError(null);
-    setLinking(false);
+    closeDialog();
     run("createLink", url.trim(), () => markLinks(noUtm));
-    setNoUtm(false);
   }
 
   return (
@@ -187,7 +199,7 @@ export function RichTextEditor({ label, value, onChange, readOnly, onTarget }: P
               event.preventDefault();
               remember();
             }}
-            onClick={() => setLinking((open) => !open)}
+            onClick={() => (linking ? closeDialog() : openDialog())}
           >
             Link
           </button>

@@ -93,6 +93,16 @@ describe("link addresses", () => {
   });
 });
 
+function selectAndOpen(editor: HTMLElement, node: Node = editor) {
+  const range = document.createRange();
+  range.selectNodeContents(node);
+  window.getSelection()?.removeAllRanges();
+  window.getSelection()?.addRange(range);
+  fireEvent.mouseUp(editor);
+  fireEvent.mouseDown(screen.getByRole("button", { name: "Add a link" }));
+  fireEvent.click(screen.getByRole("button", { name: "Add a link" }));
+}
+
 describe("the UTM opt-out of a link", () => {
   it("is the one data attribute the clean pass keeps, and only as off", () => {
     expect(cleanRichText('<p><a href="https://a.example" data-zf-utm="off">go</a></p>')).toBe('<p><a href="https://a.example" data-zf-utm="off">go</a></p>');
@@ -139,10 +149,44 @@ describe("the UTM opt-out of a link", () => {
       open(true);
       expect(onChange).toHaveBeenLastCalledWith('<p><a href="https://" data-zf-utm="off">plain</a></p>');
 
-      open(false);
+      open(true); // the link is now opted out, so the box starts ticked and the click clears it
       expect(onChange).toHaveBeenLastCalledWith('<p><a href="https://">plain</a></p>');
     } finally {
       Reflect.deleteProperty(document, "execCommand");
     }
+  });
+
+  it("is loaded from the link under the selection and survives an address-only change", () => {
+    const exec = vi.fn((_command: string, _ui: boolean, address?: string) => {
+      document.querySelector("[role=textbox] a")?.setAttribute("href", address ?? "");
+      return true;
+    });
+    Object.defineProperty(document, "execCommand", { value: exec, configurable: true });
+    try {
+      const { onChange, editor } = mount('<p><a href="https://a.example" data-zf-utm="off">go</a></p>');
+      selectAndOpen(editor);
+      expect(screen.getByRole("checkbox", { name: "Do not add UTM parameters" })).toBeChecked();
+      fireEvent.change(screen.getByLabelText("Link address"), { target: { value: "https://b.example" } });
+      fireEvent.click(screen.getByRole("button", { name: "Apply link" }));
+      expect(onChange).toHaveBeenLastCalledWith('<p><a href="https://b.example" data-zf-utm="off">go</a></p>');
+    } finally {
+      Reflect.deleteProperty(document, "execCommand");
+    }
+  });
+
+  it("is unticked on the next link after a dialog is closed without applying", () => {
+    const { editor } = mount('<p><a href="https://a.example">one</a> <a href="https://b.example" data-zf-utm="off">two</a></p>');
+    const [first, second] = Array.from(editor.querySelectorAll("a"));
+    const box = () => screen.getByRole("checkbox", { name: "Do not add UTM parameters" });
+    selectAndOpen(editor, first);
+    fireEvent.click(box());
+    expect(box()).toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: "Add a link" }));
+    expect(screen.queryByRole("checkbox", { name: "Do not add UTM parameters" })).toBeNull();
+    selectAndOpen(editor, first);
+    expect(box()).not.toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: "Add a link" }));
+    selectAndOpen(editor, second);
+    expect(box()).toBeChecked();
   });
 });
