@@ -3,7 +3,7 @@ import { Link, useParams, useSearchParams } from "react-router";
 
 import { ApiError, client, describeError, unwrap, useResource, type components, type ErrorSummary } from "../../api";
 import { Button, Dialog, EmptyState, ErrorState, LoadingState, Panel, plural } from "../../ui";
-import { useAssistantAccess } from "../assistant";
+import { AssistantToggle, useAssistantAccess, useAssistantDock, withoutDock, type Draft } from "../assistant";
 import { useCatalog, useLeaveGuard } from "../segments";
 import { useFlowAccess } from "./access";
 import { Canvas, type FocusRequest, type IssueItem } from "./Canvas";
@@ -34,7 +34,8 @@ import { layout } from "./layout";
 import { PublishDialog } from "./PublishDialog";
 import { VersionCanvas, VersionsView, type FlowVersion } from "./VersionsView";
 import { SettingsView, type SettingsFocus } from "./SettingsView";
-import { FlowAssistantSheet } from "./FlowAssistant";
+import { FlowAssistantDock, graphOf } from "./FlowAssistant";
+import { draftMarks } from "./FlowChanges";
 import { ResultsView } from "./ResultsView";
 import { StepPalette } from "./StepPalette";
 import { useVersionCounts } from "./counts";
@@ -43,6 +44,7 @@ import { StepInspector } from "./StepInspector";
 import { TestView } from "./TestView";
 import type { TestResult } from "./testMode";
 import { useFlowDraft } from "./useFlowDraft";
+import { WarmupLine, warmupProgress, type Warmup } from "./Warmup";
 
 /** The settings section an issue about no step or connection belongs to, if any. */
 function sectionOfIssue(issue: FlowIssue) {
@@ -51,6 +53,9 @@ function sectionOfIssue(issue: FlowIssue) {
 }
 
 type FlowBody = components["schemas"]["FlowBody"];
+
+/** How often the counts of a running warm-up are read again. */
+const WARMUP_POLL_MS = 5000;
 
 const VIEWS = [
   { id: "build", label: "Build" },
@@ -142,6 +147,9 @@ function Editor({
   canViewPii: boolean;
 }) {
   const [life, setLife] = useState<Life>({ state: flow.state, version: flow.current_version ?? null });
+  const [warmup, setWarmup] = useState<Warmup>(flow.warmup);
+  const [warmupBusy, setWarmupBusy] = useState(false);
+  const [clock, setClock] = useState(() => Date.now());
   const archived = life.state === "archived";
   const editable = canWrite && !archived;
   const store = useFlowDraft({ workspaceId, flow, editable });
@@ -191,7 +199,12 @@ function Editor({
   const [acting, setActing] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<TestResult | null>(null);
-  const [assistantOpen, setAssistantOpen] = useState(false);
+  const dock = useAssistantDock();
+  /** Only the build view has the dock; the URL may still say it is open while another view shows. */
+  const assistantOpen = dock.open && assistantOn && activeView === "build" && !versionsOpen;
+  /** The valid draft the assistant is showing, which the canvas draws with its marks until the person puts it in or discards it. */
+  const [shownDraft, setShownDraft] = useState<Draft | null>(null);
+  const [draftHidden, setDraftHidden] = useState(false);
   const [previousView, setPreviousView] = useState(activeView);
   /** Bumped when a whole new draft is loaded, so the canvas draws it afresh. */
   const [layoutEpoch, setLayoutEpoch] = useState(0);
@@ -200,18 +213,17 @@ function Editor({
   if (previousView !== activeView) {
     setPreviousView(activeView);
     setTestResult(null);
-    setAssistantOpen(false);
     setCited([]);
   }
   const [assistantSeen, setAssistantSeen] = useState(assistantOn);
   if (assistantSeen !== assistantOn) {
     setAssistantSeen(assistantOn);
-    // Turned off, or no longer the person's to use: the sheet and what it marked on the canvas go with it.
-    if (!assistantOn) {
-      setAssistantOpen(false);
-      setCited([]);
-    }
+    // Turned off, or no longer the person's to use: what the dock marked on the canvas goes with it.
+    if (!assistantOn) setCited([]);
   }
+  const drafted = shownDraft !== null && assistantOpen ? graphOf(shownDraft.content) : null;
+  /** The canvas draws the assistant's draft, read-only, until the person asks to see it without. */
+  const showingDraft = drafted !== null && !draftHidden;
   /** Set while the person is asked whether the assistant's draft may replace their unsaved edits. */
   const [replacing, setReplacing] = useState<{ resolve: (replace: boolean) => void } | null>(null);
   const nonce = useRef(0);
@@ -253,6 +265,11 @@ function Editor({
         ? { steps: new Map(cited.map((id) => [id, [] as number[]])), dimOthers: true }
         : undefined,
     [assistantOpen, cited],
+  );
+
+  const draftOverlay = useMemo<Overlay | undefined>(
+    () => (shownDraft !== null ? { draft: draftMarks(shownDraft.changes) } : undefined),
+    [shownDraft],
   );
 
   function describeStep(id: string): string {
@@ -311,13 +328,13 @@ function Editor({
   }
 
   function toggleAssistant() {
-    if (assistantOpen && selected === null) {
-      setAssistantOpen(false);
+    if (assistantOpen) {
+      dock.setOpen(false);
       setCited([]);
       return;
     }
     setSelected(null);
-    setAssistantOpen(true);
+    dock.setOpen(true);
   }
 
   /** Accepting replaces the draft, so edits that are not saved yet are asked about first, then the editor stands still. */
@@ -428,6 +445,69 @@ function Editor({
     setNotice(summary.detail || summary.title);
   }
 
+  /** Shows the warm-up a response carries, and measures the window from this moment. */
+  function adoptWarmup(next: Warmup) {
+    setWarmup(next);
+    setClock(Date.now());
+  }
+
+  /** The publish response does not carry the warm-up its first publish started, so it is read again. */
+  async function refreshWarmup() {
+    try {
+      const current = await unwrap(
+        client.GET("/api/v1/workspaces/{ws}/flows/{id}", { params: { path: { ws: workspaceId, id: flow.id } } }),
+      );
+      if (mounted.current) adoptWarmup(current.warmup);
+    } catch {
+      // The state line shows after the next load; the publish itself went through.
+    }
+  }
+
+  async function changeWarmup(request: () => Promise<{ warmup: Warmup }>, said: string) {
+    if (warmupBusy) return;
+    setWarmupBusy(true);
+    setNotice(null);
+    try {
+      const updated = await request();
+      if (!mounted.current) return;
+      adoptWarmup(updated.warmup);
+      announce(said);
+    } catch (error) {
+      if (mounted.current) noticeOf(error);
+    } finally {
+      if (mounted.current) setWarmupBusy(false);
+    }
+  }
+
+  function saveWarmup(enabled: boolean, seconds: number) {
+    const path = { params: { path: { ws: workspaceId, id: flow.id } } };
+    void changeWarmup(
+      () => unwrap(client.PUT("/api/v1/workspaces/{ws}/flows/{id}/warmup", { ...path, body: { enabled, seconds } })),
+      "The warm-up is saved.",
+    );
+  }
+
+  function openWarmup() {
+    const path = { params: { path: { ws: workspaceId, id: flow.id } } };
+    void changeWarmup(() => unwrap(client.POST("/api/v1/workspaces/{ws}/flows/{id}/warmup/open", path)), "The flow is open.");
+  }
+
+  const warmupState = life.state === "published" ? warmupProgress(warmup, clock) : null;
+  const warming = warmupState !== null;
+  useEffect(() => {
+    if (!warming) return;
+    // The clock moves and the counts are read again while the window runs.
+    const timer = setInterval(() => {
+      setClock(Date.now());
+      void unwrap(client.GET("/api/v1/workspaces/{ws}/flows/{id}", { params: { path: { ws: workspaceId, id: flow.id } } }))
+        .then((fresh) => {
+          if (mounted.current) setWarmup(fresh.warmup);
+        })
+        .catch(() => undefined);
+    }, WARMUP_POLL_MS);
+    return () => clearInterval(timer);
+  }, [warming, workspaceId, flow.id]);
+
   /** Says something to a screen reader; the region is cleared first so the same words are read again. */
   function announce(text: string) {
     if (!mounted.current) return;
@@ -471,6 +551,7 @@ function Editor({
             : client.POST("/api/v1/workspaces/{ws}/flows/{id}/archive", path),
       );
       applyLife(request, { state: updated.state, version: updated.current_version ?? null });
+      adoptWarmup(updated.warmup);
       announce(action === "pause" ? "The flow is paused." : action === "resume" ? "The flow is live again." : "The flow is archived.");
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
@@ -528,6 +609,7 @@ function Editor({
     applyLife(request, { state: result.flow.state, version: result.flow.current_version ?? result.version.version });
     refocusActions();
     announce(`Version ${result.version.version} of ${draft.name} is published.`);
+    void refreshWarmup();
   }
 
   /** A publish was refused with a 409: the dialog goes and the flow is shown as it is now. */
@@ -577,7 +659,7 @@ function Editor({
   const doomed = deleting === null ? undefined : draft.graph.nodes.find((candidate) => candidate.id === deleting);
 
   function paramsFor(next: ViewId) {
-    const params = new URLSearchParams(searchParams);
+    const params = withoutDock(searchParams);
     params.delete("tab");
     params.delete("panel");
     if (next === "build") params.delete("view");
@@ -590,7 +672,6 @@ function Editor({
       setViewing(null);
       setCited([]);
       setTestResult(null);
-      setAssistantOpen(false);
       setFocusRequest(null);
       setSettingsFocus(null);
       setInspectorFocus(false);
@@ -628,40 +709,26 @@ function Editor({
   const selectedPort = selectedNode ? portsOf(selectedNode)[0] : undefined;
   const canvas = (
     <Canvas
-      graph={draft.graph}
+      graph={showingDraft ? drafted : draft.graph}
       settings={draft.settings}
       names={names}
       placed={placed}
       issueItems={issueItems}
       checked={store.issues !== null}
       checking={store.checking}
-      editable={canEdit && !testing}
+      editable={canEdit && !testing && !showingDraft}
       layoutKey={layoutEpoch}
-      overlay={testing ? testOverlay : citedOverlay ?? countsOverlay}
-      assistant={assistantOn && !testing ? { open: assistantOpen, onToggle: toggleAssistant } : undefined}
-      selectedId={testing ? null : selected}
+      overlay={testing ? testOverlay : showingDraft ? draftOverlay : citedOverlay ?? countsOverlay}
+      selectedId={testing || showingDraft ? null : selected}
       focusRequest={focusRequest}
       canUndo={store.canUndo}
-      onOpen={testing ? () => undefined : open}
+      onOpen={testing || showingDraft ? () => undefined : open}
       onClose={closeInspector}
       onWire={wireStep}
       onUndo={store.undo}
       onDeleteRequest={(id) => setDeleting(id)}
       onPickIssue={pick}
-    >
-      {assistantOn && !testing && assistantOpen ? (
-        <div className="fl-sheet" hidden={selectedNode !== undefined}>
-          <FlowAssistantSheet
-            workspaceId={workspaceId} flowId={flow.id} version={null}
-            graph={draft.graph} revision={[draft.graph, draft.settings]} names={names}
-            onGone={reloadAssistant} busy={busy}
-            drafting={editable ? { confirmAccept: confirmAssistantAccept, onAccept: loadAssistantDraft, onAcceptFailed: reconcileAccept } : undefined}
-            prepare={editable ? store.saveNow : undefined}
-            onReveal={revealStep} onCited={setCited} onClose={toggleAssistant}
-          />
-        </div>
-      ) : null}
-    </Canvas>
+    />
   );
 
   return (
@@ -693,6 +760,7 @@ function Editor({
             </Link>
           ))}
         </nav>
+        {assistantOn && !testing && activeView === "build" && !versionsOpen ? <AssistantToggle open={assistantOpen} onToggle={toggleAssistant} /> : null}
         <Button aria-expanded={versionsOpen} aria-controls={versionsOpen ? "flow-versions" : undefined} onClick={toggleVersions}>Versions</Button>
         <div className="fl-status" role="status">
           {busy ? (
@@ -743,6 +811,10 @@ function Editor({
         ) : null}
       </div>
 
+      {warmupState ? (
+        <WarmupLine warmup={warmup} progress={warmupState} canOpen={canAdmin} busy={warmupBusy} onOpen={openWarmup} />
+      ) : null}
+
       {notice ? (
         <p className="fl-notice" role="alert">
           {notice}
@@ -782,6 +854,14 @@ function Editor({
           ) : <EmptyState title="Testing needs an editor">You can explore the flow in Build and read its Results.</EmptyState>
         ) : (
           <>
+            {drafted !== null ? (
+              <div className="dock-legend" role="group" aria-label="The assistant's draft on the canvas">
+                <span className="strong">{draftHidden ? "The assistant's draft is hidden" : "Showing the assistant's draft"}</span>
+                <span className="dock-mark">Added</span>
+                <span className="dock-mark dock-mark-changed">Changed</span>
+                <Button onClick={() => setDraftHidden((hidden) => !hidden)}>{draftHidden ? "Show the draft" : "Show without the draft"}</Button>
+              </div>
+            ) : null}
             <div className="fl-build-bar">
               {life.version !== null ? (
                 <label className="check">
@@ -803,6 +883,18 @@ function Editor({
                     : "This step has no output. New steps start disconnected."
                   : selected === TRIGGER_ID ? "Inserts directly after the trigger." : "Select a step to insert after it, or add a disconnected step."} /> : null}
               {canvas}
+              {assistantOpen ? (
+                <FlowAssistantDock
+                  workspaceId={workspaceId} flowId={flow.id} version={null}
+                  graph={draft.graph} revision={[draft.graph, draft.settings]} names={names}
+                  onGone={reloadAssistant} busy={busy}
+                  drafting={editable ? { confirmAccept: confirmAssistantAccept, onAccept: loadAssistantDraft, onAcceptFailed: reconcileAccept } : undefined}
+                  prepare={editable ? store.saveNow : undefined}
+                  hidden={selectedNode !== undefined}
+                  onDraft={(next) => { setShownDraft(next); setDraftHidden(false); }}
+                  onReveal={revealStep} onCited={setCited} onClose={toggleAssistant}
+                />
+              ) : null}
               {selectedNode ? (
                 <StepInspector key={selectedNode.id} workspaceId={workspaceId} graph={draft.graph}
                   node={selectedNode} names={names} steps={steps} issues={issuesOfStep(selectedNode.id)}
@@ -812,12 +904,13 @@ function Editor({
                   onRemovePort={(next, prefix, index) => editGraph((graph) => removeIndexedPort(graph, next, prefix, index))}
                   onWire={(port, to) => wireStep(selectedNode.id, port, to)}
                   onDelete={() => setDeleting(selectedNode.id)} />
-              ) : (
+              ) : assistantOpen ? null : (
                 <section className="fl-inspector stack" aria-label="Flow settings">
                   <h2>Flow settings</h2>
                   <p className="faint">Starts with: {triggerWords(draft.settings, names).title}.</p>
                   <SettingsView workspaceId={workspaceId} settings={draft.settings} catalog={catalog}
-                    readOnly={!canEdit} issues={placed.bySection} focus={settingsFocus} onChange={editSettings} />
+                    readOnly={!canEdit} issues={placed.bySection} focus={settingsFocus} onChange={editSettings}
+                    warmup={{ value: warmup, canChange: canPublish && !archived, busy: warmupBusy, onSave: saveWarmup }} />
                 </section>
               )}
             </div>

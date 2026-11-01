@@ -1895,6 +1895,47 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/flows/{id}/warmup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Turns the warm-up of a flow on or off and sets its length. A window already running keeps its
+         *     start and counts the new length from it; turning it off lets everyone waiting in at once.
+         *     Needs the publisher role and is audited as `flow.warmup_changed`.
+         */
+        put: operations["set_flow_warmup"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/flows/{id}/warmup/open": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Ends the warm-up window early: everyone waiting is admitted now, through the same checks as
+         *     any entry. Needs the admin role and is audited as `flow.warmup_opened`.
+         */
+        post: operations["open_flow_warmup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/forwarding/dead-letters": {
         parameters: {
             query?: never;
@@ -7138,6 +7179,8 @@ export interface components {
         FlowDetailBody: components["schemas"]["FlowBody"] & {
             graph: components["schemas"]["FlowGraph"];
             settings: components["schemas"]["FlowSettings"];
+            /** @description The warm-up that ramps enrollments into the flow after it starts taking them. */
+            warmup: components["schemas"]["WarmupBody"];
         };
         /** @description The output port `port` of node `from` leads to node `to`. Every port of every node is wired exactly once. */
         FlowEdge: {
@@ -11288,6 +11331,51 @@ export interface components {
             /** @description The unique key of the `flow.step` job the runtime would enqueue. */
             key: string;
             node: string;
+        };
+        /** @description The warm-up of a flow: its setting and the window it last started. */
+        WarmupBody: {
+            /**
+             * Format: int64
+             * @description Entries admitted since the window started.
+             */
+            admitted: number;
+            /** @description Whether a window holds back enrollments when the flow starts taking them. */
+            enabled: boolean;
+            /**
+             * Format: date-time
+             * @description When the window ends, `started_at` plus `seconds`; null before it started.
+             */
+            ends_at?: string | null;
+            /**
+             * Format: date-time
+             * @description When an Admin ended the window early; null when none did.
+             */
+            opened_at?: string | null;
+            /**
+             * Format: int32
+             * @description The length of the window, 60 to 86400 seconds.
+             */
+            seconds: number;
+            /**
+             * Format: date-time
+             * @description When the window last started: the first publish or the last resume. Null before either.
+             */
+            started_at?: string | null;
+            /**
+             * Format: int64
+             * @description Entries still waiting for their turn.
+             */
+            waiting: number;
+        };
+        WarmupRequest: {
+            /** @description Whether a window holds back enrollments when the flow starts taking them. */
+            enabled: boolean;
+            /**
+             * Format: int32
+             * @description The length of the window in seconds, 60 to 86400.
+             * @example 300
+             */
+            seconds: number;
         };
         WebhookAccepted: {
             /** @description Payloads appended to the inbox: always 1. They are durable, not yet applied. */
@@ -18905,6 +18993,141 @@ export interface operations {
                 };
             };
             /** @description The flow is a draft or the version is not older than the current one (`code` is `flow_state`), or the flow is archived (`flow_archived`) or paused (`flow_paused`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    set_flow_warmup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Flow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WarmupRequest"];
+            };
+        };
+        responses: {
+            /** @description The flow with its new warm-up */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FlowDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a publisher, a key without the publish scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or flow, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The flow is archived (`code` is `flow_archived`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A length outside 60 to 86400 seconds */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    open_flow_warmup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Flow id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The flow, no longer warming up */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FlowDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not an admin, a key without the admin scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or flow, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The flow is not published: a draft, paused or archived flow cannot be opened */
             409: {
                 headers: {
                     [name: string]: unknown;

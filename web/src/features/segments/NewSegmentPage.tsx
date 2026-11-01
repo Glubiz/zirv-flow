@@ -1,7 +1,8 @@
+import { useState } from "react";
 import { useParams } from "react-router";
 
 import { EmptyState, PageHeader, Panel } from "../../ui";
-import { useAssistantEnabled } from "../assistant";
+import { AssistantToggle, useAssistantAccess, useAssistantDock } from "../assistant";
 import { useSegmentAccess } from "./access";
 import { SegmentForm } from "./SegmentForm";
 
@@ -12,17 +13,27 @@ export function NewSegmentPage() {
 
 function NewSegment({ workspaceId }: { workspaceId: string }) {
   const { canWrite, canUseAssistant } = useSegmentAccess(workspaceId);
-  const assistantOn = useAssistantEnabled(workspaceId, canUseAssistant);
+  const { enabled: assistantOn, reload: reloadAssistant } = useAssistantAccess(workspaceId, canUseAssistant);
+  const dock = useAssistantDock();
+  const [dockSlot, setDockSlot] = useState<HTMLElement | null>(null);
   return (
-    <div className="page">
-      <PageHeader title="New segment" breadcrumb={{ group: "Audience", section: "Segments", to: `/w/${workspaceId}/segments` }} lede="Say who belongs, and watch the count as you build the rule." />
-      {canWrite ? (
-        <SegmentForm workspaceId={workspaceId} segment={null} canWrite assistant={assistantOn} />
-      ) : (
-        <Panel flush>
-          <EmptyState title="You cannot create segments">Ask a member of the workspace to create one, or to give you a role.</EmptyState>
-        </Panel>
-      )}
+    <div className="dock-layout">
+      <div className="page">
+        <PageHeader
+          title="New segment"
+          breadcrumb={{ group: "Audience", section: "Segments", to: `/w/${workspaceId}/segments` }}
+          lede="Say who belongs, and watch the count as you build the rule."
+          actions={canWrite && assistantOn ? <AssistantToggle open={dock.open} onToggle={dock.toggle} /> : null}
+        />
+        {canWrite ? (
+          <SegmentForm workspaceId={workspaceId} segment={null} canWrite assistant={assistantOn} onAssistantGone={reloadAssistant} dockSlot={dockSlot} />
+        ) : (
+          <Panel flush>
+            <EmptyState title="You cannot create segments">Ask a member of the workspace to create one, or to give you a role.</EmptyState>
+          </Panel>
+        )}
+      </div>
+      <div className="dock-slot" ref={setDockSlot} />
     </div>
   );
 }

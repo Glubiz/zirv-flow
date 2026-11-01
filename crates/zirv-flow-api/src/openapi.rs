@@ -155,6 +155,8 @@ use crate::workspaces::{
         flows::publish::pause,
         flows::publish::resume,
         flows::publish::archive,
+        flows::warmup::set,
+        flows::warmup::open,
         flows::test_mode::test,
         flows::triggers::enroll_person,
         flows::triggers::start,

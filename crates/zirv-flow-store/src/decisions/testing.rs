@@ -143,6 +143,18 @@ fn check_decision(row: &Value) -> Result<(), String> {
                     return Err("subject_ids.version: version is not a number".into());
                 }
             }
+            "admit_at" => {
+                let parsed = value.as_str().is_some_and(|time| {
+                    time::OffsetDateTime::parse(
+                        time,
+                        &time::format_description::well_known::Rfc3339,
+                    )
+                    .is_ok()
+                });
+                if !parsed {
+                    return Err("subject_ids.admit_at: admit_at is not a time".into());
+                }
+            }
             _ => {
                 if !decision_actions::ALL
                     .iter()
@@ -506,6 +518,16 @@ mod tests {
         row["reason"] = json!("not a code");
         insert(&pool, ws, row, false).await;
         rejection(&pool, "reason is not a code").await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_admit_at_that_is_not_a_time_is_rejected(pool: PgPool) {
+        let ws = workspace(&pool).await;
+        let mut row = valid_row();
+        row["subject_ids"]["admit_at"] = json!(PERSONAL_DATA.email);
+        insert(&pool, ws, row, false).await;
+        rejection(&pool, "subject_ids.admit_at: admit_at is not a time").await;
     }
 
     #[sqlx::test]

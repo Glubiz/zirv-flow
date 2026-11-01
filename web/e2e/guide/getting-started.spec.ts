@@ -296,6 +296,10 @@ test("getting started on a clean Compose stack", async ({ page, request }) => {
     await expect(page.getByRole("dialog")).toContainText("1 person in Newsletter readers");
     await page.getByRole("dialog").getByRole("button", { name: "Publish version 1", exact: true }).click();
     await expect(page.getByRole("dialog")).toBeHidden();
+    // The first newsletter would arrive within the warm-up window; let everyone in at once.
+    await page.getByRole("button", { name: "Open now", exact: true }).click();
+    await page.getByRole("dialog").getByRole("button", { name: "Open now", exact: true }).click();
+    await expect(page.getByRole("dialog")).toBeHidden();
     const flowMessage = await receipt(page, 1, "Spring is here");
     await expect(async () => {
       await page.reload();

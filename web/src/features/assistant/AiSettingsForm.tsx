@@ -1,16 +1,19 @@
 import { useState, type SyntheticEvent } from "react";
+import { createPortal } from "react-dom";
 
 import {
   ApiError,
   client,
   describeError,
   unwrap,
+  useResource,
   type components,
   type ErrorSummary,
   type FieldError,
 } from "../../api";
-import { Button, formatDateTime, InlineError, Panel, Pill, SelectField, TextField } from "../../ui";
-import { fromMicros, toMicros } from "./money";
+import { Button, Dialog, formatDateTime, InlineError, Panel, Pill, SelectField, TextField } from "../../ui";
+import { useLeaveGuard } from "../segments";
+import { formatMicros, fromMicros, toMicros } from "./money";
 
 type Models = components["schemas"]["AiModelsBody"];
 type Settings = components["schemas"]["AiSettingsBody"];
@@ -29,6 +32,8 @@ interface AiSettingsFormProps {
   models: Models;
   settings: Settings;
   onSaved: () => void;
+  /** Where the one Save button goes, in the page header; absent, it stays with the form. */
+  saveSlot?: HTMLElement | null;
 }
 
 interface Failure {
@@ -42,7 +47,26 @@ function failureOf(error: unknown): Failure {
   return { summary: describeError(error), capabilities };
 }
 
-export function AiSettingsForm({ workspaceId, models, settings, onSaved }: AiSettingsFormProps) {
+/** How much of the monthly budget is used, as a bar and in words. Nothing while the usage cannot be read. */
+function SpendMeter({ workspaceId, version }: { workspaceId: string; version: string }) {
+  const usage = useResource(
+    () => unwrap(client.GET("/api/v1/workspaces/{ws}/ai/usage", { params: { path: { ws: workspaceId } } })),
+    [workspaceId, version],
+  );
+  if (usage.status !== "ready") return null;
+  const { spent_micros: spent, budget_micros: budget } = usage.data;
+  const percent = budget === 0 ? 100 : Math.min(100, Math.floor((spent / budget) * 100));
+  return (
+    <div className="stack-tight">
+      <progress aria-label={`${percent} percent of the monthly budget used`} max={100} value={percent} />
+      <p className="faint">
+        {formatMicros(spent)} of {formatMicros(budget)} used this month
+      </p>
+    </div>
+  );
+}
+
+export function AiSettingsForm({ workspaceId, models, settings, onSaved, saveSlot }: AiSettingsFormProps) {
   const [enabled, setEnabled] = useState(settings.enabled);
   const [providerId, setProviderId] = useState(settings.provider_id ?? "");
   const [model, setModel] = useState(settings.model ?? "");
@@ -61,6 +85,16 @@ export function AiSettingsForm({ workspaceId, models, settings, onSaved }: AiSet
   const daysValid = Number.isInteger(dayCount) && dayCount >= 1 && dayCount <= 30;
   const needsKey = enabled && key.trim() === "" && !settings.provider_key_set;
   const incomplete = enabled && (!provider || !chosen);
+  const changed =
+    enabled !== settings.enabled ||
+    providerId !== (settings.provider_id ?? "") ||
+    model !== (settings.model ?? "") ||
+    key.trim() !== "" ||
+    budgetMicros !== settings.monthly_budget_micros ||
+    pii !== settings.pii_opt_in ||
+    keepTranscripts !== (settings.transcript_days != null) ||
+    (keepTranscripts && dayCount !== settings.transcript_days);
+  const guard = useLeaveGuard(changed && !busy);
   const invalid = budgetMicros === null || (keepTranscripts && !daysValid) || needsKey || incomplete;
 
   function chooseProvider(id: string) {
@@ -68,9 +102,9 @@ export function AiSettingsForm({ workspaceId, models, settings, onSaved }: AiSet
     setModel(models.providers.find((entry) => entry.id === id)?.models[0]?.name ?? "");
   }
 
-  async function submit(event: SyntheticEvent) {
-    event.preventDefault();
-    if (budgetMicros === null) return;
+  async function submit(event?: SyntheticEvent) {
+    event?.preventDefault();
+    if (budgetMicros === null || invalid || !changed) return;
     setBusy(true);
     setFailure(null);
     try {
@@ -96,19 +130,38 @@ export function AiSettingsForm({ workspaceId, models, settings, onSaved }: AiSet
     }
   }
 
+  const saveButton = (
+    <Button type="button" variant="primary" disabled={busy || invalid || !changed} onClick={() => void submit()}>
+      {busy ? "Saving" : "Save"}
+    </Button>
+  );
+
   return (
     <form className="stack" onSubmit={(event) => void submit(event)} noValidate>
-      <Panel title="Provider and model">
+      <Panel title="On for this workspace">
         <div className="stack">
           <label className="check">
-            <input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />
-            <span>
-              Turn the assistant on{" "}
-              <span className="faint">
-                Saving runs a short check that the model can call tools and reports its token use.
-              </span>
-            </span>
+            <input type="checkbox" role="switch" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />
+            <span>Turn on for this workspace</span>
           </label>
+          <dl className="facts">
+            <div className="fact">
+              <dt>Drafts</dt>
+              <dd>Segments, flows, templates and source mappings</dd>
+            </div>
+            <div className="fact">
+              <dt>Explains</dt>
+              <dd>Segments, flows and why someone got a message</dd>
+            </div>
+            <div className="fact">
+              <dt>Never</dt>
+              <dd>Publishes, sends, deletes or changes consent. It cannot act on its own.</dd>
+            </div>
+          </dl>
+        </div>
+      </Panel>
+      <Panel title="Provider and model">
+        <div className="stack">
           <SelectField label="Provider" value={providerId} onChange={(event) => chooseProvider(event.target.value)}>
             <option value="">Choose a provider</option>
             {models.providers.map((entry) => (
@@ -164,43 +217,30 @@ export function AiSettingsForm({ workspaceId, models, settings, onSaved }: AiSet
         </div>
       </Panel>
       <Panel title="Spending">
-        <TextField
-          label="Monthly budget"
-          type="number"
-          inputMode="decimal"
-          min="0"
-          step="0.01"
-          hint="In your deployment's currency, per calendar month (UTC). With 0 the assistant makes no calls."
-          value={budget}
-          onChange={(event) => setBudget(event.target.value)}
-          error={budgetMicros === null ? "Enter an amount of 0 or more." : undefined}
-        />
+        <div className="stack">
+          <TextField
+            label="Monthly budget"
+            type="number"
+            inputMode="decimal"
+            min="0"
+            step="0.01"
+            hint="In your deployment's currency, per calendar month (UTC). With 0 the assistant makes no calls."
+            value={budget}
+            onChange={(event) => setBudget(event.target.value)}
+            error={budgetMicros === null ? "Enter an amount of 0 or more." : undefined}
+          />
+          <SpendMeter workspaceId={workspaceId} version={JSON.stringify(settings)} />
+        </div>
       </Panel>
       <Panel title="Privacy">
         <div className="stack">
           <label className="check">
             <input type="checkbox" checked={pii} onChange={(event) => setPii(event.target.checked)} />
-            <span>
-              Allow personal data in requests{" "}
-              <span className="faint">
-                Off, the assistant sees only field names, types and counts. On, it may also see identifiers and property
-                values of people, and sends them to the provider.
-              </span>
-            </span>
+            <span>Allow personal data in requests</span>
           </label>
           <label className="check">
-            <input
-              type="checkbox"
-              checked={keepTranscripts}
-              onChange={(event) => setKeepTranscripts(event.target.checked)}
-            />
-            <span>
-              Keep transcripts{" "}
-              <span className="faint">
-                Off, requests and answers are not stored; only a log of counts and names is kept. On, they are stored for
-                the days below and then deleted.
-              </span>
-            </span>
+            <input type="checkbox" checked={keepTranscripts} onChange={(event) => setKeepTranscripts(event.target.checked)} />
+            <span>Keep transcripts</span>
           </label>
           {keepTranscripts ? (
             <TextField
@@ -230,11 +270,19 @@ export function AiSettingsForm({ workspaceId, models, settings, onSaved }: AiSet
           ) : null}
         </div>
       ) : null}
-      <div className="form-actions">
-        <Button type="submit" variant="primary" disabled={busy || invalid}>
-          {busy ? "Saving" : "Save settings"}
-        </Button>
-      </div>
+      {saveSlot === undefined ? <div className="form-actions">{saveButton}</div> : null}
+      {saveSlot ? createPortal(saveButton, saveSlot) : null}
+      {guard.pending !== null ? (
+        <Dialog title="Leave without saving?" onClose={guard.stay}>
+          <p className="muted">You have changes that are not saved. If you leave now, they are lost.</p>
+          <div className="dialog-actions">
+            <Button onClick={guard.stay}>Keep editing</Button>
+            <Button variant="primary" onClick={guard.leave}>
+              Leave without saving
+            </Button>
+          </div>
+        </Dialog>
+      ) : null}
     </form>
   );
 }

@@ -631,6 +631,9 @@ mod tests {
             )
             .await
             .unwrap();
+            zirv_flow_store::set_warmup(&mut connection, self.ws, id, false, 300)
+                .await
+                .unwrap();
             drop(connection);
             let mut tx = zirv_flow_store::begin(&self.pool).await.unwrap();
             let locked = zirv_flow_store::lock_flow(&mut tx, self.ws, id)

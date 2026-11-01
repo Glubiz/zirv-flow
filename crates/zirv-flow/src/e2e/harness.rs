@@ -623,6 +623,14 @@ impl World {
             )
             .await;
         let id = created["id"].as_str().expect("a flow id").to_owned();
+        // The tests that use this are about what a flow does, not the ramp that admits people.
+        self.api_ok(
+            "PUT",
+            &format!("/flows/{id}/warmup"),
+            Some(json!({"enabled": false, "seconds": 300})),
+            StatusCode::OK,
+        )
+        .await;
         self.api_ok(
             "POST",
             &format!("/flows/{id}/publish"),

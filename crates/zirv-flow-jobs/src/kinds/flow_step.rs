@@ -335,6 +335,7 @@ impl Walk<'_> {
             graph: Some(GraphPoint {
                 version: enrollment.flow_version,
                 node: node.map(str::to_owned),
+                admit_at: None,
             }),
             workspace_id: self.workspace,
             trace: enrollment.trace.clone(),
@@ -1445,9 +1446,15 @@ pub(super) mod tests {
             let trace = TraceContext::root(Cause::manual(zirv_flow_core::UserId::from_uuid(
                 Uuid::new_v4(),
             )));
-            zirv_flow_store::resume_flow(&mut tx, self.ws, flow, &trace)
-                .await
-                .unwrap();
+            zirv_flow_store::resume_flow(
+                &mut tx,
+                &Clock::Manual(self.clock.clone()),
+                self.ws,
+                flow,
+                &trace,
+            )
+            .await
+            .unwrap();
             zirv_flow_store::commit(tx).await.unwrap();
             trace
         }
@@ -1564,6 +1571,10 @@ pub(super) mod tests {
 
         pub(crate) async fn publish(&self, id: Uuid) -> i32 {
             let mut tx = zirv_flow_store::begin(&self.pool).await.unwrap();
+            // The tests that use this are about the steps of a flow, not the ramp that admits people.
+            zirv_flow_store::set_warmup(&mut tx, self.ws, id, false, 300)
+                .await
+                .unwrap();
             let locked = zirv_flow_store::lock_flow(&mut tx, self.ws, id)
                 .await
                 .unwrap();

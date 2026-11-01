@@ -6,6 +6,7 @@ import { DurationField, EventFilters, EventSelect, fieldError, SegmentSelect } f
 import { issueText, type Section } from "./issues";
 import { NIL_UUID, type FlowIssue, type Settings } from "./model";
 import { blankTrigger, TRIGGER_KINDS, type TriggerType } from "./triggers";
+import { WarmupSetting, type Warmup } from "./Warmup";
 
 type Trigger = Settings["trigger"];
 type Goal = NonNullable<Settings["goal"]>;
@@ -27,6 +28,8 @@ interface Props {
   issues: ReadonlyMap<Section, readonly FlowIssue[]>;
   focus: SettingsFocus | null;
   onChange: (change: (settings: Settings) => Settings, key?: string) => void;
+  /** The warm-up of the flow: its own setting, saved apart from the draft; not shown for a past version. */
+  warmup?: { value: Warmup; canChange: boolean; busy: boolean; onSave: (enabled: boolean, seconds: number) => void };
 }
 
 function SectionBlock({
@@ -72,7 +75,16 @@ function SectionBlock({
 }
 
 /** The flow settings: what starts it, who may enter again, the goal and what ends a person's run. */
-export function SettingsView({ workspaceId, settings, catalog, readOnly, issues, focus, onChange }: Props) {
+export function SettingsView({
+  workspaceId,
+  settings,
+  catalog,
+  readOnly,
+  issues,
+  focus,
+  onChange,
+  warmup,
+}: Props) {
   const empty: readonly FlowIssue[] = [];
   const at = (section: Section) => issues.get(section) ?? empty;
   const trigger = settings.trigger;
@@ -340,6 +352,15 @@ export function SettingsView({ workspaceId, settings, catalog, readOnly, issues,
           <Button onClick={() => setCriteria([...criteria, { type: "leaves_segment" }])}>Add an exit rule</Button>
         )}
       </SectionBlock>
+
+      {warmup ? (
+        <section className="panel panel-pad" aria-labelledby="flow-section-warmup">
+          <h2 className="panel-title" id="flow-section-warmup">
+            Warm-up
+          </h2>
+          <WarmupSetting warmup={warmup.value} canChange={warmup.canChange} busy={warmup.busy} onSave={warmup.onSave} />
+        </section>
+      ) : null}
     </div>
   );
 }

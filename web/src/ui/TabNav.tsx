@@ -14,7 +14,7 @@ interface TabState {
 }
 
 /** The tab named by a URL parameter. The first tab is the default and is left out of the URL. */
-export function useTabParam(tabs: readonly TabEntry[], param: "tab" | "filter" = "tab"): TabState {
+export function useTabParam(tabs: readonly TabEntry[], param: "tab" | "filter" | "dock" = "tab"): TabState {
   const [params] = useSearchParams();
   const first = tabs[0]?.id ?? "";
   const asked = params.get(param);
@@ -32,7 +32,7 @@ export function useTabParam(tabs: readonly TabEntry[], param: "tab" | "filter" =
 interface TabNavProps {
   label: string;
   tabs: readonly TabEntry[];
-  param?: "tab" | "filter";
+  param?: "tab" | "filter" | "dock";
 }
 
 /** Page sections (`?tab=`) and list filters (`?filter=`): links that keep the choice in the URL. */

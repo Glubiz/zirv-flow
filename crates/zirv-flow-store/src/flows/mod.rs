@@ -18,6 +18,7 @@ mod send;
 mod signing;
 mod state;
 mod triggers;
+mod warmup;
 
 pub(crate) use arrivals::{Arrival, enqueue_arrivals};
 pub use arrivals::{StoredEvent, find_event_of_person};
@@ -69,6 +70,10 @@ pub use triggers::{
     AudienceSource, ENROLL_JOB_KIND, EnrollJobPayload, EnrollWork, TriggerEvent, TriggerKind,
     TriggeredFlow, audience_page, enroll_page_key, find_events, lock_audience_page, occurrence_of,
     reconcile_flow_schedules, segment_trigger_flows,
+};
+pub use warmup::{
+    DEFAULT_WARMUP_SECONDS, MAX_WARMUP_SECONDS, MIN_WARMUP_SECONDS, Warmup, WarmupCounts,
+    open_warmup, set_warmup, warmup_counts,
 };
 
 #[cfg(test)]
@@ -207,7 +212,9 @@ pub(crate) mod tests_support {
         let mut tx = begin(pool).await?;
         let flow = match action {
             FlowAction::Pause => pause_flow(&mut tx, ws, id, &trace()).await?,
-            FlowAction::Resume => resume_flow(&mut tx, ws, id, &trace()).await?,
+            FlowAction::Resume => {
+                resume_flow(&mut tx, &crate::Clock::default(), ws, id, &trace()).await?
+            }
             FlowAction::Archive => archive_flow(&mut tx, ws, id, &trace()).await?,
             FlowAction::Publish => unreachable!("a publish is not a transition"),
         };

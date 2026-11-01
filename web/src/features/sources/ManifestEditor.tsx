@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { client, describeError, unwrap, type ErrorSummary } from "../../api";
-import { AssistantPanel } from "../assistant";
+import { AssistantDock, AssistantPanel, AssistantToggle, useAssistantDock } from "../assistant";
 import { Button, EmptyState, InlineError, LoadingState, SelectField, TextAreaField } from "../../ui";
 import { issueText } from "./labels";
 import { analyze, lineOfPointer, offsetOfLine, prettyPrint, STARTERS, starterManifest, type AuthType } from "./manifest";
@@ -66,6 +66,10 @@ export function ManifestEditor({
   disabled = false,
 }: ManifestEditorProps) {
   const area = useRef<HTMLTextAreaElement>(null);
+  const dock = useAssistantDock();
+  /** Once opened, the dock stays mounted while closed, so a draft under review survives closing it. */
+  const [dockUsed, setDockUsed] = useState(dock.open);
+  if (dock.open && !dockUsed) setDockUsed(true);
   const analysis = useMemo(() => analyze(value), [value]);
   const [verdict, setVerdict] = useState<Verdict | null>(null);
   const [unreachable, setUnreachable] = useState<string | null>(null);
@@ -150,6 +154,7 @@ export function ManifestEditor({
   }
 
   return (
+    <div className="dock-layout">
     <div className="stack">
       {blank ? (
         <SelectField
@@ -184,6 +189,7 @@ export function ManifestEditor({
         <Button onClick={format} disabled={disabled || !analysis.ok || blank}>
           Format
         </Button>
+        {disabled ? null : <AssistantToggle open={dock.open} onToggle={dock.toggle} />}
         <span className="faint" role="status">
           {blank
             ? "Nothing yet"
@@ -292,19 +298,29 @@ export function ManifestEditor({
       ) : (
         <p className="muted">Save the source to read a sample with its credential.</p>
       )}
-      {disabled ? null : (
-        <AssistantPanel
-          workspaceId={workspaceId}
-          kind="manifest"
-          sourceId={sourceId}
-          onAccept={(content) => {
-            const next = JSON.stringify(content, null, 2);
-            baseline.current = next;
-            onChange(next);
-          }}
-          confirmAccept={() => value === baseline.current || window.confirm("Replace the manifest you have edited with the assistant's draft?")}
+    </div>
+    {dockUsed && !disabled ? (
+      <div className="dock-slot">
+        <AssistantDock
+          thing="manifest"
+          hidden={!dock.open}
+          onClose={() => dock.setOpen(false)}
+          draft={
+                <AssistantPanel
+                  workspaceId={workspaceId}
+                  kind="manifest"
+                  sourceId={sourceId}
+                  onAccept={(content) => {
+                    const next = JSON.stringify(content, null, 2);
+                    baseline.current = next;
+                    onChange(next);
+                  }}
+                  confirmAccept={() => value === baseline.current || window.confirm("Replace the manifest you have edited with the assistant's draft?")}
+                />
+          }
         />
-      )}
+      </div>
+    ) : null}
     </div>
   );
 }

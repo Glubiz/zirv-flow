@@ -366,9 +366,10 @@ describe("the mapping dialog", () => {
     mount();
     const dialog = within(await openDialog(user));
 
-    await user.type(await dialog.findByLabelText("What do you want?"), "Map the email");
+    await user.click(dialog.getByRole("button", { name: "Assistant" }));
+    await user.type(await dialog.findByLabelText("Ask for a change"), "Map the email");
     await user.click(dialog.getByRole("button", { name: "Draft" }));
-    await user.click(await dialog.findByRole("button", { name: "Accept" }));
+    await user.click(await dialog.findByRole("button", { name: "Put into the draft" }));
 
     expect(await dialog.findByText("Loaded into the editor. Save to apply it.")).toBeInTheDocument();
     expect(dialog.getByLabelText("Field of row 1")).toHaveValue("email");
