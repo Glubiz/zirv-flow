@@ -12909,6 +12909,121 @@ email,b@example.com,
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_size_per_day_follows_the_membership_history_and_rejects_bad_days(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let one = workspace(&router, &owner, "One").await;
+        let two = workspace(&router, &owner, "Two").await;
+        define_plan(&pool, &one).await;
+        plan_people(
+            &pool,
+            &one,
+            &[("a@example.com", "pro"), ("b@example.com", "pro")],
+        )
+        .await;
+        let (_, read_key) = make_key(&router, &owner, &one, &["read"]).await;
+        let (_, write_key) = make_key(&router, &owner, &one, &["write"]).await;
+        let mine = make_segment(&router, Auth::Session(&owner), &one, "Mine", plan_is("pro"))
+            .await
+            .body["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let segment: uuid::Uuid = mine.parse().unwrap();
+        let people: Vec<uuid::Uuid> =
+            sqlx::query_scalar("SELECT id FROM people WHERE workspace_id = $1 ORDER BY id")
+                .bind(one.parse::<uuid::Uuid>().unwrap())
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        // The first is in since three days ago; the second entered yesterday and left today.
+        for (person, entered, exited) in [
+            (people[0], "3 days", None),
+            (people[1], "1 day", Some("0 days")),
+        ] {
+            sqlx::query(
+                "INSERT INTO segment_members (workspace_id, segment_id, person_id, version, \
+                    entered_at, entered_trace_id, entered_cause, exited_at, exited_trace_id, \
+                    exited_cause, exited_version) \
+                 SELECT $1, $2, $3, 1, now() - $4::interval, gen_random_uuid(), 'initial', \
+                    now() - $5::interval, \
+                    CASE WHEN $5::text IS NULL THEN NULL ELSE gen_random_uuid() END, \
+                    CASE WHEN $5::text IS NULL THEN NULL ELSE 'time' END, \
+                    CASE WHEN $5::text IS NULL THEN NULL ELSE 1 END",
+            )
+            .bind(one.parse::<uuid::Uuid>().unwrap())
+            .bind(segment)
+            .bind(person)
+            .bind(entered)
+            .bind(exited)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query("UPDATE segments SET member_count = 1 WHERE id = $1")
+            .bind(segment)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let uri = format!("{}/{mine}/size", segments_uri(&one));
+
+        let week = call(
+            &router,
+            "GET",
+            &format!("{uri}?days=5"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let default = call(&router, "GET", &uri, None, Auth::Session(&owner)).await;
+        let by_read_key = call(&router, "GET", &uri, None, Auth::Key(&read_key)).await;
+        let by_write_key = call(&router, "GET", &uri, None, Auth::Key(&write_key)).await;
+        let foreign = call(
+            &router,
+            "GET",
+            &format!("{}/{mine}/size", segments_uri(&two)),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let unknown = call(
+            &router,
+            "GET",
+            &format!("{}/{}/size", segments_uri(&one), uuid::Uuid::now_v7()),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(week.status, StatusCode::OK, "{:?}", week.body);
+        assert_eq!(week.body["timezone"], "UTC");
+        let days = week.body["days"].as_array().unwrap();
+        assert_eq!(days.len(), 5);
+        assert_eq!(week.body["from"], days[0]["date"]);
+        assert_eq!(week.body["to"], days[4]["date"]);
+        assert_eq!(week.body["current"], 1);
+        assert_eq!(days[4]["size"], 1, "the last day is the current count");
+        assert_eq!(days[0]["size"], 0, "before the first entry");
+        assert_eq!(default.body["days"].as_array().unwrap().len(), 30);
+        assert_eq!(by_read_key.status, StatusCode::OK);
+        assert_eq!(by_write_key.status, StatusCode::FORBIDDEN);
+        assert_eq!(foreign.status, StatusCode::NOT_FOUND);
+        assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+        for bad in ["days=0", "days=91", "days=x"] {
+            let reply = call(
+                &router,
+                "GET",
+                &format!("{uri}?{bad}"),
+                None,
+                Auth::Session(&owner),
+            )
+            .await;
+            assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{bad}");
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_preview_counts_samples_masks_by_role_and_reports_the_data_age(pool: PgPool) {
         let router = app(&pool).await;
         let owner = owner(&pool, &router).await;

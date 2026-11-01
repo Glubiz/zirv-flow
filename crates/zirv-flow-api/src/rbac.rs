@@ -303,6 +303,7 @@ pub(crate) const ROUTES: &[Route] = table! {
     Get    "/api/v1/workspaces/{ws}/segments/{id}/versions/{n}" => READ;
     Get    "/api/v1/workspaces/{ws}/segments/{id}/members" => READ, "values masked unless view_pii";
     Get    "/api/v1/workspaces/{ws}/segments/{id}/history" => READ, "values masked unless view_pii";
+    Get    "/api/v1/workspaces/{ws}/segments/{id}/size" => READ @ not_audited("read-only query");
     Post   "/api/v1/workspaces/{ws}/segments/{id}/refresh" => EDIT @ audited("segment.refresh_requested");
     Get    "/api/v1/workspaces/{ws}/people/{id}/explain" => READ, "values masked unless view_pii";
     // events

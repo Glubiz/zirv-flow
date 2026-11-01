@@ -22,6 +22,7 @@ use crate::AppState;
 use crate::auth::{Need, Principal, authorize, path_id};
 use crate::jobs_admin::{DEFAULT_LIMIT, parse_limit};
 use crate::problem::{ApiError, Problem};
+use crate::series::{DEFAULT_DAYS, format_day, parse_days};
 use crate::traces::DecisionBody;
 
 /// The longest node id a filter may name (the graph's own bound).
@@ -484,9 +485,6 @@ pub(crate) async fn counts(
     Ok(Json(VersionCountsBody { version, nodes }))
 }
 
-/// The days of an entries series when `days` is not given.
-const DEFAULT_ENTRY_DAYS: u32 = 30;
-
 #[derive(Serialize, ToSchema)]
 pub(crate) struct EntryDayBody {
     /// The UTC day, `YYYY-MM-DD`.
@@ -515,26 +513,12 @@ pub(crate) struct EntriesBody {
     previous_total: i64,
 }
 
-fn format_day(day: time::Date) -> String {
-    let format = time::macros::format_description!("[year]-[month]-[day]");
-    day.format(&format).unwrap_or_default()
-}
-
 fn parse_entries_query(query: &str) -> Result<(u32, Option<i32>), ApiError> {
-    let (mut days, mut version) = (DEFAULT_ENTRY_DAYS, None);
+    let (mut days, mut version) = (DEFAULT_DAYS, None);
     for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
         match key.as_ref() {
             "days" => {
-                days = value
-                    .parse::<u32>()
-                    .ok()
-                    .filter(|days| (1..=zirv_flow_store::MAX_ENTRY_DAYS).contains(days))
-                    .ok_or_else(|| {
-                        ApiError::bad_request(format!(
-                            "days must be a whole number from 1 to {}",
-                            zirv_flow_store::MAX_ENTRY_DAYS
-                        ))
-                    })?;
+                days = parse_days(&value, zirv_flow_store::MAX_ENTRY_DAYS)?;
             }
             "version" => {
                 version = Some(
@@ -761,11 +745,5 @@ mod tests {
         ] {
             assert!(parse_entries_query(bad).is_err(), "{bad}");
         }
-    }
-
-    #[test]
-    fn a_day_is_written_as_year_month_day() {
-        let day = time::Date::from_calendar_date(2026, time::Month::October, 1).unwrap();
-        assert_eq!(format_day(day), "2026-10-01");
     }
 }

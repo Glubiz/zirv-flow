@@ -29,8 +29,14 @@ function base(kind: "writer" | "reader" = "writer"): Record<string, Handler> {
     [`POST ${WS}/segments/preview`]: () => json(previewBody()),
     [`GET ${SEGMENT}`]: () => json(detail()),
     [`GET ${SEGMENT}/where-used`]: () => json({ flows: [], segments: [] }),
+    [`GET ${SEGMENT}/size`]: () => json(sizeSeries([0, 0])),
     [`GET ${SEGMENT}/history`]: () => json({ items: [], data_age: LIVE_AGE }),
   };
+}
+
+function sizeSeries(sizes: number[]) {
+  const days = sizes.map((size, index) => ({ date: `2026-10-${String(index + 1).padStart(2, "0")}`, size }));
+  return { from: "2026-10-01", to: days.at(-1)?.date ?? "", timezone: "UTC", days, current: sizes.at(-1) ?? 0 };
 }
 
 function mountPage(search = "?tab=rules") {
@@ -248,6 +254,54 @@ describe("segment page", () => {
     const related = screen.getByRole("complementary", { name: "Related" });
     expect(within(related).getByText("Built from")).toBeInTheDocument();
     expect(within(related).getByText("city")).toBeInTheDocument();
+  });
+
+  it("draws the size per day with a label worked out from the data, the count now, and a table", async () => {
+    const calls = mockApi({ ...base(), [`GET ${SEGMENT}/size`]: () => json(sizeSeries([1200, 1180, 1204])) });
+    const user = userEvent.setup();
+    mountPage("");
+
+    const panel = (await screen.findByRole("heading", { name: "Size, last 30 days" })).closest("section") as HTMLElement;
+    expect(
+      await within(panel).findByRole("img", {
+        name: "Segment size at the end of each of the last 3 days, between 1,180 and 1,204 people, 1,204 now",
+      }),
+    ).toBeInTheDocument();
+    expect(within(panel).getByText("1,204 people now")).toBeInTheDocument();
+    expect(within(panel).getByText("Days are UTC.")).toBeInTheDocument();
+    expect(calls.find((call) => call.path === `${SEGMENT}/size`)?.search).toBe("?days=30");
+    await user.click(within(panel).getByText("Show as table"));
+    expect(within(panel).getByRole("row", { name: "2 Oct 1,180" })).toBeInTheDocument();
+  });
+
+  it("says no one has been in the segment when every day is zero, and draws no chart", async () => {
+    mockApi(base());
+    mountPage("");
+
+    const panel = (await screen.findByRole("heading", { name: "Size, last 30 days" })).closest("section") as HTMLElement;
+    expect(await within(panel).findByText("No one has been in this segment in the last 30 days")).toBeInTheDocument();
+    expect(within(panel).queryByRole("img")).not.toBeInTheDocument();
+  });
+
+  it("shows the size loading in its own panel, then an error with a retry that reads it again", async () => {
+    let asked = 0;
+    mockApi({
+      ...base(),
+      [`GET ${SEGMENT}/size`]: () => {
+        asked += 1;
+        if (asked === 1) return new Promise<Response>((resolve) => setTimeout(() => resolve(problem(500, "Size failed", "The read failed.")), 20));
+        return json(sizeSeries([3, 4]));
+      },
+    });
+    const user = userEvent.setup();
+    mountPage("");
+
+    const panel = (await screen.findByRole("heading", { name: "Size, last 30 days" })).closest("section") as HTMLElement;
+    expect(within(panel).getByRole("status")).toHaveTextContent("Loading size");
+    expect(screen.getByRole("region", { name: "Who is in it" })).toBeInTheDocument();
+    expect(await within(panel).findByText("Size failed")).toBeInTheDocument();
+    await user.click(within(panel).getByRole("button", { name: "Try again" }));
+    expect(await within(panel).findByRole("img")).toBeInTheDocument();
   });
 
   it("lists the flows and segments that use it, with Live or Draft beside a flow", async () => {

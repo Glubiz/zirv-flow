@@ -38,6 +38,7 @@ mod request_id;
 mod retention;
 mod segments;
 mod sending;
+mod series;
 mod session;
 mod setup;
 mod snippets;
@@ -511,6 +512,10 @@ fn routes() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{ws}/segments/{id}/history",
             get(segments::members::history),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/segments/{id}/size",
+            get(segments::members::size),
         )
         .route(
             "/api/v1/workspaces/{ws}/segments/{id}/refresh",

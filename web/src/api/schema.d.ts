@@ -2983,6 +2983,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/segments/{id}/size": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * How many members the segment had at the end of each UTC day of the last `days` days,
+         *     worked back from the current count through the entries and exits. Aggregates only.
+         */
+        get: operations["get_segment_size"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/segments/{id}/versions": {
         parameters: {
             query?: never;
@@ -9680,6 +9700,30 @@ export interface components {
             /** Format: uuid */
             segment: string;
         };
+        SegmentSizeBody: {
+            /**
+             * Format: int64
+             * @description The member count now: the size at the end of the last day.
+             */
+            current: number;
+            /** @description One item per day, oldest first, including days nothing changed. */
+            days: components["schemas"]["SizeDayBody"][];
+            /**
+             * @description The first day of the window.
+             * @example 2026-10-01
+             */
+            from: string;
+            /**
+             * @description Always `UTC`: days are cut at midnight UTC.
+             * @example UTC
+             */
+            timezone: string;
+            /**
+             * @description The last day of the window: today.
+             * @example 2026-10-30
+             */
+            to: string;
+        };
         /** @description A condition on a person's trait. Beside `trait` go `op` and, for most operators, `value`. */
         SegmentTraitNode: {
             op: components["schemas"]["SegmentOp"];
@@ -9913,6 +9957,18 @@ export interface components {
             start_at: string;
             /** @description The nodes none of the synthetic people reached. */
             unreached_nodes: string[];
+        };
+        SizeDayBody: {
+            /**
+             * @description The UTC day, `YYYY-MM-DD`.
+             * @example 2026-10-01
+             */
+            date: string;
+            /**
+             * Format: int64
+             * @description Members at the end of that day.
+             */
+            size: number;
         };
         SkippedCountBody: {
             /** Format: int64 */
@@ -23547,6 +23603,79 @@ export interface operations {
             };
             /** @description The segment is archived (`code` is `segment_archived`) */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_segment_size: {
+        parameters: {
+            query?: {
+                /** @description Days to cover, 1 to 90; default 30 */
+                days?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Segment id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The size per day */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SegmentSizeBody"];
+                };
+            };
+            /** @description days is out of range or malformed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or segment, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The read ran past its time limit (`code` is `segment_preview_timeout`) */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

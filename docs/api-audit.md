@@ -216,6 +216,7 @@ The problem codes in use are listed in [the policy](api.md#problem-codes), and a
 | POST | `/api/v1/workspaces/{ws}/segments/{id}/archive` | `archive_segment` | not a creating POST | n/a | ok | convention G7: archive by POST action | ok | no |
 | GET | `/api/v1/workspaces/{ws}/segments/{id}/history` | `list_segment_history` | not a creating POST | ok | ok | strings G8: 2 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/segments/{id}/members` | `list_segment_members` | not a creating POST | ok | ok | ok | ok | no |
+| GET | `/api/v1/workspaces/{ws}/segments/{id}/size` | `get_segment_size` | not a creating POST | n/a | ok | ok | ok | no |
 | POST | `/api/v1/workspaces/{ws}/segments/{id}/refresh` | `refresh_segment` | not a creating POST | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/segments/{id}/versions` | `list_segment_versions` | not a creating POST | bounded collection | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/segments/{id}/versions/{n}` | `get_segment_version` | not a creating POST | n/a | ok | ok | ok | no |
