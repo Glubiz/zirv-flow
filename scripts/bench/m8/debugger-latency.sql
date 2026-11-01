@@ -20,9 +20,10 @@
 
 CREATE TEMP TABLE debugger_receipts (record jsonb NOT NULL);
 -- \copy does not interpolate psql variables; pass the path through the environment so
--- spaces and shell metacharacters stay data, including in a path supplied with -v.
+-- spaces and shell metacharacters stay data, including in a path supplied with -v. The
+-- commands avoid single quotes and shell expansion so cmd.exe (psql on Windows) runs them too.
 \setenv ZIRV_DEBUGGER_RECEIVE_FILE :receive_file
-\copy debugger_receipts FROM PROGRAM 'cat -- "$ZIRV_DEBUGGER_RECEIVE_FILE"' WITH (FORMAT csv, DELIMITER E'\x02', QUOTE E'\x01')
+\copy debugger_receipts FROM PROGRAM 'python3 -I -c "import os, shutil, sys; shutil.copyfileobj(open(os.environ[''ZIRV_DEBUGGER_RECEIVE_FILE''], ''rb''), sys.stdout.buffer)"' WITH (FORMAT csv, DELIMITER E'\x02', QUOTE E'\x01')
 
 SELECT count(*) FILTER (WHERE record->>'kind' = 'started') = 1
    AND count(*) FILTER (WHERE record->>'kind' = 'finished') = 1 AS complete
@@ -56,7 +57,7 @@ FROM debugger_run
     DO $$ BEGIN RAISE EXCEPTION 'invalid run boundaries or missing connected clients'; END $$;
 \endif
 
-\set client_host `python3 -I -c 'import socket; print(socket.gethostname().split(".")[0].lower())'`
+\set client_host `python3 -I -c "import socket; print(socket.gethostname().split('.')[0].lower())"`
 SELECT COALESCE(bool_and(record->>'host' = :'client_host'), false) AS same_host
 FROM debugger_receipts WHERE record->>'kind' = 'started'
 \gset
@@ -65,10 +66,10 @@ FROM debugger_receipts WHERE record->>'kind' = 'started'
     DO $$ BEGIN RAISE EXCEPTION 'psql host differs from the watcher host recorded in the receipt'; END $$;
 \endif
 
-\set client_before_us `python3 -I -c 'import time; print(time.time_ns() // 1000)'`
+\set client_before_us `python3 -I -c "import time; print(time.time_ns() // 1000)"`
 SELECT extract(epoch FROM now()) * 1000000 AS db_now_us
 \gset
-\set client_after_us `python3 -I -c 'import time; print(time.time_ns() // 1000)'`
+\set client_after_us `python3 -I -c "import time; print(time.time_ns() // 1000)"`
 
 CREATE TEMP TABLE debugger_clock AS
 SELECT (:'client_before_us'::numeric + :'client_after_us'::numeric) / 2 - :db_now_us AS offset_us,

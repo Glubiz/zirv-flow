@@ -82,7 +82,8 @@ PY
   [ -n "$cid" ] && [[ "$cid" != *$'\n'* ]] || die 'expected a single M8 serve container'
   docker inspect --format '{{json .Config.Env}}' "$cid" | python3 -I -c '
 import json, sys
-env = dict(item.split("=", 1) for item in json.load(sys.stdin))
+# A null override can list the bare key without a value; that variable is unset in the process.
+env = dict(item.split("=", 1) for item in json.load(sys.stdin) if "=" in item)
 value = env.get("ZIRV_FLOW_EXPLORER__INTERACTIVE_TIMEOUT_MS")
 expected = None if sys.argv[2] == "default" else sys.argv[2]
 if value != expected:

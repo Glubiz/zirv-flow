@@ -233,7 +233,7 @@ explorer_stub_run() (
     if [[ "$*" = *'ps -q'* ]]; then echo serve; fi
   }
   docker() {
-    if [ "$setting" = default ]; then echo '[]';
+    if [ "$setting" = default ]; then echo '["PATH=/bin","ZIRV_FLOW_EXPLORER__INTERACTIVE_TIMEOUT_MS"]';
     else echo '["ZIRV_FLOW_EXPLORER__INTERACTIVE_TIMEOUT_MS=15000"]'; fi
   }
   curl() {
