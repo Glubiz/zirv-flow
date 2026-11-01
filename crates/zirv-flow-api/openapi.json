@@ -16744,7 +16744,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/SegmentBody"
+                    "$ref": "#/components/schemas/SegmentListItemBody"
                   }
                 }
               }
@@ -17929,6 +17929,87 @@
           },
           "404": {
             "description": "No such workspace, segment or version, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/segments/{id}/where-used": {
+      "get": {
+        "tags": [
+          "segments"
+        ],
+        "summary": "The flows whose live or draft version uses the segment, and the segments that reference it.\nArchived flows are not listed.",
+        "operationId": "segment_where_used",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Segment id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Where the segment is used",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhereUsedBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or segment, or no access",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -40156,6 +40237,35 @@
           }
         }
       },
+      "SegmentListItemBody": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/SegmentBody"
+          },
+          {
+            "type": "object",
+            "required": [
+              "used_by_flows"
+            ],
+            "properties": {
+              "change_7d": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "People entered minus people left over the last 7 days; null while the segment is less than\n7 days old."
+              },
+              "used_by_flows": {
+                "type": "integer",
+                "format": "int64",
+                "description": "The number of flows whose live (published or paused) version uses the segment, each flow\nonce."
+              }
+            }
+          }
+        ],
+        "description": "A segment in the list, with where it is used and how its membership moved."
+      },
       "SegmentListNode": {
         "type": "object",
         "description": "The person is a member of the list.",
@@ -45032,6 +45142,88 @@
           "tolerance_seconds": {
             "type": "integer",
             "format": "int32"
+          }
+        }
+      },
+      "WhereUsedBody": {
+        "type": "object",
+        "required": [
+          "flows",
+          "segments"
+        ],
+        "properties": {
+          "flows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WhereUsedFlowBody"
+            },
+            "description": "By flow name; each flow once."
+          },
+          "segments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WhereUsedSegmentBody"
+            },
+            "description": "The other live segments whose current definition references the segment, by name."
+          }
+        }
+      },
+      "WhereUsedFlowBody": {
+        "type": "object",
+        "required": [
+          "flow_id",
+          "name",
+          "state",
+          "stage",
+          "uses"
+        ],
+        "properties": {
+          "flow_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "stage": {
+            "type": "string",
+            "description": "`live` when the live version uses the segment, `draft` when only the draft does.",
+            "example": "live"
+          },
+          "state": {
+            "type": "string",
+            "description": "The flow's lifecycle state: `draft`, `published` or `paused`."
+          },
+          "uses": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "How the version uses the segment: `trigger`, `filter`, `condition` or `goal`."
+          },
+          "version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The live version number; null for `draft`."
+          }
+        }
+      },
+      "WhereUsedSegmentBody": {
+        "type": "object",
+        "required": [
+          "segment_id",
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "segment_id": {
+            "type": "string",
+            "format": "uuid"
           }
         }
       },

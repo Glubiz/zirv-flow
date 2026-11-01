@@ -6,6 +6,7 @@ pub(crate) mod explain;
 pub(crate) mod members;
 pub(crate) mod preview;
 mod schema;
+pub(crate) mod uses;
 
 use std::time::Duration;
 

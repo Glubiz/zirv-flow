@@ -218,6 +218,7 @@ The problem codes in use are listed in [the policy](api.md#problem-codes), and a
 | POST | `/api/v1/workspaces/{ws}/segments/{id}/refresh` | `refresh_segment` | not a creating POST | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/segments/{id}/versions` | `list_segment_versions` | not a creating POST | bounded collection | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/segments/{id}/versions/{n}` | `get_segment_version` | not a creating POST | n/a | ok | ok | ok | no |
+| GET | `/api/v1/workspaces/{ws}/segments/{id}/where-used` | `segment_where_used` | not a creating POST | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/sender-identities` | `list_sender_identities` | not a creating POST | bounded collection | generic (1) | ok | ok | no |
 | POST | `/api/v1/workspaces/{ws}/sender-identities` | `create_sender_identity` | guarded | n/a | ok | ok | ok | no |
 | GET | `/api/v1/workspaces/{ws}/sender-identities/options` | `list_sender_identity_options` | not a creating POST | bounded collection | ok | ok | ok | no |
