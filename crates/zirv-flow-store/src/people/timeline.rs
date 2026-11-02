@@ -179,6 +179,15 @@ struct DecisionRow {
     trace_id: Uuid,
 }
 
+/// The people of a merge group, from the survivor (`$2`) down. The recursive step states
+/// `merged_into IS NOT NULL` so that `people_merged_into_idx` (a partial index) serves it.
+const GROUP_MEMBERS: &str = "WITH RECURSIVE group_ AS ( \
+         SELECT id FROM people WHERE workspace_id = $1 AND id = $2 \
+         UNION \
+         SELECT p.id FROM people p JOIN group_ g ON p.merged_into = g.id \
+         WHERE p.workspace_id = $1 AND p.merged_into IS NOT NULL) \
+     SELECT id FROM group_";
+
 /// The people that read as `person`: the survivor it was merged into (or itself) and everyone
 /// merged into that survivor. `None` when the workspace has no such person. Errors are
 /// bounded-read errors, so a timeout is reported as one.
@@ -198,14 +207,12 @@ pub(crate) async fn person_group(
     let Some(current) = current else {
         return Ok(None);
     };
-    let people = sqlx::query_scalar(
-        "WITH RECURSIVE group_ AS (              SELECT id FROM people WHERE workspace_id = $1 AND id = $2              UNION              SELECT p.id FROM people p JOIN group_ g ON p.merged_into = g.id              WHERE p.workspace_id = $1)          SELECT id FROM group_",
-    )
-    .bind(workspace.as_uuid())
-    .bind(current)
-    .fetch_all(connection)
-    .await
-    .map_err(StoreError::bounded)?;
+    let people = sqlx::query_scalar(GROUP_MEMBERS)
+        .bind(workspace.as_uuid())
+        .bind(current)
+        .fetch_all(connection)
+        .await
+        .map_err(StoreError::bounded)?;
     Ok(Some(people))
 }
 
@@ -761,5 +768,92 @@ mod tests {
             .collect();
         assert!(schemas.contains(&("signup".to_owned(), Some(1))));
         assert!(schemas.contains(&("unplanned_thing".to_owned(), None)));
+    }
+
+    async fn group_plan(pool: &PgPool, sql: &str, workspace: WorkspaceId, person: Uuid) -> String {
+        let mut connection = pool.acquire().await.unwrap();
+        let sql = format!("EXPLAIN (COSTS OFF) {sql}");
+        let lines: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+            .bind(workspace.as_uuid())
+            .bind(person)
+            .fetch_all(&mut *connection)
+            .await
+            .unwrap();
+        lines.join("\n")
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_group_lookup_does_not_scan_every_person(pool: PgPool) {
+        let ours = workspace(&pool, "ours").await;
+        let other = workspace(&pool, "other").await;
+        for (workspace, count) in [(ours, 60_000), (other, 60_000)] {
+            sqlx::query(
+                "INSERT INTO people (id, workspace_id) \
+                 SELECT gen_random_uuid(), $1 FROM generate_series(1, $2)",
+            )
+            .bind(workspace.as_uuid())
+            .bind(count)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let survivor: Uuid =
+            sqlx::query_scalar("SELECT id FROM people WHERE workspace_id = $1 LIMIT 1")
+                .bind(ours.as_uuid())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        sqlx::query("ANALYZE people").execute(&pool).await.unwrap();
+
+        // Without the index (the schema before #397) the lookup scans the table.
+        sqlx::query("DROP INDEX people_merged_into_idx")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let before = group_plan(&pool, GROUP_MEMBERS, ours, survivor).await;
+        sqlx::query("CREATE INDEX people_merged_into_idx ON people (workspace_id, merged_into) WHERE merged_into IS NOT NULL").execute(&pool).await.unwrap();
+        sqlx::query("ANALYZE people").execute(&pool).await.unwrap();
+        let current = group_plan(&pool, GROUP_MEMBERS, ours, survivor).await;
+
+        assert!(
+            !before.contains("people_merged_into_idx"),
+            "the check does not catch a missing index\n{before}"
+        );
+        assert!(
+            !current.contains("Seq Scan on people"),
+            "the group lookup scans every person\n{current}"
+        );
+        assert!(current.contains("people_merged_into_idx"), "{current}");
+    }
+
+    #[sqlx::test(migrations = false)]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_merged_into_index_migration_accepts_the_index_built_by_hand(pool: PgPool) {
+        let mut before = sqlx::migrate!("./migrations");
+        before.migrations = before
+            .migrations
+            .iter()
+            .filter(|migration| migration.version < 89)
+            .cloned()
+            .collect();
+        before.run(&pool).await.unwrap();
+        sqlx::raw_sql(
+            "CREATE INDEX CONCURRENTLY people_merged_into_idx \
+             ON people (workspace_id, merged_into) WHERE merged_into IS NOT NULL",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        crate::migrate(&pool).await.unwrap();
+
+        let indexes: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_indexes WHERE indexname = 'people_merged_into_idx'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(indexes, 1);
     }
 }
