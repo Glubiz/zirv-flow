@@ -12,13 +12,16 @@
 //!    existence does not leak), 403 for a caller who may see the workspace but not do this.
 
 use std::str::FromStr;
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use axum::extract::FromRequestParts;
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, Method};
+use hashbrown::HashMap;
 use zirv_flow_core::token::{hash_matches, sha256};
-use zirv_flow_core::{Capability, Role, Scope, UserId, WorkspaceId};
+use zirv_flow_core::{ApiKeyId, Capability, Role, Scope, UserId, WorkspaceId};
 use zirv_flow_store::{ApiKey, User, Workspace};
 
 use crate::problem::ApiError;
@@ -182,6 +185,34 @@ fn bearer(value: &str) -> Option<&str> {
     (scheme.eq_ignore_ascii_case("bearer") && !token.trim().is_empty()).then(|| token.trim())
 }
 
+/// How long this process leaves a key alone after recording its use. The store writes
+/// `last_used_at` at most once a minute, so asking more often only costs a round trip.
+const KEY_TOUCH_INTERVAL: Duration = Duration::from_secs(60);
+
+/// The keys this process recently recorded as used, so a busy key costs one write a minute
+/// and not a pool acquire on every request.
+#[derive(Default)]
+pub(crate) struct KeyTouches {
+    last: Mutex<HashMap<ApiKeyId, Instant>>,
+}
+
+impl KeyTouches {
+    /// Whether the key is due a touch at `now`; says yes once per interval per key. Entries
+    /// older than the interval are dropped as new ones come in, so the map stays small.
+    fn due(&self, id: ApiKeyId, now: Instant) -> bool {
+        let mut last = self.last.lock().unwrap_or_else(PoisonError::into_inner);
+        if last
+            .get(&id)
+            .is_some_and(|at| now.saturating_duration_since(*at) < KEY_TOUCH_INTERVAL)
+        {
+            return false;
+        }
+        last.retain(|_, at| now.saturating_duration_since(*at) < KEY_TOUCH_INTERVAL);
+        last.insert(id, now);
+        true
+    }
+}
+
 async fn authenticate_key(state: &AppState, presented: &str) -> Result<KeyPrincipal, ApiError> {
     let (id, secret) = credentials::parse_key(presented).ok_or_else(ApiError::unauthenticated)?;
     let stored = zirv_flow_store::find_api_key_for_auth(&state.pool, id)
@@ -190,7 +221,9 @@ async fn authenticate_key(state: &AppState, presented: &str) -> Result<KeyPrinci
     if !hash_matches(secret, &stored.secret_hash) || stored.key.revoked_at.is_some() {
         return Err(ApiError::unauthenticated());
     }
-    zirv_flow_store::touch_api_key(&state.pool, id).await?;
+    if state.key_touches.due(id, Instant::now()) {
+        zirv_flow_store::touch_api_key(&state.pool, id).await?;
+    }
     Ok(KeyPrincipal { key: stored.key })
 }
 
@@ -370,6 +403,28 @@ mod tests {
             csrf_hash: sha256(&credentials::csrf_token("token")).to_vec(),
             csrf_token: credentials::csrf_token("token"),
         }
+    }
+
+    #[test]
+    fn a_key_is_touched_once_per_interval() {
+        let touches = KeyTouches::default();
+        let (a, b) = (ApiKeyId::new(), ApiKeyId::new());
+        let start = Instant::now();
+        assert!(touches.due(a, start));
+        assert!(!touches.due(a, start + Duration::from_secs(59)));
+        assert!(touches.due(b, start + Duration::from_secs(59)));
+        assert!(touches.due(a, start + KEY_TOUCH_INTERVAL));
+    }
+
+    #[test]
+    fn stale_key_entries_are_dropped_on_insert() {
+        let touches = KeyTouches::default();
+        let start = Instant::now();
+        for _ in 0..100 {
+            assert!(touches.due(ApiKeyId::new(), start));
+        }
+        assert!(touches.due(ApiKeyId::new(), start + KEY_TOUCH_INTERVAL));
+        assert_eq!(touches.last.lock().unwrap().len(), 1);
     }
 
     #[test]
