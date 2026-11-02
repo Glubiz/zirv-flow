@@ -778,14 +778,20 @@ mod tests {
             let ws = workspace(&pool, slug).await;
             let flow = published(&pool, ws, "Plain").await;
             sqlx::query(
-                "INSERT INTO people (id, workspace_id)                  SELECT gen_random_uuid(), $1 FROM generate_series(1, 40000)",
+                "INSERT INTO people (id, workspace_id) \
+                 SELECT gen_random_uuid(), $1 FROM generate_series(1, 40000)",
             )
             .bind(ws.as_uuid())
             .execute(&pool)
             .await
             .unwrap();
             sqlx::query(
-                "INSERT INTO enrollments                     (id, workspace_id, flow_id, flow_version, person_id, state, node,                      occurrence_id, trace_id, cause_kind, cause_id)                  SELECT gen_random_uuid(), $1, $2, 1, p.id, 'active', 'draft',                         gen_random_uuid(), gen_random_uuid(), 'api', 't'                  FROM people p WHERE p.workspace_id = $1",
+                "INSERT INTO enrollments \
+                   (id, workspace_id, flow_id, flow_version, person_id, state, node, \
+                    occurrence_id, trace_id, cause_kind, cause_id) \
+                SELECT gen_random_uuid(), $1, $2, 1, p.id, 'active', 'draft', \
+                       gen_random_uuid(), gen_random_uuid(), 'api', 't' \
+                FROM people p WHERE p.workspace_id = $1",
             )
             .bind(ws.as_uuid())
             .bind(flow)
@@ -809,20 +815,15 @@ mod tests {
         .fetch_all(&pool)
         .await
         .unwrap();
-        let plan = lines.join(
-            "
-",
-        );
+        let plan = lines.join("\n");
 
         assert!(
             !plan.contains("Seq Scan on enrollments"),
-            "the in-flight count scans every enrollment
-{plan}"
+            "the in-flight count scans every enrollment\n{plan}"
         );
         assert!(
             plan.contains("Index Only Scan using enrollments_") && !plan.contains("Heap Scan"),
-            "the in-flight count reads the enrollment rows
-{plan}"
+            "the in-flight count reads the enrollment rows\n{plan}"
         );
     }
 
