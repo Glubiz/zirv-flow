@@ -186,8 +186,9 @@ fn bearer(value: &str) -> Option<&str> {
 }
 
 /// How long this process leaves a key alone after recording its use. The store writes
-/// `last_used_at` at most once a minute, so asking more often only costs a round trip.
-const KEY_TOUCH_INTERVAL: Duration = Duration::from_secs(60);
+/// `last_used_at` at most once a minute; half that here keeps a touch that lands just
+/// inside the store's minute from leaving the stamp two minutes stale.
+const KEY_TOUCH_INTERVAL: Duration = Duration::from_secs(30);
 
 /// The keys this process recently recorded as used, so a busy key costs one write a minute
 /// and not a pool acquire on every request.
@@ -211,6 +212,14 @@ impl KeyTouches {
         last.insert(id, now);
         true
     }
+
+    /// Makes the key due again, after a touch that failed.
+    fn forget(&self, id: ApiKeyId) {
+        self.last
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id);
+    }
 }
 
 async fn authenticate_key(state: &AppState, presented: &str) -> Result<KeyPrincipal, ApiError> {
@@ -221,8 +230,11 @@ async fn authenticate_key(state: &AppState, presented: &str) -> Result<KeyPrinci
     if !hash_matches(secret, &stored.secret_hash) || stored.key.revoked_at.is_some() {
         return Err(ApiError::unauthenticated());
     }
-    if state.key_touches.due(id, Instant::now()) {
-        zirv_flow_store::touch_api_key(&state.pool, id).await?;
+    if state.key_touches.due(id, Instant::now())
+        && let Err(error) = zirv_flow_store::touch_api_key(&state.pool, id).await
+    {
+        state.key_touches.forget(id);
+        return Err(error.into());
     }
     Ok(KeyPrincipal { key: stored.key })
 }
@@ -411,9 +423,19 @@ mod tests {
         let (a, b) = (ApiKeyId::new(), ApiKeyId::new());
         let start = Instant::now();
         assert!(touches.due(a, start));
-        assert!(!touches.due(a, start + Duration::from_secs(59)));
-        assert!(touches.due(b, start + Duration::from_secs(59)));
+        assert!(!touches.due(a, start + Duration::from_secs(29)));
+        assert!(touches.due(b, start + Duration::from_secs(29)));
         assert!(touches.due(a, start + KEY_TOUCH_INTERVAL));
+    }
+
+    #[test]
+    fn a_forgotten_key_is_due_again_at_once() {
+        let touches = KeyTouches::default();
+        let key = ApiKeyId::new();
+        let start = Instant::now();
+        assert!(touches.due(key, start));
+        touches.forget(key);
+        assert!(touches.due(key, start + Duration::from_secs(1)));
     }
 
     #[test]
