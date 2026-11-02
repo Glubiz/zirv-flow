@@ -206,7 +206,7 @@ pub use jobs::{
     Schedule, advance_schedule, claim_job, complete_job, create_schedule, database_now,
     disable_schedule, due_schedules, enqueue, enqueue_many, fail_job, find_job, heartbeat_job,
     kind_depths, list_dead_jobs, listen_for_jobs, lock_lease, purge_dead_jobs, queue_counts,
-    queue_depths, reap_expired, retry_dead_job, try_lead,
+    queue_depths, reap_expired, retry_dead_job, sample_queue_depths, try_lead,
 };
 pub use lists::{
     List, ListMember, ListSource, MAX_PEOPLE_PER_CALL, MemberIdentifier, MembershipChange,

@@ -316,10 +316,13 @@ async fn refresh_flows(conn: &mut PgConnection, workspace: Uuid) -> Result<(), S
     Ok(())
 }
 
+/// The flow ids come from the workspace's own published flows, and an enrollment's flow belongs
+/// to its workspace by foreign key, so the count needs no workspace predicate; with one, the
+/// planner cannot answer from `enrollments_in_flight_idx`, whose predicate the state list matches.
 const IN_FLOW_SNAPSHOT: &str = "INSERT INTO summary_flows (workspace_id, flow_id, people_in_flow, has_goal) \
      SELECT $1, p.flow_id, \
             (SELECT count(*) FROM enrollments e \
-             WHERE e.flow_id = p.flow_id AND e.workspace_id = $1 \
+             WHERE e.flow_id = p.flow_id \
                AND e.state IN ('active', 'waiting', 'held', 'failed')), \
             p.has_goal \
      FROM unnest($2::uuid[], $3::boolean[]) AS p (flow_id, has_goal) \
@@ -764,6 +767,63 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(per_flow, [(live, 1)]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_in_flight_count_is_answered_from_an_index_alone(pool: PgPool) {
+        crate::migrate(&pool).await.unwrap();
+        let mut flows = Vec::new();
+        for slug in ["ours", "other"] {
+            let ws = workspace(&pool, slug).await;
+            let flow = published(&pool, ws, "Plain").await;
+            sqlx::query(
+                "INSERT INTO people (id, workspace_id)                  SELECT gen_random_uuid(), $1 FROM generate_series(1, 40000)",
+            )
+            .bind(ws.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO enrollments                     (id, workspace_id, flow_id, flow_version, person_id, state, node,                      occurrence_id, trace_id, cause_kind, cause_id)                  SELECT gen_random_uuid(), $1, $2, 1, p.id, 'active', 'draft',                         gen_random_uuid(), gen_random_uuid(), 'api', 't'                  FROM people p WHERE p.workspace_id = $1",
+            )
+            .bind(ws.as_uuid())
+            .bind(flow)
+            .execute(&pool)
+            .await
+            .unwrap();
+            flows.push((ws, flow));
+        }
+        sqlx::query("VACUUM ANALYZE enrollments")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (ws, flow) = flows[0];
+
+        let lines: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN (COSTS OFF) {IN_FLOW_SNAPSHOT}"
+        )))
+        .bind(ws.as_uuid())
+        .bind(vec![flow])
+        .bind(vec![false])
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let plan = lines.join(
+            "
+",
+        );
+
+        assert!(
+            !plan.contains("Seq Scan on enrollments"),
+            "the in-flight count scans every enrollment
+{plan}"
+        );
+        assert!(
+            plan.contains("Index Only Scan using enrollments_") && !plan.contains("Heap Scan"),
+            "the in-flight count reads the enrollment rows
+{plan}"
+        );
     }
 
     #[sqlx::test]
