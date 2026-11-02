@@ -101,6 +101,7 @@ expect_failure 'M8_JOBS_CAP must be an integer' env M8_JOBS_CAP=0 bash "$here/jo
 expect_failure 'must be below M8_JOBS_CONCURRENCY (16)' env M8_JOBS_CAP=16 bash "$here/jobs.sh" "$raw"
 expect_failure 'must be below M8_JOBS_CONCURRENCY (4)' env M8_JOBS_CAP=4 M8_JOBS_CONCURRENCY=4 bash "$here/jobs.sh" "$raw"
 expect_failure 'seconds must be an integer' env M8_TIMERS_SECONDS=0 bash "$here/timers.sh" "$raw" "$pool"
+expect_failure 'worker_concurrency must be an integer' env M8_WORKER_CONCURRENCY=0 bash "$here/timers.sh" "$raw" "$pool"
 [ ! -s "$M8_TEST_CALLS" ]
 mkdir -p "$raw" "$M4_STATE/.." "$work/out"
 out="$work/out"

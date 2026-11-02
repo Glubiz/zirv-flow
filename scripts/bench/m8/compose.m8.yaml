@@ -35,6 +35,8 @@ services:
       - max_wal_size=8GB
       - -c
       - checkpoint_timeout=15min
+      - -c
+      - max_connections=${M8_PG_MAX_CONNECTIONS:-100}
 
   zirv-flow-key:
     <<: *m8-image

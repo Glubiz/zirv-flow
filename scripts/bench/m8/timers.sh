@@ -7,8 +7,9 @@ host_pg_setup
 seconds="${M8_TIMERS_SECONDS:-2400}"
 lead="${M8_TIMERS_LEAD_SECONDS:-600}"
 drain="${M8_DRAIN_SECONDS:-3600}"
+worker_concurrency="${M8_WORKER_CONCURRENCY:-4}"
 if [ -n "${M8_SMOKE:-}" ]; then seconds=5; lead=10; drain=60; fi
-for name in seconds lead drain; do positive_integer "$name" "${!name}"; done
+for name in seconds lead drain worker_concurrency; do positive_integer "$name" "${!name}"; done
 [ -x "${LOADGEN:-$root/target/release/loadgen}" ] || die 'no prebuilt loadgen'
 require_job_sampler
 sampler_pid=''; load_pid=''; worker_stopped=''
@@ -29,7 +30,18 @@ for mode in noload loaded; do
   compose stop -t 60 zirv-flow-worker
   host_pg -v seconds="$seconds" -v lead="$lead" -v enrollments="$M8_ENROLLMENTS" \
     -f "$m8_dir/timers-rearm.sql"
-  compose start zirv-flow-worker
+  # Pools per docs/operations/sizing.md: D (database.max_connections) stays at the shipped 10 and S
+  # (ingest.drain_shards) at 8; the worker then needs at most D + (2 + S) * C + 1 connections.
+  python3 -I - "$dest" "$worker_concurrency" <<'PY2'
+import json, pathlib, sys
+dest, c = pathlib.Path(sys.argv[1]), int(sys.argv[2])
+d, s = 10, 8
+(dest / 'worker.yaml').write_text(json.dumps({'services': {'zirv-flow-worker': {'environment': {
+    'ZIRV_FLOW_WORKER__CONCURRENCY': str(c)}}}}) + '\n')
+(dest / 'worker-sizing.json').write_text(json.dumps(dict(concurrency=c, database_max_connections=d,
+    drain_shards=s, worker_connection_ceiling=d + (2 + s) * c + 1), indent=2) + '\n')
+PY2
+  compose -f "$dest/worker.yaml" up -d --no-build --no-deps --force-recreate zirv-flow-worker
   worker_stopped=''
   wait_worker_metrics
   # The worker starts after the re-arm commits; the wakes must still lie ahead now.
@@ -46,9 +58,12 @@ for mode in noload loaded; do
   fi
   deadline=$((SECONDS + seconds + drain))
   while :; do
-    left="$(host_pg -At -c 'SELECT count(*) FROM jobs j JOIN m5bench.rows r ON r.job_id = j.id WHERE r.run = 1')"
-    [ "$left" != 0 ] || break
-    if [ "$SECONDS" -ge "$deadline" ]; then log "timer drain timed out with $left wake jobs; collecting $dest"; break; fi
+    # A cheap existence check: a 10 M row count every 5 s competes with the workload for database CPU.
+    [ "$(host_pg -At -c 'SELECT EXISTS (SELECT 1 FROM jobs j JOIN m5bench.rows r ON r.job_id = j.id WHERE r.run = 1)')" = t ] || break
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      left="$(host_pg -At -c 'SELECT count(*) FROM jobs j JOIN m5bench.rows r ON r.job_id = j.id WHERE r.run = 1')"
+      log "timer drain timed out with $left wake jobs; collecting $dest"; break
+    fi
     sleep 5
   done
   if [ -n "$load_pid" ]; then wait "$load_pid"; load_pid=''; fi
