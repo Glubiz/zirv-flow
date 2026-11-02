@@ -126,6 +126,14 @@ struct EnrollmentRow {
     ended_at: Option<OffsetDateTime>,
 }
 
+/// An enrollment as its lock reads it, with the workspace's time zone.
+#[derive(FromRow)]
+struct LockedRow {
+    #[sqlx(flatten)]
+    enrollment: EnrollmentRow,
+    workspace_zone: String,
+}
+
 impl EnrollmentRow {
     fn into_enrollment(self) -> Result<Enrollment, StoreError> {
         let decode = |what: &'static str| StoreError::query(sqlx::Error::Decode(what.into()));
@@ -178,19 +186,21 @@ const ENROLLMENT_ROW: &str = "id, workspace_id, flow_id, flow_version, person_id
 const ENROLLMENT_READ: &str = "WITH found AS MATERIALIZED ( \
          SELECT workspace_id, flow_id, person_id FROM enrollments WHERE id = $2) \
      SELECT f.flow_id, f.person_id, \
-         CASE WHEN p.workspace_id = f.workspace_id THEN p.merged_into END, w.timezone \
-     FROM found f JOIN workspaces w ON w.id = f.workspace_id \
-     LEFT JOIN people p ON p.id = f.person_id \
+         CASE WHEN p.workspace_id = f.workspace_id THEN p.merged_into END \
+     FROM found f LEFT JOIN people p ON p.id = f.person_id \
      WHERE f.workspace_id = $1";
 
 /// The enrollment's lock in a round of [`lock_enrollment`]: `$1` is the workspace, `$2` the
 /// enrollment and `$3` the person the round locked. The row is locked by primary key and checked
-/// after, so the plan never walks `enrollments_person_idx`.
+/// after, so the plan never walks `enrollments_person_idx`. The workspace's time zone is read
+/// here, after every lock of the step was taken, as the step read it before #397.
 fn enrollment_lock() -> String {
     format!(
         "WITH locked AS MATERIALIZED ( \
              SELECT {ENROLLMENT_ROW} FROM enrollments WHERE id = $2 FOR UPDATE) \
-         SELECT {ENROLLMENT_COLUMNS} FROM locked e WHERE e.workspace_id = $1 AND e.person_id = $3"
+         SELECT {ENROLLMENT_COLUMNS}, ws.timezone AS workspace_zone \
+         FROM locked e JOIN workspaces ws ON ws.id = e.workspace_id \
+         WHERE e.workspace_id = $1 AND e.person_id = $3"
     )
 }
 
@@ -199,20 +209,19 @@ fn enrollment_lock() -> String {
 const LOCK_ROUNDS: usize = 8;
 
 /// What is read of an enrollment, without a lock, before it is locked: the flow a step locks
-/// first, the person and the one they were merged into, and the workspace's time zone.
+/// first, and the person and the one they were merged into.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EnrollmentRead {
     pub flow_id: Uuid,
     person_id: Uuid,
     merged_into: Option<Uuid>,
-    workspace_zone: String,
 }
 
-/// An enrollment a step locked, with the zones it runs in.
+/// An enrollment a step locked, with the zones it runs in, both read after its locks.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StepEnrollment {
     pub enrollment: Enrollment,
-    /// The workspace's time zone, from the [`EnrollmentRead`].
+    /// The workspace's time zone.
     pub workspace_zone: String,
     /// The person's `timezone` trait as written (it may not be a zone; the engine falls back
     /// from an invalid one), read under the person's lock.
@@ -226,20 +235,17 @@ pub async fn read_enrollment(
     workspace: WorkspaceId,
     id: Uuid,
 ) -> Result<Option<EnrollmentRead>, StoreError> {
-    let row: Option<(Uuid, Uuid, Option<Uuid>, String)> = sqlx::query_as(ENROLLMENT_READ)
+    let row: Option<(Uuid, Uuid, Option<Uuid>)> = sqlx::query_as(ENROLLMENT_READ)
         .bind(workspace.as_uuid())
         .bind(id)
         .fetch_optional(connection)
         .await
         .map_err(StoreError::query)?;
-    Ok(row.map(
-        |(flow_id, person_id, merged_into, workspace_zone)| EnrollmentRead {
-            flow_id,
-            person_id,
-            merged_into,
-            workspace_zone,
-        },
-    ))
+    Ok(row.map(|(flow_id, person_id, merged_into)| EnrollmentRead {
+        flow_id,
+        person_id,
+        merged_into,
+    }))
 }
 
 /// [`lock_enrollment`] for a step that read the enrollment with [`read_enrollment`] before it
@@ -252,13 +258,7 @@ pub async fn lock_read_enrollment(
     id: Uuid,
     read: EnrollmentRead,
 ) -> Result<Option<StepEnrollment>, StoreError> {
-    let workspace_zone = read.workspace_zone.clone();
-    let locked = lock_enrollment_within(connection, workspace, id, Some(read), LOCK_ROUNDS).await?;
-    Ok(locked.map(|(enrollment, person_zone)| StepEnrollment {
-        enrollment,
-        workspace_zone,
-        person_zone,
-    }))
+    lock_enrollment_within(connection, workspace, id, Some(read), LOCK_ROUNDS).await
 }
 
 /// Locks an enrollment `FOR UPDATE` and reads it. Two steps of one enrollment run one after the
@@ -292,19 +292,18 @@ pub async fn lock_enrollment(
     id: Uuid,
 ) -> Result<Option<Enrollment>, StoreError> {
     let locked = lock_enrollment_within(connection, workspace, id, None, LOCK_ROUNDS).await?;
-    Ok(locked.map(|(enrollment, _)| enrollment))
+    Ok(locked.map(|locked| locked.enrollment))
 }
 
 /// [`lock_enrollment`] with its number of rounds given, starting from `read` when the caller
-/// has one; a retryable race when the rounds run out. Returns the person's `timezone` trait
-/// beside the enrollment.
+/// has one; a retryable race when the rounds run out. Returns the zones beside the enrollment.
 async fn lock_enrollment_within(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     id: Uuid,
     mut read: Option<EnrollmentRead>,
     rounds: usize,
-) -> Result<Option<(Enrollment, Option<String>)>, StoreError> {
+) -> Result<Option<StepEnrollment>, StoreError> {
     for _ in 0..rounds {
         let found = match read.take() {
             Some(read) => read,
@@ -326,7 +325,7 @@ async fn lock_enrollment_within(
             return Ok(None);
         };
         let row = if now_merged.unwrap_or(person) == survivor {
-            sqlx::query_as::<_, EnrollmentRow>(sqlx::AssertSqlSafe(enrollment_lock()))
+            sqlx::query_as::<_, LockedRow>(sqlx::AssertSqlSafe(enrollment_lock()))
                 .bind(workspace.as_uuid())
                 .bind(id)
                 .bind(person)
@@ -339,9 +338,11 @@ async fn lock_enrollment_within(
         };
         if let Some(row) = row {
             round.commit().await.map_err(StoreError::query)?;
-            return row
-                .into_enrollment()
-                .map(|enrollment| Some((enrollment, zone)));
+            return Ok(Some(StepEnrollment {
+                enrollment: row.enrollment.into_enrollment()?,
+                workspace_zone: row.workspace_zone,
+                person_zone: zone,
+            }));
         }
         // The group changed, or the enrollment moved to another person, or it is gone: let go of
         // this round's locks and read which in the next.
@@ -1557,6 +1558,31 @@ mod tests {
             .fetch_one(&pool)
             .await;
         assert!(free.is_err(), "the step does not hold the survivor");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_step_lock_reads_the_workspace_zone_committed_after_the_steps_read(pool: PgPool) {
+        let ws = workspace(&pool, "zone-race").await;
+        let flow = create(&pool, ws, "Flow").await;
+        publish(&pool, ws, flow.id).await.unwrap();
+        let person = person(&pool, ws).await;
+        let id = enrollment_row(&pool, ws, flow.id, person).await;
+        let mut tx = pool.begin().await.unwrap();
+        let read = read_enrollment(&mut tx, ws, id).await.unwrap().unwrap();
+        // An Admin's new zone commits between the step's read and its locks.
+        sqlx::query("UPDATE workspaces SET timezone = 'Europe/Copenhagen' WHERE id = $1")
+            .bind(ws.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let locked = lock_read_enrollment(&mut tx, ws, id, read)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(locked.workspace_zone, "Europe/Copenhagen");
     }
 
     /// The plans of `sql` for `binds`: the one planned for the values, and the generic one a
