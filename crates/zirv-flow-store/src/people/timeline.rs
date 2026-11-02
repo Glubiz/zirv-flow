@@ -179,13 +179,14 @@ struct DecisionRow {
     trace_id: Uuid,
 }
 
-/// The people of a merge group, from the survivor (`$2`) down. The recursive step states
-/// `merged_into IS NOT NULL` so that `people_merged_into_idx` (a partial index) serves it.
+/// The people of a merge group, from the survivor (`$2`) down. The equality on
+/// `merged_into` implies not-null, so `people_merged_into_idx` (a partial index) serves the
+/// recursive step.
 const GROUP_MEMBERS: &str = "WITH RECURSIVE group_ AS ( \
          SELECT id FROM people WHERE workspace_id = $1 AND id = $2 \
          UNION \
          SELECT p.id FROM people p JOIN group_ g ON p.merged_into = g.id \
-         WHERE p.workspace_id = $1 AND p.merged_into IS NOT NULL) \
+         WHERE p.workspace_id = $1) \
      SELECT id FROM group_";
 
 /// The people that read as `person`: the survivor it was merged into (or itself) and everyone
