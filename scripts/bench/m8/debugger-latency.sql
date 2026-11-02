@@ -1,6 +1,8 @@
 -- Durable inbox append to debugger receipt (architecture sections 17 and 19, issue #394).
 -- Run after the watcher finishes and the inbox drains, on the SAME HOST as loadgen:
 --   psql -X "$DATABASE_URL" -v receive_file=/absolute/path/receive.jsonl -f scripts/bench/m8/debugger-latency.sql
+-- With -v container_mode=1 (psql in a Linux container beside the watcher) the commands use
+-- date, hostname and cat instead of python3.
 -- Requires python3 on that host for a contemporaneous clock comparison, not a comparison
 -- of an old receipt with today's now(). Do not use psql --single-transaction: now() must
 -- be sampled in a fresh transaction. Stable clocks from the run through this check are
@@ -23,7 +25,11 @@ CREATE TEMP TABLE debugger_receipts (record jsonb NOT NULL);
 -- spaces and shell metacharacters stay data, including in a path supplied with -v. The
 -- commands avoid single quotes and shell expansion so cmd.exe (psql on Windows) runs them too.
 \setenv ZIRV_DEBUGGER_RECEIVE_FILE :receive_file
+\if :{?container_mode}
+\copy debugger_receipts FROM PROGRAM 'cat "$ZIRV_DEBUGGER_RECEIVE_FILE"' WITH (FORMAT csv, DELIMITER E'\x02', QUOTE E'\x01')
+\else
 \copy debugger_receipts FROM PROGRAM 'python3 -I -c "import os, shutil, sys; shutil.copyfileobj(open(os.environ[''ZIRV_DEBUGGER_RECEIVE_FILE''], ''rb''), sys.stdout.buffer)"' WITH (FORMAT csv, DELIMITER E'\x02', QUOTE E'\x01')
+\endif
 
 SELECT count(*) FILTER (WHERE record->>'kind' = 'started') = 1
    AND count(*) FILTER (WHERE record->>'kind' = 'finished') = 1 AS complete
@@ -57,7 +63,11 @@ FROM debugger_run
     DO $$ BEGIN RAISE EXCEPTION 'invalid run boundaries or missing connected clients'; END $$;
 \endif
 
+\if :{?container_mode}
+\set client_host `hostname | cut -d. -f1 | tr A-Z a-z`
+\else
 \set client_host `python3 -I -c "import socket; print(socket.gethostname().split('.')[0].lower())"`
+\endif
 SELECT COALESCE(bool_and(record->>'host' = :'client_host'), false) AS same_host
 FROM debugger_receipts WHERE record->>'kind' = 'started'
 \gset

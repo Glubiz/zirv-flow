@@ -92,6 +92,10 @@ exit 99
 STUB
 chmod +x "$work/bin/psql"
 expect_failure 'M8_DEBUGGER_CLIENTS must be in 1..20' env M8_DEBUGGER_CLIENTS=21 bash "$here/debugger.sh" "$raw" "$pool"
+mkdir -p "$work/nolinux"
+expect_failure 'no Linux loadgen' env M8_DEBUGGER_CONTAINER=1 M8_STATE="$work/nolinux" bash "$here/debugger.sh" "$raw" "$pool"
+grep -Fq 'container_mode' "$here/debugger-latency.sql"
+grep -Fq 'container_mode' "$here/debugger-clock-sample.sql"
 expect_failure 'seconds must be an integer' env M8_SECONDS=0 bash "$here/explorer.sh" "$raw" "$pool"
 expect_failure 'M8_JOBS_CAP must be an integer' env M8_JOBS_CAP=0 bash "$here/jobs.sh" "$raw"
 expect_failure 'must be below M8_JOBS_CONCURRENCY (16)' env M8_JOBS_CAP=16 bash "$here/jobs.sh" "$raw"
