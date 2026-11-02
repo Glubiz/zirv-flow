@@ -193,7 +193,13 @@ const ENROLLMENT_READ: &str = "WITH found AS MATERIALIZED ( \
 /// The enrollment's lock in a round of [`lock_enrollment`]: `$1` is the workspace, `$2` the
 /// enrollment and `$3` the person the round locked. The row is locked by primary key and checked
 /// after, so the plan never walks `enrollments_person_idx`. The workspace's time zone is read
-/// here, after every lock of the step was taken, as the step read it before #397.
+/// here, after the step's flow and person locks.
+///
+/// A wait keeps the zone it was scheduled with: changing a workspace's zone re-arms nothing.
+/// This statement's snapshot predates its own wait for the enrollment lock, so a zone change
+/// committed during that wait is not seen. The step then orders before the change: it read
+/// the old workspace row and the change reads nothing the step writes, so the outcome is the
+/// one a step committed just before the change would have had.
 fn enrollment_lock() -> String {
     format!(
         "WITH locked AS MATERIALIZED ( \
