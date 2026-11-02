@@ -33,14 +33,14 @@ use zirv_flow_segments::{
     evaluate, parse_and_validate,
 };
 use zirv_flow_store::{
-    EffectError, Enrollment, EnrollmentStatus, EnrollmentUpdate, FlowState, FlowTraitWrite,
-    GraphPoint, NewDecision, NewJob, NewStepExecution, NewWait, SEND_JOB_KIND, STEP_JOB_KIND,
-    SYNC_JOB_KIND, StepJobInput, StepJobPayload, StepOutcome, StepRecord, StoredEvent,
-    WEBHOOK_JOB_KIND, append_decisions, apply_flow_list, apply_flow_trait, clear_waits, enqueue,
-    evaluate_conditions, find_enrollment, find_event_of_person, find_flow_version,
-    flow_state_for_step, hold_enrollment, lock_enrollment, record_steps, register_wait,
-    release_enrollment, reopen_failed_step, save_enrollment, segment_catalog, settle_wait_step,
-    step_zones, unhealthy_inputs, wait_filters,
+    DecisionBuffer, EffectError, Enrollment, EnrollmentStatus, EnrollmentUpdate, FlowState,
+    FlowTraitWrite, GraphPoint, NewDecision, NewJob, NewStepExecution, NewWait, SEND_JOB_KIND,
+    STEP_JOB_KIND, SYNC_JOB_KIND, StepEnrollment, StepJobInput, StepJobPayload, StepOutcome,
+    StepRecord, StoredEvent, WEBHOOK_JOB_KIND, append_decisions, apply_flow_list, apply_flow_trait,
+    clear_waits, enqueue, evaluate_conditions, find_event_of_person, find_flow_version,
+    flow_state_for_step, hold_enrollment, lock_read_enrollment, read_enrollment, record_steps,
+    register_wait, release_enrollment, reopen_failed_step, save_enrollment, segment_catalog,
+    settle_wait_step, unhealthy_inputs, wait_filters,
 };
 
 use super::delivery_send::Queued;
@@ -72,18 +72,23 @@ impl JobKind for FlowStep {
         let at = (ctx.job_id(), ctx.attempts());
         let job_id = ctx.job_id();
         let last_attempt = ctx.attempts() >= ctx.max_attempts();
+        // The worker took the person-change guard (`NEEDS_CHANGE_READERS`) before the lease, in
+        // this transaction, for the workspace checked above.
         let conn = ctx.conn();
-        zirv_flow_store::cache_change_readers(conn, job.workspace).await?;
         let now = clock.now(conn).await?;
-        let Some(known) = find_enrollment(conn, job.workspace, job.enrollment).await? else {
+        let Some(read) = read_enrollment(conn, job.workspace, job.enrollment).await? else {
             // Erased with the person: nothing is left to advance.
             return Ok(());
         };
         // After the segment guard, the flow's state is read and held until commit, so a resume
         // either sees the enrollment this step holds or the step sees the flow resumed. The
         // flow, then the person, then the enrollment: the order a resume locks them in.
-        let flow_state = flow_state_for_step(conn, job.workspace, known.flow_id).await?;
-        let Some(mut enrollment) = lock_enrollment(conn, job.workspace, job.enrollment).await?
+        let flow_state = flow_state_for_step(conn, job.workspace, read.flow_id).await?;
+        let Some(StepEnrollment {
+            mut enrollment,
+            workspace_zone,
+            person_zone,
+        }) = lock_read_enrollment(conn, job.workspace, job.enrollment, read).await?
         else {
             return Ok(());
         };
@@ -131,7 +136,8 @@ impl JobKind for FlowStep {
         }
 
         let mut savepoint = conn.begin().await?;
-        let walked = advance(&mut savepoint, &job, &enrollment, now, at).await;
+        let zones = (workspace_zone, person_zone);
+        let walked = advance(&mut savepoint, &job, &enrollment, zones, now, at).await;
         match walked {
             Ok(()) => {
                 savepoint.commit().await?;
@@ -314,6 +320,9 @@ struct Walk<'a> {
     freshness: Option<&'static str>,
     /// The step execution of each node this job has run.
     steps: HashMap<String, Uuid>,
+    /// The decisions of the walk, in the order they were made, appended in one statement when
+    /// the walk ends.
+    decisions: DecisionBuffer,
 }
 
 impl Walk<'_> {
@@ -364,11 +373,13 @@ impl Walk<'_> {
     }
 }
 
-/// Walks the enrollment from the job's input to the next wait, exit or failure.
+/// Walks the enrollment from the job's input to the next wait, exit or failure. `zones` are the
+/// workspace's zone and the person's `timezone` trait, as the enrollment's lock read them.
 async fn advance(
     conn: &mut PgConnection,
     job: &StepJobPayload,
     enrollment: &Enrollment,
+    (workspace_zone, person_zone): (String, Option<String>),
     now: OffsetDateTime,
     at: (Uuid, i32),
 ) -> Result<(), StepFailure> {
@@ -382,8 +393,6 @@ async fn advance(
     .ok_or_else(|| JobError::new("the pinned flow version is missing"))?;
     let graph = FlowGraph::from_value(version.graph)
         .map_err(|_| JobError::new("the pinned flow version does not parse"))?;
-    let (workspace_zone, person_zone) =
-        step_zones(&mut *conn, job.workspace, enrollment.person_id).await?;
     let zones = Zones {
         now: to_chrono(now).ok_or_else(|| JobError::new("the time does not fit the engine"))?,
         workspace: workspace_zone.parse().unwrap_or(Tz::UTC),
@@ -399,12 +408,24 @@ async fn advance(
         catalog: None,
         freshness: None,
         steps: HashMap::new(),
+        decisions: DecisionBuffer::default(),
     };
 
-    let Some(mut input) = first_input(conn, &mut walk, job).await? else {
+    walk_steps(conn, &mut walk, job).await?;
+    walk.decisions.flush(conn).await?;
+    Ok(())
+}
+
+/// The nodes of [`advance`], from the first input to where the walk ends.
+async fn walk_steps(
+    conn: &mut PgConnection,
+    walk: &mut Walk<'_>,
+    job: &StepJobPayload,
+) -> Result<(), StepFailure> {
+    let Some(mut input) = first_input(conn, walk, job).await? else {
         return Ok(());
     };
-    let mut state = engine_state(enrollment)?;
+    let mut state = engine_state(walk.enrollment)?;
     let mut first = true;
     loop {
         let transition = engine_step(&walk.graph, &state, input, &walk.zones)
@@ -413,20 +434,20 @@ async fn advance(
             return Ok(());
         }
         if first {
-            wake(conn, &mut walk, job).await?;
+            wake(conn, walk, job).await?;
             first = false;
         }
-        apply(conn, &mut walk, &transition).await?;
+        apply(conn, walk, &transition).await?;
         match &transition.outcome {
             Outcome::NeedsConditions { node, conditions } => {
-                let results = branch(conn, &mut walk, node, conditions).await?;
+                let results = branch(conn, walk, node, conditions).await?;
                 input = StepInput::ConditionsEvaluated {
                     node: node.clone(),
                     results,
                 };
                 state = transition.state;
             }
-            _ => return finish(conn, &mut walk, &transition).await,
+            _ => return finish(conn, walk, &transition).await,
         }
     }
 }
@@ -563,7 +584,7 @@ async fn wake(
     let node = walk.enrollment.node.clone();
     let step = settle_wait_step(&mut *conn, walk.enrollment.id, &node).await?;
     let decision = walk.decision(outcome, None, step, Some(&node));
-    append_decisions(conn, &[decision]).await?;
+    walk.decisions.push(decision);
     Ok(())
 }
 
@@ -651,7 +672,9 @@ async fn apply(
         };
         decisions.push(walk.decision(spec, reason, Some(record.id), Some(&visit.node)));
     }
-    append_decisions(&mut *conn, &decisions).await?;
+    for decision in decisions {
+        walk.decisions.push(decision);
+    }
 
     for change in &transition.waits {
         match change {
@@ -983,9 +1006,9 @@ async fn branch(
             Some(node),
         ));
     }
-    append_decisions(&mut *conn, &decisions)
-        .await
-        .map_err(|error| StepFailure::at(node, error))?;
+    for decision in decisions {
+        walk.decisions.push(decision);
+    }
     Ok(results)
 }
 
@@ -1067,7 +1090,7 @@ async fn finish(
         ),
         _ => unreachable!("the walk ended above"),
     };
-    append_decisions(&mut *conn, &[decision]).await?;
+    walk.decisions.push(decision);
     Ok(())
 }
 
@@ -1259,6 +1282,16 @@ pub(super) mod tests {
         assert!(stale(Active, 1, StepJobInput::Wake, 1), "the wrong status");
     }
 
+    /// The person-change guard the worker takes, before anything else in the job's transaction,
+    /// for a kind that `needs` it.
+    async fn guard(tx: &mut PgConnection, claimed: &ClaimedJob, needs: bool) {
+        if needs && let Some(workspace) = claimed.workspace_id {
+            zirv_flow_store::cache_change_readers(tx, WorkspaceId::from_uuid(workspace))
+                .await
+                .unwrap();
+        }
+    }
+
     /// One workspace, one clock and a worker that runs `flow.step` jobs by hand.
     pub(crate) struct Env {
         pub(crate) pool: PgPool,
@@ -1416,6 +1449,7 @@ pub(super) mod tests {
             .unwrap()
             {
                 let mut tx = zirv_flow_store::begin(&self.pool).await.unwrap();
+                guard(&mut tx, &claimed, K::NEEDS_CHANGE_READERS).await;
                 let result = {
                     let mut ctx = JobContext::new(&mut tx, &claimed)
                         .with_clock(Clock::Manual(self.clock.clone()));
@@ -1691,6 +1725,7 @@ pub(super) mod tests {
         /// error rolls it back and puts the job up for another attempt.
         pub(crate) async fn execute(&self, claimed: ClaimedJob) -> Result<(), JobError> {
             let mut tx = zirv_flow_store::begin(&self.pool).await.unwrap();
+            guard(&mut tx, &claimed, FlowStep::NEEDS_CHANGE_READERS).await;
             let result = {
                 let mut ctx = JobContext::new(&mut tx, &claimed)
                     .with_clock(Clock::Manual(self.clock.clone()));
@@ -2541,6 +2576,86 @@ pub(super) mod tests {
             env.advance(61);
             env.run_due().await;
             assert_eq!(env.enrollment(id).await.status, EnrollmentStatus::Completed);
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_wake_appends_its_decisions_in_one_statement_with_the_rows_it_always_wrote(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            let ada = env.person(PERSONAL_DATA.email, json!({})).await;
+            let graph = json!({"v": 1, "nodes": [
+                {"id": "w1", "type": "wait.duration", "seconds": 60},
+                {"id": "x1", "type": "exit"}
+            ], "edges": [edge("e1", "w1", "next", "x1")]});
+            let flow = env.flow("Timer", graph).await;
+            let enrolled = env.enroll(flow, 1, &[ada]).await;
+            let id = enrolled.enrolled[0].enrollment;
+            let trace = enrolled.enrolled[0].trace.clone();
+            env.run_due().await;
+            env.advance(61);
+            env.hold_others(Some("wake"), Some(id)).await;
+            let wake = env.claim().await.unwrap();
+            env.release().await;
+
+            env.execute(wake.clone()).await.unwrap();
+
+            let step_of = |node: &'static str| {
+                let pool = env.pool.clone();
+                async move {
+                    sqlx::query_scalar::<_, Uuid>(
+                        "SELECT id FROM step_executions WHERE enrollment_id = $1 AND node_id = $2",
+                    )
+                    .bind(id)
+                    .bind(node)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+                }
+            };
+            let (waited, exited) = (step_of("w1").await, step_of("x1").await);
+            let row =
+                |action: &str, outcome: &str, reason: Option<&str>, step: Uuid, node: &str| {
+                    json!({"action": action, "outcome": outcome, "reason": reason, "attempt": 1,
+                       "subjects": {"flow": flow, "enrollment": id, "person": ada,
+                                    "step_execution": step, "version": 1, "node": node}})
+                };
+            let rows: Vec<Value> = sqlx::query_scalar(
+                "SELECT jsonb_build_object('action', action, 'outcome', outcome, 'reason', reason, \
+                     'attempt', attempt, 'subjects', subject_ids) \
+                 FROM decision_records WHERE workspace_id = $1 AND trace_id = $2 AND job_id = $3 \
+                 ORDER BY recorded_at, id",
+            )
+            .bind(env.ws.as_uuid())
+            .bind(trace.trace_id.as_uuid())
+            .bind(wake.id)
+            .fetch_all(&env.pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                rows,
+                [
+                    row("flow.wake", "timer", None, waited, "w1"),
+                    row("flow.step", "done", Some("exit"), exited, "x1"),
+                    row("flow.enrollment", "completed", None, exited, "x1"),
+                ]
+            );
+            // Rows written by one statement share a command id.
+            let statements: i64 = sqlx::query_scalar(
+                "SELECT count(DISTINCT cmin::text) FROM decision_records WHERE job_id = $1",
+            )
+            .bind(wake.id)
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                statements, 1,
+                "the wake appended its decisions in more than one insert"
+            );
         })
         .await;
     }
