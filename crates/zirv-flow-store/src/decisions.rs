@@ -325,6 +325,12 @@ impl DecisionBuffer {
         self.pending.push((Uuid::now_v7(), decision));
     }
 
+    pub fn extend(&mut self, decisions: impl IntoIterator<Item = NewDecision>) {
+        for decision in decisions {
+            self.push(decision);
+        }
+    }
+
     /// The position to hand to [`DecisionBuffer::discard_after`], taken before a savepoint.
     pub(crate) fn mark(&self) -> usize {
         self.pending.len()

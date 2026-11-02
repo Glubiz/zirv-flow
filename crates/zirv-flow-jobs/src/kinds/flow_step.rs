@@ -672,9 +672,7 @@ async fn apply(
         };
         decisions.push(walk.decision(spec, reason, Some(record.id), Some(&visit.node)));
     }
-    for decision in decisions {
-        walk.decisions.push(decision);
-    }
+    walk.decisions.extend(decisions);
 
     for change in &transition.waits {
         match change {
@@ -1006,9 +1004,7 @@ async fn branch(
             Some(node),
         ));
     }
-    for decision in decisions {
-        walk.decisions.push(decision);
-    }
+    walk.decisions.extend(decisions);
     Ok(results)
 }
 
