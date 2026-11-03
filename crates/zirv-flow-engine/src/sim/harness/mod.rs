@@ -1,8 +1,9 @@
 //! The deterministic flow simulation harness (architecture section 18, layer 1): thousands of
 //! enrollments over 90 virtual days, on generated graphs that use every node kind, against an
 //! in-memory model of the commit protocol (9.2 and 9.3), with crashes injected inside and after
-//! the commit of every step. It is test-only and adds no runtime surface; layer 2 runs the same
-//! protocol on PostgreSQL.
+//! the commit of every step, and with the batch transactions a slot runs the steps it claimed
+//! together in (#397): a savepoint per step, one commit, a crash that discards them all. It is
+//! test-only and adds no runtime surface; layer 2 runs the same protocol on PostgreSQL.
 //!
 //! The same seed always gives the same run: SplitMix64 is the only source of randomness, the
 //! clock is virtual, and every table is an ordered map, so no hash order can reach the outcome.
@@ -55,6 +56,9 @@ pub(super) enum Defect {
     EarlyTimer,
     /// Internal effects are applied outside the transaction, so a rollback cannot take them back.
     LeakyRollback,
+    /// A step that fails in a batch transaction rolls back to the start of the transaction, not
+    /// to its own savepoint, which undoes the steps before it while their jobs are acknowledged.
+    WideSavepoint,
 }
 
 #[derive(Clone, Debug)]
@@ -66,6 +70,10 @@ pub(super) struct Config {
     /// Jobs of one enrollment that are due together are claimed together and commit in a seeded
     /// order: the event/timeout race.
     pub(super) races: bool,
+    /// A claim takes several due jobs, as a slot does, and runs them in one batch transaction,
+    /// a savepoint each and one commit (#397). Off while every effect is a crash point, which
+    /// counts crash points per job.
+    pub(super) batches: bool,
 }
 
 impl Config {
@@ -76,6 +84,7 @@ impl Config {
             crash: CrashMode::Random { one_in: 6 },
             defect: None,
             races: true,
+            batches: true,
         }
     }
 }
@@ -109,6 +118,11 @@ pub(super) struct Stats {
     pub(super) races: usize,
     pub(super) crashes_in_tx: usize,
     pub(super) crashes_after_commit: usize,
+    /// Batch transactions run, and those that committed more than one step.
+    pub(super) batches: usize,
+    pub(super) shared_commits: usize,
+    /// Steps of a batch whose handler failed and rolled back to their savepoint alone.
+    pub(super) savepoint_rollbacks: usize,
     /// Steps that committed without first being killed at each of their `effects + 2`
     /// in-transaction points; only counted when every effect is a crash point.
     pub(super) partial_sweeps: usize,
@@ -258,17 +272,28 @@ mod tests {
             let stats = &report.stats;
             println!(
                 "seed {seed}: {} enrollments, {} commits, {} stale, {} races, {} crashes in \
-                 transactions, {} after commit",
+                 transactions, {} after commit, {} batches ({} committed several steps, {} \
+                 savepoint rollbacks)",
                 stats.enrollments,
                 stats.commits,
                 stats.stale,
                 stats.races,
                 stats.crashes_in_tx,
-                stats.crashes_after_commit
+                stats.crashes_after_commit,
+                stats.batches,
+                stats.shared_commits,
+                stats.savepoint_rollbacks
             );
             assert_eq!(stats.queue_left, 0);
             assert!(stats.crashes_in_tx > 0 && stats.crashes_after_commit > 0);
             assert!(stats.races > 0 && stats.stale > 0);
+            assert!(
+                stats.shared_commits > 0 && stats.savepoint_rollbacks > 0,
+                "seed {seed}: {} batches, {} committed several steps, {} savepoint rollbacks",
+                stats.batches,
+                stats.shared_commits,
+                stats.savepoint_rollbacks
+            );
             let mut every_kind: Vec<&str> = zirv_flow_core::flow::NODE_TYPES.to_vec();
             every_kind.sort_unstable();
             assert_eq!(
@@ -357,6 +382,29 @@ mod tests {
         let mut config = Config::new(0xbad0_0004, SMALL);
         config.defect = Some(Defect::EarlyTimer);
         assert!(simulate(&config).has(Invariant::TimerNotEarly));
+    }
+
+    /// One step per transaction, as before batches, holds the invariants too.
+    #[test]
+    fn a_run_without_batches_holds_the_invariants() {
+        let mut config = Config::new(0x0b47_c4e5, SMALL);
+        config.batches = false;
+        let report = simulate(&config);
+        report.assert_clean(&config);
+        assert_eq!(report.stats.batches, 0);
+    }
+
+    #[test]
+    fn a_batch_whose_failed_step_rolls_back_its_neighbours_fails_the_fourth_invariant() {
+        let mut config = Config::new(0xbad0_0006, SMALL);
+        config.defect = Some(Defect::WideSavepoint);
+        let report = simulate(&config);
+        assert!(report.stats.savepoint_rollbacks > 0);
+        assert!(
+            report.has(Invariant::Liveness),
+            "the broken model passed: {}",
+            report.lines()
+        );
     }
 
     #[test]

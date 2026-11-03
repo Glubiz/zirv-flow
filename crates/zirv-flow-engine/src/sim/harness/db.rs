@@ -5,8 +5,11 @@
 //!
 //! [`Db::commit`] is one transaction. It writes in the order a real one would, keeps an undo
 //! journal, and can be killed after any number of effects: a kill rolls everything back, which is
-//! how a crash before the commit looks to the next reader. The ledger is the audit log the
-//! invariants read; it is written where an effect is applied, not where it is deduplicated.
+//! how a crash before the commit looks to the next reader. A batch transaction (#397) writes
+//! several steps into one [`Journal`] with [`Db::write`], each after a savepoint
+//! ([`Journal::mark`]) that [`Db::roll_back_to`] returns to, and a kill anywhere rolls the whole
+//! journal back with [`Db::roll_back`]. The ledger is the audit log the invariants read; it is
+//! written where an effect is applied, not where it is deduplicated.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -97,6 +100,17 @@ enum Undo {
     Decision,
 }
 
+/// The undo journal of one open transaction.
+#[derive(Debug, Default)]
+pub(super) struct Journal(Vec<Undo>);
+
+impl Journal {
+    /// A savepoint: where [`Db::roll_back_to`] returns the transaction to.
+    pub(super) fn mark(&self) -> usize {
+        self.0.len()
+    }
+}
+
 #[derive(Debug, Default)]
 pub(super) struct Db {
     pub(super) enrollments: BTreeMap<Uuid, EnrollmentState>,
@@ -147,6 +161,25 @@ impl Db {
         defect: Option<Defect>,
         tie: u64,
     ) -> Commit {
+        let mut journal = Journal::default();
+        match self.write(tx, crash_after, defect, tie, &mut journal) {
+            Some(written) => written,
+            None => self.roll_back(journal, defect),
+        }
+    }
+
+    /// Writes `tx` into the open transaction whose journal is `journal`: [`Commit::Committed`]
+    /// once every write is done (the transaction commits later), [`Commit::Stale`] with nothing
+    /// written, or `None` when `crash_after` killed the process inside it, after which the caller
+    /// rolls the whole transaction back.
+    pub(super) fn write(
+        &mut self,
+        tx: &Tx,
+        crash_after: Option<usize>,
+        defect: Option<Defect>,
+        tie: u64,
+        journal: &mut Journal,
+    ) -> Option<Commit> {
         // The idempotency checks: the version compare-and-set, the step execution rows, and the
         // unique keys. A runtime without them is the broken model the tests must catch.
         let checked = defect != Some(Defect::NoIdempotency);
@@ -155,10 +188,10 @@ impl Db {
             .get(&tx.enrollment)
             .map(|s| s.state_version);
         if checked && current != Some(tx.base_version) {
-            return Commit::Stale;
+            return Some(Commit::Stale);
         }
 
-        let mut journal: Vec<Undo> = Vec::new();
+        let journal = &mut journal.0;
         let mut fresh: BTreeSet<&str> = BTreeSet::new();
         for visit in &tx.visits {
             if self.step_executions.insert(visit.step_key.clone()) {
@@ -169,15 +202,15 @@ impl Db {
             }
         }
         if crash_after == Some(0) {
-            return self.roll_back(journal, defect);
+            return None;
         }
 
         for (index, effect) in tx.effects.iter().enumerate() {
             if fresh.contains(effect.step_key.as_str()) {
-                self.apply(effect, tx.enrollment, checked, defect, &mut journal);
+                self.apply(effect, tx.enrollment, checked, defect, journal);
             }
             if crash_after == Some(index + 1) {
-                return self.roll_back(journal, defect);
+                return None;
             }
         }
 
@@ -233,9 +266,9 @@ impl Db {
             journal.push(Undo::Decision);
         }
         if crash_after == Some(tx.effects.len() + 1) {
-            return self.roll_back(journal, defect);
+            return None;
         }
-        Commit::Committed
+        Some(Commit::Committed)
     }
 
     fn apply(
@@ -282,7 +315,25 @@ impl Db {
         journal.push(Undo::Outbox(key.clone()));
     }
 
-    fn roll_back(&mut self, journal: Vec<Undo>, defect: Option<Defect>) -> Commit {
+    /// Rolls the whole transaction back.
+    pub(super) fn roll_back(&mut self, journal: Journal, defect: Option<Defect>) -> Commit {
+        self.undo(journal.0, defect);
+        Commit::RolledBack
+    }
+
+    /// Rolls the transaction back to the savepoint `mark`: what was written after it is undone,
+    /// what came before stays.
+    pub(super) fn roll_back_to(
+        &mut self,
+        journal: &mut Journal,
+        mark: usize,
+        defect: Option<Defect>,
+    ) {
+        let after = journal.0.split_off(mark.min(journal.0.len()));
+        self.undo(after, defect);
+    }
+
+    fn undo(&mut self, journal: Vec<Undo>, defect: Option<Defect>) {
         for undo in journal.into_iter().rev() {
             match undo {
                 Undo::StepExecution(key) => {
@@ -321,7 +372,6 @@ impl Db {
                 }
             }
         }
-        Commit::RolledBack
     }
 }
 
@@ -444,6 +494,50 @@ mod tests {
             assert_eq!(db.commit(&tx(id, 0), None, None, 0), Commit::Committed);
             assert_eq!(db.applied.len(), 2);
         }
+    }
+
+    #[test]
+    fn a_batch_rolls_one_step_back_to_its_savepoint_and_every_step_back_on_a_crash() {
+        let (a, b, c) = (Uuid::from_u128(4), Uuid::from_u128(5), Uuid::from_u128(6));
+        let mut db = db_with(a);
+        db.enrollments.insert(b, state(b, 0));
+        db.enrollments.insert(c, state(c, 0));
+        let mut journal = Journal::default();
+        assert_eq!(
+            db.write(&tx(a, 0), None, None, 0, &mut journal),
+            Some(Commit::Committed)
+        );
+        let savepoint = journal.mark();
+        assert_eq!(
+            db.write(&tx(b, 0), None, None, 1, &mut journal),
+            Some(Commit::Committed)
+        );
+        db.roll_back_to(&mut journal, savepoint, None);
+        assert_eq!(
+            (
+                db.enrollments[&a].state_version,
+                db.enrollments[&b].state_version
+            ),
+            (1, 0),
+            "only the step after the savepoint is undone"
+        );
+        assert_eq!(
+            (db.applied.len(), db.outbox.len(), db.queue.len()),
+            (2, 1, 1)
+        );
+        assert_eq!(
+            db.write(&tx(b, 0), None, None, 1, &mut journal),
+            Some(Commit::Committed)
+        );
+        assert_eq!(db.applied.len(), 4);
+        // A crash inside a later step takes back every step of the transaction.
+        assert_eq!(db.write(&tx(c, 0), Some(2), None, 2, &mut journal), None);
+        assert_eq!(db.roll_back(journal, None), Commit::RolledBack);
+        for id in [a, b, c] {
+            assert_eq!(db.enrollments[&id].state_version, 0);
+        }
+        assert!(db.applied.is_empty() && db.outbox.is_empty() && db.decisions.is_empty());
+        assert!(db.queue.is_empty() && db.job_keys.is_empty() && db.step_executions.is_empty());
     }
 
     #[test]

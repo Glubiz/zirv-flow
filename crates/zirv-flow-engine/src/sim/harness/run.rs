@@ -5,7 +5,9 @@
 //! couple of seconds are claimed together, as two workers would, and commit in a seeded order),
 //! computes the step chain from the state it read, and commits it as one transaction. The
 //! runtime re-reads the state on every claim and the commit is a compare-and-set on the version,
-//! so a redelivered job finds its work done and is acknowledged without effect.
+//! so a redelivered job finds its work done and is acknowledged without effect. Half the claims
+//! that find other jobs due take up to [`BATCH`] of them, as a slot does, and run them in one
+//! batch transaction (`Sim::run_batch`).
 
 use std::collections::BTreeMap;
 
@@ -14,7 +16,7 @@ use chrono_tz::Tz;
 use uuid::Uuid;
 use zirv_flow_core::flow::FlowGraph;
 
-use super::db::{Commit, Db, Job, JobKind, QueueKey, Tx};
+use super::db::{Commit, Db, Job, JobKind, Journal, QueueKey, Tx};
 use super::generate::{self, EVENTS};
 use super::invariants::{self, World};
 use super::rng::{Rng, mix};
@@ -23,6 +25,13 @@ use crate::{ArrivedEvent, EnrollmentState, Outcome, StepContext, StepInput, Wait
 
 /// The virtual days enrollments start over.
 pub(super) const DAYS: i64 = 90;
+
+/// The most jobs one claim takes, and so one batch transaction runs: the runtime's `CLAIM_BATCH`.
+const BATCH: usize = 8;
+
+/// One step in this many of a batch fails in its handler after writing, and rolls back to its
+/// savepoint alone.
+const STEP_FAILURE_ONE_IN: u64 = 12;
 
 /// The zones of the people; the last is not a zone, which the engine must fall back from.
 const ZONES: [Option<&str>; 6] = [
@@ -175,6 +184,22 @@ impl Sim<'_> {
                     self.rng.shuffle(&mut group);
                 }
             }
+            if group.len() == 1 && self.batching() {
+                // The other jobs due now, which one claim of a slot takes with this one.
+                let due: Vec<QueueKey> = self
+                    .db
+                    .queue
+                    .range(..=(now, u64::MAX, u64::MAX))
+                    .take(BATCH - 1)
+                    .map(|(key, _)| *key)
+                    .collect();
+                if !due.is_empty() && self.rng.chance(50) {
+                    group.extend(due.iter().filter_map(|key| self.db.queue.remove(key)));
+                    self.clock = now;
+                    self.run_batch(group, now);
+                    continue;
+                }
+            }
             self.clock = now;
             // Every job of the group reads before any of them commits.
             let mut claimed = Vec::new();
@@ -300,6 +325,89 @@ impl Sim<'_> {
                     job.crashes += 1;
                     self.redeliver(job, now);
                 }
+            }
+        }
+    }
+
+    /// Whether claims run batch transactions: not while every effect of every job is a crash
+    /// point, which is counted per job.
+    fn batching(&self) -> bool {
+        self.config.batches && self.config.crash != CrashMode::EveryEffect
+    }
+
+    /// Runs the jobs one claim took in one transaction, as a slot runs the steps of a workspace
+    /// it claimed together (#397). The jobs run in lock order (by enrollment, ties in claim
+    /// order). Each reads the state when it starts, so it sees what the jobs before it wrote, and
+    /// writes after a savepoint of its own. A job whose handler fails after writing rolls back to
+    /// its savepoint and is redelivered alone, and the others go on. A crash inside any job, or
+    /// at the commit, discards every job of the transaction and redelivers them all; a crash
+    /// after the commit redelivers them all, to find their work done.
+    fn run_batch(&mut self, mut jobs: Vec<Job>, now: DateTime<Utc>) {
+        self.report.stats.batches += 1;
+        jobs.sort_by_key(|job| job.enrollment);
+        let defect = self.config.defect;
+        let mut journal = Journal::default();
+        let mut held = jobs.into_iter();
+        let mut ran: Vec<(Job, Option<Box<Tx>>)> = Vec::new();
+        let mut crash_after_commit = false;
+        while let Some(mut job) = held.next() {
+            let Prepared::Run(tx) = self.prepare(&mut job, now) else {
+                ran.push((job, None));
+                continue;
+            };
+            let effects = tx.effects.len();
+            let point = self.crash_point(&job, effects);
+            crash_after_commit |= point == Some(effects + 2);
+            let in_tx = point.filter(|point| *point <= effects + 1);
+            let savepoint = journal.mark();
+            let tie = self.rng.next_u64();
+            match self.db.write(&tx, in_tx, defect, tie, &mut journal) {
+                None => {
+                    // The process died: the transaction is gone with every job it held.
+                    self.db.roll_back(journal, defect);
+                    self.report.stats.crashes_in_tx += 1;
+                    let lost = ran
+                        .into_iter()
+                        .map(|(job, _)| job)
+                        .chain(std::iter::once(job))
+                        .chain(held);
+                    for mut job in lost {
+                        job.crashes += 1;
+                        self.redeliver(job, now);
+                    }
+                    return;
+                }
+                Some(Commit::Committed) if self.rng.below(STEP_FAILURE_ONE_IN) == 0 => {
+                    let to = if defect == Some(Defect::WideSavepoint) {
+                        0
+                    } else {
+                        savepoint
+                    };
+                    self.db.roll_back_to(&mut journal, to, defect);
+                    self.report.stats.savepoint_rollbacks += 1;
+                    self.redeliver(job, now);
+                }
+                Some(Commit::Committed) => ran.push((job, Some(tx))),
+                Some(_) => {
+                    self.report.stats.stale += 1;
+                    ran.push((job, None));
+                }
+            }
+        }
+        let committed = ran.iter().filter(|(_, tx)| tx.is_some()).count();
+        if committed > 1 {
+            self.report.stats.shared_commits += 1;
+        }
+        if crash_after_commit {
+            self.report.stats.crashes_after_commit += 1;
+        }
+        for (mut job, tx) in ran {
+            if let Some(tx) = tx {
+                self.after_commit(&tx, now);
+            }
+            if crash_after_commit {
+                job.crashes += 1;
+                self.redeliver(job, now);
             }
         }
     }
