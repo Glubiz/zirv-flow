@@ -55,6 +55,9 @@ pub struct AppState {
     keyring: Option<Arc<Keyring>>,
     /// The explorer's time and row limits.
     pub(crate) explorer: ExplorerLimits,
+    /// The connections the explorer queries use, so they never queue behind ingest; absent
+    /// means the main pool serves them.
+    explorer_pool: Option<PgPool>,
     /// How long a segment preview may run before PostgreSQL cancels it (architecture 8.3).
     pub(crate) segment_preview_timeout: Duration,
     /// The clock segment paths and the webhook signature window read; a test fixes it.
@@ -121,6 +124,7 @@ impl AppState {
             redaction_key: None,
             keyring: None,
             explorer: ExplorerLimits::default(),
+            explorer_pool: None,
             segment_preview_timeout: crate::segments::PREVIEW_TIMEOUT,
             clock: Clock::default(),
             stop: None,
@@ -228,6 +232,23 @@ impl AppState {
     /// The deployment's AI allowlist.
     pub fn ai_config(&self) -> &AiConfig {
         &self.ai.config
+    }
+
+    /// Serves the explorer queries from `pool` (its acquire timeout bounds how long one waits for a
+    /// connection), apart from the main pool.
+    pub fn with_explorer_pool(mut self, pool: PgPool) -> Self {
+        self.explorer_pool = Some(pool);
+        self
+    }
+
+    /// The pool of the explorer queries.
+    pub(crate) fn explorer_pool(&self) -> &PgPool {
+        self.explorer_pool.as_ref().unwrap_or(&self.pool)
+    }
+
+    /// The pool of the explorer queries when it is not the main pool.
+    pub(crate) fn separate_explorer_pool(&self) -> Option<&PgPool> {
+        self.explorer_pool.as_ref()
     }
 
     /// The explorer's query timeouts and row limits.

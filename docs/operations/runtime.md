@@ -57,7 +57,7 @@ does not exist.
 |--------|------|--------|------------------|
 | `zirv_flow_http_requests_total` | counter | `method`, `route`, `status` | HTTP requests by matched route template |
 | `zirv_flow_http_request_duration_seconds` | histogram | `method`, `route` | HTTP request latency |
-| `zirv_flow_db_pool_connections` | gauge | `pool`, `state` | Pool connections by state |
+| `zirv_flow_db_pool_connections` | gauge | `pool`, `state` | Pool connections by state; `pool` is `main`, `explorer` (a `serve` process), `jobs` or `heartbeat` |
 | `zirv_flow_db_pool_max_connections` | gauge | `pool` | Pool size limit |
 | `zirv_flow_jobs` | gauge | `kind`, `state` | Queue depth for `ready`, `running` and `dead` |
 | `zirv_flow_jobs_total` | counter | `kind`, `outcome` | Job attempts by how they ended |

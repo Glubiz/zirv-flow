@@ -28,7 +28,7 @@ use zirv_flow_core::events::mask_event;
 use zirv_flow_core::{TraceId, WorkspaceId};
 use zirv_flow_store::{
     Bucket, ExploreError, ExploreFilter, ExploreLimits, ExploreRow, ExploreScope, FilterOp, PgPool,
-    RowCursor,
+    PreparedScope, RowCursor,
 };
 
 use crate::admin;
@@ -191,7 +191,7 @@ pub(crate) struct ExploreCountBody {
         (status = 403, description = "A key without the read scope, a missing CSRF token, or a probe of a PII property by a caller who may not see values (`code` is `pii_property_not_explorable`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "A malformed range, filter or bucket", body = Problem, content_type = "application/problem+json"),
-        (status = 503, description = "The query ran past its time limit (`code` is `query_timeout`)", body = Problem, content_type = "application/problem+json")
+        (status = 503, description = "The query ran past its time limit (`code` is `query_timeout`), or every explorer connection stayed busy for a second (`code` is `explorer_busy`; see `Retry-After`)", body = Problem, content_type = "application/problem+json", headers(("Retry-After" = u64, description = "Whole seconds to wait before retrying `explorer_busy`")))
     ),
     security(("session" = []), ("api_key" = []))
 )]
@@ -210,7 +210,7 @@ pub(crate) async fn count(
     let reveal = may_view_pii(&state, &principal, workspace.id).await;
     let started = Instant::now();
     let result = zirv_flow_store::explore_count(
-        &state.pool,
+        state.explorer_pool(),
         workspace.id,
         &request.scope.scope(&filters),
         bucket,
@@ -277,7 +277,7 @@ pub(crate) struct ExploreBreakdownBody {
         (status = 403, description = "A key without the read scope, a missing CSRF token, or a PII property for a caller who may not see values (`code` is `pii_property_not_explorable`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "A malformed range, filter or property", body = Problem, content_type = "application/problem+json"),
-        (status = 503, description = "The query ran past its time limit (`code` is `query_timeout`)", body = Problem, content_type = "application/problem+json")
+        (status = 503, description = "The query ran past its time limit (`code` is `query_timeout`), or every explorer connection stayed busy for a second (`code` is `explorer_busy`; see `Retry-After`)", body = Problem, content_type = "application/problem+json", headers(("Retry-After" = u64, description = "Whole seconds to wait before retrying `explorer_busy`")))
     ),
     security(("session" = []), ("api_key" = []))
 )]
@@ -292,7 +292,7 @@ pub(crate) async fn breakdown(
     let reveal = may_view_pii(&state, &principal, workspace.id).await;
     let started = Instant::now();
     let result = zirv_flow_store::explore_breakdown(
-        &state.pool,
+        state.explorer_pool(),
         workspace.id,
         &request.scope.scope(&filters),
         &request.property,
@@ -412,7 +412,7 @@ fn decode_cursor(text: &str) -> Option<RowCursor> {
         (status = 403, description = "A key without the read scope, a missing CSRF token, or a probe of a PII property by a caller who may not see values (`code` is `pii_property_not_explorable`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "A malformed range or filter", body = Problem, content_type = "application/problem+json"),
-        (status = 503, description = "The query ran past its time limit (`code` is `query_timeout`)", body = Problem, content_type = "application/problem+json")
+        (status = 503, description = "The query ran past its time limit (`code` is `query_timeout`), or every explorer connection stayed busy for a second (`code` is `explorer_busy`; see `Retry-After`)", body = Problem, content_type = "application/problem+json", headers(("Retry-After" = u64, description = "Whole seconds to wait before retrying `explorer_busy`")))
     ),
     security(("session" = []), ("api_key" = []))
 )]
@@ -445,7 +445,7 @@ pub(crate) async fn list(
     let reveal = may_view_pii(&state, &principal, workspace.id).await;
     let started = Instant::now();
     let page = zirv_flow_store::explore_rows(
-        &state.pool,
+        state.explorer_pool(),
         workspace.id,
         &request.scope.scope(&filters),
         after,
@@ -552,7 +552,7 @@ enum Export {
         (status = 403, description = "A key without the read scope, a missing CSRF token, or a probe of a PII property by a caller who may not see values (`code` is `pii_property_not_explorable`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "A malformed range or filter", body = Problem, content_type = "application/problem+json"),
-        (status = 503, description = "The query ran past its time limit (`code` is `query_timeout`)", body = Problem, content_type = "application/problem+json")
+        (status = 503, description = "The query ran past its time limit (`code` is `query_timeout`), or every explorer connection stayed busy for a second (`code` is `explorer_busy`; see `Retry-After`)", body = Problem, content_type = "application/problem+json", headers(("Retry-After" = u64, description = "Whole seconds to wait before retrying `explorer_busy`")))
     ),
     security(("session" = []), ("api_key" = []))
 )]
@@ -570,16 +570,16 @@ pub(crate) async fn export(
     // Count first: a bad filter or a timeout is an error response, not a broken stream, and
     // the audit entry exists whether or not the client reads to the end.
     let started = Instant::now();
-    let matched = zirv_flow_store::explore_total(
-        &state.pool,
+    let start = zirv_flow_store::explore_start(
+        state.explorer_pool(),
         workspace.id,
         &request.scope(&filters),
         limits,
         reveal,
     )
     .await;
-    observe_query("export", started, &matched);
-    let matched = matched.map_err(ApiError::from)?;
+    observe_query("export", started, &start);
+    let (matched, prepared) = start.map_err(ApiError::from)?;
     let rows = u64::try_from(matched)
         .unwrap_or(0)
         .min(u64::from(limits.row_limit));
@@ -600,7 +600,8 @@ pub(crate) async fn export(
     metrics::counter!("zirv_flow_explorer_exports_total").increment(1);
 
     let source = ExportSource {
-        pool: state.pool.clone(),
+        pool: state.explorer_pool().clone(),
+        prepared,
         workspace: workspace.id,
         request,
         filters,
@@ -627,16 +628,29 @@ pub(crate) async fn export(
                 }
                 let size = u32::try_from(remaining.min(u64::from(EXPORT_PAGE))).unwrap_or(1);
                 let started = Instant::now();
-                let page = zirv_flow_store::explore_rows(
-                    &source.pool,
-                    source.workspace,
-                    &source.request.scope(&source.filters),
-                    after,
-                    size,
-                    source.limits,
-                    source.reveal,
-                )
-                .await;
+                // A page that finds the pool busy keeps waiting, up to one page's time limit:
+                // the export already answered 200 and cannot turn into a 503.
+                let page = loop {
+                    let page = zirv_flow_store::explore_rows_prepared(
+                        &source.pool,
+                        source.workspace,
+                        &source.request.scope(&source.filters),
+                        &source.prepared,
+                        after,
+                        size,
+                        source.limits,
+                    )
+                    .await;
+                    match &page {
+                        Err(ExploreError::Store(error))
+                            if error.is_pool_timeout()
+                                && started.elapsed() < source.limits.timeout =>
+                        {
+                            continue;
+                        }
+                        _ => break page,
+                    }
+                };
                 observe_query("export", started, &page);
                 match page {
                     Ok(page) => {
@@ -685,6 +699,7 @@ pub(crate) async fn export(
 }
 
 struct ExportSource {
+    prepared: PreparedScope,
     pool: PgPool,
     workspace: WorkspaceId,
     request: ExploreScopeRequest,

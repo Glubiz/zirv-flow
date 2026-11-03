@@ -78,6 +78,9 @@ pub struct BrokenTemplateProblem {
 }
 
 /// The most templates a problem lists.
+/// Seconds an explorer client waits before retrying after `explorer_busy`.
+const EXPLORER_RETRY_AFTER: u64 = 2;
+
 const MAX_LISTED_TEMPLATES: usize = 20;
 
 /// One issue of a flow.
@@ -325,6 +328,18 @@ impl ApiError {
                 "the query took too long; narrow the time range or the filters and try again",
             )
         }
+    }
+
+    /// Every connection of the explorer pool was busy for the whole acquire timeout.
+    pub(crate) fn explorer_busy() -> Self {
+        Self {
+            code: Some("explorer_busy"),
+            ..Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the explorer is busy with other queries; try again shortly",
+            )
+        }
+        .with_retry_after(EXPLORER_RETRY_AFTER)
     }
 
     /// The stream already has a queued or running sync run.
@@ -1250,6 +1265,7 @@ impl From<zirv_flow_store::ExploreError> for ApiError {
             }
             ExploreError::PiiPropertyNotExplorable => Self::pii_property_not_explorable(),
             ExploreError::Store(error) if error.is_timeout() => Self::query_timeout(),
+            ExploreError::Store(error) if error.is_pool_timeout() => Self::explorer_busy(),
             ExploreError::Store(_) => Self::internal(),
         }
     }
@@ -1691,6 +1707,19 @@ mod tests {
         let problem: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(problem["code"], "search_timeout");
         assert_eq!(problem["status"], 503);
+    }
+
+    #[tokio::test]
+    async fn a_busy_explorer_pool_is_a_503_with_a_code_and_retry_after() {
+        let response = ApiError::explorer_busy().into_response();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()[header::RETRY_AFTER], "2");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let problem: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(problem["code"], "explorer_busy");
     }
 
     #[tokio::test]
