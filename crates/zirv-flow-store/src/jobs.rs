@@ -3433,14 +3433,12 @@ mod tests {
                 if *caught {
                     assert!(
                         step.is_some(),
-                        "{statement}, {stage}, {mode}: not caught
-{plan}"
+                        "{statement}, {stage}, {mode}: not caught\n{plan}"
                     );
                 } else {
                     assert!(
                         step.is_none(),
-                        "{statement}, {stage}, {mode}: {step:?}
-{plan}"
+                        "{statement}, {stage}, {mode}: {step:?}\n{plan}"
                     );
                 }
             }
