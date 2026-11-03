@@ -1114,7 +1114,10 @@ mod tests {
         sqlx::query("CHECKPOINT").execute(pool).await.unwrap();
         let mut tx = pool.begin().await.unwrap();
         let plan: serde_json::Value = sqlx::query_scalar(
-            "EXPLAIN (ANALYZE, WAL, FORMAT JSON)              INSERT INTO decision_records              (id, workspace_id, trace_id, action, outcome, cause_kind, cause_id)              SELECT gen_random_uuid(), $1, t, 'step', 'done', 'api', 'x' FROM unnest($2::uuid[]) t",
+            "EXPLAIN (ANALYZE, WAL, FORMAT JSON) 
+             INSERT INTO decision_records 
+             (id, workspace_id, trace_id, action, outcome, cause_kind, cause_id) 
+             SELECT gen_random_uuid(), $1, t, 'step', 'done', 'api', 'x' FROM unnest($2::uuid[]) t",
         )
         .bind(ws.as_uuid())
         .bind(traces)
@@ -1132,7 +1135,10 @@ mod tests {
     ) {
         let ws = workspace(&pool, "ours").await;
         sqlx::query(
-            "INSERT INTO decision_records              (id, workspace_id, trace_id, action, outcome, cause_kind, cause_id)              SELECT gen_random_uuid(), $1, gen_random_uuid(), 'step', 'done', 'api', 'x'              FROM generate_series(1, 150000)",
+            "INSERT INTO decision_records 
+             (id, workspace_id, trace_id, action, outcome, cause_kind, cause_id) 
+             SELECT gen_random_uuid(), $1, gen_random_uuid(), 'step', 'done', 'api', 'x' 
+             FROM generate_series(1, 150000)",
         )
         .bind(ws.as_uuid())
         .execute(&pool)
