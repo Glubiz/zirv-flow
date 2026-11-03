@@ -18,7 +18,7 @@ for name in runs items rate; do positive_integer "$name" "${!name}"; done
 bin="$M8_STATE/ab-bin"
 loadgen="${LOADGEN:-$root/target/release/loadgen}"
 [ -x "$loadgen" ] || die "no prebuilt loadgen at $loadgen"
-for side in on off; do [ -x "$bin/zirv-flow-$side" ] || die "missing $bin/zirv-flow-$side; run scripts/bench/m8/build-ab.sh"; done
+for side in on off; do [ -s "$bin/zirv-flow-$side" ] || die "missing $bin/zirv-flow-$side; run scripts/bench/m8/build-ab.sh"; done
 base="${M4_PROJECT}-ab"
 net="$base-net"; pgc="$base-postgres"; servec="$base-serve"; workerc="$base-worker"; schedc="$base-scheduler"
 pgvol="$base-pgdata"; keyvol="$base-keys"
