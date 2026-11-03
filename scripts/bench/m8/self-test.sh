@@ -96,6 +96,13 @@ mkdir -p "$work/nolinux"
 expect_failure 'no Linux loadgen' env M8_DEBUGGER_CONTAINER=1 M8_STATE="$work/nolinux" bash "$here/debugger.sh" "$raw" "$pool"
 grep -Fq 'container_mode' "$here/debugger-latency.sql"
 grep -Fq 'container_mode' "$here/debugger-clock-sample.sql"
+grep -Fq 'offset_before_us' "$here/debugger-latency.sql"
+grep -Fq 'container_mode' "$here/debugger-clock-bracket.sql"
+if grep -Fq 'run_clock_step' "$here/debugger-latency.sql"; then echo 'self-test FAILED: run-step gate still present' >&2; exit 1; fi
+for setting in wal_compression=lz4 shared_preload_libraries=pg_stat_statements max_wal_size='${M8_MAX_WAL_SIZE:-32GB}' max_connections='${M8_PG_MAX_CONNECTIONS:-400}' ZIRV_FLOW_DATABASE__MAX_CONNECTIONS; do
+  grep -Fq -- "$setting" "$here/compose.m8.yaml" || { echo "self-test FAILED: compose.m8.yaml lacks $setting" >&2; exit 1; }
+done
+bash -n "$here/ingest.sh"
 expect_failure 'seconds must be an integer' env M8_SECONDS=0 bash "$here/explorer.sh" "$raw" "$pool"
 expect_failure 'M8_JOBS_CAP must be an integer' env M8_JOBS_CAP=0 bash "$here/jobs.sh" "$raw"
 expect_failure 'must be below M8_JOBS_CONCURRENCY (16)' env M8_JOBS_CAP=16 bash "$here/jobs.sh" "$raw"

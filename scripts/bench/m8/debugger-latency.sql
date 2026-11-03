@@ -5,8 +5,11 @@
 -- date, hostname and cat instead of python3.
 -- Requires python3 on that host for a contemporaneous clock comparison, not a comparison
 -- of an old receipt with today's now(). Do not use psql --single-transaction: now() must
--- be sampled in a fresh transaction. Stable clocks from the run through this check are
--- assumed; start/end wall time versus monotonic elapsed also detects a run-time clock step.
+-- be sampled in a fresh transaction. The clock gate is the offset drift: debugger.sh takes the
+-- best-of-ten bracket before the watcher starts (debugger-clock-bracket.sql) and passes it as
+-- -v offset_before_us=... -v uncertainty_before_us=...; this script takes the bracket after the run.
+-- Both ends must satisfy |offset| + uncertainty <= 50 ms, and so must
+-- |offset_after - offset_before| + u_before + u_after, the only clock change that biases a sample.
 -- JSONL timestamps are UTC Unix microseconds. Null event ids cannot join to stored events.
 -- Every receipt is retained in the file; reconnect replays count only once per client/event.
 -- Delivered share = distinct delivered client/event pairs / (watchers * stored API events
@@ -18,6 +21,11 @@
 \else
     \echo 'required: -v receive_file=/absolute/path/receive.jsonl'
     DO $$ BEGIN RAISE EXCEPTION 'receive_file is required'; END $$;
+\endif
+\if :{?offset_before_us}
+\else
+    \echo 'required: -v offset_before_us=... -v uncertainty_before_us=... (debugger-clock-bracket.sql)'
+    DO $$ BEGIN RAISE EXCEPTION 'the before-run clock bracket is required'; END $$;
 \endif
 
 CREATE TEMP TABLE debugger_receipts (record jsonb NOT NULL);
@@ -99,16 +107,21 @@ SELECT to_timestamp(start_us / 1000000) AS client_started_at,
        to_timestamp(:db_now_us / 1000000) AS database_now,
        round(offset_us / 1000, 3) AS client_minus_database_ms,
        round(uncertainty_us / 1000, 3) AS clock_uncertainty_ms,
-       round((end_us - start_us - elapsed_us) / 1000, 3) AS run_clock_step_ms
+       round(:'offset_before_us'::numeric / 1000, 3) AS client_minus_database_before_ms,
+       round(:'uncertainty_before_us'::numeric / 1000, 3) AS clock_uncertainty_before_ms,
+       round((offset_us - :'offset_before_us'::numeric) / 1000, 3) AS offset_drift_ms
 FROM debugger_run CROSS JOIN debugger_clock;
 
-SELECT COALESCE(uncertainty_us >= 0 AND abs(offset_us) + uncertainty_us <= 50000
-       AND abs(end_us - start_us - elapsed_us) <= 50000, false) AS clock_ok
+SELECT COALESCE(uncertainty_us >= 0 AND :'uncertainty_before_us'::numeric >= 0
+       AND abs(offset_us) + uncertainty_us <= 50000
+       AND abs(:'offset_before_us'::numeric) + :'uncertainty_before_us'::numeric <= 50000
+       AND abs(offset_us - :'offset_before_us'::numeric) + uncertainty_us
+           + :'uncertainty_before_us'::numeric <= 50000, false) AS clock_ok
 FROM debugger_run CROSS JOIN debugger_clock
 \gset
 \if :clock_ok
 \else
-    DO $$ BEGIN RAISE EXCEPTION 'clock skew, sampling uncertainty or run clock step exceeds 50 ms'; END $$;
+    DO $$ BEGIN RAISE EXCEPTION 'clock skew, sampling uncertainty or offset drift exceeds 50 ms'; END $$;
 \endif
 
 CREATE TEMP TABLE debugger_events AS

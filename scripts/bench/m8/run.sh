@@ -25,9 +25,7 @@ HELP
 # The command writes raw JSON beneath $raw; run_bench supplies metadata with write_data.
 bench_command() {
   case "$1" in
-    ingest) cmd=("${LOADGEN:-$root/target/release/loadgen}" --url http://127.0.0.1:8080
-      --key-file "$M4_STATE/loadgen.key" --mode track --rate "$M8_RATE" --duration "$M8_SECONDS"
-      --people "$pool" --out "$raw/ingest.json") ;;
+    ingest) cmd=(bash "$m8_dir/ingest.sh" "$raw" "$pool") ;;
     segments) cmd=(bash "$root/scripts/bench/m4/measure.sh" all) ;;
     render) cmd=(bash "$root/scripts/bench/m7/render.sh" "$raw") ;;
     send) cmd=(bash "$root/scripts/bench/m6/run.sh" "m8-${raw##*/}") ;;
@@ -43,6 +41,7 @@ up() {
   validate_cpus
   compose up -d --no-build --wait --wait-timeout 300 postgres zirv-flow-key zirv-flow
   compose up -d --no-build --wait --wait-timeout 300 zirv-flow-worker zirv-flow-scheduler
+  pg -c 'CREATE EXTENSION IF NOT EXISTS pg_stat_statements' >/dev/null
   (
     # Reuse M4's authentication helpers; seeds themselves never call the product API.
     # shellcheck source=../m4/common.sh
@@ -155,7 +154,7 @@ run_bench() {
   pool=$((M8_PEOPLE * 2 / 5)); [ "$pool" -le 1000000 ] || pool=1000000
   raw="$M4_STATE/../runs/$bench-$(date -u +%Y%m%dT%H%M%S)-$$"
   bench_command "$bench" || return $?
-  case "$bench" in debugger | explorer | jobs | timers) host_pg_setup ;; esac
+  case "$bench" in ingest | debugger | explorer | jobs | timers) host_pg_setup ;; esac
   validate_cpus
   seed_manifest
   mkdir -p "$raw"
@@ -166,8 +165,17 @@ run_bench() {
   if [ "$bench" = send ]; then prepare_send; fi
   topology="$raw/topology.ndjson"
   capture_topology "$topology"
+  if [ "$bench" != render ]; then
+    trap stop_docker_stats EXIT
+    quiet_start
+    instrument_begin "$raw"
+  fi
   log "running $bench ($label)"
   "${cmd[@]}" || rc=$?
+  if [ "$bench" != render ] && ! instrument_end "$raw"; then
+    log "instrumentation incomplete for $bench"
+    [ "$rc" != 0 ] || rc=1
+  fi
   if [ "$rc" = 0 ]; then capture_topology "$topology"; fi
   write_data "$bench" "$rc" "$raw" "$topology" "${cmd[@]}"
   return "$rc"
@@ -207,7 +215,7 @@ main() {
   [ "$1" != smoke ] || { smoke=1; export M8_SMOKE=1; }
   configure
   case "$1" in
-    debugger | explorer) host_pg_setup ;;
+    ingest | debugger | explorer) host_pg_setup ;;
     jobs | timers | smoke | all) host_pg_setup; require_job_sampler ;;
   esac
   case "$1" in

@@ -16,7 +16,7 @@ for name in clients seconds connect drain; do positive_integer "$name" "${!name}
 [ "$clients" -le 20 ] || die 'M8_DEBUGGER_CLIENTS must be in 1..20 (per-workspace stream cap)'
 # M8_DEBUGGER_CONTAINER=1: watcher and latency SQL run in Linux containers on the bench network, so
 # loadgen, psql's clock commands and the database read one kernel clock (host mode spawns a process
-# per clock sample and misses the 50 ms bound on Windows). Both containers share one fixed hostname:
+# per clock sample and misses the 50 ms drift bound on Windows). Both containers share one fixed hostname:
 # the SQL checks the watcher host recorded in the receipt against its own.
 container="${M8_DEBUGGER_CONTAINER:-}"
 linux_loadgen="$M8_STATE/send-tools/linux/loadgen"
@@ -46,6 +46,18 @@ client_count() {
 }
 [ "$(client_count)" = 0 ] || die 'close existing debugger streams before the measurement'
 wait_inbox "$drain"
+# The offset bracket before the watcher starts; the SQL takes the one after the run and gates the drift.
+if [ -n "$container" ]; then
+  MSYS_NO_PATHCONV=1 docker run --rm --hostname m8-debugger --network "${M4_PROJECT}_default" \
+    -e PGHOST=postgres -e PGPORT=5432 -e PGUSER=zirv -e PGDATABASE=zirv_flow_m8 -e PGPASSWORD=zirv-m8-bench -e PGCONNECT_TIMEOUT=10 \
+    -v "$(win "$m8_dir"):/sql:ro" "$pg_image" \
+    psql -X -q -v ON_ERROR_STOP=1 --csv -v container_mode=1 -f /sql/debugger-clock-bracket.sql >"$raw/clock-before.csv"
+else
+  host_pg --csv -f "$m8_dir/debugger-clock-bracket.sql" >"$raw/clock-before.csv"
+fi
+IFS=, read -r offset_before uncertainty_before < <(tail -n 1 "$raw/clock-before.csv" | tr -d '\r')
+num='^-?[0-9]+(\.[0-9]+)?$'
+[[ "$offset_before" =~ $num && "$uncertainty_before" =~ $num ]] || die "unreadable clock bracket in $raw/clock-before.csv"
 if [ -n "$container" ]; then
   docker rm -f "$cname" >/dev/null 2>&1 || true
   MSYS_NO_PATHCONV=1 docker run --rm --name "$cname" --hostname m8-debugger --network "${M4_PROJECT}_default" \
@@ -78,9 +90,12 @@ if [ -n "$container" ]; then
     -e PGHOST=postgres -e PGPORT=5432 -e PGUSER=zirv -e PGDATABASE=zirv_flow_m8 -e PGPASSWORD=zirv-m8-bench -e PGCONNECT_TIMEOUT=10 \
     -v "$(win "$m8_dir"):/sql:ro" -v "$(win "$raw"):/raw:ro" "$pg_image" \
     psql -X -q -v ON_ERROR_STOP=1 --csv -v container_mode=1 -v receive_file=/raw/receive.jsonl \
+    -v offset_before_us="$offset_before" -v uncertainty_before_us="$uncertainty_before" \
     -f /sql/debugger-latency.sql >"$raw/latency.csv"
 else
-  host_pg --csv -v receive_file="$raw/receive.jsonl" -f "$m8_dir/debugger-latency.sql" >"$raw/latency.csv"
+  host_pg --csv -v receive_file="$raw/receive.jsonl" \
+    -v offset_before_us="$offset_before" -v uncertainty_before_us="$uncertainty_before" \
+    -f "$m8_dir/debugger-latency.sql" >"$raw/latency.csv"
 fi
 python3 -I - "$raw" "$seconds" "$clients" <<'PY'
 import csv, json, pathlib, sys

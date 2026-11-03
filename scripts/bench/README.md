@@ -115,8 +115,11 @@ psql -X "$DATABASE_URL" -v receive_file="$PWD/receive.jsonl" \
 The JSONL holds one `item` per receipt (`client`, nullable `event_id`, `received_at` in UTC Unix
 microseconds), `started`/`finished` clock boundaries and per-client gap/skipped/status summaries.
 Run SQL after the inbox drains, on the watcher's host with `python3` available and stable clocks;
-it fails unless that host's short name matches the `host` in the `started` record, then samples that host around database `now()` and fails if skew plus uncertainty, or the run's wall
-versus monotonic clock step, exceeds 50 ms. Saved boundaries alone cannot establish clock skew.
+it fails unless that host's short name matches the `host` in the `started` record, then samples that host around database `now()` (best of ten brackets) and fails if
+skew plus uncertainty at either end exceeds 50 ms, or if the offset drift does: `debugger.sh` takes
+the same bracket before the watcher starts (`debugger-clock-bracket.sql`, kept in `clock-before.csv`) and passes
+it as `-v offset_before_us -v uncertainty_before_us`, and the gate requires
+`|offset_after - offset_before| + u_before + u_after <= 50 ms`. Saved boundaries alone cannot establish clock skew.
 SQL reports first-receipt nearest-rank p50/p95/p99/max and delivered share per client and overall:
 distinct client/event pairs divided by clients times stored API events arriving during the run.
 Leave a drain window before watchers stop; non-stored outcomes are excluded from that denominator.
@@ -456,8 +459,33 @@ one-shot key generator exits before measurement. Defaults, all overridable:
 | `BENCH_IMAGE_TAG` | `0.190.0` | Pre-pulled versioned app image; no `latest` or build fallback |
 
 The other PostgreSQL settings match [M4 section 2.1](../../docs/benchmarks/m4-segments.md#21-hardware-spec-d1):
-`effective_cache_size=16GB`, `maintenance_work_mem=1GB`, `max_wal_size=8GB`,
-`checkpoint_timeout=15min`; 8 GiB shared memory follows the corrected M4 run. If changing the PG
+`effective_cache_size=16GB`, `maintenance_work_mem=1GB`, `checkpoint_timeout=15min`; 8 GiB shared
+memory follows the corrected M4 run. The M8 stack differs from M4 where `docs/operations/sizing.md`
+now recommends otherwise: `wal_compression=lz4`, `max_wal_size=32GB` (`M8_MAX_WAL_SIZE`) and
+`shared_preload_libraries=pg_stat_statements` (restart-only, so `up` recreates PostgreSQL; the
+extension is created idempotently by `up` and by every arm), so M8 WAL figures are not comparable
+with M4's 8 GB runs.
+
+Connections: `M8_PG_MAX_CONNECTIONS` defaults to 400. Serve gets `database.max_connections` 32
+(`ZIRV_FLOW_DATABASE__MAX_CONNECTIONS`, `M8_SERVE_DB_CONNECTIONS`; the sizing.md serve rule, D about
+24-32); worker and scheduler keep the shipped 10. Worst case at worker concurrency C = 32 and S = 8
+drain shards: serve D 32 + explorer pool (`explorer.max_connections`, default 4, lands with the
+explorer PR) 4 + worker (2 + S) x C + 1 = 321 gives **357** against 400. That leaves 43 for the
+worker and scheduler main pools (10 each), admin and monitoring clients. At the topology default
+C = 4 the worker adds 41.
+
+Every arm is wrapped by `run_bench` in a quiet start and shared instrumentation (`common.sh`):
+`quiet_start` waits (bound `M8_QUIET_TIMEOUT_S`, default 1800, failing the arm on timeout) until
+`pg_stat_progress_vacuum` is empty, then runs `CHECKPOINT`. `instrument_begin/end` write
+`instrument/` under the raw directory: serve `/metrics` before and after, `pg-stats-before/after.json`
+(`pg_current_wal_lsn()`, `pg_stat_wal`, `pg_stat_io`, checkpoint counters from
+`pg_stat_checkpointer` or, on 16, `pg_stat_bgwriter`), `pg-statements.json` (top 30 by
+`total_exec_time` since the arm's `pg_stat_statements_reset()`) and `docker-stats.tsv` (read-only
+`docker stats --no-stream` of the four stack containers every `M8_DOCKER_STATS_TICK_S=10` seconds).
+The ingest arm (`m8/ingest.sh`) adds `instrument/waits.ndjson`, the wait events of the client
+backends once per second (ingest backends flagged by their inbox statements); loadgen's report
+gains `timeline_from_schedule`, per scheduled second the requests, p50, p99 and max latency from
+schedule (loadgen had no timeline before). Rebuild `target/release/loadgen` to get it. If changing the PG
 cap, size `M8_SHARED_BUFFERS` with it. `up` rejects intersections among all three CPU allocations
 before calling Docker. An enrollment seed also checks that the Docker VM can hold the sum of the
 configured memory caps (48 GiB by default). These IDs are logical CPUs, not claims about identical
@@ -637,7 +665,8 @@ future wakes are pending; both are named in the `measurement` field of the jobs 
 
 Jobs and timers call `m8/sample-job-kinds.sh` and `job-kinds.sql` from #455; merge that dependency
 and select an image emitting its per-kind claim metrics before running. `JOB_KINDS_TICK_S=5`
-controls that sampler. CSV samples and their JSON copy remain under each raw scenario, alongside
+controls that sampler (timers defaults to 30, since the query scans every due-ready job; the
+stop deadline of tick + 30 s still fits). CSV samples and their JSON copy remain under each raw scenario, alongside
 Prometheus scrapes and workload results; `write_data` embeds all raw JSON in the M8 report.
 
 The no-Docker self-test is in the existing CI job beside the benchmark feature gate. The feature

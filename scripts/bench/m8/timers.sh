@@ -11,7 +11,11 @@ worker_concurrency="${M8_WORKER_CONCURRENCY:-4}"
 if [ -n "${M8_SMOKE:-}" ]; then seconds=5; lead=10; drain=60; fi
 for name in seconds lead drain worker_concurrency; do positive_integer "$name" "${!name}"; done
 [ -x "${LOADGEN:-$root/target/release/loadgen}" ] || die 'no prebuilt loadgen'
+# The per-kind query scans every due-ready job: 30 s keeps that observer off the drain (override with JOB_KINDS_TICK_S).
+export JOB_KINDS_TICK_S="${JOB_KINDS_TICK_S:-30}"
 require_job_sampler
+# A ready wake job is found through jobs_ready_kind_idx and a running one through the partial running index.
+wake_pending="SELECT EXISTS (SELECT 1 FROM jobs WHERE kind = 'flow.step' AND state = 'ready') OR EXISTS (SELECT 1 FROM jobs WHERE kind = 'flow.step' AND state = 'running')"
 sampler_pid=''; load_pid=''; worker_stopped=''
 cleanup() {
   local pid
@@ -26,6 +30,7 @@ for mode in noload loaded; do
   dest="$raw/$mode"
   mkdir -p "$dest"
   wait_inbox "$drain"
+  quiet_start
   worker_stopped=1
   compose stop -t 60 zirv-flow-worker
   host_pg -v seconds="$seconds" -v lead="$lead" -v enrollments="$M8_ENROLLMENTS" \
@@ -59,9 +64,10 @@ PY2
   deadline=$((SECONDS + seconds + drain))
   while :; do
     # A cheap existence check: a 10 M row count every 5 s competes with the workload for database CPU.
-    [ "$(host_pg -At -c 'SELECT EXISTS (SELECT 1 FROM jobs j JOIN m5bench.rows r ON r.job_id = j.id WHERE r.run = 1)')" = t ] || break
+    # Only the bench's wake jobs are flow.step here, so this stays O(1) late in the drain (no join over woken rows).
+    [ "$(host_pg -At -c "$wake_pending")" = t ] || break
     if [ "$SECONDS" -ge "$deadline" ]; then
-      left="$(host_pg -At -c 'SELECT count(*) FROM jobs j JOIN m5bench.rows r ON r.job_id = j.id WHERE r.run = 1')"
+      left="$(host_pg -At -c "SELECT count(*) FROM jobs WHERE kind = 'flow.step'")"
       log "timer drain timed out with $left wake jobs; collecting $dest"; break
     fi
     sleep 5

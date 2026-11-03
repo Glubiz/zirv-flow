@@ -136,6 +136,74 @@ for row in rows:
 PY
 }
 
+# Quiet start: an arm that follows seed or timers work waits for vacuum to finish, then checkpoints,
+# so background work from that earlier work does not land in its window.
+quiet_start() {
+  local timeout="${M8_QUIET_TIMEOUT_S:-1800}" deadline busy
+  positive_integer M8_QUIET_TIMEOUT_S "$timeout"
+  deadline=$((SECONDS + timeout))
+  log 'quiet start: waiting for pg_stat_progress_vacuum to empty'
+  while :; do
+    busy="$(pg -At -c 'SELECT count(*) FROM pg_stat_progress_vacuum')"
+    [ "$busy" = 0 ] && break
+    [ "$SECONDS" -lt "$deadline" ] || die "quiet start: $busy vacuum(s) still running after ${timeout}s (M8_QUIET_TIMEOUT_S); arm not started"
+    sleep 5
+  done
+  pg -c CHECKPOINT
+}
+
+# Per-arm instrumentation, shared by every arm (called around the arm's command by run_bench).
+# Everything lands in $1/instrument: serve metrics, PostgreSQL WAL/I/O/checkpoint snapshots,
+# the top statements by execution time, and docker stats of the stack every 10 s.
+stats_pid=''
+stop_docker_stats() {
+  if [ -n "$stats_pid" ]; then
+    kill "$stats_pid" 2>/dev/null || true
+    wait "$stats_pid" 2>/dev/null || true
+    stats_pid=''
+  fi
+}
+start_docker_stats() {
+  local ids service cid
+  ids=()
+  for service in postgres zirv-flow zirv-flow-worker zirv-flow-scheduler; do
+    cid="$(compose ps -q "$service")"
+    [ -n "$cid" ] && ids+=("$cid")
+  done
+  (
+    while :; do
+      docker stats --no-stream --format '{{json .}}' "${ids[@]}" | while IFS= read -r line; do
+        printf '%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$line"
+      done
+      sleep "${M8_DOCKER_STATS_TICK_S:-10}"
+    done
+  ) >"$1/docker-stats.tsv" 2>"$1/docker-stats.err" &
+  stats_pid=$!
+}
+
+pg_snapshot() { pg -At -f /bench/m8/pg-stats.sql >"$1.tmp" && mv "$1.tmp" "$1"; }
+
+instrument_begin() {
+  local dir="$1/instrument"
+  mkdir -p "$dir"
+  curl -fsS --connect-timeout 5 --max-time 10 http://127.0.0.1:8080/metrics >"$dir/serve-metrics-before.prom" ||
+    die 'cannot scrape serve /metrics before the arm'
+  pg -c 'CREATE EXTENSION IF NOT EXISTS pg_stat_statements' >/dev/null
+  pg -At -c 'SELECT pg_stat_statements_reset()' >/dev/null ||
+    die 'pg_stat_statements is not preloaded; recreate PostgreSQL with run.sh up (shared_preload_libraries)'
+  pg_snapshot "$dir/pg-stats-before.json"
+  start_docker_stats "$dir"
+}
+
+instrument_end() {
+  local dir="$1/instrument"
+  stop_docker_stats
+  curl -fsS --connect-timeout 5 --max-time 10 http://127.0.0.1:8080/metrics >"$dir/serve-metrics-after.prom" &&
+    pg_snapshot "$dir/pg-stats-after.json" &&
+    pg -At -f /bench/m8/pg-statements.sql >"$dir/pg-statements.json.tmp" &&
+    mv "$dir/pg-statements.json.tmp" "$dir/pg-statements.json"
+}
+
 validate_cpus() {
   python3 -I - "$M8_PG_CPUSET" "$M8_SERVE_CPUSET" "$M8_WORKER_CPUSET" <<'PY'
 import re, sys
@@ -215,7 +283,7 @@ capture_topology() {
     [ -n "$cid" ] || die "no running $service; run up first"
     docker inspect --format '{"service":"{{index .Config.Labels "com.docker.compose.service"}}","image":"{{.Config.Image}}","image_id":"{{.Image}}","cpuset":"{{.HostConfig.CpusetCpus}}","memory_bytes":{{.HostConfig.Memory}},"shm_bytes":{{.HostConfig.ShmSize}}}' "$cid" >>"$dest"
   done
-  pg -At -c "SELECT json_build_object('postgres_settings', json_object_agg(name, current_setting(name))) FROM unnest(ARRAY['shared_buffers','effective_cache_size','maintenance_work_mem','max_wal_size','checkpoint_timeout']) name" >>"$dest"
+  pg -At -c "SELECT json_build_object('postgres_settings', json_object_agg(name, current_setting(name))) FROM unnest(ARRAY['shared_buffers','effective_cache_size','maintenance_work_mem','max_wal_size','checkpoint_timeout','wal_compression','shared_preload_libraries','max_connections']) name" >>"$dest"
   python3 -I - "$dest" "$(mem_bytes "$M8_PG_MEMORY")" "$(mem_bytes "$M8_SERVE_MEMORY")" \
     "$(mem_bytes "$M8_WORKER_MEMORY")" "$(mem_bytes "$M8_SCHEDULER_MEMORY")" <<'PY'
 import json, os, sys
