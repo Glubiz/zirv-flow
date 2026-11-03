@@ -92,13 +92,24 @@ if [ -z "$mode" ]; then
 fi
 
 # ---------------------------------------------------------------------
-# Only reachable v<SemVer> tags participate; unrelated tags are not releases.
+# A tag is released into a revision when it is an ancestor of it, or when it
+# tags CD's CHANGELOG.md commit and that commit's parent, the released commit,
+# is: main's ruleset refuses the CHANGELOG.md push, so CD's tags stay off main.
+released_into() {
+  local tag="$1" rev="$2"
+  git merge-base --is-ancestor "$tag" "$rev" && return 0
+  [[ "$(git log -1 --format=%s "$tag" --)" == "docs: CHANGELOG.md for $tag [skip ci]" ]] &&
+    git merge-base --is-ancestor "$tag^" "$rev"
+}
+
+# Only released v<SemVer> tags participate; unrelated tags are not releases.
 # Sort by SemVer rather than Git's version sort (which puts final before rc).
 release_tag_list=()
 release_tags() {
   local rev="$1" tag i
   while IFS= read -r tag; do
     [[ "$tag" == v* ]] && semver_valid "${tag#v}" || continue
+    released_into "$tag" "$rev" || continue
     i=${#release_tag_list[@]}
     while (( i > 0 )); do
       semver_compare "${release_tag_list[$((i - 1))]#v}" "${tag#v}"
@@ -107,7 +118,7 @@ release_tags() {
       i=$((i - 1))
     done
     release_tag_list[$i]=$tag
-  done < <(git tag --merged "$rev")
+  done < <(git tag --list 'v*')
 }
 
 # CD supplies --version before tagging. Tagged rebuilds derive it from --to;
@@ -131,7 +142,7 @@ nearest_tag() {
       if [[ "${version%%+*}" != *-* && "${tag%%+*}" == *-* ]]; then continue; fi
     fi
     # A cached tag reachable from --to may not be an ancestor of this release.
-    git merge-base --is-ancestor "$tag" "$rev" || continue
+    released_into "$tag" "$rev" || continue
     previous=$tag
     break
   done
@@ -400,6 +411,19 @@ HEADER
     [[ "$headings" == $'v1.0.0\nv1.0.0-rc.2\nv1.0.0-rc.1\nv0.10.0\nv0.9.0\nv0.2.0\nv0.1.1\nv0.1.0' ]]
     final_full=$(sed -n '1,/^## v1.0.0-rc.2/{ /^## v1.0.0-rc.2/d; p; }' <<< "$full")
     [[ "$final_full" == *'first rc feature'* && "$final_full" == *'second rc fix'* && "$final_full" != *'previous stable'* ]]
+    # CD tags its CHANGELOG.md commit, which never reaches main: the next
+    # release starts from that tag, not from the last tag on main.
+    (
+      cd "$workdir"
+      git commit -q --allow-empty -m "feat: released work"
+      git checkout -q --detach
+      git commit -q --allow-empty -m "docs: CHANGELOG.md for v1.1.0 [skip ci]"
+      git tag v1.1.0
+      git checkout -q main
+      git commit -q --allow-empty -m "fix: after the release"
+    )
+    next=$(cd "$workdir" && "$script_path" --section --to HEAD --version 1.2.0 --header '## v1.2.0')
+    [[ "$next" == *'after the release'* && "$next" != *'released work'* ]]
 
     if [ "$fail" = "1" ]; then
       exit 1
