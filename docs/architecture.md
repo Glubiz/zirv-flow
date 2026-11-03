@@ -2621,17 +2621,27 @@ was merged into), then by person id, a wake whose enrollment is gone first. Each
 savepoint of its own: its lease check, the step and its decisions, and its fenced completion, with
 its heartbeat running until the completion. A wake whose handler fails, or whose lease check,
 heartbeat or completion finds the lease gone, rolls back to its savepoint, which drops its writes
-and the row locks it took, and the others go on. After the transaction it is settled as a job
-alone: a failure records the attempt and its error and retries with backoff (on the last attempt
-the enrollment fails), and a lost lease leaves the job to its new owner. One commit ends the batch,
+and the row locks it took, and the others go on. A failure is then written in the batch
+transaction, outside the wake's savepoint and in a savepoint of its own (ruling 4e9d24be), with
+the statement that settles a job alone's: the attempt and its error, the backoff, the cleared
+lease and the `job_error` decision (on the last attempt the enrollment fails). Its job row is
+`ready` once the batch commits, so a reaper that waited for the batch finds it settled, not a
+running job whose lease ran out while the later wakes ran. A failure that cannot be written there
+(a deadlock with a reaper that holds the row, say) is rolled back to that savepoint and settled
+after the transaction, and a lost lease leaves the job to its new owner. One commit ends the batch,
 so eight steps make one handler commit instead of eight. When the commit fails, or an error leaves
-the transaction unusable, it is rolled back and every wake that completed in it fails with `could
-not commit the job transaction`, as a job alone whose commit fails: its attempt counts and it
-retries. A completed wake's fenced delete holds its job row until the commit, so the reaper cannot
-return it meanwhile. The slot begins no wake past the hold limit and gives the rest back as for
-any claim, so a wake starts with five sixths of its lease, and a batch holds at most eight. The
-decisions of one batch share their `recorded_at`, the transaction's start, and keep their order
-by id. `zirv_flow_job_transactions_total{kind}` counts handler transactions, so jobs per
+the transaction unusable, it is rolled back: every wake that completed in it fails with `could not
+commit the job transaction`, as a job alone whose commit fails (its attempt counts and it retries),
+and every failure written in it is settled again after it, on a lease the rollback left as it was.
+A completed wake's fenced delete and a failed wake's written failure hold its job row until the
+commit, so the reaper waits for the batch instead of returning the job meanwhile. The slot begins
+no wake past the hold limit and gives the rest back as for any claim, so a wake starts with five
+sixths of its lease, and a batch holds at most eight. The decisions of one batch share their
+`recorded_at` (the column's default, the transaction's start) and keep their order by id; a
+failure written in the batch shares it too, under a random id, so in a trace it sorts after the
+enrollment's earlier steps, as before, but by its id among the rows another wake of the same
+trace wrote in the batch, and before the rows of transactions that began while the batch ran.
+`zirv_flow_job_transactions_total{kind}` counts handler transactions, so jobs per
 transaction is `zirv_flow_jobs_total` over it; a batched job's duration is its own wake plus an
 equal share of the batch's setup and commit.
 

@@ -3714,19 +3714,22 @@ pub(super) mod tests {
         tx
     }
 
+    /// How many connections of this database wait for a lock.
+    async fn waiting(env: &Env) -> i64 {
+        sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity \
+             WHERE datname = current_database() AND cardinality(pg_blocking_pids(pid)) > 0",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .unwrap()
+    }
+
     /// Waits until `count` connections of this database wait for a lock.
     async fn until_waiting(env: &Env, count: i64) {
         tokio::time::timeout(Duration::from_secs(30), async {
             loop {
-                let waiting: i64 = sqlx::query_scalar(
-                    "SELECT count(*) FROM pg_stat_activity \
-                     WHERE datname = current_database() \
-                       AND cardinality(pg_blocking_pids(pid)) > 0",
-                )
-                .fetch_one(&env.pool)
-                .await
-                .unwrap();
-                if waiting >= count {
+                if waiting(env).await >= count {
                     return;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -3909,6 +3912,16 @@ pub(super) mod tests {
             }
             let ids: Vec<Uuid> = wakes.iter().map(|job| job.id).collect();
             assert_eq!(transactions_of(&env, &ids).await, 1, "the others committed together");
+            let in_batch: bool = sqlx::query_scalar(
+                "SELECT (SELECT recorded_at FROM decision_records WHERE job_id = $1) \
+                      = (SELECT max(recorded_at) FROM decision_records WHERE job_id = ANY($2))",
+            )
+            .bind(doomed_job.id)
+            .bind(&ids)
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+            assert!(in_batch, "the failure was written in the batch transaction");
             let after = env.enrollment(doomed).await;
             assert_eq!(
                 (after.status, after.state_version, after.node.as_str()),
@@ -3938,6 +3951,202 @@ pub(super) mod tests {
                 [("job.attempt", "failed", Some("job_error"), 1)],
                 "only the failure is recorded for the failed wake"
             );
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_failed_wake_keeps_its_own_failure_when_its_lease_runs_out_before_the_batch_ends(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            const MESSAGE: &str = "an increment needs a trait whose value is a number";
+            let env = Env::new(pool).await;
+            env.define_trait("plan", TraitType::String).await;
+            let ada = env
+                .person(PERSONAL_DATA.email, json!({"plan": "pro"}))
+                .await;
+            let failing = env
+                .flow(
+                    "Failing",
+                    json!({"v": 1, "nodes": [
+                        {"id": "w", "type": "wait.duration", "seconds": 60},
+                        {"id": "bump", "type": "action.update_trait", "key": "plan",
+                         "change": {"op": "increment", "by": 1.0}},
+                        {"id": "end", "type": "exit"}
+                    ], "edges": [edge("e1", "w", "next", "bump"), edge("e2", "bump", "next", "end")]}),
+                )
+                .await;
+            let doomed = env.enroll(failing, 1, &[ada]).await.enrolled[0].enrollment;
+            let enrolled = due_visits(&env, 1).await;
+            assert!(ada < enrolled[0].person, "the failing wake runs first");
+            // Leases of two seconds, which the failed wake outlives while the next one waits.
+            let lease = Duration::from_secs(2);
+            let jobs = zirv_flow_store::claim_jobs(
+                &env.pool,
+                "test",
+                &[STEP_JOB_KIND],
+                lease,
+                None,
+                8,
+            )
+            .await
+            .unwrap();
+            env.release().await;
+            assert_eq!(jobs.len(), 2, "the wakes that are due");
+            let doomed_job = jobs
+                .iter()
+                .find(|job| enrollment_of(job) == Some(doomed))
+                .unwrap()
+                .clone();
+            let blocker = hold_person(&env, enrolled[0].person).await;
+            let mut config = batch_config(&env);
+            config.lease = lease;
+            config.backoff_base = Duration::from_secs(600);
+            config.backoff_cap = Duration::from_secs(600);
+            let (pool, ws) = (env.pool.clone(), env.ws);
+            let batch =
+                tokio::spawn(
+                    async move { crate::worker::run_wakes(&pool, config, ws, jobs).await },
+                );
+            until_waiting(&env, 1).await;
+            // The failed wake's lease runs out while the next wake waits, and the reaper runs.
+            tokio::time::sleep(lease + Duration::from_millis(500)).await;
+            let pool = env.pool.clone();
+            let reaper =
+                tokio::spawn(async move { zirv_flow_store::reap_expired(&pool).await.unwrap() });
+            for _ in 0..300 {
+                if reaper.is_finished() || waiting(&env).await >= 2 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            blocker.rollback().await.unwrap();
+            let outcomes = batch.await.unwrap();
+            reaper.await.unwrap();
+
+            assert_eq!(
+                outcomes_of(std::slice::from_ref(&doomed_job), &outcomes),
+                [crate::metrics::Outcome::Retried]
+            );
+            let (state, attempts, error, backed_off): (String, i32, Option<String>, bool) =
+                sqlx::query_as(
+                    "SELECT state, attempts, last_error, run_at > now() + interval '1 minute' \
+                     FROM jobs WHERE id = $1",
+                )
+                .bind(doomed_job.id)
+                .fetch_one(&env.pool)
+                .await
+                .unwrap();
+            assert_eq!(
+                (state.as_str(), attempts, error.as_deref(), backed_off),
+                ("ready", 1, Some(MESSAGE), true),
+                "the failure, not the reaper, settled the wake"
+            );
+            let recorded: Vec<(String, String, Option<String>, Value, i32)> =
+                shapes_of(&env, doomed_job.id).await;
+            assert_eq!(
+                recorded
+                    .iter()
+                    .map(|(action, outcome, reason, _, attempt)| {
+                        (action.as_str(), outcome.as_str(), reason.as_deref(), *attempt)
+                    })
+                    .collect::<Vec<_>>(),
+                [("job.attempt", "failed", Some("job_error"), 1)]
+            );
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_failure_written_in_a_batch_whose_commit_fails_is_settled_once_after_it(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            const MESSAGE: &str = "an increment needs a trait whose value is a number";
+            let env = Env::new(pool).await;
+            env.define_trait("plan", TraitType::String).await;
+            let ada = env
+                .person(PERSONAL_DATA.email, json!({"plan": "pro"}))
+                .await;
+            let failing = env
+                .flow(
+                    "Failing",
+                    json!({"v": 1, "nodes": [
+                        {"id": "w", "type": "wait.duration", "seconds": 60},
+                        {"id": "bump", "type": "action.update_trait", "key": "plan",
+                         "change": {"op": "increment", "by": 1.0}},
+                        {"id": "end", "type": "exit"}
+                    ], "edges": [edge("e1", "w", "next", "bump"), edge("e2", "bump", "next", "end")]}),
+                )
+                .await;
+            let doomed = env.enroll(failing, 1, &[ada]).await.enrolled[0].enrollment;
+            let enrolled = due_visits(&env, 2).await;
+            // The next commit that writes a step row fails, at the commit itself.
+            for statement in [
+                "CREATE SEQUENCE commit_failures",
+                "CREATE FUNCTION fail_first_commit() RETURNS trigger LANGUAGE plpgsql AS $$ \
+                 BEGIN \
+                     IF nextval('commit_failures') = 1 THEN \
+                         RAISE EXCEPTION 'injected commit failure'; \
+                     END IF; \
+                     RETURN NULL; \
+                 END $$",
+                "CREATE CONSTRAINT TRIGGER fail_first_commit AFTER INSERT ON step_executions \
+                 DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION fail_first_commit()",
+            ] {
+                sqlx::query(statement).execute(&env.pool).await.unwrap();
+            }
+            let jobs = claim_wakes(&env, 3).await;
+            let doomed_job = jobs
+                .iter()
+                .find(|job| enrollment_of(job) == Some(doomed))
+                .unwrap()
+                .clone();
+
+            let outcomes = spawn_batch(&env, jobs.clone()).await.unwrap();
+
+            assert_eq!(
+                outcomes_of(&jobs, &outcomes),
+                [crate::metrics::Outcome::Retried; 3]
+            );
+            let errors: Vec<(Uuid, String, i32, Option<String>)> = sqlx::query_as(
+                "SELECT id, state, attempts, last_error FROM jobs WHERE id = ANY($1)",
+            )
+            .bind(jobs.iter().map(|job| job.id).collect::<Vec<_>>())
+            .fetch_all(&env.pool)
+            .await
+            .unwrap();
+            for wake in wakes_of(&enrolled, &jobs).iter().chain([&doomed_job]) {
+                let error = if wake.id == doomed_job.id {
+                    MESSAGE
+                } else {
+                    "could not commit the job transaction"
+                };
+                let (_, state, attempts, last_error) =
+                    errors.iter().find(|(id, ..)| *id == wake.id).unwrap();
+                assert_eq!(
+                    (state.as_str(), *attempts, last_error.as_deref()),
+                    ("ready", 1, Some(error)),
+                    "job {}",
+                    wake.id
+                );
+                let recorded: Vec<(String, String, Option<String>, Value, i32)> =
+                    shapes_of(&env, wake.id).await;
+                assert_eq!(
+                    recorded
+                        .iter()
+                        .map(|(action, outcome, reason, _, attempt)| {
+                            (action.as_str(), outcome.as_str(), reason.as_deref(), *attempt)
+                        })
+                        .collect::<Vec<_>>(),
+                    [("job.attempt", "failed", Some("job_error"), 1)],
+                    "job {} is settled once",
+                    wake.id
+                );
+            }
         })
         .await;
     }

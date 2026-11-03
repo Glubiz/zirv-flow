@@ -491,6 +491,10 @@ enum Attempt {
     LeaseLost,
     /// The handler failed; the text is safe to store.
     Failed(String, Option<Duration>),
+    /// The handler of a wake failed and the failure was written in its batch transaction, which
+    /// has not ended yet (#397): the outcome stands once that commits; when it does not, the
+    /// failure is settled again as [`Attempt::Failed`].
+    Recorded(String, Option<Duration>, Outcome),
 }
 
 /// What a job whose transaction did not commit failed with.
@@ -545,6 +549,10 @@ async fn settle(shared: &Shared, job: &ClaimedJob, attempt: Attempt, ran: Durati
             failure = Some(reason);
             outcome
         }
+        Attempt::Recorded(reason, _, outcome) => {
+            failure = Some(reason);
+            outcome
+        }
     };
     let elapsed = ran + settling.elapsed();
     let duration_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
@@ -572,14 +580,9 @@ pub(crate) fn retry_delay(backoff: Duration, asked: Option<Duration>, cap: Durat
     asked.map_or(backoff, |asked| backoff.max(asked.min(cap)))
 }
 
-/// Retries or buries a job whose handler failed, fenced on its lease.
-async fn settle_failure(
-    shared: &Shared,
-    job: &ClaimedJob,
-    reason: &str,
-    retry_after: Option<Duration>,
-) -> Outcome {
-    let delay = retry_delay(
+/// When a failed job runs again: its backoff, or the wait its handler asked for.
+fn failure_delay(shared: &Shared, job: &ClaimedJob, retry_after: Option<Duration>) -> Duration {
+    retry_delay(
         backoff(
             u32::try_from(job.attempts).unwrap_or(u32::MAX),
             shared.config.backoff_base,
@@ -588,11 +591,27 @@ async fn settle_failure(
         ),
         retry_after,
         shared.config.backoff_cap,
-    );
+    )
+}
+
+fn failed_outcome(failed: FailOutcome) -> Outcome {
+    match failed {
+        FailOutcome::Retried => Outcome::Retried,
+        FailOutcome::Dead => Outcome::Dead,
+        FailOutcome::Purged => Outcome::Purged,
+    }
+}
+
+/// Retries or buries a job whose handler failed, fenced on its lease.
+async fn settle_failure(
+    shared: &Shared,
+    job: &ClaimedJob,
+    reason: &str,
+    retry_after: Option<Duration>,
+) -> Outcome {
+    let delay = failure_delay(shared, job, retry_after);
     match fail_job(&shared.pool, job.id, job.lease_token, delay, reason).await {
-        Ok(Some(FailOutcome::Retried)) => Outcome::Retried,
-        Ok(Some(FailOutcome::Dead)) => Outcome::Dead,
-        Ok(Some(FailOutcome::Purged)) => Outcome::Purged,
+        Ok(Some(failed)) => failed_outcome(failed),
         Ok(None) => Outcome::LeaseLost,
         Err(error) => {
             // The lease runs out and the reaper takes the job from here.
@@ -833,13 +852,14 @@ async fn process_wakes(shared: &Arc<Shared>, wakes: Wakes) -> Vec<(Uuid, Outcome
 /// A wake runs as a job alone does: its lease check, handler beside its heartbeat, and fenced
 /// completion, in its savepoint, which is released when the wake completes. A wake that fails or
 /// loses its lease rolls back to its savepoint, which undoes its writes and frees its locks, and
-/// the next wake goes on; the failure is settled after the transaction, with the attempt counted,
-/// as a job alone's is. A wake begins only before the deadline and while the pool runs; the rest
-/// stay in the queue, to be given back.
+/// the next wake goes on. A failure is then written in the transaction ([`record_failure`]), with
+/// the attempt counted as a job alone's is, and commits with the batch. A wake begins only before
+/// the deadline and while the pool runs; the rest stay in the queue, to be given back.
 ///
 /// When the transaction cannot go on (a savepoint that cannot be begun, released or rolled back)
-/// or its commit fails, nothing of it is kept, and every wake that completed fails as a job alone
-/// whose commit failed: back to the queue with an attempt counted, or dead on its last attempt.
+/// or its commit fails, nothing of it is kept: every wake that completed fails as a job alone
+/// whose commit failed, back to the queue with an attempt counted or dead on its last attempt,
+/// and every failure it recorded is settled again after it, as a job alone's is.
 async fn execute_wakes(shared: Arc<Shared>, wakes: Wakes) -> Vec<Ran> {
     let Wakes {
         workspace,
@@ -887,10 +907,21 @@ async fn execute_wakes(shared: Arc<Shared>, wakes: Wakes) -> Vec<Ran> {
         let attempt = run_wake(&shared, kind, &mut tx, &job, &mut batch)
             .instrument(span.clone())
             .await;
-        let attempt = attempt.unwrap_or_else(|| {
-            usable = false;
-            Attempt::Failed(NOT_COMMITTED.into(), None)
-        });
+        let attempt = match attempt {
+            Some(Attempt::Failed(reason, retry_after)) => {
+                let (attempt, went_on) =
+                    record_failure(&shared, &mut tx, &job, reason, retry_after)
+                        .instrument(span.clone())
+                        .await;
+                usable = went_on;
+                attempt
+            }
+            Some(attempt) => attempt,
+            None => {
+                usable = false;
+                Attempt::Failed(NOT_COMMITTED.into(), None)
+            }
+        };
         ran.push(Ran {
             job,
             attempt,
@@ -906,13 +937,52 @@ async fn execute_wakes(shared: Arc<Shared>, wakes: Wakes) -> Vec<Ran> {
         // The connection is broken; the server ends the transaction when it goes.
         warn!("could not roll back a batch transaction");
     }
-    // Rolled back before the failures are settled, so its row locks are gone by then.
+    // Rolled back before the failures are settled, so its row locks are gone by then, and so are
+    // the failures it recorded: their leases are as they were, and they are settled again.
     for wake in &mut ran {
-        if matches!(wake.attempt, Attempt::Completed) {
-            wake.attempt = Attempt::Failed(NOT_COMMITTED.into(), None);
-        }
+        let attempt = std::mem::replace(&mut wake.attempt, Attempt::LeaseLost);
+        wake.attempt = match attempt {
+            Attempt::Completed => Attempt::Failed(NOT_COMMITTED.into(), None),
+            Attempt::Recorded(reason, retry_after, _) => Attempt::Failed(reason, retry_after),
+            attempt => attempt,
+        };
     }
     ran
+}
+
+/// Records the failure of a wake whose savepoint rolled back in the batch transaction, outside
+/// that savepoint, in a savepoint of its own (supervisor ruling 4e9d24be). The job row is then
+/// `ready` (or `dead`, or deleted for an erasure) in the transaction, so a reaper that waits for
+/// the batch finds it settled once the batch commits, instead of a running job whose lease ran
+/// out while the later wakes ran. A failure that cannot be recorded here (the statement failed,
+/// say a deadlock with a reaper that holds the row) is rolled back and settled after the
+/// transaction, as a job alone's is; no row means the lease was lost. Returns the attempt and
+/// whether the transaction can go on.
+async fn record_failure(
+    shared: &Shared,
+    tx: &mut PgConnection,
+    job: &ClaimedJob,
+    reason: String,
+    retry_after: Option<Duration>,
+) -> (Attempt, bool) {
+    let Ok(mut savepoint) = tx.begin().await else {
+        return (Attempt::Failed(reason, retry_after), false);
+    };
+    let delay = failure_delay(shared, job, retry_after);
+    match fail_job(&mut *savepoint, job.id, job.lease_token, delay, &reason).await {
+        Ok(Some(failed)) => {
+            let recorded = Attempt::Recorded(reason.clone(), retry_after, failed_outcome(failed));
+            match savepoint.commit().await {
+                Ok(()) => (recorded, true),
+                Err(_) => (Attempt::Failed(reason, retry_after), false),
+            }
+        }
+        Ok(None) => (Attempt::LeaseLost, savepoint.rollback().await.is_ok()),
+        Err(_) => {
+            let went_on = savepoint.rollback().await.is_ok();
+            (Attempt::Failed(reason, retry_after), went_on)
+        }
+    }
 }
 
 /// One wake of a batch transaction, inside a savepoint of its own. `None` means the savepoint
@@ -932,7 +1002,9 @@ async fn run_wake(
     };
     let ended = match attempt {
         Attempt::Completed => savepoint.commit().await,
-        Attempt::LeaseLost | Attempt::Failed(..) => savepoint.rollback().await,
+        Attempt::LeaseLost | Attempt::Failed(..) | Attempt::Recorded(..) => {
+            savepoint.rollback().await
+        }
     };
     ended.ok().map(|()| attempt)
 }

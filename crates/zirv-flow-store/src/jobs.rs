@@ -732,8 +732,10 @@ pub async fn heartbeat_job<'e>(
 /// needs `FOR UPDATE`, which a handler's `KEY SHARE` blocks, so the rows to delete are taken
 /// `FOR UPDATE OF j SKIP LOCKED` first and a marked row a handler still holds is left alone on
 /// this pass: its handler's `complete_job` or `fail_job` deletes it, or a later reap does. The
-/// reaper therefore never waits on a handler, which would stall every other expired job behind
-/// one zombie and deadlock with a handler that completes.
+/// reaper therefore never waits on a handler's lease lock, which would stall every other expired
+/// job behind one zombie and deadlock with a handler that completes. It does wait for a worker's
+/// batch transaction (#397) that already completed or failed a job whose lease ran out while the
+/// batch's later jobs ran; once the batch commits, the row is gone or settled and is skipped.
 pub async fn reap_expired<'e>(executor: impl PgExecutor<'e>) -> Result<Reaped, StoreError> {
     let states: Vec<String> = sqlx::query_scalar(
         "WITH locked AS ( \

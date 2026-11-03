@@ -173,9 +173,9 @@ slot gives the jobs it has not started back to the queue a sixth of the lease (a
 most a second) after the claim, so they never wait long behind a slow job, and at
 once when the worker stops. The flow steps of one workspace among them run in
 one transaction with one commit, each behind a savepoint of its own: a step that
-fails or loses its lease is rolled back alone and retried or left to its new
-owner, while the others commit, and when the shared commit fails every step in it
-is retried. A worker that dies leaves its jobs to the scheduler,
+fails is rolled back alone and its retry, with the attempt and its error, commits
+with the others; a step that loses its lease is rolled back alone and left to its
+new owner; and when the shared commit fails every step in it is retried. A worker that dies leaves its jobs to the scheduler,
 which makes them runnable again once their leases have expired; a job
 that fails is retried with exponential backoff and jitter, and is kept as
 `dead` after its last attempt. A job's database writes commit together with its
