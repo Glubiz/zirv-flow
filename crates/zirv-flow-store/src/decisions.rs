@@ -316,13 +316,19 @@ async fn write_chunks(
 /// pushed, so its place among the records written directly in the same transaction (which share
 /// one `recorded_at` and are ordered by id) is the order in which the decisions were made.
 #[derive(Debug, Default)]
-pub(crate) struct DecisionBuffer {
+pub struct DecisionBuffer {
     pending: Vec<(Uuid, NewDecision)>,
 }
 
 impl DecisionBuffer {
-    pub(crate) fn push(&mut self, decision: NewDecision) {
+    pub fn push(&mut self, decision: NewDecision) {
         self.pending.push((Uuid::now_v7(), decision));
+    }
+
+    pub fn extend(&mut self, decisions: impl IntoIterator<Item = NewDecision>) {
+        for decision in decisions {
+            self.push(decision);
+        }
     }
 
     /// The position to hand to [`DecisionBuffer::discard_after`], taken before a savepoint.
@@ -336,7 +342,7 @@ impl DecisionBuffer {
     }
 
     /// Appends everything pushed so far, in push order, and empties the buffer.
-    pub(crate) async fn flush(&mut self, connection: &mut PgConnection) -> Result<(), StoreError> {
+    pub async fn flush(&mut self, connection: &mut PgConnection) -> Result<(), StoreError> {
         if self.pending.is_empty() {
             return Ok(());
         }

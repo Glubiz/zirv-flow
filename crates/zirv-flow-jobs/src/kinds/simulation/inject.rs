@@ -134,21 +134,27 @@ impl World {
                 || message.starts_with("the request to the destination"))
     }
 
-    /// The final run: the handler, the ack and the commit in one transaction. The error is the
-    /// handler's, after the transaction was rolled back.
-    pub(super) async fn final_run(&self, claimed: &ClaimedJob) -> Result<(), RunError> {
-        let mut tx = zirv_flow_store::begin(&self.env.pool).await.unwrap();
+    /// Takes the person-change guard of `claimed` the way the worker does: first in the job's
+    /// transaction, for a kind that needs it.
+    async fn guard(tx: &mut Tx, claimed: &ClaimedJob) {
         let kind = crate::Registry::built_in().get(&claimed.kind).unwrap();
         if kind.needs_change_readers()
             && let Some(workspace) = claimed.workspace_id
         {
             zirv_flow_store::cache_change_readers(
-                &mut tx,
+                tx,
                 zirv_flow_core::WorkspaceId::from_uuid(workspace),
             )
             .await
             .unwrap();
         }
+    }
+
+    /// The final run: the handler, the ack and the commit in one transaction. The error is the
+    /// handler's, after the transaction was rolled back.
+    pub(super) async fn final_run(&self, claimed: &ClaimedJob) -> Result<(), RunError> {
+        let mut tx = zirv_flow_store::begin(&self.env.pool).await.unwrap();
+        Self::guard(&mut tx, claimed).await;
         if !lock_lease(&mut tx, claimed.id, claimed.lease_token)
             .await
             .unwrap()
@@ -788,6 +794,7 @@ impl Driver<'_> {
     async fn failed_attempt(&mut self, claimed: &ClaimedJob, mode: Mode) -> Attempt {
         let w = self.w;
         let mut tx = zirv_flow_store::begin(&w.env.pool).await.unwrap();
+        World::guard(&mut tx, claimed).await;
         assert!(
             lock_lease(&mut tx, claimed.id, claimed.lease_token)
                 .await
@@ -892,6 +899,7 @@ impl Driver<'_> {
             .fetch_one(&mut *tx_a)
             .await
             .unwrap();
+        World::guard(&mut tx_a, claimed_a).await;
         if fenced {
             assert!(
                 lock_lease(&mut tx_a, id, a_token).await.unwrap(),
