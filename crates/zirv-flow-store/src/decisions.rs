@@ -1114,6 +1114,59 @@ mod tests {
         );
     }
 
+    /// The `WAL FPI` of `EXPLAIN (ANALYZE, WAL)` for inserting one decision row per trace id,
+    /// rolled back, after a checkpoint so every touched page needs a fresh full-page image.
+    async fn flush_fpi(pool: &PgPool, ws: WorkspaceId, traces: &[Uuid]) -> i64 {
+        sqlx::query("CHECKPOINT").execute(pool).await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        let plan: serde_json::Value = sqlx::query_scalar(
+            "EXPLAIN (ANALYZE, WAL, FORMAT JSON) \
+             INSERT INTO decision_records \
+             (id, workspace_id, trace_id, action, outcome, cause_kind, cause_id) \
+             SELECT gen_random_uuid(), $1, t, 'step', 'done', 'api', 'x' FROM unnest($2::uuid[]) t",
+        )
+        .bind(ws.as_uuid())
+        .bind(traces)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        tx.rollback().await.unwrap();
+        plan[0]["Plan"]["WAL FPI"].as_i64().unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn time_ordered_trace_ids_write_far_fewer_full_page_images_than_random_ones(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "ours").await;
+        sqlx::query(
+            "INSERT INTO decision_records \
+             (id, workspace_id, trace_id, action, outcome, cause_kind, cause_id) \
+             SELECT gen_random_uuid(), $1, gen_random_uuid(), 'step', 'done', 'api', 'x' \
+             FROM generate_series(1, 150000)",
+        )
+        .bind(ws.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("VACUUM (ANALYZE) decision_records")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let random: Vec<Uuid> = (0..300).map(|_| Uuid::new_v4()).collect();
+        let ordered: Vec<Uuid> = (0..300).map(|_| TraceId::new().as_uuid()).collect();
+        let random_fpi = flush_fpi(&pool, ws, &random).await;
+        let ordered_fpi = flush_fpi(&pool, ws, &ordered).await;
+
+        eprintln!("full-page images: random v4 {random_fpi}, time-ordered v7 {ordered_fpi}");
+        assert!(
+            ordered_fpi * 2 < random_fpi,
+            "v7 wrote {ordered_fpi} full-page images against {random_fpi} for v4"
+        );
+    }
+
     async fn insert_at(pool: &PgPool, ws: WorkspaceId, recorded_at: &str) {
         sqlx::query(
             "INSERT INTO decision_records \

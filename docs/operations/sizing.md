@@ -137,9 +137,33 @@ needs its own memory budget; these runs did not measure smaller database tiers.
 | `shared_buffers` | 4 GB | PostgreSQL's shared page cache; leave RAM for backend work and the OS cache. |
 | `effective_cache_size` | 16 GB | Planner estimate of available cache, not a memory allocation. |
 | `maintenance_work_mem` | 1 GB | Budget maintenance work alongside concurrent queries and vacuum workers. |
-| `max_wal_size` | 8 GB | Checkpoint pressure setting, not a hard limit on WAL disk usage. |
+| `max_wal_size` | 8 GB | Checkpoint pressure setting, not a hard limit on WAL disk usage. Recommended: 32 GB, see below. |
+| `wal_compression` | off | Recommended: `lz4`, see below. |
 | `checkpoint_timeout` | 15 min | Timed checkpoint interval; WAL pressure can cause earlier checkpoints. |
 | `synchronous_commit` | on | The measured baseline waits for commit durability. |
+
+**Recommended change from the recorded values: `wal_compression = lz4` and `max_wal_size = 32GB`
+(keep `checkpoint_timeout = 15min`).** The M8 validation run
+([#397](https://github.com/Glubiz/zirv-flow/issues/397)) measured checkpoints triggered by WAL
+volume every 91 to 190 s at 8 GB, not by the 15 min timeout; the drain wrote about 12 KB of WAL per
+event, about 75% of the worst case from full-page images of random index leaves right after each
+checkpoint, and a timer wake about 56 KB. Compression shrinks those images, and a checkpoint
+interval of minutes instead of seconds means fewer images to write.
+
+Sizing `max_wal_size`: PostgreSQL requests a checkpoint once the WAL written since the last one
+passes about `max_wal_size / (1 + checkpoint_completion_target)`, 53% of it at the default target of
+0.9. At 8 GB that is about 4.2 GB, which the measured rates filled in 91 to 190 s. At the sustained
+2,000 events/s of [section 19](../architecture.md#19-scalability-envelope) and the measured 12 KB per
+event, the drain writes 24 MB/s: about 21 GB per 15 min before compression, and roughly half after
+`lz4` and the time-ordered trace ids (decision inserts no longer touch random index pages), about
+11 GB. At 32 GB the trigger is about 17 GB, so the compressed sustained rate checkpoints on the
+timeout; uncompressed it would still checkpoint about every 12 min. The 10,000 events/s burst drains
+at about 4,400 events/s, 53 MB/s before compression and about 26 MB/s after, so during a burst
+checkpoints still come from WAL volume, about every 11 min with compression. Budget the WAL volume for
+`max_wal_size` plus headroom (for example 40 GB); the setting does not cap disk use. A larger
+value lengthens crash recovery, which replays up to one interval of WAL. The halving is an
+estimate, not a measurement; verify it with `pg_stat_checkpointer` (`num_timed` against
+`num_requested`).
 
 The performance effect of disabling `synchronous_commit` or increasing
 `wal_buffers` is **not measured** ([#151](https://github.com/Glubiz/zirv-flow/issues/151)).
