@@ -98,7 +98,7 @@ fi
 released_into() {
   local tag="$1" rev="$2"
   git merge-base --is-ancestor "$tag" "$rev" && return 0
-  [[ "$(git log -1 --format=%s "$tag")" == "docs: CHANGELOG.md for $tag [skip ci]" ]] &&
+  [[ "$(git log -1 --format=%s "$tag" --)" == "docs: CHANGELOG.md for $tag [skip ci]" ]] &&
     git merge-base --is-ancestor "$tag^" "$rev"
 }
 
