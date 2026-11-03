@@ -215,8 +215,9 @@ pub struct RowsPage {
     pub next: Option<RowCursor>,
 }
 
-/// A scope after its checks: filters typed, the person group resolved.
-struct Prepared {
+/// A scope after its checks: filters typed, the person group resolved. An export makes it once
+/// and reuses it for every page.
+pub struct PreparedScope {
     planned: Vec<Planned>,
     /// The person and the people merged with them; absent without a person filter.
     people: Option<Vec<Uuid>>,
@@ -224,7 +225,7 @@ struct Prepared {
     schema: Option<Vec<SchemaProperty>>,
 }
 
-impl Prepared {
+impl PreparedScope {
     /// The declared type of `key`; `None` when undeclared or there is no published schema.
     fn declared(&self, key: &str) -> Option<&SchemaProperty> {
         self.schema
@@ -238,7 +239,7 @@ async fn prepare(
     workspace: WorkspaceId,
     scope: &ExploreScope<'_>,
     reveal: bool,
-) -> Result<Prepared, ExploreError> {
+) -> Result<PreparedScope, ExploreError> {
     if scope.from >= scope.to {
         return Err(invalid("from", "must be before to"));
     }
@@ -269,7 +270,7 @@ async fn prepare(
         .map(|properties| properties.0),
         None => None,
     };
-    let mut prepared = Prepared {
+    let mut prepared = PreparedScope {
         planned: Vec::new(),
         people: None,
         schema,
@@ -398,7 +399,7 @@ fn push_scope(
     qb: &mut Builder,
     workspace: WorkspaceId,
     scope: &ExploreScope<'_>,
-    prepared: &Prepared,
+    prepared: &PreparedScope,
 ) {
     qb.push(" FROM events e WHERE e.workspace_id = ")
         .push_bind(workspace.as_uuid())
@@ -446,6 +447,7 @@ pub async fn explore_count(
         .push_bind(limit + 1);
     let mut buckets: Vec<(OffsetDateTime, i64)> = qb
         .build_query_as()
+        .persistent(false)
         .fetch_all(&mut *tx)
         .await
         .map_err(bounded)?;
@@ -465,16 +467,31 @@ pub async fn explore_total(
     limits: ExploreLimits,
     reveal: bool,
 ) -> Result<i64, ExploreError> {
+    explore_start(pool, workspace, scope, limits, reveal)
+        .await
+        .map(|(total, _)| total)
+}
+
+/// How many events match, and the scope after its checks, for an export that pages through
+/// the matches: [`explore_rows_prepared`] then skips the checks on every page.
+pub async fn explore_start(
+    pool: &PgPool,
+    workspace: WorkspaceId,
+    scope: &ExploreScope<'_>,
+    limits: ExploreLimits,
+    reveal: bool,
+) -> Result<(i64, PreparedScope), ExploreError> {
     let mut tx = begin_snapshot_for(pool, limits.timeout).await?;
     let prepared = prepare(&mut tx, workspace, scope, reveal).await?;
     let mut qb: Builder = QueryBuilder::new("SELECT count(*)");
     push_scope(&mut qb, workspace, scope, &prepared);
     let (total,): (i64,) = qb
         .build_query_as()
+        .persistent(false)
         .fetch_one(&mut *tx)
         .await
         .map_err(bounded)?;
-    Ok(total)
+    Ok((total, prepared))
 }
 
 /// The most common values of `property` over the scope. A caller without access to values
@@ -497,38 +514,40 @@ pub async fn explore_breakdown(
     {
         return Err(ExploreError::PiiPropertyNotExplorable);
     }
-    let present = |qb: &mut Builder| {
-        qb.push(" AND COALESCE(jsonb_typeof(");
-        push_json(qb, property);
-        qb.push("), 'null') <> 'null'");
-    };
-
-    let mut qb: Builder = QueryBuilder::new("SELECT ");
+    // One scan: the groups by value, then the top values and both totals from the groups.
+    // `->>` is SQL NULL for an absent key and for a JSON null, exactly the events the old
+    // presence test excluded, so that group is the "missing" one. It sorts first so it never
+    // costs a value its place among the 50.
+    let mut qb: Builder = QueryBuilder::new("WITH g AS (SELECT ");
     push_text(&mut qb, property);
     qb.push(" AS v, count(*) AS n");
     push_scope(&mut qb, workspace, scope, &prepared);
-    present(&mut qb);
-    qb.push(" GROUP BY 1 ORDER BY n DESC, v LIMIT ")
-        .push_bind(BREAKDOWN_VALUES);
-    let values: Vec<(String, i64)> = qb
-        .build_query_as()
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(bounded)?;
-
-    let mut qb: Builder = QueryBuilder::new(
-        "SELECT count(*) AS total, count(*) FILTER (WHERE COALESCE(jsonb_typeof(",
+    qb.push(
+        " GROUP BY 1) SELECT t.v, t.n, s.total, s.present \
+         FROM (SELECT v, n FROM g ORDER BY (v IS NULL) DESC, n DESC, v LIMIT ",
+    )
+    .push_bind(BREAKDOWN_VALUES + 1)
+    .push(
+        ") t CROSS JOIN (SELECT COALESCE(sum(n), 0)::bigint AS total, \
+         COALESCE(sum(n) FILTER (WHERE v IS NOT NULL), 0)::bigint AS present FROM g) s \
+         ORDER BY (t.v IS NULL) DESC, t.n DESC, t.v",
     );
-    push_json(&mut qb, property);
-    qb.push("), 'null') <> 'null') AS present");
-    push_scope(&mut qb, workspace, scope, &prepared);
-    let (total, present_count): (i64, i64) = qb
+    let rows: Vec<(Option<String>, i64, i64, i64)> = qb
         .build_query_as()
-        .fetch_one(&mut *tx)
+        .persistent(false)
+        .fetch_all(&mut *tx)
         .await
         .map_err(bounded)?;
     drop(tx);
 
+    let (total, present_count) = rows
+        .first()
+        .map_or((0, 0), |(_, _, total, present)| (*total, *present));
+    let values: Vec<(String, i64)> = rows
+        .into_iter()
+        .filter_map(|(value, count, _, _)| Some((value?, count)))
+        .take(usize::try_from(BREAKDOWN_VALUES).unwrap_or(usize::MAX))
+        .collect();
     let named: i64 = values.iter().map(|(_, count)| count).sum();
     Ok(Breakdown {
         values,
@@ -562,14 +581,41 @@ pub async fn explore_rows(
     limits: ExploreLimits,
     reveal: bool,
 ) -> Result<RowsPage, ExploreError> {
-    let limit = i64::from(limit.clamp(1, limits.row_limit.max(1)));
     let mut tx = begin_snapshot_for(pool, limits.timeout).await?;
     let prepared = prepare(&mut tx, workspace, scope, reveal).await?;
+    rows_page(tx, workspace, scope, &prepared, after, limit, limits).await
+}
+
+/// Like [`explore_rows`], for a scope [`explore_start`] already checked: the page does not
+/// repeat the checks.
+pub async fn explore_rows_prepared(
+    pool: &PgPool,
+    workspace: WorkspaceId,
+    scope: &ExploreScope<'_>,
+    prepared: &PreparedScope,
+    after: Option<RowCursor>,
+    limit: u32,
+    limits: ExploreLimits,
+) -> Result<RowsPage, ExploreError> {
+    let tx = begin_snapshot_for(pool, limits.timeout).await?;
+    rows_page(tx, workspace, scope, prepared, after, limit, limits).await
+}
+
+async fn rows_page(
+    mut tx: crate::Tx,
+    workspace: WorkspaceId,
+    scope: &ExploreScope<'_>,
+    prepared: &PreparedScope,
+    after: Option<RowCursor>,
+    limit: u32,
+    limits: ExploreLimits,
+) -> Result<RowsPage, ExploreError> {
+    let limit = i64::from(limit.clamp(1, limits.row_limit.max(1)));
     let mut qb: Builder = QueryBuilder::new(
         "SELECT e.id, e.occurred_at, e.name, e.source, e.person_id, e.validation_state, \
                 e.flags, e.trace_id, e.properties, e.schema_version",
     );
-    push_scope(&mut qb, workspace, scope, &prepared);
+    push_scope(&mut qb, workspace, scope, prepared);
     if let Some(cursor) = after {
         qb.push(" AND (e.occurred_at, e.id) < (")
             .push_bind(cursor.at)
@@ -581,6 +627,7 @@ pub async fn explore_rows(
         .push_bind(limit + 1);
     let mut rows: Vec<EventRow> = qb
         .build_query_as()
+        .persistent(false)
         .fetch_all(&mut *tx)
         .await
         .map_err(bounded)?;
@@ -1220,5 +1267,161 @@ mod tests {
             matches!(&error, ExploreError::Store(inner) if inner.is_timeout()),
             "{error}"
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn explorer_statements_are_never_kept_as_prepared_plans(pool: PgPool) {
+        let ws = fixture(&pool).await;
+        let one = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with((*pool.connect_options()).clone())
+            .await
+            .unwrap();
+        let scope = scope(Some("order"), &[]);
+
+        // Past the fifth execution PostgreSQL would adopt a generic plan for a kept
+        // statement, which cannot see the time range and scans the wrong way.
+        for _ in 0..7 {
+            explore_count(&one, ws, &scope, Bucket::Day, LIMITS, true)
+                .await
+                .unwrap();
+            explore_breakdown(&one, ws, &scope, "plan", LIMITS, true)
+                .await
+                .unwrap();
+            explore_start(&one, ws, &scope, LIMITS, true).await.unwrap();
+            explore_rows(&one, ws, &scope, None, 10, LIMITS, true)
+                .await
+                .unwrap();
+        }
+
+        let kept: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_prepared_statements \
+             WHERE statement LIKE '%FROM events e%' \
+               AND statement NOT LIKE '%pg_prepared_statements%'",
+        )
+        .fetch_one(&one)
+        .await
+        .unwrap();
+        assert_eq!(kept, 0);
+    }
+
+    /// The two statements the breakdown used to run, as the reference for the merged one.
+    async fn reference_breakdown(pool: &PgPool, ws: WorkspaceId, name: &str) -> Breakdown {
+        let values: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT e.properties ->> 'k' AS v, count(*) AS n FROM events e \
+             WHERE e.workspace_id = $1 AND e.name = $2 \
+               AND COALESCE(jsonb_typeof(e.properties -> 'k'), 'null') <> 'null' \
+             GROUP BY 1 ORDER BY n DESC, v LIMIT 50",
+        )
+        .bind(ws.as_uuid())
+        .bind(name)
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        let (total, present): (i64, i64) = sqlx::query_as(
+            "SELECT count(*), count(*) FILTER (WHERE \
+               COALESCE(jsonb_typeof(e.properties -> 'k'), 'null') <> 'null') \
+             FROM events e WHERE e.workspace_id = $1 AND e.name = $2",
+        )
+        .bind(ws.as_uuid())
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let named: i64 = values.iter().map(|(_, count)| count).sum();
+        Breakdown {
+            values,
+            other: present - named,
+            missing: total - present,
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_one_scan_breakdown_matches_the_two_statement_reference(pool: PgPool) {
+        let ws = workspace(&pool, "edge").await;
+        let edge = [
+            json!({"k": "a"}),
+            json!({"k": "a"}),
+            json!({"k": "a"}),
+            json!({"k": "b"}),
+            json!({"k": null}),
+            json!({"x": 1}),
+            json!({"x": 2}),
+            json!({"k": ""}),
+            json!({"k": 5}),
+            json!({"k": false}),
+            json!({"k": ["x", "y"]}),
+            json!({"k": {"z": 1}}),
+        ];
+        for properties in edge {
+            send(&pool, ws, "a@example.com", "edge", 1, properties).await;
+        }
+        // Past the 50 values a breakdown names, so `other` is not zero.
+        for number in 0..52 {
+            send(
+                &pool,
+                ws,
+                "a@example.com",
+                "many",
+                1,
+                json!({ "k": format!("v{number:02}") }),
+            )
+            .await;
+        }
+        send(&pool, ws, "a@example.com", "many", 1, json!({"x": 1})).await;
+        send(
+            &pool,
+            ws,
+            "a@example.com",
+            "only_missing",
+            1,
+            json!({"x": 1}),
+        )
+        .await;
+
+        for name in ["edge", "many", "only_missing", "nobody"] {
+            let merged = explore_breakdown(&pool, ws, &scope(Some(name), &[]), "k", LIMITS, true)
+                .await
+                .unwrap();
+            let reference = reference_breakdown(&pool, ws, name).await;
+
+            assert_eq!(merged, reference, "{name}");
+        }
+        let many = explore_breakdown(&pool, ws, &scope(Some("many"), &[]), "k", LIMITS, true)
+            .await
+            .unwrap();
+        assert_eq!((many.values.len(), many.other, many.missing), (50, 2, 1));
+        let edge = explore_breakdown(&pool, ws, &scope(Some("edge"), &[]), "k", LIMITS, true)
+            .await
+            .unwrap();
+        assert_eq!((edge.other, edge.missing), (0, 3));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn prepared_export_pages_match_unprepared_pages(pool: PgPool) {
+        let ws = fixture(&pool).await;
+        let filters = [eq("plan", json!("pro"))];
+        let scope = scope(Some("order"), &filters);
+
+        let (total, prepared) = explore_start(&pool, ws, &scope, LIMITS, true)
+            .await
+            .unwrap();
+        let first = explore_rows_prepared(&pool, ws, &scope, &prepared, None, 1, LIMITS)
+            .await
+            .unwrap();
+        let second = explore_rows_prepared(&pool, ws, &scope, &prepared, first.next, 1, LIMITS)
+            .await
+            .unwrap();
+        let plain = explore_rows(&pool, ws, &scope, None, 10, LIMITS, true)
+            .await
+            .unwrap();
+
+        assert_eq!(total, 2);
+        assert_eq!(first.rows[0], plain.rows[0]);
+        assert_eq!(second.rows[0], plain.rows[1]);
+        assert!(second.next.is_none());
     }
 }

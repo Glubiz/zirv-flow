@@ -57,9 +57,9 @@ does not exist.
 |--------|------|--------|------------------|
 | `zirv_flow_http_requests_total` | counter | `method`, `route`, `status` | HTTP requests by matched route template |
 | `zirv_flow_http_request_duration_seconds` | histogram | `method`, `route` | HTTP request latency |
-| `zirv_flow_db_pool_connections` | gauge | `pool`, `state` | Pool connections by state |
+| `zirv_flow_db_pool_connections` | gauge | `pool`, `state` | Pool connections by state; `pool` is `main`, `explorer` (a `serve` process), `jobs` or `heartbeat` |
 | `zirv_flow_db_pool_max_connections` | gauge | `pool` | Pool size limit |
-| `zirv_flow_jobs` | gauge | `kind`, `state` | Queue depth for `ready`, `running` and `dead` |
+| `zirv_flow_jobs` | gauge | `kind`, `state` | Queue depth for `ready`, `running` and `dead`; refreshed at most every 15 s |
 | `zirv_flow_jobs_total` | counter | `kind`, `outcome` | Job attempts by how they ended |
 | `zirv_flow_job_duration_seconds` | histogram | `kind` | Handler duration |
 | `zirv_flow_job_claim_lag_seconds` | histogram | `kind` | Time from `run_at` to the claim |
@@ -102,7 +102,7 @@ does not exist.
 | `zirv_flow_segment_dirty_age_seconds` | gauge | none | Age of the oldest dirty mark |
 | `zirv_flow_flow_enrollments_total` | counter | `trigger`, `outcome` | People a `flow.enroll` enrolled or found enrolled |
 | `zirv_flow_flow_enroll_skips_total` | counter | `trigger`, `reason` | Enrollments refused, by reason |
-| `zirv_flow_enrollments` | gauge | `state` | Enrollments that are `active` or `waiting` |
+| `zirv_flow_enrollments` | gauge | `state` | Enrollments that are `active` or `waiting`; sampled every 60 s |
 | `zirv_flow_enrollments_last_sample_timestamp_seconds` | gauge | none | Unix time of the last successful enrollment sample; alert on it going stale, since a failed sample leaves the gauges at their last values |
 | `zirv_flow_timer_lateness_seconds` | gauge | none | Age of the oldest `waiting` enrollment whose `wake_at` has passed; 0 with none |
 | `zirv_flow_timer_wake_lateness_seconds` | histogram | none | Time between a timer's `wake_at` and its `flow.step` running |

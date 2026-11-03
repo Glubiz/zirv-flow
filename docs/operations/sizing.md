@@ -64,12 +64,17 @@ slow query, a lock bottleneck or provider throttling. Follow
 
 `database.max_connections` is the main pool limit **per process**, not per
 deployment. A process running a worker also opens separate jobs and heartbeat
-pools. Let D be its main pool limit, C be `worker.concurrency` and S be
+pools, and a process running `serve` opens an explorer pool. Let D be its main pool
+limit, E be `explorer.max_connections` (default 4), C be `worker.concurrency` and S be
 `ingest.drain_shards`. The maximum is:
 
-- `serve` or `scheduler`: D.
-- `worker` or `all`: D + C × (S + 1) + 1 for the jobs pool + C for heartbeats,
-  or D + (2 + S) × C + 1.
+- `scheduler`: D.
+- `serve`: D + E. The explorer pool serves every explorer query and CSV export page,
+  so a burst of them waits for its E connections and never takes one from ingest.
+  A query that waits one second for a connection answers `503` with the code
+  `explorer_busy` and `Retry-After`.
+- `worker`: D + C × (S + 1) + 1 for the jobs pool + C for heartbeats,
+  or D + (2 + S) × C + 1. `all` adds E to that.
 
 This is configured pool arithmetic from the
 [worker implementation](../../crates/zirv-flow-jobs/src/worker.rs), not measured
@@ -83,8 +88,8 @@ Worked example: separate `serve`, `worker` and `scheduler`, each using the curre
 [configured default](../../crates/zirv-flow/src/config.rs) D = 10, with C = 4 and
 S = 8 as in [M2 §2.1](../benchmarks/m2-ingestion.md#21-stack-and-tiers). The extra
 worker budget is (2 + 8) × 4 + 1 = **41** connections; the deployment total is
-3 × 10 + 41 = **71**. Against the benchmark PostgreSQL `max_connections` of **100**
-([M stack](../benchmarks/data/M/sustained-stack.txt)), that leaves **29** before
+3 × 10 + 41 + E = 3 × 10 + 41 + 4 = **75**. Against the benchmark PostgreSQL `max_connections` of **100**
+([M stack](../benchmarks/data/M/sustained-stack.txt)), that leaves **25** before
 subtracting PostgreSQL reserved slots, monitoring clients, migrations, and the
 admin CLI's own pool. These are calculated ceilings, not a recommended spare
 capacity or observed usage. Count every additional process and concurrent admin
