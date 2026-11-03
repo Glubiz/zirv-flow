@@ -13,9 +13,13 @@ use crate::{UserId, ValidationError};
 pub struct TraceId(Uuid);
 
 impl TraceId {
-    /// A fresh random id.
+    /// A fresh id that sorts by creation time (a version 7 UUID).
+    ///
+    /// The ids are not secret: nothing grants access by knowing one. Time order keeps
+    /// the decision log's trace index appending at its right edge instead of dirtying a
+    /// random leaf page, and its full-page image, per insert.
     pub fn new() -> Self {
-        Self(Uuid::new_v4())
+        Self(Uuid::now_v7())
     }
 
     pub const fn from_uuid(uuid: Uuid) -> Self {
@@ -199,6 +203,25 @@ mod tests {
         let json = serde_json::to_string(&id).unwrap();
         assert_eq!(json, format!("\"{text}\""));
         assert_eq!(serde_json::from_str::<TraceId>(&json).unwrap(), id);
+    }
+
+    #[test]
+    fn new_trace_ids_sort_by_creation_time() {
+        let ids: Vec<TraceId> = (0..64)
+            .map(|_| {
+                let id = TraceId::new();
+                std::thread::sleep(std::time::Duration::from_millis(2));
+                id
+            })
+            .collect();
+
+        assert!(
+            ids.windows(2)
+                .all(|pair| pair[0].as_uuid() < pair[1].as_uuid())
+        );
+        let texts: Vec<String> = ids.iter().map(ToString::to_string).collect();
+        assert!(texts.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(ids[0].as_uuid().get_version_num(), 7);
     }
 
     #[test]
