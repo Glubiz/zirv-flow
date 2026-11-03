@@ -145,12 +145,16 @@ event, about 75% of the worst case from full-page images of random index leaves 
 checkpoint, and a timer wake about 56 KB. Compression shrinks those images, and a checkpoint
 interval of minutes instead of seconds means fewer images to write.
 
-Sizing `max_wal_size`: WAL written per checkpoint interval must stay under it, or the checkpoint
-comes early. At the sustained 2,000 events/s of [section 19](../architecture.md#19-scalability-envelope)
-and the measured 12 KB per event, that is 24 MB/s, so 15 min is about 21 GB before compression;
-roughly half after `lz4` and the time-ordered trace ids (decision inserts no longer touch random
-index pages), about 11 GB. 32 GB also covers the 10,000 events/s burst: the drain applies
-about 4,400 events/s, 53 MB/s, so about 16 GB per 5 min before compression and about 8 GB after. Budget the WAL volume for
+Sizing `max_wal_size`: PostgreSQL requests a checkpoint once the WAL written since the last one
+passes about `max_wal_size / (1 + checkpoint_completion_target)`, 53% of it at the default target of
+0.9. At 8 GB that is about 4.2 GB, which the measured rates filled in 91 to 190 s. At the sustained
+2,000 events/s of [section 19](../architecture.md#19-scalability-envelope) and the measured 12 KB per
+event, the drain writes 24 MB/s: about 21 GB per 15 min before compression, and roughly half after
+`lz4` and the time-ordered trace ids (decision inserts no longer touch random index pages), about
+11 GB. At 32 GB the trigger is about 17 GB, so the compressed sustained rate checkpoints on the
+timeout; uncompressed it would still checkpoint about every 12 min. The 10,000 events/s burst drains
+at about 4,400 events/s, 53 MB/s before compression and about 26 MB/s after, so during a burst
+checkpoints still come from WAL volume, about every 11 min with compression. Budget the WAL volume for
 `max_wal_size` plus headroom (for example 40 GB); the setting does not cap disk use. A larger
 value lengthens crash recovery, which replays up to one interval of WAL. The halving is an
 estimate, not a measurement; verify it with `pg_stat_checkpointer` (`num_timed` against
