@@ -80,8 +80,9 @@ This is configured pool arithmetic from the
 [worker implementation](../../crates/zirv-flow-jobs/src/worker.rs), not measured
 connection demand. The jobs pool covers each slot's transaction, its concurrent
 drain transactions and a failure connection; the heartbeat pool protects lease
-renewal. The worker's `LISTEN` connection and scheduler's leader lock each occupy
-a connection **inside** their main pool. HTTP and admin work also use the main
+renewal and gives back the claimed jobs a slot has not started. The worker's
+`LISTEN` connection and scheduler's leader lock each occupy a connection
+**inside** their main pool. HTTP and admin work also use the main
 pool. Keep capacity available there for ordinary queries.
 
 Worked example: separate `serve`, `worker` and `scheduler`, each using the current
