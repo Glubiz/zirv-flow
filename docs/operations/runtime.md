@@ -177,7 +177,9 @@ that fails is retried with exponential backoff and jitter, and is kept as
 completion, so a job never completes twice. Work that reaches outside the
 database must be idempotent: a crash can run a job again. A workspace is limited
 to `worker.max_running_per_workspace` running jobs when that is set, so one busy
-workspace cannot take every worker.
+workspace cannot take every worker. A claimed job counts as running from its
+claim, for that limit and in the `running` queue depth, so the depth can exceed
+the number of slots.
 
 For pool sizes and the deployment connection budget, see [connection arithmetic](sizing.md#connection-arithmetic).
 
