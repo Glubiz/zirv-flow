@@ -827,6 +827,24 @@ pub async fn queue_depths<'e>(
         .map_err(StoreError::query)
 }
 
+/// The longest the queue-depth gauge query may run.
+const DEPTH_TIMEOUT: &str = "5s";
+
+/// [`queue_depths`] under a statement timeout, for the leader's gauges: no index covers kind and
+/// state, so on a table of millions of jobs the count is a full scan that must not hold the tick.
+pub async fn sample_queue_depths(pool: &PgPool) -> Result<Vec<QueueDepth>, StoreError> {
+    let mut tx = pool.begin().await.map_err(StoreError::query)?;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SET LOCAL statement_timeout = '{DEPTH_TIMEOUT}'"
+    )))
+    .execute(&mut *tx)
+    .await
+    .map_err(StoreError::query)?;
+    let depths = queue_depths(&mut *tx).await?;
+    tx.commit().await.map_err(StoreError::query)?;
+    Ok(depths)
+}
+
 /// The queue of one job kind, for the jobs-admin view.
 #[derive(Clone, Debug, FromRow, PartialEq)]
 pub struct KindDepth {
@@ -1331,6 +1349,24 @@ mod tests {
             .map(|d| (d.kind.as_str(), d.state.as_str(), d.count))
             .collect();
         assert_eq!(summary, [("a.kind", "ready", 2), ("b.kind", "running", 1)]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_timed_queue_depths_match_the_plain_ones_and_fail_on_a_closed_pool(pool: PgPool) {
+        enqueue(&pool, &job("a.kind")).await.unwrap();
+        enqueue(&pool, &job("b.kind")).await.unwrap();
+        claim(&pool, &["b.kind"]).await.unwrap();
+
+        let mut timed = sample_queue_depths(&pool).await.unwrap();
+        let mut plain = queue_depths(&pool).await.unwrap();
+        timed.sort_by(|a, b| a.kind.cmp(&b.kind));
+        plain.sort_by(|a, b| a.kind.cmp(&b.kind));
+
+        assert_eq!(timed, plain);
+        assert_eq!(timed.len(), 2);
+        pool.close().await;
+        assert!(sample_queue_depths(&pool).await.is_err());
     }
 
     #[sqlx::test]

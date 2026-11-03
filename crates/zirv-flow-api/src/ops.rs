@@ -26,12 +26,19 @@ type RoleReadiness = Arc<dyn Fn() -> Option<&'static str> + Send + Sync>;
 #[derive(Clone)]
 pub struct OpsState {
     pool: PgPool,
+    explorer_pool: Option<PgPool>,
     render_metrics: Arc<dyn Fn() -> String + Send + Sync>,
     role_readiness: RoleReadiness,
     schema_check: SchemaCheck,
 }
 
 impl OpsState {
+    /// Also reports the gauges of the explorer pool, when the process serves the explorer from one.
+    pub fn with_explorer_pool(mut self, pool: PgPool) -> Self {
+        self.explorer_pool = Some(pool);
+        self
+    }
+
     /// `render_metrics` returns the Prometheus text exposition. `role_readiness` returns the
     /// reason the process is not ready, such as a stopped role loop, or `None` when it is.
     pub fn new(
@@ -41,6 +48,7 @@ impl OpsState {
     ) -> Self {
         Self {
             pool,
+            explorer_pool: None,
             render_metrics,
             role_readiness,
             schema_check: Arc::new(|pool| {
@@ -83,7 +91,11 @@ async fn readyz(State(state): State<OpsState>) -> Result<Json<StatusBody>, ApiEr
 }
 
 async fn metrics(State(state): State<OpsState>) -> Response {
-    crate::metrics::respond(&state.pool, &state.render_metrics)
+    crate::metrics::respond(
+        &state.pool,
+        state.explorer_pool.as_ref(),
+        &state.render_metrics,
+    )
 }
 
 #[cfg(test)]
