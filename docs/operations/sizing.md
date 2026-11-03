@@ -91,6 +91,19 @@ capacity or observed usage. Count every additional process and concurrent admin
 command before choosing PostgreSQL's limit; preserve operational headroom instead
 of allocating the whole remainder to workers.
 
+A `serve` process that takes sustained ingest needs a larger D. Connections in
+use are about the request rate times the mean hold time, and each ingest request
+takes two pool connections (the key lookup and the append). Under database
+background load the [M8 validation run](https://github.com/Glubiz/zirv-flow/issues/397)
+had about 34 requests in flight at 2,000 events/s against D = 10, so most of the
+latency was waiting for a connection. A `serve` process taking 2,000 events/s
+needs D of about 24 to 32.
+
+Worked budget for that topology, with D = 32 on `serve` and 10 on `scheduler` and
+`worker`: 32 + 10 + 10 + 41 = **93**. That leaves 7 of PostgreSQL's default
+`max_connections` of 100, less than the reserved slots and headroom above
+require, so raise PostgreSQL's `max_connections` above 100, for example to 150.
+
 Use [ZirvFlowDbPoolSaturated](runbooks.md#zirvflowdbpoolsaturated) for the procedure.
 An idle pool need not open its full allocation, but the server must accommodate
 the planned worst case. Raising C or S changes that budget even if the main pool
