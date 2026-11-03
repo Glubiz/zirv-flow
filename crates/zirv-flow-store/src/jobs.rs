@@ -385,23 +385,28 @@ const CLAIM: &str = concat!(
 /// `running` counts each workspace's running jobs once, from `jobs_workspace_running_idx`, and
 /// `capped` lists the workspaces at their cap. While the cap is at least `$4` and no workspace
 /// runs more than `$5 - $4` jobs, no batch can take one past its cap, and the claim is
-/// [`CLAIM`]'s. Otherwise a band's due jobs are not read in `run_at` order, which would step over
-/// a capped workspace's flood of due jobs row by row. `heads` instead walks the workspaces upwards in
-/// `jobs_ready_workspace_idx` from below the lowest id (the nil one), one probe per workspace
-/// and band (a skip scan): a capped workspace is passed over at once, and each other workspace
-/// finds the first band that holds a due job of one of `$3`. From that band it offers its oldest
-/// due jobs of those kinds, as many as its cap has room for (`$5` less its running jobs), so a
-/// batch never takes a workspace past its cap, and at most `$4`. The instance jobs' bands are
-/// walked in `jobs_ready_instance_idx` the way [`CLAIM`] walks them. A claim's cost is therefore
-/// bounded by the workspaces with ready jobs, their bands and `$4`, not by any workspace's
-/// backlog (#207); as in [`CLAIM`], due jobs of other kinds are stepped over. Every workspace
-/// probe is a row comparison led by `workspace_id`, so no index but that one can answer it,
-/// whatever the statistics.
+/// [`CLAIM`]'s. Otherwise a band's due jobs are not read in `run_at` order, which would step
+/// over a capped workspace's flood of due jobs row by row. `heads` instead walks the workspaces
+/// upwards in `jobs_ready_workspace_idx` from below the lowest id (the nil one), one probe per
+/// workspace and band (a skip scan): a capped workspace is passed over at once, and each other
+/// workspace finds the first band that holds a due job of one of `$3`. From that band it offers
+/// its oldest due jobs of those kinds, as many as its cap has room for (`$5` less its running
+/// jobs), so a batch never takes a workspace past its cap, and at most `$4`. The instance jobs'
+/// bands are walked in `jobs_ready_instance_idx` the way [`CLAIM`] walks them, and offer at most
+/// `$4`. A claim's cost is therefore bounded by the workspaces with ready jobs, their bands and
+/// `$4`, not by any workspace's backlog (#207); as in [`CLAIM`], due jobs of other kinds are
+/// stepped over. Every workspace probe is a row comparison led by `workspace_id`, so no index
+/// but that one can answer it, whatever the statistics.
 ///
-/// The offers are read without locks and tried by priority, then age, `FOR UPDATE SKIP LOCKED`,
-/// so a claim locks only the rows it takes; an offer that is locked is passed over until the next
-/// claim. Claims under a cap are serialised by [`claim_jobs`], so no other claim moves a head or
-/// changes a running count meanwhile.
+/// A batch takes only the offers of the best band offered (`best`), workspace and instance
+/// offers alike: a workspace offers from its own first band alone, so a later band's offers
+/// could otherwise come before the same workspace's jobs of an earlier band, which wait for the
+/// next claim (ruling a894b5c2). A batch is therefore smaller when the best band offers fewer
+/// than `$4` jobs, and empty for one claim when other transactions lock every one of them. The
+/// offers are read without locks and tried by age, `FOR UPDATE SKIP LOCKED`, so a claim locks
+/// only the rows it takes; an offer that is locked is passed over until the next claim. Claims
+/// under a cap are serialised by [`claim_jobs`], so no other claim moves a head or changes a
+/// running count meanwhile.
 const CLAIM_CAPPED: &str = concat!(
     "WITH RECURSIVE running AS MATERIALIZED ( \
         SELECT workspace_id, count(*) AS running FROM jobs \
@@ -442,7 +447,8 @@ const CLAIM_CAPPED: &str = concat!(
         AND NOT EXISTS (SELECT FROM running WHERE running > $5 - $4) THEN ",
     claim_first_due!(),
     " ELSE ARRAY(SELECT l.id FROM ( \
-        SELECT c.id FROM ( \
+        SELECT c.id, c.run_at FROM ( \
+        SELECT c.id, c.priority, c.run_at, min(c.priority) OVER () AS best FROM ( \
             SELECT o.id, h.priority, o.run_at FROM heads h \
             LEFT JOIN running r ON r.workspace_id = h.workspace_id \
             CROSS JOIN LATERAL ( \
@@ -461,8 +467,9 @@ const CLAIM_CAPPED: &str = concat!(
                 WHERE j.state = 'ready' AND j.workspace_id IS NULL AND j.priority = b.priority \
                 AND j.run_at <= now() AND j.kind = ANY($3) \
                 ORDER BY j.run_at LIMIT $4) i \
-             LIMIT $4)) c \
-        ORDER BY c.priority, c.run_at) c \
+             LIMIT $4)) c) c \
+        WHERE c.priority = c.best \
+        ORDER BY c.run_at) c \
     CROSS JOIN LATERAL ( \
         SELECT j.id FROM jobs j WHERE j.id = c.id AND j.state = 'ready' \
         FOR UPDATE SKIP LOCKED) l \
@@ -3633,9 +3640,11 @@ mod tests {
         assert!(none.is_none());
     }
 
+    /// A locked offer is passed over within its band, but under a cap a claim never falls
+    /// through to a later band while the best band offered is held (ruling a894b5c2).
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_capped_claim_skips_a_locked_job_and_falls_through_to_the_next_band(pool: PgPool) {
+    async fn a_capped_claim_skips_a_locked_job_but_waits_for_its_band(pool: PgPool) {
         let busy = workspace(&pool, "busy").await;
         seed_running(&pool, busy, 1).await;
         seed_wakes(&pool, busy, "busy", 50, -180.0, -60.0).await;
@@ -3651,13 +3660,15 @@ mod tests {
         let claim_capped = || claim_job(&pool, "w", &["flow.step"], LEASE, Some(1));
 
         let second = claim_capped().await.unwrap().unwrap();
-        let later = claim_capped().await.unwrap().unwrap();
+        let held = claim_capped().await.unwrap();
         holder.rollback().await.unwrap();
         let first = claim_capped().await.unwrap().unwrap();
+        let later = claim_capped().await.unwrap().unwrap();
 
         assert_eq!(second.payload, json!({"n": "second"}));
-        assert_eq!(later.payload, json!({"n": "later"}));
+        assert!(held.is_none(), "the best band's only offer is held");
         assert_eq!(first.payload, json!({"n": "first"}));
+        assert_eq!(later.payload, json!({"n": "later"}));
     }
 
     #[sqlx::test]
@@ -3904,9 +3915,35 @@ mod tests {
 
         let first = batch().await.unwrap();
         let second = batch().await.unwrap();
+        let last = batch().await.unwrap();
 
-        assert_eq!(names(&first), ["quiet", "third", "instance"]);
-        assert!(second.is_empty(), "every workspace is at its cap");
+        // Each batch takes one band only.
+        assert_eq!(names(&first), ["quiet"]);
+        assert_eq!(names(&second), ["third", "instance"]);
+        assert!(last.is_empty(), "every workspace is at its cap");
+    }
+
+    /// Ruling a894b5c2: under a cap a batch takes only the best band offered, so a workspace's
+    /// earlier band never waits behind another workspace's later band.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_capped_batch_takes_only_the_best_band_offered(pool: PgPool) {
+        let a = workspace(&pool, "a").await;
+        let b = workspace(&pool, "b").await;
+        enqueue_named(&pool, "a-p0", Some(a), 0, 10).await;
+        for n in 0..7 {
+            enqueue_named(&pool, "a-p1", Some(a), 1, 20 + n).await;
+            enqueue_named(&pool, "b-p2", Some(b), 2, 30 + n).await;
+        }
+        // A cap below the batch size takes the capped path.
+        let batch = || claim_jobs(&pool, "w", &["flow.step"], LEASE, Some(7), 8);
+
+        let first = batch().await.unwrap();
+        let second = batch().await.unwrap();
+
+        assert_eq!(names(&first), ["a-p0"]);
+        // A runs one job, so its cap has room for six more.
+        assert_eq!(names(&second), ["a-p1"; 6]);
     }
 
     #[sqlx::test]

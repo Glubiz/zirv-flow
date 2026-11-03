@@ -2638,11 +2638,14 @@ cannot overshoot it. Such a claim reads the running counts once and, while a
 batch could take any workspace past its cap, walks the ready jobs one workspace and
 band at a time (`jobs_ready_workspace_idx`, a skip scan), passing over a capped
 workspace in one probe, so its backlog does not slow the others' claims (#207,
-`docs/benchmarks/m5-flows.md` section 8). Each other workspace offers at most as
-many jobs as its cap has room for, counting its running jobs and the batch's
-together (#397). Weighted claiming is rejected for v1:
-it is more complex and nothing yet shows the cap is not enough. M8 validates the
-cap under load.
+`docs/benchmarks/m5-flows.md` section 8). Each other workspace offers jobs from its
+first band with a due job only, at most as many as its cap has room for, counting
+its running jobs and the batch's together, and the batch takes only the offers of
+the best band offered, instance jobs included, so a capped batch never puts a later
+band before an earlier one. It is smaller when that band offers fewer jobs, and
+empty for one poll when other transactions lock them all (#397, ruling a894b5c2).
+Weighted claiming is rejected for v1: it is more complex and nothing yet shows the
+cap is not enough. M8 validates the cap under load.
 
 | Concern | Design |
 |---------|--------|
