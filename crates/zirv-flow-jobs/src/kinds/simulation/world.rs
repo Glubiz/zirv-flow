@@ -78,6 +78,7 @@ impl World {
         zirv_flow_store::migrate(&pool).await.unwrap();
         install_enqueue_log(&pool).await;
         install_write_log(&pool).await;
+        install_commit_failure(&pool).await;
         let slug = format!("sim-{ordinal}");
         let ws = zirv_flow_store::create_workspace(
             &pool,
@@ -338,6 +339,29 @@ async fn install_write_log(pool: &PgPool) {
         "DROP TRIGGER IF EXISTS sim_log_list_delete ON list_members",
         "CREATE TRIGGER sim_log_list_delete BEFORE DELETE ON list_members \
          FOR EACH ROW EXECUTE FUNCTION sim_log_list_write()",
+    ] {
+        sqlx::query(statement).execute(pool).await.unwrap();
+    }
+}
+
+/// A commit failure the driver arms (see `inject`): a deferred constraint trigger on the deletion
+/// of a job row, which fails the commit of a transaction that completed a job while the sequence
+/// is armed, that is set to hand out 1 next. A sequence is not transactional, so the arming is
+/// used up by the commit that fails, and the deletions of a savepoint rolled back fire nothing.
+/// It starts at 2 and is moved far on when disarmed, so no other commit fails. Test fixture only.
+async fn install_commit_failure(pool: &PgPool) {
+    for statement in [
+        "CREATE SEQUENCE IF NOT EXISTS sim_commit_failure START 2",
+        "CREATE OR REPLACE FUNCTION sim_fail_armed_commit() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN \
+             IF nextval('sim_commit_failure') = 1 THEN \
+                 RAISE EXCEPTION 'injected commit failure'; \
+             END IF; \
+             RETURN NULL; \
+         END $$",
+        "DROP TRIGGER IF EXISTS sim_fail_armed_commit ON jobs",
+        "CREATE CONSTRAINT TRIGGER sim_fail_armed_commit AFTER DELETE ON jobs \
+         DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION sim_fail_armed_commit()",
     ] {
         sqlx::query(statement).execute(pool).await.unwrap();
     }
