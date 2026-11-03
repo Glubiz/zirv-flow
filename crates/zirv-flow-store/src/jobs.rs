@@ -188,13 +188,12 @@ pub struct Schedule {
     pub enabled: bool,
 }
 
-/// Enqueues a job; returns whether a row was inserted (false when its unique key is held).
-///
-/// Pass the caller's transaction so the job commits with the change that caused it. The
-/// wake-up notification is sent in that transaction, so it is delivered on commit.
-pub async fn enqueue<'e>(executor: impl PgExecutor<'e>, job: &NewJob) -> Result<bool, StoreError> {
-    let notified = sqlx::query(
-        "WITH inserted AS ( \
+/// The CTEs of a single-job enqueue, `inserted` and `notified`, over the twelve parameters
+/// [`bind_job`] binds as `$1` to `$12`. A statement that appends them to its own takes
+/// parameters from `$13` and must read `notified`, or the wake-up is never sent.
+macro_rules! enqueue_ctes {
+    () => {
+        "inserted AS ( \
              INSERT INTO jobs \
                 (id, workspace_id, kind, payload, priority, run_at, max_attempts, unique_key, \
                  trace_id, cause_kind, cause_id) \
@@ -204,21 +203,44 @@ pub async fn enqueue<'e>(executor: impl PgExecutor<'e>, job: &NewJob) -> Result<
          notified AS ( \
              SELECT pg_notify($12, kind) FROM inserted \
              WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE state = 'ready' AND kind = inserted.kind \
-                               AND run_at <= now())) \
-         SELECT kind FROM inserted, (SELECT count(*) FROM notified) AS n",
+                               AND run_at <= now()))"
+    };
+}
+pub(crate) use enqueue_ctes;
+
+/// Binds `$1` to `$12` of [`enqueue_ctes`].
+pub(crate) fn bind_job<'q>(
+    query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+    job: &'q NewJob,
+) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
+    query
+        .bind(Uuid::new_v4())
+        .bind(job.workspace_id.map(|id| id.as_uuid()))
+        .bind(&job.kind)
+        .bind(&job.payload)
+        .bind(job.priority)
+        .bind(job.run_at)
+        .bind(job.max_attempts)
+        .bind(job.unique_key.as_deref())
+        .bind(job.trace.trace_id.as_uuid())
+        .bind(job.trace.cause.kind.as_str())
+        .bind(&job.trace.cause.id)
+        .bind(NOTIFY_CHANNEL)
+}
+
+/// Enqueues a job; returns whether a row was inserted (false when its unique key is held).
+///
+/// Pass the caller's transaction so the job commits with the change that caused it. The
+/// wake-up notification is sent in that transaction, so it is delivered on commit.
+pub async fn enqueue<'e>(executor: impl PgExecutor<'e>, job: &NewJob) -> Result<bool, StoreError> {
+    let notified = bind_job(
+        sqlx::query(concat!(
+            "WITH ",
+            enqueue_ctes!(),
+            " SELECT kind FROM inserted, (SELECT count(*) FROM notified) AS n"
+        )),
+        job,
     )
-    .bind(Uuid::new_v4())
-    .bind(job.workspace_id.map(|id| id.as_uuid()))
-    .bind(&job.kind)
-    .bind(&job.payload)
-    .bind(job.priority)
-    .bind(job.run_at)
-    .bind(job.max_attempts)
-    .bind(job.unique_key.as_deref())
-    .bind(job.trace.trace_id.as_uuid())
-    .bind(job.trace.cause.kind.as_str())
-    .bind(&job.trace.cause.id)
-    .bind(NOTIFY_CHANNEL)
     .fetch_optional(executor)
     .await
     .map_err(StoreError::query)?;

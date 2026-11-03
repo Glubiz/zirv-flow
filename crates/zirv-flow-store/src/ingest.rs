@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::Connection;
+use sqlx::Row;
 use sqlx::prelude::FromRow;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -25,6 +26,7 @@ use crate::events::{
     EventBatch, EventOutcome, EventRecord, FailedItem, apply_event_record, reject_apply_failed,
 };
 use crate::events::{Refusal, insert_record_rejects};
+use crate::jobs::{bind_job, enqueue_ctes};
 use crate::people::{
     ProfileOutcome, ProfileRecord, apply_profile_record, apply_profile_record_into,
 };
@@ -231,8 +233,9 @@ impl StoredItem {
     }
 }
 
-/// Appends `items` as one multi-row insert in one transaction and enqueues the workspace's
-/// drain in it, so the wake-up commits with the rows. Returns once the rows are durable.
+/// Appends `items` as one multi-row insert and enqueues the workspace's drain, both in one
+/// statement, so the wake-up commits with the rows and the request pays a single round trip
+/// and commit. Returns once the rows are durable.
 /// The rows are stamped `received_at` with the database's clock, the one the scheduler's safety
 /// net and the inbox-age gauge compare it with.
 pub async fn append_inbox(
@@ -255,14 +258,23 @@ pub async fn append_inbox(
 
     let affinities: Vec<i16> = items.iter().map(item_bucket).collect();
 
-    let mut tx = begin(pool).await?;
-    let inserted = sqlx::query(
-        "INSERT INTO ingest_inbox \
-            (workspace_id, api_key_id, kind, item, message_id, received_at, trace_id, affinity) \
-         SELECT $1, $2, i.kind, i.item, i.message_id, now(), $3, i.affinity \
-         FROM unnest($4::text[], $5::jsonb[], $6::text[], $7::smallint[]) WITH ORDINALITY \
-            AS i(kind, item, message_id, affinity, n) \
-         ORDER BY i.n",
+    let job = drain_job(workspace, trace);
+    let row = bind_job(
+        sqlx::query(concat!(
+            "WITH ",
+            enqueue_ctes!(),
+            ", appended AS ( \
+                 INSERT INTO ingest_inbox \
+                    (workspace_id, api_key_id, kind, item, message_id, received_at, trace_id, \
+                     affinity) \
+                 SELECT $13, $14, i.kind, i.item, i.message_id, now(), $15, i.affinity \
+                 FROM unnest($16::text[], $17::jsonb[], $18::text[], $19::smallint[]) \
+                    WITH ORDINALITY AS i(kind, item, message_id, affinity, n) \
+                 ORDER BY i.n \
+                 RETURNING 1) \
+             SELECT (SELECT count(*) FROM appended), (SELECT count(*) FROM notified)"
+        )),
+        &job,
     )
     .bind(workspace.as_uuid())
     .bind(api_key_id)
@@ -271,12 +283,11 @@ pub async fn append_inbox(
     .bind(&stored)
     .bind(&message_ids)
     .bind(&affinities)
-    .execute(&mut *tx)
+    .fetch_one(pool)
     .await
     .map_err(StoreError::query)?;
-    enqueue_drain(&mut *tx, workspace, trace).await?;
-    commit(tx).await?;
-    Ok(usize::try_from(inserted.rows_affected()).unwrap_or(usize::MAX))
+    let inserted: i64 = row.try_get(0).map_err(StoreError::query)?;
+    Ok(usize::try_from(inserted).unwrap_or(usize::MAX))
 }
 
 /// Enqueues the workspace's drain. A no-op while one is ready or running.
@@ -285,11 +296,15 @@ pub async fn enqueue_drain<'e>(
     workspace: WorkspaceId,
     trace: &TraceContext,
 ) -> Result<bool, StoreError> {
+    enqueue(executor, &drain_job(workspace, trace)).await
+}
+
+fn drain_job(workspace: WorkspaceId, trace: &TraceContext) -> NewJob {
     let mut job = NewJob::new(DRAIN_JOB_KIND, trace.clone());
     job.workspace_id = Some(workspace);
     job.payload = json!({ "workspace_id": workspace.as_uuid() });
     job.unique_key = Some(format!("{DRAIN_JOB_KIND}:{}", workspace.as_uuid()));
-    enqueue(executor, &job).await
+    job
 }
 
 /// A workspace's oldest inbox row.
@@ -1175,6 +1190,59 @@ mod tests {
 
         assert_eq!((total.rows, total.late), (4, 2));
         assert_eq!(total.applied[&("track", "valid")], 4);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_append_and_its_drain_wake_up_are_one_client_statement(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            sqlx::raw_sql(
+                "CREATE TABLE statement_log (client_query text NOT NULL); \
+                 CREATE FUNCTION log_statement() RETURNS trigger LANGUAGE plpgsql AS \
+                   $$ BEGIN INSERT INTO statement_log VALUES (current_query()); RETURN NULL; END $$; \
+                 CREATE TRIGGER log_inbox AFTER INSERT ON ingest_inbox \
+                   FOR EACH STATEMENT EXECUTE FUNCTION log_statement(); \
+                 CREATE TRIGGER log_jobs AFTER INSERT ON jobs \
+                   FOR EACH STATEMENT EXECUTE FUNCTION log_statement();",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            let trace = TraceContext::root(Cause::api("req-1"));
+            append(&pool, ws, &trace, &[identify("u1", "m-1", json!({}))]).await;
+
+            let (writes, distinct): (i64, i64) =
+                sqlx::query_as("SELECT count(*), count(DISTINCT client_query) FROM statement_log")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                (writes, distinct),
+                (2, 1),
+                "the inbox and the job in one statement"
+            );
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_empty_append_still_wakes_the_drain(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            let trace = TraceContext::root(Cause::api("req-1"));
+            append(&pool, ws, &trace, &[]).await;
+            assert_eq!(inbox_count(&pool).await, 0);
+            let jobs: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = $1")
+                .bind(DRAIN_JOB_KIND)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(jobs, 1);
+        })
+        .await;
     }
 
     #[sqlx::test]
