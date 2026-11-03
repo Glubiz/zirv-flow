@@ -190,6 +190,14 @@ const ENROLLMENT_READ: &str = "WITH found AS MATERIALIZED ( \
      FROM found f LEFT JOIN people p ON p.id = f.person_id \
      WHERE f.workspace_id = $1";
 
+/// [`ENROLLMENT_READ`] for many enrollments at once: `$1` is the workspace, `$2` the enrollments.
+const ENROLLMENTS_READ: &str = "WITH found AS MATERIALIZED ( \
+         SELECT id, workspace_id, flow_id, person_id FROM enrollments WHERE id = ANY($2)) \
+     SELECT f.id, f.flow_id, f.person_id, \
+         CASE WHEN p.workspace_id = f.workspace_id THEN p.merged_into END \
+     FROM found f LEFT JOIN people p ON p.id = f.person_id \
+     WHERE f.workspace_id = $1";
+
 /// The enrollment's lock in a round of [`lock_enrollment`]: `$1` is the workspace, `$2` the
 /// enrollment and `$3` the person the round locked. The row is locked by primary key and checked
 /// after, so the plan never walks `enrollments_person_idx`. The workspace's time zone is read
@@ -223,6 +231,15 @@ pub struct EnrollmentRead {
     merged_into: Option<Uuid>,
 }
 
+impl EnrollmentRead {
+    /// Where a step of this enrollment comes in the person lock order: the lowest id of the group
+    /// its lock takes first (the person and the one they were merged into), then the person.
+    pub fn lock_order(&self) -> (Uuid, Uuid) {
+        let survivor = self.merged_into.unwrap_or(self.person_id);
+        (self.person_id.min(survivor), self.person_id)
+    }
+}
+
 /// An enrollment a step locked, with the zones it runs in, both read after its locks.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StepEnrollment {
@@ -252,6 +269,38 @@ pub async fn read_enrollment(
         person_id,
         merged_into,
     }))
+}
+
+/// [`read_enrollment`] for many enrollments in one statement, for the steps that run in one
+/// transaction (#397), by the enrollments' and the people's primary keys as that read is. An
+/// enrollment that is gone, or of another workspace, is absent.
+pub async fn read_enrollments(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    ids: &[Uuid],
+) -> Result<Vec<(Uuid, EnrollmentRead)>, StoreError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows: Vec<(Uuid, Uuid, Uuid, Option<Uuid>)> = sqlx::query_as(ENROLLMENTS_READ)
+        .bind(workspace.as_uuid())
+        .bind(ids)
+        .fetch_all(connection)
+        .await
+        .map_err(StoreError::query)?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, flow_id, person_id, merged_into)| {
+            (
+                id,
+                EnrollmentRead {
+                    flow_id,
+                    person_id,
+                    merged_into,
+                },
+            )
+        })
+        .collect())
 }
 
 /// [`lock_enrollment`] for a step that read the enrollment with [`read_enrollment`] before it
@@ -1529,6 +1578,57 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_step_locks_at_the_lowest_id_of_its_group_then_at_its_person() {
+        let (low, high) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let read = |person_id, merged_into| EnrollmentRead {
+            flow_id: Uuid::nil(),
+            person_id,
+            merged_into,
+        };
+
+        assert_eq!(read(high, None).lock_order(), (high, high));
+        assert_eq!(read(high, Some(low)).lock_order(), (low, high));
+        assert_eq!(read(low, Some(high)).lock_order(), (low, low));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_read_of_many_enrollments_finds_what_the_read_of_each_finds(pool: PgPool) {
+        let ws = workspace(&pool, "batch-read").await;
+        let other = workspace(&pool, "batch-foreign").await;
+        let flow = create(&pool, ws, "Flow").await;
+        publish(&pool, ws, flow.id).await.unwrap();
+        let foreign_flow = create(&pool, other, "Foreign").await;
+        publish(&pool, other, foreign_flow.id).await.unwrap();
+        let survivor = person(&pool, ws).await;
+        let loser = person(&pool, ws).await;
+        sqlx::query("UPDATE people SET merged_into = $2 WHERE id = $1")
+            .bind(loser)
+            .bind(survivor)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let plain = enrollment_row(&pool, ws, flow.id, survivor).await;
+        let merged = enrollment_row(&pool, ws, flow.id, loser).await;
+        let foreign_person = person(&pool, other).await;
+        let foreign = enrollment_row(&pool, other, foreign_flow.id, foreign_person).await;
+        let mut tx = pool.begin().await.unwrap();
+
+        let mut found = read_enrollments(&mut tx, ws, &[merged, foreign, plain, Uuid::now_v7()])
+            .await
+            .unwrap();
+
+        found.sort_by_key(|(id, _)| *id);
+        let mut each = Vec::new();
+        for id in [plain, merged] {
+            each.push((id, read_enrollment(&mut tx, ws, id).await.unwrap().unwrap()));
+        }
+        each.sort_by_key(|(id, _)| *id);
+        assert_eq!(found, each);
+        assert!(read_enrollments(&mut tx, ws, &[]).await.unwrap().is_empty());
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_step_lock_from_a_read_that_went_stale_locks_the_group_it_finds_under_the_lock(
@@ -1594,12 +1694,32 @@ mod tests {
     /// The plans of `sql` for `binds`: the one planned for the values, and the generic one a
     /// prepared statement settles on after its fifth execution.
     async fn plans_of(pool: &PgPool, sql: &str, binds: &[Uuid]) -> String {
+        let binds: Vec<Vec<Uuid>> = binds.iter().map(|bind| vec![*bind]).collect();
+        plans_with(pool, sql, &binds, false).await
+    }
+
+    /// [`plans_of`] for a statement whose last parameter is an array of `ids`, after `ws`.
+    async fn plans_of_many(pool: &PgPool, sql: &str, ws: Uuid, ids: &[Uuid]) -> String {
+        plans_with(pool, sql, &[vec![ws], ids.to_vec()], true).await
+    }
+
+    /// The plans of `sql`, each bind one value, or an array when `last_is_array` says so of the last.
+    async fn plans_with(
+        pool: &PgPool,
+        sql: &str,
+        binds: &[Vec<Uuid>],
+        last_is_array: bool,
+    ) -> String {
         let mut connection = pool.acquire().await.unwrap();
         let mut custom = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(format!(
             "EXPLAIN (COSTS OFF) {sql}"
         )));
-        for bind in binds {
-            custom = custom.bind(*bind);
+        for (index, bind) in binds.iter().enumerate() {
+            custom = if last_is_array && index + 1 == binds.len() {
+                custom.bind(bind.clone())
+            } else {
+                custom.bind(bind[0])
+            };
         }
         let custom = custom.fetch_all(&mut *connection).await.unwrap();
         sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
@@ -1608,7 +1728,18 @@ mod tests {
         .execute(&mut *connection)
         .await
         .unwrap();
-        let values: Vec<String> = binds.iter().map(|bind| format!("'{bind}'")).collect();
+        let values: Vec<String> = binds
+            .iter()
+            .enumerate()
+            .map(|(index, bind)| {
+                let text: Vec<String> = bind.iter().map(Uuid::to_string).collect();
+                if last_is_array && index + 1 == binds.len() {
+                    format!("'{{{}}}'", text.join(","))
+                } else {
+                    format!("'{}'", text.join(","))
+                }
+            })
+            .collect();
         let generic: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
             "EXPLAIN (COSTS OFF) EXECUTE planned({})",
             values.join(", ")
@@ -1667,6 +1798,13 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
+        // A wake transaction reads the enrollments of the eight jobs a slot claims.
+        let batch: Vec<Uuid> =
+            sqlx::query_scalar("SELECT id FROM enrollments WHERE workspace_id = $1 LIMIT 8")
+                .bind(ours.as_uuid())
+                .fetch_all(&pool)
+                .await
+                .unwrap();
         let ws = ours.as_uuid();
 
         // The bench's plans took the other indexes; at this size the planner picks either for
@@ -1682,14 +1820,17 @@ mod tests {
             plans.push((
                 plans_of(&pool, ENROLLMENT_READ, &[ws, enrollment]).await,
                 plans_of(&pool, &enrollment_lock(), &[ws, enrollment, person]).await,
+                plans_of_many(&pool, ENROLLMENTS_READ, ws, &batch).await,
             ));
         }
 
-        for (read, lock) in &plans {
+        for (read, lock, batch_read) in &plans {
             assert!(read.contains("enrollments_pkey"), "{read}");
             assert!(read.contains("people_pkey"), "{read}");
             assert!(lock.contains("enrollments_pkey"), "{lock}");
-            for plan in [read, lock] {
+            assert!(batch_read.contains("enrollments_pkey"), "{batch_read}");
+            assert!(batch_read.contains("people_pkey"), "{batch_read}");
+            for plan in [read, lock, batch_read] {
                 for path in [
                     "people_workspace_idx",
                     "enrollments_person_idx",
