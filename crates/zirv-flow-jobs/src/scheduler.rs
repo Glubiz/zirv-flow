@@ -16,9 +16,9 @@ use zirv_flow_store::{
     due_schedules, due_sending_domains, end_orphaned_messages, enqueue, enqueue_domain_verify,
     enqueue_drain, enqueue_reevaluate, ensure_decision_partitions, ensure_event_partitions,
     ensure_forward_job, expire_api_idempotency, expire_contact_idempotency, expire_exports,
-    fail_orphaned_runs, forwarding_report, inbox_heads, prune_debugger_feed, queue_depths,
-    reap_expired, reconcile_flow_schedules, reconcile_segment_schedules, record_retention_run,
-    sample_enrollments, stream_freshness, try_lead,
+    fail_orphaned_runs, forwarding_report, inbox_heads, prune_debugger_feed, reap_expired,
+    reconcile_flow_schedules, reconcile_segment_schedules, record_retention_run,
+    sample_enrollments, sample_queue_depths, stream_freshness, try_lead,
 };
 
 use crate::metrics::{
@@ -44,8 +44,12 @@ const SYNC_RECONCILE_INTERVAL: Duration = Duration::from_secs(60);
 const FRESHNESS_INTERVAL: Duration = Duration::from_secs(30);
 /// How often the destination gauges and counters are refreshed.
 const DESTINATION_INTERVAL: Duration = Duration::from_secs(15);
-/// How often the enrollment and timer gauges are sampled.
-const ENROLLMENT_INTERVAL: Duration = Duration::from_secs(15);
+/// How often the enrollment and timer gauges are sampled. Each sample counts the live
+/// enrollments, which on a table of millions of rows takes seconds of database time.
+const ENROLLMENT_INTERVAL: Duration = Duration::from_secs(60);
+/// How often the queue-depth gauges are refreshed. The count scans the jobs table, so it does not
+/// run on every tick.
+const QUEUE_DEPTH_INTERVAL: Duration = Duration::from_secs(15);
 /// How often the leader looks for sending domains that are due a DNS check.
 const SENDING_DOMAIN_SCAN_INTERVAL: Duration = Duration::from_secs(60);
 /// Domains queued per scan; more than this carry over to the next one.
@@ -136,6 +140,12 @@ pub struct Scheduler {
     destinations_checked: Option<Instant>,
     /// When the enrollment gauges were last sampled; none until this instance leads.
     enrollments_checked: Option<Instant>,
+    /// When the queue-depth gauges were last refreshed; none until this instance leads.
+    depths_checked: Option<Instant>,
+    /// The counts of the last refresh, reported on the ticks in between.
+    depth_counts: QueueCounts,
+    /// Whether the last refresh failed, so a run of failures is logged once.
+    depths_failing: bool,
     /// When the sending domains were last scanned for due checks; none until this instance leads.
     domains_scanned: Option<Instant>,
 }
@@ -157,6 +167,9 @@ impl Scheduler {
             destinations: DestinationGauges::default(),
             destinations_checked: None,
             enrollments_checked: None,
+            depths_checked: None,
+            depth_counts: QueueCounts::default(),
+            depths_failing: false,
             domains_scanned: None,
         }
     }
@@ -205,7 +218,10 @@ impl Scheduler {
         self.keep_destinations().await;
         self.keep_enrollments(now).await;
         self.keep_sending_domains().await;
-        Ok(Tick::Led(self.work_at(now).await?))
+        let mut report = self.work_at(now).await?;
+        self.keep_queue_depths().await;
+        report.counts = self.depth_counts;
+        Ok(Tick::Led(report))
     }
 
     /// Like [`tick`](Self::tick) with the clock given, for tests that walk through slots
@@ -224,7 +240,10 @@ impl Scheduler {
         self.keep_destinations().await;
         self.keep_enrollments(now).await;
         self.keep_sending_domains().await;
-        Ok(Tick::Led(self.work_at(now).await?))
+        let mut report = self.work_at(now).await?;
+        self.keep_queue_depths().await;
+        report.counts = self.depth_counts;
+        Ok(Tick::Led(report))
     }
 
     /// The hourly upkeep: makes sure the decision log and the event store have partitions for
@@ -443,6 +462,44 @@ impl Scheduler {
         publish_enrollments(sample_enrollments(&self.pool).await, now);
     }
 
+    /// Refreshes the queue-depth gauges: on gaining leadership, then at most every
+    /// [`QUEUE_DEPTH_INTERVAL`]. The store's query runs under a statement timeout; a failure keeps
+    /// the last values, is logged once per run of failures, and is retried at the next check.
+    async fn keep_queue_depths(&mut self) {
+        let due = self
+            .depths_checked
+            .is_none_or(|checked| checked.elapsed() >= QUEUE_DEPTH_INTERVAL);
+        if !due {
+            return;
+        }
+        self.depths_checked = Some(Instant::now());
+        match sample_queue_depths(&self.pool).await {
+            Ok(depths) => {
+                self.depths_failing = false;
+                self.gauges
+                    .get_mut()
+                    .expect("the gauge lock is never held across a panic")
+                    .update(&depths);
+                let mut counts = QueueCounts::default();
+                for depth in &depths {
+                    match depth.state.as_str() {
+                        "ready" => counts.ready += depth.count,
+                        "running" => counts.running += depth.count,
+                        "dead" => counts.dead += depth.count,
+                        _ => {}
+                    }
+                }
+                self.depth_counts = counts;
+            }
+            Err(error) => {
+                if !self.depths_failing {
+                    warn!("could not refresh the queue-depth gauges: {error}");
+                }
+                self.depths_failing = true;
+            }
+        }
+    }
+
     /// Publishes the forwarding queue gauges and gives every destination whose outbox has rows
     /// but no ready or running `event.forward` job a job again: a job that died on a database
     /// outage must not strand its rows. A failure is logged and retried at the next check.
@@ -533,6 +590,9 @@ impl Scheduler {
             self.freshness.zero_all();
             self.destinations_checked = None;
             self.enrollments_checked = None;
+            self.depths_checked = None;
+            self.depth_counts = QueueCounts::default();
+            self.depths_failing = false;
             self.domains_scanned = None;
             self.destinations.zero_all();
             set_enrollments(&EnrollmentSample::default());
@@ -545,7 +605,8 @@ impl Scheduler {
         Ok(self.leadership.is_some())
     }
 
-    /// The leader's work: due schedules, expired leases, queue gauges.
+    /// The leader's work: due schedules, expired leases and the safety nets. The queue counts are
+    /// left at zero: [`tick`](Self::tick) fills them from the throttled gauge refresh.
     pub(crate) async fn work_at(&self, now: OffsetDateTime) -> Result<LeaderReport, StoreError> {
         let (fired, skipped) = self.enqueue_due(now).await?;
         let reaped = reap_expired(&self.pool).await?;
@@ -559,27 +620,13 @@ impl Scheduler {
         }
         let drains = self.wake_stale_inboxes().await?;
         let reevaluations = self.wake_stale_dirty().await?;
-        let depths = queue_depths(&self.pool).await?;
-        self.gauges
-            .lock()
-            .expect("the gauge lock is never held across a panic")
-            .update(&depths);
-        let mut counts = QueueCounts::default();
-        for depth in &depths {
-            match depth.state.as_str() {
-                "ready" => counts.ready += depth.count,
-                "running" => counts.running += depth.count,
-                "dead" => counts.dead += depth.count,
-                _ => {}
-            }
-        }
         Ok(LeaderReport {
             fired,
             skipped,
             reaped,
             drains,
             reevaluations,
-            counts,
+            counts: QueueCounts::default(),
         })
     }
 
@@ -784,6 +831,24 @@ mod tests {
             after_failure.contains("zirv_flow_enrollments{state=\"waiting\"} 2"),
             "{after_failure}"
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_queue_gauges_refresh_at_most_once_per_interval(pool: PgPool) {
+        migrated(&pool).await;
+        let mut leader = scheduler(&pool);
+
+        let first = led(leader.tick_at(BASE).await.unwrap());
+        create_schedule(&pool, &hourly(BASE)).await.unwrap();
+        let inside = led(leader.tick_at(BASE).await.unwrap());
+        leader.depths_checked = Instant::now().checked_sub(QUEUE_DEPTH_INTERVAL);
+        let after = led(leader.tick_at(BASE).await.unwrap());
+
+        assert_eq!(first.counts.ready, 0);
+        assert_eq!(inside.fired, 1);
+        assert_eq!(inside.counts.ready, 0, "refreshed inside the interval");
+        assert_eq!(after.counts.ready, 1, "not refreshed after the interval");
     }
 
     fn hourly(next_run_at: OffsetDateTime) -> NewSchedule {
