@@ -739,7 +739,9 @@ mod tests {
             &pool,
             ws,
             "c-1",
-            ContactChange::Create(object(json!({"email": "secret@example.com", "age": 4242}))),
+            ContactChange::Create(object(
+                json!({"email": "secret@example.com", "age": 987654321987_i64}),
+            )),
             Some(&idem),
         )
         .await
@@ -774,7 +776,7 @@ mod tests {
                 .iter()
                 .all(|(name, kind)| kind != "jsonb" && (kind != "uuid" || name == "workspace_id"))
         );
-        assert!(!row.contains("secret@example.com") && !row.contains("4242"));
+        assert!(!row.contains("secret@example.com") && !row.contains("987654321987"));
         assert!(!row.contains(&written.contact.unwrap().person_id.to_string()));
     }
 
