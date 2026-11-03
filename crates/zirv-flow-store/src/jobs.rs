@@ -105,6 +105,8 @@ struct ClaimedRow {
     workspace_id: Option<Uuid>,
     kind: String,
     payload: Value,
+    priority: i16,
+    run_at: OffsetDateTime,
     attempts: i32,
     max_attempts: i32,
     lease_token: Uuid,
@@ -336,66 +338,75 @@ macro_rules! claim_update {
     };
 }
 
-/// The oldest due job of one of `$3` in the first band that has one, locked.
+/// The oldest due jobs of one of `$3`, up to `$4`, band by band upwards, locked.
 macro_rules! claim_first_due {
     () => {
-        "(SELECT c.id FROM bands b CROSS JOIN LATERAL ( \
+        "ARRAY(SELECT c.id FROM bands b CROSS JOIN LATERAL ( \
             SELECT j.id FROM jobs j \
             WHERE j.state = 'ready' AND j.priority = b.priority AND j.run_at <= now() \
             AND j.kind = ANY($3) \
             ORDER BY j.run_at \
-            LIMIT 1 \
+            LIMIT $4 \
             FOR UPDATE SKIP LOCKED) c \
-            LIMIT 1)"
+            LIMIT $4)"
     };
 }
 
 macro_rules! claim_returning {
     () => {
-        " RETURNING id, workspace_id, kind, payload, attempts, max_attempts, lease_token, \
-            unique_key, trace_id, cause_kind, cause_id, \
+        " RETURNING id, workspace_id, kind, payload, priority, run_at, attempts, max_attempts, \
+            lease_token, unique_key, trace_id, cause_kind, cause_id, \
             EXTRACT(EPOCH FROM now() - run_at)::float8 AS claim_lag_seconds"
     };
 }
 
-/// The claim: the oldest due job of one of `$3` with the lowest priority number.
+/// The claim: up to `$4` due jobs of one of `$3`, by priority band, then age.
 ///
 /// `bands` walks the distinct priorities of the ready jobs upwards, one `jobs_ready_idx` probe
-/// each, and the lateral takes the oldest due job of the first band that has one: a bounded
-/// range of `(priority, run_at)`. A claim's cost therefore does not grow with the due or the
+/// each, and the lateral takes the oldest due jobs of each band in turn: a bounded range of
+/// `(priority, run_at)` per band. A claim's cost therefore does not grow with the due or the
 /// future jobs, whatever the statistics say (#207, `docs/benchmarks/m5-flows.md`). The
-/// recursion yields the bands in ascending order and the outer `LIMIT 1` stops at the first
-/// band that yields a job. Due jobs of kinds outside `$3` in a band are stepped over.
+/// recursion yields the bands in ascending order and the outer `LIMIT` stops at the band that
+/// fills the batch, so a later band is read only while the bands before it held fewer than `$4`
+/// due jobs. Due jobs of kinds outside `$3` in a band are stepped over. A row is locked as the
+/// limit takes it, so a claim locks only the jobs it claims.
 const CLAIM: &str = concat!(
     "WITH RECURSIVE ",
     claim_bands!(),
     claim_update!(),
-    "WHERE id = ",
+    "WHERE id = ANY(",
     claim_first_due!(),
+    ")",
     claim_returning!()
 );
 
-/// The claim under a per-workspace cap of `$4` running jobs; instance jobs are never capped.
+/// The claim under a per-workspace cap of `$5` running jobs; instance jobs are never capped.
 ///
-/// `capped` lists the workspaces at their cap, read once from `jobs_workspace_running_idx`.
-/// While it is empty the claim is [`CLAIM`]'s. Otherwise a band's due jobs are not read in
-/// `run_at` order, which would step over a capped workspace's flood of due jobs row by row.
-/// `heads` instead walks the workspaces upwards in `jobs_ready_workspace_idx` from below the
-/// lowest id (the nil one), one probe per workspace and band (a skip scan): a capped workspace
-/// is passed over at once, and each other workspace contributes the oldest due job of one of
-/// `$3` in its first band that has one. The instance jobs' bands are walked in
-/// `jobs_ready_instance_idx` the way [`CLAIM`] walks them. A claim's cost is therefore bounded by
-/// the workspaces with ready jobs and their bands, not by any workspace's backlog (#207); as in
-/// [`CLAIM`], due jobs of other kinds are stepped over. Every workspace probe is a row comparison
-/// led by `workspace_id`, so no index but that one can answer it, whatever the statistics.
+/// `running` counts each workspace's running jobs once, from `jobs_workspace_running_idx`, and
+/// `capped` lists the workspaces at their cap. While the cap is at least `$4` and no workspace
+/// runs more than `$5 - $4` jobs, no batch can take one past its cap, and the claim is
+/// [`CLAIM`]'s. Otherwise a band's due jobs are not read in `run_at` order, which would step over
+/// a capped workspace's flood of due jobs row by row. `heads` instead walks the workspaces upwards in
+/// `jobs_ready_workspace_idx` from below the lowest id (the nil one), one probe per workspace
+/// and band (a skip scan): a capped workspace is passed over at once, and each other workspace
+/// finds the first band that holds a due job of one of `$3`. From that band it offers its oldest
+/// due jobs of those kinds, as many as its cap has room for (`$5` less its running jobs), so a
+/// batch never takes a workspace past its cap, and at most `$4`. The instance jobs' bands are
+/// walked in `jobs_ready_instance_idx` the way [`CLAIM`] walks them. A claim's cost is therefore
+/// bounded by the workspaces with ready jobs, their bands and `$4`, not by any workspace's
+/// backlog (#207); as in [`CLAIM`], due jobs of other kinds are stepped over. Every workspace
+/// probe is a row comparison led by `workspace_id`, so no index but that one can answer it,
+/// whatever the statistics.
 ///
-/// The heads are read without locks and tried by priority, then age, `FOR UPDATE SKIP LOCKED`,
-/// so a claim locks the one row it takes; a head that is locked is passed over until the next
-/// claim. Claims under a cap are serialised by [`claim_job`], so no other claim moves a head.
+/// The offers are read without locks and tried by priority, then age, `FOR UPDATE SKIP LOCKED`,
+/// so a claim locks only the rows it takes; an offer that is locked is passed over until the next
+/// claim. Claims under a cap are serialised by [`claim_jobs`], so no other claim moves a head or
+/// changes a running count meanwhile.
 const CLAIM_CAPPED: &str = concat!(
-    "WITH RECURSIVE capped AS MATERIALIZED ( \
-        SELECT workspace_id FROM jobs WHERE state = 'running' AND workspace_id IS NOT NULL \
-        GROUP BY workspace_id HAVING count(*) >= $4), ",
+    "WITH RECURSIVE running AS MATERIALIZED ( \
+        SELECT workspace_id, count(*) AS running FROM jobs \
+        WHERE state = 'running' AND workspace_id IS NOT NULL GROUP BY workspace_id), \
+    capped AS MATERIALIZED (SELECT workspace_id FROM running WHERE running >= $5), ",
     claim_bands!(),
     ", heads (workspace_id, priority, id, run_at) AS ( \
         SELECT '00000000-0000-0000-0000-000000000000'::uuid, 32767::smallint, NULL::uuid, \
@@ -427,49 +438,70 @@ const CLAIM_CAPPED: &str = concat!(
                 ORDER BY j.priority LIMIT 1) \
         FROM instance_bands b WHERE b.priority IS NOT NULL) ",
     claim_update!(),
-    "WHERE id = CASE WHEN NOT EXISTS (SELECT FROM capped) THEN ",
+    "WHERE id = ANY(CASE WHEN $5 >= $4 \
+        AND NOT EXISTS (SELECT FROM running WHERE running > $5 - $4) THEN ",
     claim_first_due!(),
-    " ELSE (SELECT l.id FROM ( \
+    " ELSE ARRAY(SELECT l.id FROM ( \
         SELECT c.id FROM ( \
-            SELECT id, priority, run_at FROM heads WHERE id IS NOT NULL \
+            SELECT o.id, h.priority, o.run_at FROM heads h \
+            LEFT JOIN running r ON r.workspace_id = h.workspace_id \
+            CROSS JOIN LATERAL ( \
+                SELECT j.id, j.run_at FROM jobs j \
+                WHERE j.state = 'ready' AND j.workspace_id IS NOT NULL \
+                AND ROW(j.workspace_id, j.priority) >= ROW(h.workspace_id, h.priority) \
+                AND ROW(j.workspace_id, j.priority, j.run_at) \
+                    <= ROW(h.workspace_id, h.priority, now()) \
+                AND j.kind = ANY($3) \
+                ORDER BY j.workspace_id, j.priority, j.run_at \
+                LIMIT LEAST($4, $5 - COALESCE(r.running, 0))) o \
+            WHERE h.id IS NOT NULL \
             UNION ALL \
             (SELECT i.id, b.priority, i.run_at FROM instance_bands b CROSS JOIN LATERAL ( \
                 SELECT j.id, j.run_at FROM jobs j \
                 WHERE j.state = 'ready' AND j.workspace_id IS NULL AND j.priority = b.priority \
                 AND j.run_at <= now() AND j.kind = ANY($3) \
-                ORDER BY j.run_at LIMIT 1) i \
-             LIMIT 1)) c \
+                ORDER BY j.run_at LIMIT $4) i \
+             LIMIT $4)) c \
         ORDER BY c.priority, c.run_at) c \
     CROSS JOIN LATERAL ( \
         SELECT j.id FROM jobs j WHERE j.id = c.id AND j.state = 'ready' \
         FOR UPDATE SKIP LOCKED) l \
-    LIMIT 1) END",
+    LIMIT $4) END)",
     claim_returning!()
 );
 
-/// Claims the next runnable job of one of `kinds`, or none.
+/// Claims up to `n` runnable jobs of one of `kinds`, by priority, then age; none when nothing is
+/// due.
 ///
-/// A short transaction of its own, committed before the handler runs. With
-/// `max_running_per_workspace`, a workspace that already has that many running jobs is
-/// skipped, and claims are serialised so the cap holds under concurrent workers.
-pub async fn claim_job(
+/// One short statement of its own, committed before any handler runs, so a batch costs one round
+/// trip and one commit whatever its size. Each job gets its own lease token and lease, and its
+/// attempt is counted. With `max_running_per_workspace`, a workspace that already has that many
+/// running jobs is skipped, a batch takes no workspace past it (its running jobs and the batch's
+/// counted together), and claims are serialised so the cap holds under concurrent workers. The
+/// jobs come back in claim order.
+pub async fn claim_jobs(
     pool: &PgPool,
     worker: &str,
     kinds: &[&str],
     lease: Duration,
     max_running_per_workspace: Option<u32>,
-) -> Result<Option<ClaimedJob>, StoreError> {
-    let claimed: Option<ClaimedRow> = match max_running_per_workspace {
+    n: u32,
+) -> Result<Vec<ClaimedJob>, StoreError> {
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    let mut claimed: Vec<ClaimedRow> = match max_running_per_workspace {
         // Without a cap one statement is enough.
         None => sqlx::query_as(CLAIM)
             .bind(worker)
             .bind(lease.as_secs_f64())
             .bind(kinds)
-            .fetch_optional(pool)
+            .bind(i64::from(n))
+            .fetch_all(pool)
             .await
             .map_err(StoreError::query)?,
-        // With one, claims queue up on a transaction lock so the count each claim sees
-        // includes the claims before it.
+        // With one, claims queue up on a transaction lock so the counts each claim sees
+        // include the claims before it.
         Some(cap) => {
             let mut tx = pool.begin().await.map_err(StoreError::query)?;
             sqlx::query("SELECT pg_advisory_xact_lock($1)")
@@ -481,15 +513,76 @@ pub async fn claim_job(
                 .bind(worker)
                 .bind(lease.as_secs_f64())
                 .bind(kinds)
+                .bind(i64::from(n))
                 .bind(i64::from(cap))
-                .fetch_optional(&mut *tx)
+                .fetch_all(&mut *tx)
                 .await
                 .map_err(StoreError::query)?;
             tx.commit().await.map_err(StoreError::query)?;
             claimed
         }
     };
-    claimed.map(ClaimedRow::into_claimed).transpose()
+    // `RETURNING` follows the primary key, not the claim's order.
+    claimed.sort_by_key(|row| (row.priority, row.run_at));
+    claimed.into_iter().map(ClaimedRow::into_claimed).collect()
+}
+
+/// Claims the next runnable job of one of `kinds`, or none: [`claim_jobs`] of one.
+pub async fn claim_job(
+    pool: &PgPool,
+    worker: &str,
+    kinds: &[&str],
+    lease: Duration,
+    max_running_per_workspace: Option<u32>,
+) -> Result<Option<ClaimedJob>, StoreError> {
+    let claimed = claim_jobs(pool, worker, kinds, lease, max_running_per_workspace, 1).await?;
+    Ok(claimed.into_iter().next())
+}
+
+/// Gives back claimed jobs whose handlers never started, each fenced on its lease token: back to
+/// `ready` as before the claim, with its `run_at` kept and the claim's attempt no longer counted,
+/// and the workers woken as an enqueue wakes them. A job an erasure marked `purge_on_release`
+/// while it was held is deleted instead, as on every other release, and a job whose lease was
+/// lost is left alone. Returns how many jobs went back to `ready`.
+///
+/// The rows are taken `FOR UPDATE` in id order, the order an erasure and the reaper lock in. No
+/// handler holds them (a handler takes its `lock_lease` only once it starts), so this never
+/// waits on one.
+pub async fn release_jobs<'e>(
+    executor: impl PgExecutor<'e>,
+    jobs: &[(Uuid, Uuid)],
+) -> Result<u64, StoreError> {
+    if jobs.is_empty() {
+        return Ok(0);
+    }
+    let (ids, tokens): (Vec<Uuid>, Vec<Uuid>) = jobs.iter().copied().unzip();
+    let released: Vec<String> = sqlx::query_scalar(
+        "WITH held AS ( \
+             SELECT j.id, j.purge_on_release FROM jobs j \
+             JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) \
+               ON j.id = t.id AND j.lease_token = t.lease_token \
+             WHERE j.state = 'running' \
+             ORDER BY j.id FOR UPDATE OF j), \
+         purged AS ( \
+             DELETE FROM jobs WHERE id IN (SELECT id FROM held WHERE purge_on_release)), \
+         released AS ( \
+             UPDATE jobs SET state = 'ready', attempts = attempts - 1, lease_token = NULL, \
+                lease_expires_at = NULL, locked_by = NULL \
+             WHERE id IN (SELECT id FROM held WHERE NOT purge_on_release) \
+             RETURNING kind), \
+         notified AS ( \
+             SELECT pg_notify($3, k.kind) FROM (SELECT DISTINCT kind FROM released) k \
+             WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE state = 'ready' AND kind = k.kind \
+                               AND run_at <= now())) \
+         SELECT kind FROM released, (SELECT count(*) FROM notified) AS n",
+    )
+    .bind(&ids)
+    .bind(&tokens)
+    .bind(NOTIFY_CHANNEL)
+    .fetch_all(executor)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(u64::try_from(released.len()).unwrap_or(u64::MAX))
 }
 
 /// Locks the job row in the handler's transaction, to confirm the lease is still held.
@@ -3061,7 +3154,7 @@ mod tests {
                 .unwrap()
                 .map(|claimed| (claimed.id, claimed.lease_token));
         }
-        let query = sqlx::query_as(if cap.is_some() {
+        let query = sqlx::query(if cap.is_some() {
             CLAIM_WITH_PER_ROW_CAP
         } else {
             CLAIM_BEFORE_207
@@ -3070,7 +3163,7 @@ mod tests {
         .bind(LEASE.as_secs_f64())
         .bind(WORKER_KINDS)
         .bind(cap);
-        let row: Option<ClaimedRow> = if cap.is_some() {
+        let row: Option<sqlx::postgres::PgRow> = if cap.is_some() {
             let mut tx = pool.begin().await.unwrap();
             sqlx::query("SELECT pg_advisory_xact_lock($1)")
                 .bind(CLAIM_LOCK_KEY)
@@ -3083,7 +3176,7 @@ mod tests {
         } else {
             query.fetch_optional(pool).await.unwrap()
         };
-        row.map(|row| (row.id, row.lease_token))
+        row.map(|row| (row.get("id"), row.get("lease_token")))
     }
 
     /// Four workers claim and complete for `run_for`: claims and empty claims per second.
@@ -3123,17 +3216,18 @@ mod tests {
 
     /// The plan a worker's connection runs: the statement prepared once and run six times,
     /// so the plan cache has made its generic-or-custom choice, then `EXPLAIN (ANALYZE,
-    /// BUFFERS)` of the next execution. All inside a transaction that is rolled back. `cap` is
-    /// bound when the statement takes one.
-    async fn cached_claim_plan(pool: &PgPool, sql: &'static str, cap: Option<i64>) -> String {
-        let takes_cap = sql.contains("$4");
+    /// BUFFERS)` of the next execution. All inside a transaction that is rolled back. `binds`
+    /// are the parameters after `$3`, as [`claim_plans`] takes them.
+    async fn cached_claim_plan(pool: &PgPool, sql: &'static str, binds: &[Option<i64>]) -> String {
         let mut tx = pool.begin().await.unwrap();
         for _ in 0..6 {
-            let query = sqlx::query(sql)
+            let mut query = sqlx::query(sql)
                 .bind("bench")
                 .bind(LEASE.as_secs_f64())
                 .bind(WORKER_KINDS);
-            let query = if takes_cap { query.bind(cap) } else { query };
+            for value in binds {
+                query = query.bind(*value);
+            }
             query.execute(&mut *tx).await.unwrap();
         }
         let (name, generic, custom): (String, i64, i64) = sqlx::query_as(
@@ -3149,13 +3243,12 @@ mod tests {
             .map(|kind| format!("'{kind}'"))
             .collect::<Vec<_>>()
             .join(",");
-        let cap = match (takes_cap, cap) {
-            (false, _) => String::new(),
-            (true, None) => ", NULL".to_owned(),
-            (true, Some(cap)) => format!(", {cap}"),
-        };
+        let rest: String = binds
+            .iter()
+            .map(|value| value.map_or_else(|| ", NULL".to_owned(), |value| format!(", {value}")))
+            .collect();
         let lines: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-            "EXPLAIN (ANALYZE, BUFFERS) EXECUTE {name}('bench', 30, ARRAY[{kinds}]::text[]{cap})"
+            "EXPLAIN (ANALYZE, BUFFERS) EXECUTE {name}('bench', 30, ARRAY[{kinds}]::text[]{rest})"
         )))
         .fetch_all(&mut *tx)
         .await
@@ -3254,26 +3347,28 @@ mod tests {
         None
     }
 
-    /// The custom plan of `sql` for each of `caps` (bound when it takes one) and its generic plan.
+    /// The parameters a plan check binds after `$3`, one set per custom plan: the cap for the
+    /// baselines, and the batch size, then the cap if it takes one, for the current claims.
+    type Binds<'a> = &'a [&'a [Option<i64>]];
+
+    /// The custom plan of `sql` for each set of `binds` and its generic plan.
     async fn claim_plans(
         pool: &PgPool,
         sql: &'static str,
-        caps: &[Option<i64>],
+        binds: Binds<'_>,
     ) -> Vec<(String, Value)> {
         let mut plans = Vec::new();
-        for cap in caps {
-            let query =
+        for set in binds {
+            let mut query =
                 sqlx::query_scalar(sqlx::AssertSqlSafe(format!("EXPLAIN (FORMAT JSON) {sql}")))
                     .bind("w")
                     .bind(LEASE.as_secs_f64())
                     .bind(WORKER_KINDS);
-            let query = if sql.contains("$4") {
-                query.bind(cap)
-            } else {
-                query
-            };
+            for value in *set {
+                query = query.bind(*value);
+            }
             plans.push((
-                format!("custom, cap {cap:?}"),
+                format!("custom, binds {set:?}"),
                 query.fetch_one(pool).await.unwrap(),
             ));
         }
@@ -3290,24 +3385,26 @@ mod tests {
     }
 
     /// Asserts that each statement's plans are bounded, or (`caught`) that the check catches
-    /// one of them, as custom plans for each cap and as the generic plan.
+    /// one of them, as custom plans for each set of binds and as the generic plan.
     async fn check_claim_plans(
         pool: &PgPool,
         stage: &str,
-        statements: &[(&str, &'static str, &[Option<i64>], bool)],
+        statements: &[(&str, &'static str, Binds<'_>, bool)],
     ) {
-        for (statement, sql, caps, caught) in statements {
-            for (mode, plan) in claim_plans(pool, sql, caps).await {
+        for (statement, sql, binds, caught) in statements {
+            for (mode, plan) in claim_plans(pool, sql, binds).await {
                 let step = unbounded_step(&plan);
                 if *caught {
                     assert!(
                         step.is_some(),
-                        "{statement}, {stage}, {mode}: not caught\n{plan}"
+                        "{statement}, {stage}, {mode}: not caught
+{plan}"
                     );
                 } else {
                     assert!(
                         step.is_none(),
-                        "{statement}, {stage}, {mode}: {step:?}\n{plan}"
+                        "{statement}, {stage}, {mode}: {step:?}
+{plan}"
                     );
                 }
             }
@@ -3316,9 +3413,9 @@ mod tests {
 
     /// #207: the claim reads a bounded range per priority band whatever the statistics: none
     /// yet, taken while nothing was due (the old claim then sorted every due job), or fresh; as
-    /// the custom plan with and without a cap and as the generic plan a worker's prepared
-    /// statement can settle on. The statement before #207 is checked the same way, so the check
-    /// is known to catch it.
+    /// the custom plan for one job and for a batch (#397), with and without a cap, and as the
+    /// generic plan a worker's prepared statement can settle on. The statement before #207 is
+    /// checked the same way, so the check is known to catch it.
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_claim_plan_stays_bounded_whatever_the_statistics(pool: PgPool) {
@@ -3326,10 +3423,24 @@ mod tests {
         let ws = workspace(&pool, "ours").await;
         seed_wakes(&pool, ws, "f", 20_000, 600.0, 2_400.0).await;
         seed_other_work(&pool, OtherWork::Later).await;
-        let statements: &[(&str, &'static str, &[Option<i64>], bool)] = &[
-            ("current", CLAIM, &[None], false),
-            ("capped", CLAIM_CAPPED, &[Some(2)], false),
-            ("before #207", CLAIM_BEFORE_207, &[None, Some(2)], true),
+        let statements: &[(&str, &'static str, Binds<'_>, bool)] = &[
+            ("current", CLAIM, &[&[Some(1)], &[Some(8)]], false),
+            (
+                "capped",
+                CLAIM_CAPPED,
+                &[
+                    &[Some(1), Some(2)],
+                    &[Some(8), Some(2)],
+                    &[Some(8), Some(20)],
+                ],
+                false,
+            ),
+            (
+                "before #207",
+                CLAIM_BEFORE_207,
+                &[&[None], &[Some(2)]],
+                true,
+            ),
         ];
 
         seed_wakes(&pool, ws, "b0", 5_000, -60.0, 0.0).await;
@@ -3368,8 +3479,9 @@ mod tests {
     /// #207, the cap path: a workspace at its cap with a flood of due jobs in the first band,
     /// other workspaces' due jobs behind it and instance work beside it. The capped claim reads
     /// no ready index range filtered on the workspace (which steps over the flood row by row)
-    /// and counts no running jobs per row, whatever the statistics, as the custom and the
-    /// generic plan. The claim before its skip scan is checked the same way and caught.
+    /// and counts no running jobs per row, whatever the statistics, as the custom plan for one
+    /// job and for a batch larger than the cap (#397), and as the generic plan. The claim before
+    /// its skip scan is checked the same way and caught.
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_capped_claim_plan_does_not_step_over_a_capped_workspace(pool: PgPool) {
@@ -3392,9 +3504,14 @@ mod tests {
                 seed_other_work(&pool, OtherWork::Busy).await;
             }
         };
-        let statements: &[(&str, &'static str, &[Option<i64>], bool)] = &[
-            ("capped", CLAIM_CAPPED, &[Some(2)], false),
-            ("per-row cap", CLAIM_WITH_PER_ROW_CAP, &[Some(2)], true),
+        let statements: &[(&str, &'static str, Binds<'_>, bool)] = &[
+            (
+                "capped",
+                CLAIM_CAPPED,
+                &[&[Some(1), Some(2)], &[Some(8), Some(2)]],
+                false,
+            ),
+            ("per-row cap", CLAIM_WITH_PER_ROW_CAP, &[&[Some(2)]], true),
         ];
 
         burst("b0").await;
@@ -3511,7 +3628,7 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_capped_claim_locks_only_the_job_it_claims(pool: PgPool) {
+    async fn a_capped_claim_locks_only_the_jobs_it_claims(pool: PgPool) {
         let busy = workspace(&pool, "busy").await;
         seed_running(&pool, busy, 1).await;
         seed_wakes(&pool, busy, "busy", 20, -180.0, -60.0).await;
@@ -3534,20 +3651,313 @@ mod tests {
         };
         assert_eq!(lockable().await, 25);
 
-        let mut claimer = pool.begin().await.unwrap();
-        let claimed: ClaimedRow = sqlx::query_as(CLAIM_CAPPED)
-            .bind("w")
-            .bind(LEASE.as_secs_f64())
-            .bind(&["flow.step"][..])
-            .bind(1_i64)
-            .fetch_one(&mut *claimer)
+        for (n, names) in [
+            (1_i64, &["other0"][..]),
+            (3, &["other0", "other1", "other2"]),
+        ] {
+            let mut claimer = pool.begin().await.unwrap();
+            let mut claimed: Vec<ClaimedRow> = sqlx::query_as(CLAIM_CAPPED)
+                .bind("w")
+                .bind(LEASE.as_secs_f64())
+                .bind(&["flow.step"][..])
+                .bind(n)
+                .bind(1_i64)
+                .fetch_all(&mut *claimer)
+                .await
+                .unwrap();
+            claimed.sort_by_key(|row| row.run_at);
+
+            // The five workspace heads were read, but only the claimed ones are locked.
+            let payloads: Vec<&Value> = claimed.iter().map(|row| &row.payload).collect();
+            let wanted: Vec<Value> = names.iter().map(|name| json!({ "n": name })).collect();
+            assert_eq!(
+                payloads,
+                wanted.iter().collect::<Vec<_>>(),
+                "a batch of {n}"
+            );
+            assert_eq!(lockable().await, 25 - n, "a batch of {n}");
+            claimer.rollback().await.unwrap();
+        }
+    }
+
+    fn names(jobs: &[ClaimedJob]) -> Vec<&str> {
+        jobs.iter()
+            .map(|job| job.payload["n"].as_str().unwrap_or(""))
+            .collect()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_batch_claim_takes_the_oldest_due_jobs_band_by_band_with_a_lease_each(pool: PgPool) {
+        for (name, kind, priority, age) in [
+            ("p0-new", "a.kind", 0_i16, 10_i64),
+            ("p0-old", "a.kind", 0, 90),
+            ("p1-old", "a.kind", 1, 300),
+            ("p1-new", "a.kind", 1, 5),
+            ("p-1", "a.kind", -1, 1),
+            ("other", "b.kind", -5, 600),
+            ("p2", "a.kind", 2, 50),
+        ] {
+            let mut new = job(kind);
+            new.priority = priority;
+            new.payload = json!({ "n": name });
+            new.run_at = Some(OffsetDateTime::now_utc() - time::Duration::seconds(age));
+            enqueue(&pool, &new).await.unwrap();
+        }
+        let mut later = job("a.kind");
+        later.priority = -9;
+        later.run_at = Some(OffsetDateTime::now_utc() + time::Duration::hours(1));
+        enqueue(&pool, &later).await.unwrap();
+        let batch = || claim_jobs(&pool, "w", &["a.kind"], LEASE, None, 4);
+
+        let first = batch().await.unwrap();
+        let second = batch().await.unwrap();
+
+        assert_eq!(names(&first), ["p-1", "p0-old", "p0-new", "p1-old"]);
+        assert_eq!(names(&second), ["p1-new", "p2"]);
+        assert!(batch().await.unwrap().is_empty());
+        let mut tokens: Vec<Uuid> = first
+            .iter()
+            .chain(&second)
+            .map(|job| job.lease_token)
+            .collect();
+        tokens.sort();
+        tokens.dedup();
+        assert_eq!(tokens.len(), 6, "every job has a lease token of its own");
+        for claimed in first.iter().chain(&second) {
+            let stored = find_job(&pool, claimed.id).await.unwrap().unwrap();
+            assert_eq!(stored.state, "running");
+            assert_eq!(stored.lease_token, Some(claimed.lease_token));
+            assert_eq!((stored.attempts, claimed.attempts), (1, 1));
+            assert!(stored.lease_expires_at.is_some());
+        }
+        // Each job's lag is that of its own `run_at`.
+        assert!((89.0..600.0).contains(&first[1].claim_lag_seconds));
+        assert!((0.0..30.0).contains(&first[0].claim_lag_seconds));
+    }
+
+    /// Two claimers, each on a connection of its own, drain 400 due jobs of two workspaces and
+    /// the instance in batches of eight, completing each batch before claiming the next: no job is
+    /// claimed twice and every lease token is distinct, without a cap and under a cap of three,
+    /// where no workspace ever runs more than three.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn concurrent_batch_claims_never_take_a_job_twice(pool: PgPool) {
+        let workspaces = vec![
+            Some(workspace(&pool, "one").await.as_uuid()),
+            Some(workspace(&pool, "two").await.as_uuid()),
+            None,
+        ];
+        for cap in [None, Some(3_u32)] {
+            sqlx::query(
+                "INSERT INTO jobs (id, workspace_id, kind, payload, priority, run_at, trace_id, \
+                    cause_kind, cause_id) \
+                 SELECT gen_random_uuid(), ($1::uuid[])[1 + g % 3], 'a.kind', '{}', \
+                        (g % 2)::int2, now() - make_interval(secs => g), gen_random_uuid(), \
+                        'api', 'x' \
+                 FROM generate_series(1, 400) g",
+            )
+            .bind(&workspaces)
+            .execute(&pool)
+            .await
+            .unwrap();
+            let start = Arc::new(tokio::sync::Barrier::new(2));
+            let mut tasks = tokio::task::JoinSet::new();
+            for claimer in 0..2 {
+                let own = sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(1)
+                    .connect_with((*pool.connect_options()).clone())
+                    .await
+                    .unwrap();
+                let start = start.clone();
+                tasks.spawn(async move {
+                    let name = format!("claimer-{claimer}");
+                    let mut claimed = Vec::new();
+                    start.wait().await;
+                    loop {
+                        let batch = claim_jobs(&own, &name, &["a.kind"], LEASE, cap, 8)
+                            .await
+                            .unwrap();
+                        if batch.is_empty() {
+                            return claimed;
+                        }
+                        if let Some(cap) = cap {
+                            let most: Option<i64> = sqlx::query_scalar(
+                                "SELECT max(n) FROM (SELECT count(*) AS n FROM jobs \
+                                 WHERE state = 'running' AND workspace_id IS NOT NULL \
+                                 GROUP BY workspace_id) r",
+                            )
+                            .fetch_one(&own)
+                            .await
+                            .unwrap();
+                            assert!(most.unwrap_or(0) <= i64::from(cap), "{most:?} running");
+                        }
+                        for job in batch {
+                            assert!(complete_job(&own, job.id, job.lease_token).await.unwrap());
+                            claimed.push((job.id, job.lease_token));
+                        }
+                    }
+                });
+            }
+            let mut claimed = Vec::new();
+            while let Some(result) = tasks.join_next().await {
+                claimed.extend(result.unwrap());
+            }
+
+            let mut ids: Vec<Uuid> = claimed.iter().map(|(id, _)| *id).collect();
+            ids.sort();
+            ids.dedup();
+            let mut tokens: Vec<Uuid> = claimed.iter().map(|(_, token)| *token).collect();
+            tokens.sort();
+            tokens.dedup();
+            assert_eq!(
+                (claimed.len(), ids.len(), tokens.len()),
+                (400, 400, 400),
+                "cap {cap:?}"
+            );
+            assert_eq!(queue_counts(&pool).await.unwrap(), QueueCounts::default());
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_capped_batch_takes_no_workspace_past_its_cap(pool: PgPool) {
+        let busy = workspace(&pool, "busy").await;
+        let fresh = workspace(&pool, "fresh").await;
+        let quiet = workspace(&pool, "quiet").await;
+        seed_running(&pool, busy, 1).await;
+        seed_wakes(&pool, busy, "busy", 10, -180.0, -60.0).await;
+        // No running jobs, but a cap below the batch size.
+        seed_wakes(&pool, fresh, "fresh", 10, -120.0, -60.0).await;
+        enqueue_named(&pool, "quiet", Some(quiet), 0, 5).await;
+        enqueue_named(&pool, "instance-a", None, 0, 30).await;
+        enqueue_named(&pool, "instance-b", None, 0, 20).await;
+        let batch = || claim_jobs(&pool, "w", &["flow.step"], LEASE, Some(3), 8);
+
+        let first = batch().await.unwrap();
+        let second = batch().await.unwrap();
+
+        let taken = |workspace: Option<WorkspaceId>| {
+            let id = workspace.map(|ws| ws.as_uuid());
+            first.iter().filter(|job| job.workspace_id == id).count()
+        };
+        assert_eq!(
+            [
+                taken(Some(busy)),
+                taken(Some(fresh)),
+                taken(Some(quiet)),
+                taken(None)
+            ],
+            [2, 3, 1, 2]
+        );
+        assert!(second.is_empty(), "every workspace is at its cap");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_capped_workspace_flood_does_not_hide_the_jobs_behind_it_from_a_batch(pool: PgPool) {
+        let busy = workspace(&pool, "busy").await;
+        let quiet = workspace(&pool, "quiet").await;
+        let third = workspace(&pool, "third").await;
+        seed_running(&pool, busy, 1).await;
+        // Busy's due jobs are all older than quiet's, in the same band.
+        seed_wakes(&pool, busy, "busy", 500, -180.0, -60.0).await;
+        enqueue_named(&pool, "quiet", Some(quiet), 0, 5).await;
+        // Older than everything, but at a later priority.
+        enqueue_named(&pool, "third", Some(third), 1, 600).await;
+        enqueue_named(&pool, "instance", None, 1, 1).await;
+        let batch = || claim_jobs(&pool, "w", &["flow.step"], LEASE, Some(1), 8);
+
+        let first = batch().await.unwrap();
+        let second = batch().await.unwrap();
+
+        assert_eq!(names(&first), ["quiet", "third", "instance"]);
+        assert!(second.is_empty(), "every workspace is at its cap");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn batch_claimed_jobs_a_crash_left_run_again_once_their_leases_expire(pool: PgPool) {
+        for _ in 0..3 {
+            enqueue(&pool, &job("a.kind")).await.unwrap();
+        }
+        let crashed = claim_jobs(&pool, "w", &["a.kind"], Duration::from_millis(300), None, 8)
+            .await
+            .unwrap();
+        assert_eq!(crashed.len(), 3);
+        for job in &crashed {
+            wait_until_expired(&pool, job.id).await;
+        }
+
+        let reaped = reap_expired(&pool).await.unwrap();
+        let again = claim_jobs(&pool, "w", &["a.kind"], LEASE, None, 8)
             .await
             .unwrap();
 
-        // The five workspace heads were read, but only the claimed one is locked.
-        assert_eq!(claimed.payload, json!({"n": "other0"}));
-        assert_eq!(lockable().await, 24);
-        claimer.rollback().await.unwrap();
+        assert_eq!(reaped.requeued, 3);
+        let mut before: Vec<Uuid> = crashed.iter().map(|job| job.id).collect();
+        let mut after: Vec<Uuid> = again.iter().map(|job| job.id).collect();
+        before.sort();
+        after.sort();
+        assert_eq!(before, after);
+        assert!(again.iter().all(|job| job.attempts == 2));
+        for job in &crashed {
+            assert!(!complete_job(&pool, job.id, job.lease_token).await.unwrap());
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_released_job_goes_back_as_it_was_and_a_marked_or_lost_one_does_not(pool: PgPool) {
+        for (n, age) in [(0, 30_i64), (1, 20), (2, 10)] {
+            let mut new = job("a.kind");
+            new.payload = json!({ "n": n });
+            new.run_at = Some(OffsetDateTime::now_utc() - time::Duration::seconds(age));
+            enqueue(&pool, &new).await.unwrap();
+        }
+        let held = claim_jobs(&pool, "w", &["a.kind"], LEASE, None, 8)
+            .await
+            .unwrap();
+        let [kept, marked, lost] = [&held[0], &held[1], &held[2]];
+        let run_at = find_job(&pool, kept.id).await.unwrap().unwrap().run_at;
+        sqlx::query("UPDATE jobs SET purge_on_release = true WHERE id = $1")
+            .bind(marked.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE jobs SET lease_token = gen_random_uuid() WHERE id = $1")
+            .bind(lost.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut listener = listen_for_jobs(&pool).await.unwrap();
+
+        let tokens: Vec<(Uuid, Uuid)> = held.iter().map(|job| (job.id, job.lease_token)).collect();
+        let released = release_jobs(&pool, &tokens).await.unwrap();
+
+        assert_eq!(released, 1);
+        let stored = find_job(&pool, kept.id).await.unwrap().unwrap();
+        assert_eq!(stored.state, "ready");
+        assert_eq!(stored.attempts, 0, "the attempt never started");
+        assert_eq!(stored.run_at, run_at);
+        assert!(stored.lease_token.is_none() && stored.lease_expires_at.is_none());
+        assert!(stored.locked_by.is_none());
+        assert!(find_job(&pool, marked.id).await.unwrap().is_none());
+        let other = find_job(&pool, lost.id).await.unwrap().unwrap();
+        assert_eq!(other.state, "running");
+        assert_ne!(other.lease_token, Some(lost.lease_token));
+        tokio::time::timeout(Duration::from_secs(5), listener.wait())
+            .await
+            .expect("a release wakes the workers")
+            .unwrap();
+        let again = claim_jobs(&pool, "w", &["a.kind"], LEASE, None, 8)
+            .await
+            .unwrap();
+        assert_eq!(
+            again.iter().map(|job| job.id).collect::<Vec<_>>(),
+            [kept.id]
+        );
+        assert_eq!(again[0].attempts, 1);
     }
 
     /// Reproduces #207 at small scale: a million waiting timers and a burst of due ones, with
@@ -3595,7 +4005,9 @@ mod tests {
                 .unwrap();
                 let statement = if before { "before" } else { "after" };
                 let sql = if before { CLAIM_BEFORE_207 } else { CLAIM };
-                let plan = cached_claim_plan(&pool, sql, None).await;
+                // The baseline's `$4` is the cap; the claim's is the batch size.
+                let binds: &[Option<i64>] = if before { &[None] } else { &[Some(1)] };
+                let plan = cached_claim_plan(&pool, sql, binds).await;
                 eprintln!("PLAN {label} {statement} due={due_now}\n{plan}");
                 let (claims, empty) = claim_rate(&pool, before, None, run_for).await;
                 eprintln!(
@@ -3743,7 +4155,12 @@ mod tests {
                 } else {
                     CLAIM_CAPPED
                 };
-                let plan = cached_claim_plan(&pool, sql, Some(CAP)).await;
+                let binds: &[Option<i64>] = if before {
+                    &[Some(CAP)]
+                } else {
+                    &[Some(1), Some(CAP)]
+                };
+                let plan = cached_claim_plan(&pool, sql, binds).await;
                 eprintln!("PLAN {scenario} {statement} flood={flood_size} due={due_now}\n{plan}");
                 let (claims, empty) = claim_rate(&pool, before, Some(CAP), run_for).await;
                 eprintln!(
