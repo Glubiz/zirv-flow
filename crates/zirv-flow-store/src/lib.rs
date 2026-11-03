@@ -130,17 +130,18 @@ pub use events::{
     EventOutcome, EventPolicy, EventRecord, EventRetention, EventSchema, EventSchemaUpdate,
     ExploreError, ExploreFilter, ExploreLimits, ExploreRow, ExploreScope, FEED_RETENTION_MINUTES,
     FeedBatch, FeedFilter, FeedItem, FilterOp, IngestReject, MAX_FILTERS, MAX_RANGE_DAYS,
-    MAX_REPLAY, NewEventSchema, PublishOutcome, REPLAY_JOB_KIND, RETENTION_BATCH, RejectCursor,
-    RejectFilter, ReplayPrediction, ReplaySelection, ReplayTotals, RetentionReport, RowCursor,
-    RowsPage, SchemaVersion, WATCH_SECONDS, apply_event_batch, apply_event_retention,
+    MAX_REPLAY, NewEventSchema, PreparedScope, PublishOutcome, REPLAY_JOB_KIND, RETENTION_BATCH,
+    RejectCursor, RejectFilter, ReplayPrediction, ReplaySelection, ReplayTotals, RetentionReport,
+    RowCursor, RowsPage, SchemaVersion, WATCH_SECONDS, apply_event_batch, apply_event_retention,
     apply_event_retention_progress, create_event_schema, debugger_epoch, debugger_epoch_peek,
     debugger_feed_head, debugger_feed_missing, debugger_feed_position, debugger_feed_start,
     enqueue_replay, ensure_event_partitions, erase_unattributed_rejects, explore_breakdown,
-    explore_count, explore_rows, explore_total, find_event_schema, get_event_policy,
-    list_event_schemas, list_ingest_rejects, list_schema_versions, listen_for_debugger,
-    preview_replay, prune_debugger_feed, publish_schema_draft, read_debugger_batch,
-    read_debugger_feed, read_debugger_feed_at, replay_rejects, save_schema_draft, select_rejects,
-    set_event_policy, touch_debugger_watch, update_event_schema,
+    explore_count, explore_rows, explore_rows_prepared, explore_start, explore_total,
+    find_event_schema, get_event_policy, list_event_schemas, list_ingest_rejects,
+    list_schema_versions, listen_for_debugger, preview_replay, prune_debugger_feed,
+    publish_schema_draft, read_debugger_batch, read_debugger_feed, read_debugger_feed_at,
+    replay_rejects, save_schema_draft, select_rejects, set_event_policy, touch_debugger_watch,
+    update_event_schema,
 };
 pub use feedback::{
     FeedbackEvent, FeedbackOutcome, ProviderFeedback, SuppressionMade, record_provider_feedback,
@@ -436,6 +437,7 @@ enum StoreErrorKind {
     Conflict,
     Retryable,
     Timeout,
+    PoolTimeout,
     RunActive,
     Erased,
     AuditSummary,
@@ -471,6 +473,9 @@ impl StoreError {
 
     /// A failed query. A unique-constraint violation becomes a conflict.
     pub(crate) fn query(source: sqlx::Error) -> Self {
+        if matches!(source, sqlx::Error::PoolTimedOut) {
+            return Self::with_source(StoreErrorKind::PoolTimeout, source);
+        }
         let conflict = source
             .as_database_error()
             .is_some_and(|error| error.is_unique_violation());
@@ -579,6 +584,11 @@ impl StoreError {
         matches!(self.kind, StoreErrorKind::Timeout)
     }
 
+    /// Whether no connection came free within the pool's acquire timeout.
+    pub fn is_pool_timeout(&self) -> bool {
+        matches!(self.kind, StoreErrorKind::PoolTimeout)
+    }
+
     /// Whether the write was refused because the value already exists.
     pub fn is_conflict(&self) -> bool {
         matches!(self.kind, StoreErrorKind::Conflict)
@@ -638,6 +648,9 @@ impl fmt::Display for StoreError {
             }
             StoreErrorKind::Conflict => formatter.write_str("the value already exists"),
             StoreErrorKind::Timeout => formatter.write_str("the query ran past its time limit"),
+            StoreErrorKind::PoolTimeout => {
+                formatter.write_str("no database connection came free in time")
+            }
             StoreErrorKind::RunActive => formatter.write_str("a sync run is queued or running"),
             StoreErrorKind::AuditSummary => {
                 formatter.write_str("the audit summary was refused")?;

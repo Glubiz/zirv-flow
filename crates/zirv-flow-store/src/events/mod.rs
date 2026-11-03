@@ -22,8 +22,9 @@ pub use debugger::{
 };
 pub use explore::{
     BREAKDOWN_VALUES, Breakdown, Bucket, CountResult, ExploreError, ExploreFilter, ExploreLimits,
-    ExploreRow, ExploreScope, FilterOp, MAX_FILTERS, MAX_RANGE_DAYS, RowCursor, RowsPage,
-    explore_breakdown, explore_count, explore_rows, explore_total,
+    ExploreRow, ExploreScope, FilterOp, MAX_FILTERS, MAX_RANGE_DAYS, PreparedScope, RowCursor,
+    RowsPage, explore_breakdown, explore_count, explore_rows, explore_rows_prepared, explore_start,
+    explore_total,
 };
 pub use partitions::ensure_event_partitions;
 pub use rejects::{

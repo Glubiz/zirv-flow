@@ -9655,6 +9655,64 @@ email,b@example.com,
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_busy_explorer_pool_answers_503_explorer_busy_while_ingest_still_succeeds(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let explorer_pool =
+            zirv_flow_store::sized_like(&pool, 1, 0, std::time::Duration::from_millis(100));
+        let router = router(
+            AppState::new(pool.clone(), Arc::new(String::new))
+                .with_hmac_root(&zirv_flow_core::HmacRoot::bootstrap_from(
+                    &zirv_flow_core::MasterKey::generate(),
+                ))
+                .with_explorer_pool(explorer_pool.clone()),
+        );
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (_, key) = make_key(&router, &owner, &ws, &["read", "ingest"]).await;
+        let held = explorer_pool.acquire().await.unwrap();
+
+        let busy = call(
+            &router,
+            "POST",
+            &explore_uri(&ws, "count"),
+            Some(with_range(json!({"bucket": "day"}))),
+            Auth::Key(&key),
+        )
+        .await;
+        let ingested = call(
+            &router,
+            "POST",
+            "/api/v1/ingest/track",
+            Some(json!({"userId": "u-1", "event": "seen"})),
+            Auth::Key(&key),
+        )
+        .await;
+        drop(held);
+        let free = call(
+            &router,
+            "POST",
+            &explore_uri(&ws, "count"),
+            Some(with_range(json!({"bucket": "day"}))),
+            Auth::Key(&key),
+        )
+        .await;
+
+        assert_eq!(
+            busy.status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{:?}",
+            busy.body
+        );
+        assert_eq!(busy.body["code"], "explorer_busy");
+        assert!(busy.headers.contains_key(header::RETRY_AFTER));
+        assert_eq!(ingested.status, StatusCode::ACCEPTED, "{:?}", ingested.body);
+        assert_eq!(free.status, StatusCode::OK, "{:?}", free.body);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_explorer_applies_the_configured_fifteen_second_statement_timeout(pool: PgPool) {
         zirv_flow_store::migrate(&pool).await.unwrap();
         let router = app_limits(crate::ExplorerLimits {

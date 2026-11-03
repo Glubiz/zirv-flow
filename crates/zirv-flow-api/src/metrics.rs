@@ -10,15 +10,23 @@ use crate::AppState;
 pub(crate) const UNMATCHED: &str = "unmatched";
 
 pub(crate) async fn render(State(state): State<AppState>) -> Response {
-    respond(&state.pool, &state.render_metrics)
+    respond(
+        &state.pool,
+        state.separate_explorer_pool(),
+        &state.render_metrics,
+    )
 }
 
 /// The exposition text, after refreshing the pool gauges it includes.
 pub(crate) fn respond(
     pool: &zirv_flow_store::PgPool,
+    explorer_pool: Option<&zirv_flow_store::PgPool>,
     render: &std::sync::Arc<dyn Fn() -> String + Send + Sync>,
 ) -> Response {
     zirv_flow_store::observe_pool(pool, "main");
+    if let Some(explorer_pool) = explorer_pool {
+        zirv_flow_store::observe_pool(explorer_pool, "explorer");
+    }
     (
         [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
         render(),
