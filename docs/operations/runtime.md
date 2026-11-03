@@ -168,10 +168,10 @@ Each of a worker's `worker.concurrency` slots claims up to eight due jobs at onc
 and runs them one after another. A running job holds a lease of
 `worker.lease_seconds`, which its worker extends every third of that while the
 handler runs. A claimed job waits for its turn on the lease from its claim: the
-slot gives the jobs it has not started back to the queue after a sixth of the
-lease (at most a second), so they never wait long behind a slow job, and at once
-when the worker stops. A worker that dies leaves its jobs to the scheduler, which
-makes them runnable again once their leases have expired; a job
+slot gives the jobs it has not started back to the queue a sixth of the lease (at
+most a second) after the claim, so they never wait long behind a slow job, and at
+once when the worker stops. A worker that dies leaves its jobs to the scheduler,
+which makes them runnable again once their leases have expired; a job
 that fails is retried with exponential backoff and jitter, and is kept as
 `dead` after its last attempt. A job's database writes commit together with its
 completion, so a job never completes twice. Work that reaches outside the

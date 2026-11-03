@@ -2601,10 +2601,11 @@ in its own transaction exactly as a job claimed alone: its own lease check, hear
 completion. The batch saves a claim round trip and a commit flush on all but one of its jobs. A
 claimed job that has not started holds its lease from the claim; the slot gives it back to `ready`
 (its `run_at` kept and the claim's attempt uncounted, or deleted when an erasure marked it
-`purge_on_release`) once the batch has been held a sixth of the lease, at most one second, even
-while a handler runs, and at once when the worker stops. A job therefore starts with at least five
-sixths of its lease left, and jobs claimed behind a slow handler go to other workers instead of
-waiting for it. A slot that dies leaves its unstarted jobs, like its running one, to lease expiry.
+`purge_on_release`) once a sixth of the lease, at most one second, has passed since the claim
+was sent, even while a handler runs, and at once when the worker stops. A job therefore starts
+with at least five sixths of its lease left, even when its claim waited, and jobs claimed
+behind a slow handler go to other workers instead of waiting for it. A slot that dies leaves its
+unstarted jobs, like its running one, to lease expiry.
 
 **Completion.** The runtime opens the handler's transaction and first takes a
 key-share lock on the job row, `SELECT 1 FROM jobs WHERE id = $1 AND

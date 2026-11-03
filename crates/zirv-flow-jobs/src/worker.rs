@@ -277,6 +277,8 @@ async fn work(shared: Arc<Shared>, slot: usize, mut stop: watch::Receiver<bool>)
         tokio::pin!(woken);
         woken.as_mut().enable();
 
+        // Taken before the claim is sent, so no later than the database takes the leases.
+        let sent = tokio::time::Instant::now();
         match claim_jobs(
             &shared.pool,
             &name,
@@ -288,7 +290,7 @@ async fn work(shared: Arc<Shared>, slot: usize, mut stop: watch::Receiver<bool>)
         .await
         {
             Ok(batch) if !batch.is_empty() => {
-                run_batch(&shared, batch, &mut stop).await;
+                run_batch(&shared, batch, sent, &mut stop).await;
                 continue;
             }
             Ok(_) => {}
@@ -318,12 +320,18 @@ fn hold_limit(lease: Duration) -> Duration {
 /// Runs a claimed batch in claim order, each job in its own transaction exactly as if it had
 /// been claimed alone, so its lease check, heartbeat and completion are its own.
 ///
-/// The jobs not started yet go back to the queue as soon as the pool is told to stop or the
-/// batch has been held for [`hold_limit`], even while a handler runs. Should the slot die
+/// The jobs not started yet go back to the queue as soon as the pool is told to stop or
+/// [`hold_limit`] has passed since the claim was `sent`, even while a handler runs; the hold
+/// counts the claim's own wait, so a claim that waited long starts nothing. Should the slot die
 /// first, they run again once their leases expire, as a running job does.
-async fn run_batch(shared: &Arc<Shared>, batch: Vec<ClaimedJob>, stop: &mut watch::Receiver<bool>) {
+async fn run_batch(
+    shared: &Arc<Shared>,
+    batch: Vec<ClaimedJob>,
+    sent: tokio::time::Instant,
+    stop: &mut watch::Receiver<bool>,
+) {
     let claimed = tokio::time::Instant::now();
-    let deadline = claimed + hold_limit(shared.config.lease);
+    let deadline = sent + hold_limit(shared.config.lease);
     let mut held = VecDeque::from(batch);
     while let Some(job) = held.pop_front() {
         if *stop.borrow() || tokio::time::Instant::now() >= deadline {
@@ -1556,6 +1564,58 @@ mod tests {
         assert!(
             least_left > 4.5,
             "{least_left} s of the lease left at a start"
+        );
+    }
+
+    /// Under a cap a claim is a transaction, and its leases run from its start, so a claim that
+    /// waited has used up part of them by the time it returns: the slot gives such a batch back
+    /// unstarted, and its jobs run on a fresh claim instead.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_claim_that_waited_past_the_hold_is_given_back_and_claimed_anew(pool: PgPool) {
+        migrated(&pool).await;
+        sqlx::query(
+            "CREATE TABLE leases (job uuid PRIMARY KEY, expires timestamptz, left_s float8)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for _ in 0..2 {
+            enqueue(&pool, &new_job("test.lease")).await.unwrap();
+        }
+        // The worker's claim waits for this lock, its leases already running.
+        let mut blocker = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE jobs IN EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+        let mut config = test_config(1);
+        config.lease = Duration::from_secs(6);
+        config.max_running_per_workspace = Some(8);
+        let (stop, handle) = start(&pool, config);
+        wait_until(
+            &pool,
+            "the claim to wait for the table lock",
+            "SELECT EXISTS (SELECT 1 FROM pg_locks \
+             WHERE relation = 'jobs'::regclass AND NOT granted)",
+        )
+        .await;
+        // Three of the six seconds pass before the claim returns, well past the hold of one.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        blocker.commit().await.unwrap();
+
+        wait_for(&pool, |counts| counts == QueueCounts::default()).await;
+        stop_and_join(stop, handle).await;
+
+        let (started, least_left): (i64, f64) =
+            sqlx::query_as("SELECT count(*), min(left_s) FROM leases")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(started, 2);
+        assert!(
+            least_left > 4.5,
+            "a job started on the claim that waited, with {least_left} s of its lease left"
         );
     }
 
