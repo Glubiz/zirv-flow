@@ -77,10 +77,10 @@ pub struct BrokenTemplateProblem {
     pub codes: Vec<String>,
 }
 
-/// The most templates a problem lists.
 /// Seconds an explorer client waits before retrying after `explorer_busy`.
 const EXPLORER_RETRY_AFTER: u64 = 2;
 
+/// The most templates a problem lists.
 const MAX_LISTED_TEMPLATES: usize = 20;
 
 /// One issue of a flow.
