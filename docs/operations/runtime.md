@@ -61,8 +61,9 @@ does not exist.
 | `zirv_flow_db_pool_max_connections` | gauge | `pool` | Pool size limit |
 | `zirv_flow_jobs` | gauge | `kind`, `state` | Queue depth for `ready`, `running` and `dead`; refreshed at most every 15 s |
 | `zirv_flow_jobs_total` | counter | `kind`, `outcome` | Job attempts by how they ended |
-| `zirv_flow_job_duration_seconds` | histogram | `kind` | Handler duration |
+| `zirv_flow_job_duration_seconds` | histogram | `kind` | Handler duration; a flow step run in a shared transaction counts its own run plus an equal share of the transaction's setup and commit |
 | `zirv_flow_job_claim_lag_seconds` | histogram | `kind` | Time from `run_at` until a worker starts the job: its claim, plus its wait behind the jobs claimed with it |
+| `zirv_flow_job_transactions_total` | counter | `kind` | Handler transactions; `zirv_flow_jobs_total` over this is jobs per transaction, above 1 when flow steps share one |
 | `zirv_flow_retention_deleted_total` | counter | `table` | Rows a retention job removed; `table` is `messages`, `decision_records`, `jobs` or `audit_log` |
 | `zirv_flow_retention_last_run_timestamp_seconds` | gauge | `table` | Unix time of the last retention run of `table` |
 | `zirv_flow_egress_denied_total` | counter | `class` | Outbound requests refused by the egress policy |
@@ -170,7 +171,11 @@ and runs them one after another. A running job holds a lease of
 handler runs. A claimed job waits for its turn on the lease from its claim: the
 slot gives the jobs it has not started back to the queue a sixth of the lease (at
 most a second) after the claim, so they never wait long behind a slow job, and at
-once when the worker stops. A worker that dies leaves its jobs to the scheduler,
+once when the worker stops. The flow steps of one workspace among them run in
+one transaction with one commit, each behind a savepoint of its own: a step that
+fails is rolled back alone and its retry, with the attempt and its error, commits
+with the others; a step that loses its lease is rolled back alone and left to its
+new owner; and when the shared commit fails every step in it is retried. A worker that dies leaves its jobs to the scheduler,
 which makes them runnable again once their leases have expired; a job
 that fails is retried with exponential backoff and jitter, and is kept as
 `dead` after its last attempt. A job's database writes commit together with its
@@ -189,7 +194,7 @@ running are left to lease expiry. The
 `ingest.drain` kind (one per workspace) applies that workspace's ingestion inbox; see
 [Ingestion](../people.md#ingestion). `/metrics` carries
 `zirv_flow_jobs_total{kind,outcome}`, `zirv_flow_job_duration_seconds{kind}`,
-`zirv_flow_job_claim_lag_seconds{kind}` and the queue depth
+`zirv_flow_job_claim_lag_seconds{kind}`, `zirv_flow_job_transactions_total{kind}` and the queue depth
 `zirv_flow_jobs{kind,state}` (`ready`, `running`, `dead`), set by the scheduler
 leader. A `worker` or `scheduler` process has no HTTP server, so set `ops.bind` (for
 example `ZIRV_FLOW_OPS__BIND=0.0.0.0:9100`) to serve `/metrics`, `/healthz` and

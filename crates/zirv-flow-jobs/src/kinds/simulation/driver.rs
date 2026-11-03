@@ -1,6 +1,7 @@
 //! The virtual-time loop. The clock moves from one instant to the next at which something is
 //! due (a job's `run_at` or a scheduled event); at each instant every due job runs, in a seeded
-//! order, until nothing is due. Which jobs are claimable is controlled by rewriting `run_at`, as
+//! order, until nothing is due, and in a seeded half of the rounds the final runs of the steps
+//! end together in batch transactions. Which jobs are claimable is controlled by rewriting `run_at`, as
 //! the existing tests do: the database's own `now()` is the real time, so a job at a virtual
 //! instant is held back until the driver makes it due.
 
@@ -27,6 +28,7 @@ pub(super) const LANE_ORDER: u64 = 21;
 pub(super) const LANE_EARLY: u64 = 22;
 const LANE_EVENTS: u64 = 23;
 const LANE_NOISE: u64 = 24;
+pub(super) const LANE_BATCH: u64 = 25;
 
 /// The kinds of job the driver runs. Anything else the runtime enqueues (a segment re-evaluation
 /// request, say) is left alone.
@@ -77,6 +79,8 @@ pub(super) struct Due {
     /// A name for the job that does not depend on random ids, so a seed gives the same plan.
     pub(super) label: u64,
     pub(super) scenario: Scenario,
+    /// The enrollment a `flow.step` or `webhook.call` job is about.
+    pub(super) enrollment: Option<Uuid>,
 }
 
 struct Pending {
@@ -282,8 +286,14 @@ impl<'w> Driver<'w> {
                 self.bump("jobs sharing a label with another due job");
             }
             sort_due(&mut due, seed, at, round);
-            for job in due {
-                self.run_job(&job, false).await;
+            // Half the rounds run the final runs of their steps the way a slot runs the steps
+            // one claim returned: in batch transactions (#397).
+            if Rng::derive(seed, &[LANE_BATCH, seconds_of(at), round]).chance(50) {
+                self.run_batched(due, at, round).await;
+            } else {
+                for job in due {
+                    self.run_job(&job, false).await;
+                }
             }
         }
         self.problem(format!("jobs were still due after 200 rounds at {at}"));
@@ -318,11 +328,16 @@ impl<'w> Driver<'w> {
             } else {
                 Scenario::default()
             };
+            let enrollment = payload
+                .get("enrollment_id")
+                .and_then(Value::as_str)
+                .and_then(|text| Uuid::parse_str(text).ok());
             due.push(Due {
                 id,
                 kind,
                 label,
                 scenario,
+                enrollment,
             });
         }
         due
@@ -508,6 +523,7 @@ impl<'w> Driver<'w> {
             kind: STEP_JOB_KIND,
             label,
             scenario: Scenario::default(),
+            enrollment: None,
         };
         self.run_job(&job, true).await;
     }
@@ -587,6 +603,7 @@ mod tests {
             kind: STEP_JOB_KIND,
             label,
             scenario: Scenario::default(),
+            enrollment: None,
         }
     }
 

@@ -19,6 +19,7 @@ use zirv_flow_store::{
 
 use crate::JobError;
 use crate::delivery::rate::RateGates;
+use crate::kinds::WakeBatch;
 
 /// How many days `jobs.retention` keeps dead jobs unless the operator says otherwise.
 pub(crate) const DEFAULT_JOB_HISTORY_DAYS: u32 = 14;
@@ -63,6 +64,7 @@ pub struct JobContext<'a> {
     dns: Option<Arc<dyn DnsResolver>>,
     public_url: Option<String>,
     tracking_key: Option<Arc<HmacKey>>,
+    wakes: Option<&'a mut WakeBatch>,
 }
 
 impl<'a> JobContext<'a> {
@@ -89,7 +91,20 @@ impl<'a> JobContext<'a> {
             dns: None,
             public_url: None,
             tracking_key: None,
+            wakes: None,
         }
+    }
+
+    /// Runs the wake as one of a batch: the batch already read the wake's enrollment and
+    /// holds its flow, and it keeps the flow versions its wakes pinned.
+    pub(crate) fn with_wakes(mut self, batch: &'a mut WakeBatch) -> Self {
+        self.wakes = Some(batch);
+        self
+    }
+
+    /// The batch this wake runs in, or `None` when the wake runs alone.
+    pub(crate) fn take_wakes(&mut self) -> Option<&'a mut WakeBatch> {
+        self.wakes.take()
     }
 
     /// Gives the handler the public URL and the key that tracking links are built and signed with.
