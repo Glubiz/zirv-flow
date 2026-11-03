@@ -14,6 +14,7 @@ use zirv_flow_store::{
 
 use crate::assets::AssetLimits;
 use crate::assistant::{AiConfig, runtime::AiRuntime};
+use crate::auth::KeyTouches;
 use crate::events::ExplorerLimits;
 use crate::events::debugger::DebuggerHub;
 use crate::imports::ImportLimits;
@@ -83,6 +84,8 @@ pub struct AppState {
     pub(crate) prefetch_user_agents: Vec<String>,
     /// The per-message rate limit of the tracking routes.
     pub(crate) tracking_limiter: Arc<RateLimiter>,
+    /// The API keys this process recently recorded as used.
+    pub(crate) key_touches: Arc<KeyTouches>,
 }
 
 /// OIDC sign-in, when it is configured.
@@ -129,6 +132,7 @@ impl AppState {
             tracking_key: None,
             prefetch_user_agents: Vec::new(),
             tracking_limiter: Arc::new(crate::tracking::limiter()),
+            key_touches: Arc::default(),
         }
     }
 
