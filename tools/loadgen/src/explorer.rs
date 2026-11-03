@@ -103,6 +103,7 @@ fn query_set(to: OffsetDateTime, person: &str) -> Result<Vec<Query>, String> {
 struct Outcomes {
     status: BTreeMap<u16, u64>,
     query_timeouts: u64,
+    explorer_busy: u64,
     transport_errors: u64,
     body_errors: u64,
     client_timeouts: u64,
@@ -121,6 +122,7 @@ impl Samples {
             *self.outcomes.status.entry(status).or_default() += count;
         }
         self.outcomes.query_timeouts += other.outcomes.query_timeouts;
+        self.outcomes.explorer_busy += other.outcomes.explorer_busy;
         self.outcomes.transport_errors += other.outcomes.transport_errors;
         self.outcomes.body_errors += other.outcomes.body_errors;
         self.outcomes.client_timeouts += other.outcomes.client_timeouts;
@@ -129,9 +131,17 @@ impl Samples {
     }
 }
 
+fn is_503_with_code(status: u16, body: &[u8], code: &str) -> bool {
+    status == 503 && serde_json::from_slice::<Value>(body).is_ok_and(|value| value["code"] == code)
+}
+
 fn is_query_timeout(status: u16, body: &[u8]) -> bool {
-    status == 503
-        && serde_json::from_slice::<Value>(body).is_ok_and(|value| value["code"] == "query_timeout")
+    is_503_with_code(status, body, "query_timeout")
+}
+
+/// The explorer pool is full: an expected, counted outcome at more clients than the pool has connections.
+fn is_explorer_busy(status: u16, body: &[u8]) -> bool {
+    is_503_with_code(status, body, "explorer_busy")
 }
 
 async fn request(
@@ -170,6 +180,7 @@ async fn request(
         }
     }
     counts.query_timeouts += u64::from(is_query_timeout(status, &problem));
+    counts.explorer_busy += u64::from(is_explorer_busy(status, &problem));
     status == 200
 }
 
@@ -262,7 +273,10 @@ pub(crate) async fn run(args: Args) -> Result<(), String> {
         .map(|(query, samples)| {
             let count = samples.all.len() as u64;
             valid &= count > 0
-                && count == samples.successful.len() as u64 + samples.outcomes.query_timeouts;
+                && count
+                    == samples.successful.len() as u64
+                        + samples.outcomes.query_timeouts
+                        + samples.outcomes.explorer_busy;
             json!({"shape": query.shape, "endpoint": query.endpoint,
             "latency": Latency::from_micros(samples.all),
             "successful_latency": Latency::from_micros(samples.successful),
@@ -282,7 +296,7 @@ pub(crate) async fn run(args: Args) -> Result<(), String> {
     .map_err(|error| format!("cannot write --out: {error}"))?;
     if !valid {
         return Err(
-            "incomplete query mix or errors other than 503 query_timeout; see --out".into(),
+            "incomplete query mix or errors other than 503 query_timeout or explorer_busy; see --out".into(),
         );
     }
     Ok(())
@@ -399,5 +413,14 @@ mod tests {
         assert!(!is_query_timeout(500, problem));
         assert!(!is_query_timeout(503, br#"{"code":"overloaded"}"#));
         assert!(!is_query_timeout(503, b"broken body"));
+    }
+
+    #[test]
+    fn only_a_503_with_the_problem_code_counts_as_explorer_busy() {
+        let problem = br#"{"code":"explorer_busy"}"#;
+        assert!(is_explorer_busy(503, problem));
+        assert!(!is_explorer_busy(500, problem));
+        assert!(!is_query_timeout(503, problem));
+        assert!(!is_explorer_busy(503, br#"{"code":"query_timeout"}"#));
     }
 }

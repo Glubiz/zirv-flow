@@ -11,6 +11,10 @@ host_pg_setup
 seconds="$M8_SECONDS"
 drain="${M8_DRAIN_SECONDS:-60}"
 clients=(1 4 16)
+# Reruns: M8_EXPLORER_CLIENTS="16" and M8_EXPLORER_SETTINGS="default 15000" pick the scenarios (defaults: all).
+[ -z "${M8_EXPLORER_CLIENTS:-}" ] || read -r -a clients <<<"$M8_EXPLORER_CLIENTS"
+settings=(default 15000)
+[ -z "${M8_EXPLORER_SETTINGS:-}" ] || read -r -a settings <<<"$M8_EXPLORER_SETTINGS"
 if [ -n "${M8_SMOKE:-}" ]; then seconds=5; clients=(1); fi
 for name in seconds drain; do positive_integer "$name" "${!name}"; done
 loadgen="${LOADGEN:-$root/target/release/loadgen}"
@@ -67,7 +71,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 metrics='zirv_flow_explorer_query_seconds,zirv_flow_explorer_timeouts_total'
-for setting in default 15000; do
+for setting in "${settings[@]}"; do
   dest="$raw/timeout-$setting"
   mkdir -p "$dest"
   python3 -I - "$dest/serve.yaml" "$setting" <<'PY'
