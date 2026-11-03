@@ -33,12 +33,13 @@ use zirv_flow_segments::{
     evaluate, parse_and_validate,
 };
 use zirv_flow_store::{
-    DecisionBuffer, EffectError, Enrollment, EnrollmentStatus, EnrollmentUpdate, FlowState,
-    FlowTraitWrite, GraphPoint, NewDecision, NewJob, NewStepExecution, NewWait, SEND_JOB_KIND,
-    STEP_JOB_KIND, SYNC_JOB_KIND, StepEnrollment, StepJobInput, StepJobPayload, StepOutcome,
-    StepRecord, StoredEvent, WEBHOOK_JOB_KIND, append_decisions, apply_flow_list, apply_flow_trait,
-    clear_waits, enqueue, evaluate_conditions, find_event_of_person, find_flow_version,
-    flow_state_for_step, hold_enrollment, lock_read_enrollment, read_enrollment, record_steps,
+    ClaimedJob, DecisionBuffer, EffectError, Enrollment, EnrollmentRead, EnrollmentStatus,
+    EnrollmentUpdate, FlowState, FlowTraitWrite, GraphPoint, NewDecision, NewJob, NewStepExecution,
+    NewWait, SEND_JOB_KIND, STEP_JOB_KIND, SYNC_JOB_KIND, StepEnrollment, StepJobInput,
+    StepJobPayload, StepOutcome, StepRecord, StoreError, StoredEvent, WEBHOOK_JOB_KIND,
+    append_decisions, apply_flow_list, apply_flow_trait, clear_waits, enqueue, evaluate_conditions,
+    find_event_of_person, find_flow_version, flow_state_for_step, flow_states_for_steps,
+    hold_enrollment, lock_read_enrollment, read_enrollment, read_enrollments, record_steps,
     register_wait, release_enrollment, reopen_failed_step, save_enrollment, segment_catalog,
     settle_wait_step, unhealthy_inputs, wait_filters,
 };
@@ -72,18 +73,29 @@ impl JobKind for FlowStep {
         let at = (ctx.job_id(), ctx.attempts());
         let job_id = ctx.job_id();
         let last_attempt = ctx.attempts() >= ctx.max_attempts();
+        let wakes = ctx.take_wakes();
         // The worker took the person-change guard (`NEEDS_CHANGE_READERS`) before the lease, in
         // this transaction, for the workspace checked above.
         let conn = ctx.conn();
         let now = clock.now(conn).await?;
-        let Some(read) = read_enrollment(conn, job.workspace, job.enrollment).await? else {
+        // A batch read every enrollment of its wakes before it locked anything (#397).
+        let read = match wakes.as_deref() {
+            Some(batch) => batch.reads.get(&job.enrollment).cloned(),
+            None => read_enrollment(conn, job.workspace, job.enrollment).await?,
+        };
+        let Some(read) = read else {
             // Erased with the person: nothing is left to advance.
             return Ok(());
         };
         // After the segment guard, the flow's state is read and held until commit, so a resume
         // either sees the enrollment this step holds or the step sees the flow resumed. The
-        // flow, then the person, then the enrollment: the order a resume locks them in.
-        let flow_state = flow_state_for_step(conn, job.workspace, read.flow_id).await?;
+        // flow, then the person, then the enrollment: the order a resume locks them in. A batch
+        // locked the flows of all its wakes before any of them locked a person; no pause, resume
+        // or archive can commit while it holds them, so the state it read is the one at its commit.
+        let flow_state = match wakes.as_deref() {
+            Some(batch) => batch.flows.get(&read.flow_id).copied(),
+            None => flow_state_for_step(conn, job.workspace, read.flow_id).await?,
+        };
         let Some(StepEnrollment {
             mut enrollment,
             workspace_zone,
@@ -137,7 +149,8 @@ impl JobKind for FlowStep {
 
         let mut savepoint = conn.begin().await?;
         let zones = (workspace_zone, person_zone);
-        let walked = advance(&mut savepoint, &job, &enrollment, zones, now, at).await;
+        let graphs = wakes.map(|batch| &mut batch.graphs);
+        let walked = advance(&mut savepoint, &job, &enrollment, zones, now, at, graphs).await;
         match walked {
             Ok(()) => {
                 savepoint.commit().await?;
@@ -153,6 +166,63 @@ impl JobKind for FlowStep {
             }
         }
     }
+}
+
+/// What the `flow.step` jobs of one workspace that run in one transaction share (#397).
+#[derive(Debug, Default)]
+pub(crate) struct WakeBatch {
+    /// Each job's enrollment as one statement read it before any lock; one it did not find is
+    /// absent.
+    reads: HashMap<Uuid, EnrollmentRead>,
+    /// The state of each of their flows, read under the lock the transaction holds until it ends;
+    /// a flow that is gone is absent.
+    flows: HashMap<Uuid, FlowState>,
+    /// The pinned versions read so far.
+    graphs: PinnedGraphs,
+}
+
+impl WakeBatch {
+    /// Where `job` comes in the order the batch runs its jobs in, the order their steps lock
+    /// people in: by the lowest id of the group the step locks first, then by its person, the id
+    /// order that merges, erasures and the lifecycle batches lock people in. A job whose
+    /// enrollment was not found locks no person and sorts first (`None`); a stable sort keeps the
+    /// claim's order between jobs that tie.
+    pub(crate) fn lock_order(&self, job: &ClaimedJob) -> Option<(Uuid, Uuid)> {
+        enrollment_of(job)
+            .and_then(|enrollment| self.reads.get(&enrollment))
+            .map(EnrollmentRead::lock_order)
+    }
+}
+
+fn enrollment_of(job: &ClaimedJob) -> Option<Uuid> {
+    StepJobPayload::parse(&job.payload).map(|payload| payload.enrollment)
+}
+
+/// Prepares the transaction that runs `jobs`, `flow.step` jobs of `workspace`, after its
+/// person-change guard (#397). One statement reads every job's enrollment, and one locks all their
+/// flows `FOR KEY SHARE` in id order, before any job locks a person; the transaction holds them
+/// until it ends. The caller runs the jobs in [`WakeBatch::lock_order`].
+pub(crate) async fn plan_wakes(
+    conn: &mut PgConnection,
+    workspace: WorkspaceId,
+    jobs: &[ClaimedJob],
+) -> Result<WakeBatch, StoreError> {
+    let enrollments: Vec<Uuid> = jobs.iter().filter_map(enrollment_of).collect();
+    let reads: HashMap<Uuid, EnrollmentRead> = read_enrollments(conn, workspace, &enrollments)
+        .await?
+        .into_iter()
+        .collect();
+    // The statement orders and deduplicates the flows itself.
+    let flows: Vec<Uuid> = reads.values().map(|read| read.flow_id).collect();
+    let flows = flow_states_for_steps(conn, workspace, &flows)
+        .await?
+        .into_iter()
+        .collect();
+    Ok(WakeBatch {
+        reads,
+        flows,
+        graphs: PinnedGraphs::new(),
+    })
 }
 
 /// A job whose version is not the enrollment's, or that asks for what the enrollment is no
@@ -373,6 +443,34 @@ impl Walk<'_> {
     }
 }
 
+/// The pinned versions a batch has read, by flow and version.
+type PinnedGraphs = HashMap<(Uuid, i32), FlowGraph>;
+
+/// The graph of the version an enrollment is pinned to. A version row never changes: the store
+/// refuses an update, and a delete while its flow exists, and the step holds its flow
+/// `FOR KEY SHARE`. A publish adds a version under another number. So a batch reads each pinned
+/// version once and its later wakes take that graph from `graphs`.
+async fn pinned_graph(
+    conn: &mut PgConnection,
+    graphs: Option<&mut PinnedGraphs>,
+    workspace: WorkspaceId,
+    enrollment: &Enrollment,
+) -> Result<FlowGraph, JobError> {
+    let key = (enrollment.flow_id, enrollment.flow_version);
+    if let Some(graph) = graphs.as_deref().and_then(|graphs| graphs.get(&key)) {
+        return Ok(graph.clone());
+    }
+    let version = find_flow_version(conn, workspace, key.0, key.1)
+        .await?
+        .ok_or_else(|| JobError::new("the pinned flow version is missing"))?;
+    let graph = FlowGraph::from_value(version.graph)
+        .map_err(|_| JobError::new("the pinned flow version does not parse"))?;
+    if let Some(graphs) = graphs {
+        graphs.insert(key, graph.clone());
+    }
+    Ok(graph)
+}
+
 /// Walks the enrollment from the job's input to the next wait, exit or failure. `zones` are the
 /// workspace's zone and the person's `timezone` trait, as the enrollment's lock read them.
 async fn advance(
@@ -382,17 +480,9 @@ async fn advance(
     (workspace_zone, person_zone): (String, Option<String>),
     now: OffsetDateTime,
     at: (Uuid, i32),
+    graphs: Option<&mut PinnedGraphs>,
 ) -> Result<(), StepFailure> {
-    let version = find_flow_version(
-        &mut *conn,
-        job.workspace,
-        enrollment.flow_id,
-        enrollment.flow_version,
-    )
-    .await?
-    .ok_or_else(|| JobError::new("the pinned flow version is missing"))?;
-    let graph = FlowGraph::from_value(version.graph)
-        .map_err(|_| JobError::new("the pinned flow version does not parse"))?;
+    let graph = pinned_graph(&mut *conn, graphs, job.workspace, enrollment).await?;
     let zones = Zones {
         now: to_chrono(now).ok_or_else(|| JobError::new("the time does not fit the engine"))?,
         workspace: workspace_zone.parse().unwrap_or(Tz::UTC),
@@ -3509,6 +3599,863 @@ pub(super) mod tests {
         zirv_flow_store::decision_testing::checked(pool, |pool| async move {
             // The API rejects this size; the worker must still label an oversized stored graph.
             branch_fixture(pool, Some(10)).await;
+        })
+        .await;
+    }
+
+    // The wakes of one workspace that a slot claims together run in one transaction, a savepoint
+    // each (#397).
+
+    /// A wait of a minute, then one more visit, then the end: a wake applied twice shows as two.
+    fn visit_graph() -> Value {
+        json!({"v": 1, "nodes": [
+            {"id": "w", "type": "wait.duration", "seconds": 60},
+            {"id": "visit", "type": "action.update_trait", "key": "visits",
+             "change": {"op": "increment", "by": 1.0}},
+            {"id": "end", "type": "exit"}
+        ], "edges": [edge("e1", "w", "next", "visit"), edge("e2", "visit", "next", "end")]})
+    }
+
+    /// `count` people with no visits yet, enrolled in a flow of [`visit_graph`] and asleep in its
+    /// wait, sorted by person id; the clock is past the wait and their wakes are due.
+    async fn due_visits(env: &Env, count: usize) -> Vec<zirv_flow_store::Enrolled> {
+        env.define_trait("visits", TraitType::Number).await;
+        let mut people = Vec::with_capacity(count);
+        for n in 0..count {
+            let email = format!("visitor{n}@example.com");
+            people.push(env.person(&email, json!({"visits": 0})).await);
+        }
+        let flow = env.flow("Visits", visit_graph()).await;
+        let mut enrolled = env.enroll(flow, 1, &people).await.enrolled;
+        enrolled.sort_by_key(|enrolled| enrolled.person);
+        env.run_due().await;
+        env.advance(61);
+        env.hold_others(Some("wake"), None).await;
+        enrolled
+    }
+
+    /// The due wakes, claimed together as a slot claims them.
+    async fn claim_wakes(env: &Env, count: usize) -> Vec<ClaimedJob> {
+        let claimed = zirv_flow_store::claim_jobs(
+            &env.pool,
+            "test",
+            &[STEP_JOB_KIND],
+            Duration::from_secs(30),
+            None,
+            8,
+        )
+        .await
+        .unwrap();
+        env.release().await;
+        assert_eq!(claimed.len(), count, "the wakes that are due");
+        claimed
+    }
+
+    /// A worker's configuration on the test's clock, with retries a few milliseconds apart.
+    fn batch_config(env: &Env) -> crate::WorkerConfig {
+        let mut config = crate::WorkerConfig::new(1);
+        config.clock = Clock::Manual(env.clock.clone());
+        config.poll_interval = Duration::from_millis(20);
+        config.backoff_base = Duration::from_millis(1);
+        config.backoff_cap = Duration::from_millis(5);
+        config
+    }
+
+    /// Runs `jobs` in one batch transaction as a slot does, beside the test.
+    fn spawn_batch(
+        env: &Env,
+        jobs: Vec<ClaimedJob>,
+    ) -> tokio::task::JoinHandle<Vec<(Uuid, crate::metrics::Outcome)>> {
+        let (pool, config, ws) = (env.pool.clone(), batch_config(env), env.ws);
+        tokio::spawn(async move { crate::worker::run_wakes(&pool, config, ws, jobs).await })
+    }
+
+    /// The outcome of each job, in the order of `jobs`.
+    fn outcomes_of(
+        jobs: &[ClaimedJob],
+        outcomes: &[(Uuid, crate::metrics::Outcome)],
+    ) -> Vec<crate::metrics::Outcome> {
+        jobs.iter()
+            .map(|job| {
+                outcomes
+                    .iter()
+                    .find(|(id, _)| *id == job.id)
+                    .map(|(_, outcome)| *outcome)
+                    .unwrap_or_else(|| panic!("job {} was not run", job.id))
+            })
+            .collect()
+    }
+
+    /// The wake job of each enrollment, in the order of `enrolled`.
+    fn wakes_of(enrolled: &[zirv_flow_store::Enrolled], jobs: &[ClaimedJob]) -> Vec<ClaimedJob> {
+        enrolled
+            .iter()
+            .map(|enrolled| {
+                jobs.iter()
+                    .find(|job| enrollment_of(job) == Some(enrolled.enrollment))
+                    .cloned()
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    async fn visits(env: &Env, person: Uuid) -> Value {
+        env.traits(person).await["visits"].clone()
+    }
+
+    /// Holds `person` locked, as a merge or an erasure does, until the transaction ends.
+    async fn hold_person(env: &Env, person: Uuid) -> zirv_flow_store::Tx {
+        let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
+        sqlx::query("SELECT id FROM people WHERE id = $1 FOR UPDATE")
+            .bind(person)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        tx
+    }
+
+    /// How many connections of this database wait for a lock.
+    async fn waiting(env: &Env) -> i64 {
+        sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity \
+             WHERE datname = current_database() AND cardinality(pg_blocking_pids(pid)) > 0",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .unwrap()
+    }
+
+    /// Waits until `count` connections of this database wait for a lock.
+    async fn until_waiting(env: &Env, count: i64) {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if waiting(env).await >= count {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{count} connections never waited for a lock"));
+    }
+
+    /// The decisions a job's attempt wrote, in the order they were recorded: action, outcome,
+    /// reason, the names of their subjects and the attempt.
+    async fn shapes_of(env: &Env, job: Uuid) -> Vec<(String, String, Option<String>, Value, i32)> {
+        sqlx::query_as(
+            "SELECT action, outcome, reason, \
+                    COALESCE((SELECT jsonb_agg(k ORDER BY k) \
+                              FROM jsonb_object_keys(subject_ids) k), '[]'), \
+                    attempt \
+             FROM decision_records WHERE workspace_id = $1 AND job_id = $2 \
+             ORDER BY recorded_at, id",
+        )
+        .bind(env.ws.as_uuid())
+        .bind(job)
+        .fetch_all(&env.pool)
+        .await
+        .unwrap()
+    }
+
+    /// How many transactions wrote the decisions of `jobs`: their `recorded_at` is the start of
+    /// the transaction that wrote them.
+    async fn transactions_of(env: &Env, jobs: &[Uuid]) -> i64 {
+        sqlx::query_scalar(
+            "SELECT count(DISTINCT recorded_at) FROM decision_records \
+             WHERE workspace_id = $1 AND job_id = ANY($2) AND action <> 'job.attempt'",
+        )
+        .bind(env.ws.as_uuid())
+        .bind(jobs)
+        .fetch_one(&env.pool)
+        .await
+        .unwrap()
+    }
+
+    /// Runs a worker of one slot until no `flow.step` job is left.
+    async fn work_off_steps(env: &Env) {
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let worker = crate::Worker::new(
+            env.pool.clone(),
+            crate::Registry::built_in(),
+            batch_config(env),
+        );
+        let running = tokio::spawn(worker.run(stopped));
+        tokio::time::timeout(Duration::from_secs(60), async {
+            while env
+                .count("SELECT count(*) FROM jobs WHERE kind = 'flow.step'")
+                .await
+                > 0
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the worker runs every step");
+        stop.send(true).unwrap();
+        running.await.unwrap();
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_slot_runs_the_due_wakes_of_a_workspace_in_one_transaction_that_writes_what_a_lone_wake_writes(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+            let handle = recorder.handle();
+            let _installed = ::metrics::set_default_local_recorder(&recorder);
+            let env = Env::new(pool).await;
+            let enrolled = due_visits(&env, 9).await;
+            let wakes: Vec<(Uuid, Uuid)> = sqlx::query_as(
+                "SELECT id, (payload ->> 'enrollment_id')::uuid FROM jobs WHERE kind = 'flow.step'",
+            )
+            .fetch_all(&env.pool)
+            .await
+            .unwrap();
+            let wake_of = |enrollment: Uuid| {
+                wakes
+                    .iter()
+                    .find(|(_, of)| *of == enrollment)
+                    .map(|(id, _)| *id)
+                    .unwrap()
+            };
+            // One wake runs alone, as every wake did before; the other eight are what a slot
+            // claims at once.
+            let lone = enrolled[4].enrollment;
+            assert_eq!(env.run_matching(Some("wake"), Some(lone)).await, 1);
+            assert_eq!(
+                env.count("SELECT count(*) FROM jobs WHERE state = 'ready' AND run_at <= now()")
+                    .await,
+                8,
+                "only the eight wakes are due"
+            );
+
+            work_off_steps(&env).await;
+
+            let batched: Vec<Uuid> = enrolled
+                .iter()
+                .filter(|enrolled| enrolled.enrollment != lone)
+                .map(|enrolled| wake_of(enrolled.enrollment))
+                .collect();
+            assert_eq!(transactions_of(&env, &batched).await, 1);
+            assert!(
+                handle
+                    .render()
+                    .contains("zirv_flow_job_transactions_total{kind=\"flow.step\"} 1"),
+                "{}",
+                handle.render()
+            );
+            let alone = shapes_of(&env, wake_of(lone)).await;
+            assert!(!alone.is_empty());
+            for enrolled in &enrolled {
+                assert_eq!(
+                    env.enrollment(enrolled.enrollment).await.status,
+                    EnrollmentStatus::Completed
+                );
+                assert_eq!(visits(&env, enrolled.person).await, json!(1));
+                assert_eq!(
+                    shapes_of(&env, wake_of(enrolled.enrollment)).await,
+                    alone,
+                    "a batched wake records what a lone wake records"
+                );
+            }
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_wake_that_fails_in_a_batch_rolls_back_to_its_savepoint_and_is_retried_while_the_others_commit(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            const MESSAGE: &str = "an increment needs a trait whose value is a number";
+            let env = Env::new(pool).await;
+            env.define_trait("plan", TraitType::String).await;
+            let ada = env
+                .person(PERSONAL_DATA.email, json!({"plan": "pro"}))
+                .await;
+            let failing = env
+                .flow(
+                    "Failing",
+                    json!({"v": 1, "nodes": [
+                        {"id": "w", "type": "wait.duration", "seconds": 60},
+                        {"id": "bump", "type": "action.update_trait", "key": "plan",
+                         "change": {"op": "increment", "by": 1.0}},
+                        {"id": "end", "type": "exit"}
+                    ], "edges": [edge("e1", "w", "next", "bump"), edge("e2", "bump", "next", "end")]}),
+                )
+                .await;
+            let doomed = env.enroll(failing, 1, &[ada]).await.enrolled[0].enrollment;
+            let enrolled = due_visits(&env, 3).await;
+            let before = env.enrollment(doomed).await;
+            let jobs = claim_wakes(&env, 4).await;
+            let doomed_job = jobs
+                .iter()
+                .find(|job| enrollment_of(job) == Some(doomed))
+                .unwrap()
+                .clone();
+
+            let outcomes = spawn_batch(&env, jobs.clone()).await.unwrap();
+
+            let wakes = wakes_of(&enrolled, &jobs);
+            assert_eq!(
+                outcomes_of(&wakes, &outcomes),
+                [crate::metrics::Outcome::Completed; 3]
+            );
+            assert_eq!(
+                outcomes_of(std::slice::from_ref(&doomed_job), &outcomes),
+                [crate::metrics::Outcome::Retried]
+            );
+            for enrolled in &enrolled {
+                assert_eq!(visits(&env, enrolled.person).await, json!(1));
+            }
+            let ids: Vec<Uuid> = wakes.iter().map(|job| job.id).collect();
+            assert_eq!(transactions_of(&env, &ids).await, 1, "the others committed together");
+            let in_batch: bool = sqlx::query_scalar(
+                "SELECT (SELECT recorded_at FROM decision_records WHERE job_id = $1) \
+                      = (SELECT max(recorded_at) FROM decision_records WHERE job_id = ANY($2))",
+            )
+            .bind(doomed_job.id)
+            .bind(&ids)
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+            assert!(in_batch, "the failure was written in the batch transaction");
+            let after = env.enrollment(doomed).await;
+            assert_eq!(
+                (after.status, after.state_version, after.node.as_str()),
+                (before.status, before.state_version, "w"),
+                "the failed wake left its enrollment as it was"
+            );
+            let (state, attempts, error): (String, i32, Option<String>) = sqlx::query_as(
+                "SELECT state, attempts, last_error FROM jobs WHERE id = $1",
+            )
+            .bind(doomed_job.id)
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                (state.as_str(), attempts, error.as_deref()),
+                ("ready", 1, Some(MESSAGE))
+            );
+            let recorded: Vec<(String, String, Option<String>, Value, i32)> =
+                shapes_of(&env, doomed_job.id).await;
+            assert_eq!(
+                recorded
+                    .iter()
+                    .map(|(action, outcome, reason, _, attempt)| {
+                        (action.as_str(), outcome.as_str(), reason.as_deref(), *attempt)
+                    })
+                    .collect::<Vec<_>>(),
+                [("job.attempt", "failed", Some("job_error"), 1)],
+                "only the failure is recorded for the failed wake"
+            );
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_failed_wake_keeps_its_own_failure_when_its_lease_runs_out_before_the_batch_ends(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            const MESSAGE: &str = "an increment needs a trait whose value is a number";
+            let env = Env::new(pool).await;
+            env.define_trait("plan", TraitType::String).await;
+            let ada = env
+                .person(PERSONAL_DATA.email, json!({"plan": "pro"}))
+                .await;
+            let failing = env
+                .flow(
+                    "Failing",
+                    json!({"v": 1, "nodes": [
+                        {"id": "w", "type": "wait.duration", "seconds": 60},
+                        {"id": "bump", "type": "action.update_trait", "key": "plan",
+                         "change": {"op": "increment", "by": 1.0}},
+                        {"id": "end", "type": "exit"}
+                    ], "edges": [edge("e1", "w", "next", "bump"), edge("e2", "bump", "next", "end")]}),
+                )
+                .await;
+            let doomed = env.enroll(failing, 1, &[ada]).await.enrolled[0].enrollment;
+            let enrolled = due_visits(&env, 1).await;
+            assert!(ada < enrolled[0].person, "the failing wake runs first");
+            // Leases of two seconds, which the failed wake outlives while the next one waits.
+            let lease = Duration::from_secs(2);
+            let jobs = zirv_flow_store::claim_jobs(
+                &env.pool,
+                "test",
+                &[STEP_JOB_KIND],
+                lease,
+                None,
+                8,
+            )
+            .await
+            .unwrap();
+            env.release().await;
+            assert_eq!(jobs.len(), 2, "the wakes that are due");
+            let doomed_job = jobs
+                .iter()
+                .find(|job| enrollment_of(job) == Some(doomed))
+                .unwrap()
+                .clone();
+            let blocker = hold_person(&env, enrolled[0].person).await;
+            let mut config = batch_config(&env);
+            config.lease = lease;
+            config.backoff_base = Duration::from_secs(600);
+            config.backoff_cap = Duration::from_secs(600);
+            let (pool, ws) = (env.pool.clone(), env.ws);
+            let batch =
+                tokio::spawn(
+                    async move { crate::worker::run_wakes(&pool, config, ws, jobs).await },
+                );
+            until_waiting(&env, 1).await;
+            // The failed wake's lease runs out while the next wake waits, and the reaper runs.
+            tokio::time::sleep(lease + Duration::from_millis(500)).await;
+            let pool = env.pool.clone();
+            let reaper =
+                tokio::spawn(async move { zirv_flow_store::reap_expired(&pool).await.unwrap() });
+            for _ in 0..300 {
+                if reaper.is_finished() || waiting(&env).await >= 2 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            blocker.rollback().await.unwrap();
+            let outcomes = batch.await.unwrap();
+            reaper.await.unwrap();
+
+            assert_eq!(
+                outcomes_of(std::slice::from_ref(&doomed_job), &outcomes),
+                [crate::metrics::Outcome::Retried]
+            );
+            let (state, attempts, error, backed_off): (String, i32, Option<String>, bool) =
+                sqlx::query_as(
+                    "SELECT state, attempts, last_error, run_at > now() + interval '1 minute' \
+                     FROM jobs WHERE id = $1",
+                )
+                .bind(doomed_job.id)
+                .fetch_one(&env.pool)
+                .await
+                .unwrap();
+            assert_eq!(
+                (state.as_str(), attempts, error.as_deref(), backed_off),
+                ("ready", 1, Some(MESSAGE), true),
+                "the failure, not the reaper, settled the wake"
+            );
+            let recorded: Vec<(String, String, Option<String>, Value, i32)> =
+                shapes_of(&env, doomed_job.id).await;
+            assert_eq!(
+                recorded
+                    .iter()
+                    .map(|(action, outcome, reason, _, attempt)| {
+                        (action.as_str(), outcome.as_str(), reason.as_deref(), *attempt)
+                    })
+                    .collect::<Vec<_>>(),
+                [("job.attempt", "failed", Some("job_error"), 1)]
+            );
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_failure_written_in_a_batch_whose_commit_fails_is_settled_once_after_it(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            const MESSAGE: &str = "an increment needs a trait whose value is a number";
+            let env = Env::new(pool).await;
+            env.define_trait("plan", TraitType::String).await;
+            let ada = env
+                .person(PERSONAL_DATA.email, json!({"plan": "pro"}))
+                .await;
+            let failing = env
+                .flow(
+                    "Failing",
+                    json!({"v": 1, "nodes": [
+                        {"id": "w", "type": "wait.duration", "seconds": 60},
+                        {"id": "bump", "type": "action.update_trait", "key": "plan",
+                         "change": {"op": "increment", "by": 1.0}},
+                        {"id": "end", "type": "exit"}
+                    ], "edges": [edge("e1", "w", "next", "bump"), edge("e2", "bump", "next", "end")]}),
+                )
+                .await;
+            let doomed = env.enroll(failing, 1, &[ada]).await.enrolled[0].enrollment;
+            let enrolled = due_visits(&env, 2).await;
+            // The next commit that writes a step row fails, at the commit itself.
+            for statement in [
+                "CREATE SEQUENCE commit_failures",
+                "CREATE FUNCTION fail_first_commit() RETURNS trigger LANGUAGE plpgsql AS $$ \
+                 BEGIN \
+                     IF nextval('commit_failures') = 1 THEN \
+                         RAISE EXCEPTION 'injected commit failure'; \
+                     END IF; \
+                     RETURN NULL; \
+                 END $$",
+                "CREATE CONSTRAINT TRIGGER fail_first_commit AFTER INSERT ON step_executions \
+                 DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION fail_first_commit()",
+            ] {
+                sqlx::query(statement).execute(&env.pool).await.unwrap();
+            }
+            let jobs = claim_wakes(&env, 3).await;
+            let doomed_job = jobs
+                .iter()
+                .find(|job| enrollment_of(job) == Some(doomed))
+                .unwrap()
+                .clone();
+
+            let outcomes = spawn_batch(&env, jobs.clone()).await.unwrap();
+
+            assert_eq!(
+                outcomes_of(&jobs, &outcomes),
+                [crate::metrics::Outcome::Retried; 3]
+            );
+            let errors: Vec<(Uuid, String, i32, Option<String>)> = sqlx::query_as(
+                "SELECT id, state, attempts, last_error FROM jobs WHERE id = ANY($1)",
+            )
+            .bind(jobs.iter().map(|job| job.id).collect::<Vec<_>>())
+            .fetch_all(&env.pool)
+            .await
+            .unwrap();
+            for wake in wakes_of(&enrolled, &jobs).iter().chain([&doomed_job]) {
+                let error = if wake.id == doomed_job.id {
+                    MESSAGE
+                } else {
+                    "could not commit the job transaction"
+                };
+                let (_, state, attempts, last_error) =
+                    errors.iter().find(|(id, ..)| *id == wake.id).unwrap();
+                assert_eq!(
+                    (state.as_str(), *attempts, last_error.as_deref()),
+                    ("ready", 1, Some(error)),
+                    "job {}",
+                    wake.id
+                );
+                let recorded: Vec<(String, String, Option<String>, Value, i32)> =
+                    shapes_of(&env, wake.id).await;
+                assert_eq!(
+                    recorded
+                        .iter()
+                        .map(|(action, outcome, reason, _, attempt)| {
+                            (action.as_str(), outcome.as_str(), reason.as_deref(), *attempt)
+                        })
+                        .collect::<Vec<_>>(),
+                    [("job.attempt", "failed", Some("job_error"), 1)],
+                    "job {} is settled once",
+                    wake.id
+                );
+            }
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_failed_batch_commit_keeps_nothing_and_every_wake_runs_again_with_its_effect_once(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            let enrolled = due_visits(&env, 8).await;
+            let wakes: Vec<Uuid> =
+                sqlx::query_scalar("SELECT id FROM jobs WHERE kind = 'flow.step'")
+                    .fetch_all(&env.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(wakes.len(), 8);
+            // The first commit that writes a step row fails, at the commit itself.
+            for statement in [
+                "CREATE SEQUENCE commit_failures",
+                "CREATE FUNCTION fail_first_commit() RETURNS trigger LANGUAGE plpgsql AS $$ \
+                 BEGIN \
+                     IF nextval('commit_failures') = 1 THEN \
+                         RAISE EXCEPTION 'injected commit failure'; \
+                     END IF; \
+                     RETURN NULL; \
+                 END $$",
+                "CREATE CONSTRAINT TRIGGER fail_first_commit AFTER INSERT ON step_executions \
+                 DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION fail_first_commit()",
+            ] {
+                sqlx::query(statement).execute(&env.pool).await.unwrap();
+            }
+
+            work_off_steps(&env).await;
+
+            assert!(
+                env.count("SELECT last_value FROM commit_failures").await > 1,
+                "the failed commit was not the last"
+            );
+            for enrolled in &enrolled {
+                assert_eq!(
+                    env.enrollment(enrolled.enrollment).await.status,
+                    EnrollmentStatus::Completed
+                );
+                assert_eq!(
+                    visits(&env, enrolled.person).await,
+                    json!(1),
+                    "applied once"
+                );
+            }
+            let steps: Vec<i64> = sqlx::query_scalar(
+                "SELECT count(*) FROM step_executions WHERE enrollment_id = ANY($1) \
+                 GROUP BY enrollment_id",
+            )
+            .bind(
+                enrolled
+                    .iter()
+                    .map(|enrolled| enrolled.enrollment)
+                    .collect::<Vec<_>>(),
+            )
+            .fetch_all(&env.pool)
+            .await
+            .unwrap();
+            assert_eq!(steps.len(), 8);
+            assert!(steps.iter().all(|count| *count == steps[0]), "{steps:?}");
+            // Every wake of the batch failed with it, and each ran again to its one completion.
+            for wake in &wakes {
+                let failed: Vec<(String, String, Option<String>, Value, i32)> =
+                    shapes_of(&env, *wake)
+                        .await
+                        .into_iter()
+                        .filter(|(action, ..)| action == "job.attempt")
+                        .collect();
+                assert_eq!(failed.len(), 1, "wake {wake}: {failed:?}");
+                assert_eq!(
+                    (failed[0].1.as_str(), failed[0].2.as_deref(), failed[0].4),
+                    ("failed", Some("job_error"), 1)
+                );
+            }
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_wake_that_loses_its_lease_mid_batch_is_undone_alone_and_runs_once_for_its_new_owner(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            let enrolled = due_visits(&env, 3).await;
+            let jobs = claim_wakes(&env, 3).await;
+            let wakes = wakes_of(&enrolled, &jobs);
+            // The middle wake waits for its person after it took its lease lock.
+            let blocker = hold_person(&env, enrolled[1].person).await;
+            let batch = spawn_batch(&env, jobs.clone());
+            until_waiting(&env, 1).await;
+            // Its lease runs out and the reaper hands it back while it waits.
+            sqlx::query(
+                "UPDATE jobs SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
+            )
+            .bind(wakes[1].id)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+            let reaped = zirv_flow_store::reap_expired(&env.pool).await.unwrap();
+            assert_eq!(reaped.requeued, 1);
+            blocker.rollback().await.unwrap();
+            let outcomes = batch.await.unwrap();
+
+            use crate::metrics::Outcome::{Completed, LeaseLost};
+            assert_eq!(
+                outcomes_of(&wakes, &outcomes),
+                [Completed, LeaseLost, Completed]
+            );
+            assert_eq!(visits(&env, enrolled[1].person).await, json!(0), "undone");
+            let reclaimed = env.claim().await.expect("the reaped wake is due again");
+            assert_eq!(reclaimed.id, wakes[1].id);
+            env.execute(reclaimed).await.unwrap();
+            for enrolled in &enrolled {
+                assert_eq!(
+                    visits(&env, enrolled.person).await,
+                    json!(1),
+                    "applied once"
+                );
+                assert_eq!(
+                    env.enrollment(enrolled.enrollment).await.status,
+                    EnrollmentStatus::Completed
+                );
+            }
+            let steps: Vec<i64> = sqlx::query_scalar(
+                "SELECT count(*) FROM step_executions WHERE enrollment_id = ANY($1) \
+                 GROUP BY enrollment_id",
+            )
+            .bind(
+                enrolled
+                    .iter()
+                    .map(|enrolled| enrolled.enrollment)
+                    .collect::<Vec<_>>(),
+            )
+            .fetch_all(&env.pool)
+            .await
+            .unwrap();
+            assert_eq!(steps.len(), 3);
+            assert!(steps.iter().all(|count| *count == steps[0]), "{steps:?}");
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_person_erased_while_a_batch_runs_has_its_wake_skipped_and_nothing_written_back(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            let enrolled = due_visits(&env, 3).await;
+            let jobs = claim_wakes(&env, 3).await;
+            let wakes = wakes_of(&enrolled, &jobs);
+            // The batch read every enrollment, then waits at its first person; the second person
+            // is erased meanwhile.
+            let blocker = hold_person(&env, enrolled[0].person).await;
+            let batch = spawn_batch(&env, jobs.clone());
+            until_waiting(&env, 1).await;
+            let erased = &enrolled[1];
+            let mut erasure = zirv_flow_store::begin(&env.pool).await.unwrap();
+            assert!(
+                zirv_flow_store::delete_person(
+                    &mut erasure,
+                    env.ws,
+                    erased.person,
+                    zirv_flow_store::DeleteReason::Requested,
+                    &TraceContext::root(Cause::api("erase")),
+                )
+                .await
+                .unwrap()
+            );
+            zirv_flow_store::commit(erasure).await.unwrap();
+            blocker.rollback().await.unwrap();
+            let outcomes = batch.await.unwrap();
+
+            use crate::metrics::Outcome::Completed;
+            assert_eq!(outcomes_of(&wakes, &outcomes), [Completed; 3]);
+            for kept in [&enrolled[0], &enrolled[2]] {
+                assert_eq!(visits(&env, kept.person).await, json!(1));
+                assert_eq!(
+                    env.enrollment(kept.enrollment).await.status,
+                    EnrollmentStatus::Completed
+                );
+            }
+            for (table, column) in [
+                ("people", "id"),
+                ("enrollments", "person_id"),
+                ("enrollment_waits", "person_id"),
+            ] {
+                let left = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(format!(
+                    "SELECT count(*) FROM {table} WHERE {column} = $1"
+                )))
+                .bind(erased.person)
+                .fetch_one(&env.pool)
+                .await
+                .unwrap();
+                assert_eq!(left, 0, "{table} kept the erased person");
+            }
+            let written: i64 = sqlx::query_scalar(
+                "SELECT (SELECT count(*) FROM step_executions WHERE enrollment_id = $1) \
+                      + (SELECT count(*) FROM decision_records \
+                         WHERE subject_ids ->> 'person' = $2::text OR job_id = $3) \
+                      + (SELECT count(*) FROM jobs WHERE payload ->> 'enrollment_id' = $1::text)",
+            )
+            .bind(erased.enrollment)
+            .bind(erased.person)
+            .bind(wakes[1].id)
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                written, 0,
+                "the batch wrote nothing back for the erased person"
+            );
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_merge_of_two_people_a_batch_holds_waits_for_it_and_neither_deadlocks(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            let enrolled = due_visits(&env, 2).await;
+            let (low, high) = (&enrolled[0], &enrolled[1]);
+            // Claimed higher id first, the order a batch that ran in claim order would lock in.
+            sqlx::query(
+                "UPDATE jobs SET run_at = now() - CASE WHEN payload ->> 'enrollment_id' = $1::text \
+                     THEN interval '2 seconds' ELSE interval '1 second' END \
+                 WHERE kind = 'flow.step'",
+            )
+            .bind(high.enrollment)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+            let jobs = claim_wakes(&env, 2).await;
+            assert_eq!(enrollment_of(&jobs[0]), Some(high.enrollment));
+            let wakes = wakes_of(&enrolled, &jobs);
+            // The batch takes the lower id, then waits for the higher; a merge of the two then
+            // waits for the batch.
+            let blocker = hold_person(&env, high.person).await;
+            let batch = spawn_batch(&env, jobs.clone());
+            until_waiting(&env, 1).await;
+            let emails: Vec<String> = sqlx::query_scalar(
+                "SELECT value FROM identities WHERE person_id = ANY($1) AND kind = 'email' \
+                 ORDER BY person_id",
+            )
+            .bind(vec![low.person, high.person])
+            .fetch_all(&env.pool)
+            .await
+            .unwrap();
+            let joined = ProfileRecord {
+                source: "crm".into(),
+                stream: "contacts".into(),
+                record_key: "joined".into(),
+                identifiers: emails
+                    .iter()
+                    .map(|email| ("email".to_owned(), email.clone()))
+                    .collect(),
+                traits: serde_json::Map::new(),
+                observed_at: env.clock.now(),
+                trace: TraceContext::root(Cause::api("merge")),
+            };
+            let (pool, ws) = (env.pool.clone(), env.ws);
+            let merge = tokio::spawn(async move {
+                zirv_flow_store::apply_profile_batch(&pool, ws, &[joined]).await
+            });
+            until_waiting(&env, 2).await;
+            blocker.rollback().await.unwrap();
+            let outcomes = batch.await.unwrap();
+            let merged = merge.await.unwrap().expect("the merge commits");
+
+            use crate::metrics::Outcome::Completed;
+            assert_eq!(outcomes_of(&wakes, &outcomes), [Completed, Completed]);
+            assert!(
+                matches!(merged[0], zirv_flow_store::ProfileOutcome::Applied { .. }),
+                "{:?}",
+                merged[0]
+            );
+            let pointers: Vec<(Uuid, Option<Uuid>)> =
+                sqlx::query_as("SELECT id, merged_into FROM people WHERE id = ANY($1) ORDER BY id")
+                    .bind(vec![low.person, high.person])
+                    .fetch_all(&env.pool)
+                    .await
+                    .unwrap();
+            let merged_away: Vec<_> = pointers
+                .iter()
+                .filter_map(|(id, into)| into.map(|into| (*id, into)))
+                .collect();
+            assert_eq!(merged_away.len(), 1, "{pointers:?}");
+            for enrolled in &enrolled {
+                assert_eq!(
+                    env.enrollment(enrolled.enrollment).await.status,
+                    EnrollmentStatus::Completed
+                );
+            }
+            assert_eq!(
+                env.count("SELECT count(*) FROM decision_records WHERE action = 'job.attempt'")
+                    .await,
+                0,
+                "no wake failed"
+            );
         })
         .await;
     }

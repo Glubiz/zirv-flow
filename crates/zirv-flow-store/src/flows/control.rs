@@ -65,6 +65,33 @@ pub async fn flow_state_for_step(
     Ok(state.as_deref().and_then(FlowState::parse))
 }
 
+/// [`flow_state_for_step`] for the flows of steps that run in one transaction (#397): one
+/// statement takes every flow `FOR KEY SHARE` in id order, before the steps lock any person, and the
+/// locks are held until the transaction ends. A flow that is gone, or of another workspace, is
+/// absent.
+pub async fn flow_states_for_steps(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    flows: &[Uuid],
+) -> Result<Vec<(Uuid, FlowState)>, StoreError> {
+    if flows.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, state FROM flows WHERE workspace_id = $1 AND id = ANY($2) \
+         ORDER BY id FOR KEY SHARE",
+    )
+    .bind(workspace.as_uuid())
+    .bind(flows)
+    .fetch_all(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(id, state)| FlowState::parse(&state).map(|state| (id, state)))
+        .collect())
+}
+
 /// Holds an enrollment whose step fell due while its flow was paused: `held`, with the input to
 /// run again on resume. The caller holds the enrollment's lock.
 pub async fn hold_enrollment(
@@ -1036,6 +1063,56 @@ mod tests {
             .fetch_one(pool)
             .await
             .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_flows_of_a_batch_of_steps_are_read_and_held_until_it_ends(pool: PgPool) {
+        let ws = workspace(&pool, "batch-flows").await;
+        let other = workspace(&pool, "other-flows").await;
+        let first = create(&pool, ws, "First").await;
+        publish(&pool, ws, first.id).await.unwrap();
+        let second = create(&pool, ws, "Second").await;
+        let foreign = create(&pool, other, "Foreign").await;
+        let mut tx = pool.begin().await.unwrap();
+
+        let mut states = flow_states_for_steps(
+            &mut tx,
+            ws,
+            &[second.id, foreign.id, first.id, Uuid::now_v7()],
+        )
+        .await
+        .unwrap();
+        states.sort_by_key(|(id, _)| *id);
+
+        let mut wanted = vec![
+            (first.id, FlowState::Published),
+            (second.id, FlowState::Draft),
+        ];
+        wanted.sort_by_key(|(id, _)| *id);
+        assert_eq!(states, wanted);
+        for flow in [first.id, second.id] {
+            // A pause, a resume or an archive locks the flow `FOR UPDATE`: it waits for the batch.
+            let transition = sqlx::query("SELECT id FROM flows WHERE id = $1 FOR UPDATE NOWAIT")
+                .bind(flow)
+                .fetch_one(&pool)
+                .await;
+            assert!(transition.is_err(), "the batch does not hold its flow");
+        }
+        let untouched = sqlx::query("SELECT id FROM flows WHERE id = $1 FOR UPDATE NOWAIT")
+            .bind(foreign.id)
+            .fetch_one(&pool)
+            .await;
+        assert!(
+            untouched.is_ok(),
+            "the batch locked another workspace's flow"
+        );
+        tx.rollback().await.unwrap();
+        let free = sqlx::query("SELECT id FROM flows WHERE id = $1 FOR UPDATE NOWAIT")
+            .bind(first.id)
+            .fetch_one(&pool)
+            .await;
+        assert!(free.is_ok(), "the locks outlived the batch");
     }
 
     #[test]

@@ -5,8 +5,10 @@
 //! event waits, over 90 virtual days and a few hundred enrollments on generated graphs that use
 //! every node kind. Time is a `ManualClock`. Events arrive at seeded virtual times, many of them
 //! at, just before or just after the timeout of the wait they answer. Every job is put through
-//! at least one seeded failure before its final successful run (see `inject`), the mock
-//! destination fails calls too (see `mock`), and wakes are claimed before they are due. After
+//! at least one seeded failure before its final successful run (see `inject`), half the rounds
+//! end their steps in the worker's batch transactions, several steps to a commit, some of which
+//! fail at the commit, the mock destination fails calls too (see `mock`), and wakes are claimed
+//! before they are due. After
 //! the run the four invariants are checked from the tables, the log of write attempts and the
 //! log of the mock destination (see `invariants`).
 //!
@@ -182,6 +184,11 @@ async fn simulate(pool: PgPool, ordinal: usize) {
         "outcome events that settled a wait",
         "outcome events that settled nothing",
         "duplicate outcome events that settled nothing",
+        // Steps also end in the worker's batch transactions, several to one, and some of those
+        // commits fail and keep nothing of any step in them (#397).
+        "batched final runs",
+        "batches of more than one step",
+        "batch commits failed",
     ] {
         need(mode);
     }

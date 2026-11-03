@@ -17,12 +17,18 @@
 //! outcome, and a job whose attempts run out through lease expiry goes dead.
 //!
 //! The runs follow the worker's `execute`: begin, person-change guard, `lock_lease`, handler,
-//! `complete_job`, commit.
+//! `complete_job`, commit. In half the rounds the final runs of the `flow.step` jobs instead go
+//! through the worker's own batch transaction (#397), a savepoint per step and one commit, as a
+//! slot runs the steps of a workspace that one claim returned; a third of those batches first
+//! meets a commit that fails, which must keep nothing of any of its steps (see
+//! `end_jobs_batched`).
 
 use std::cell::Cell;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use hashbrown::HashSet;
 use serde_json::Value;
 use sqlx::{Connection, PgPool};
 use time::OffsetDateTime;
@@ -34,9 +40,10 @@ use zirv_flow_store::{
     claim_job, commit, complete_job, fail_job, lock_lease, reap_expired,
 };
 
-use super::driver::{Driver, Due, LANE_PLAN, WakeMove};
+use super::driver::{Driver, Due, LANE_BATCH, LANE_PLAN, WakeMove, seconds_of};
 use super::mock::Script;
 use super::world::{EPOCH, World};
+use crate::metrics::Outcome;
 use crate::worker::retry_delay;
 use crate::{JobContext, JobError, WorkerConfig};
 
@@ -378,6 +385,48 @@ impl World {
     }
 }
 
+impl World {
+    /// A worker's configuration for the batch transactions: the run's clock, keys and egress.
+    fn batch_config(&self) -> WorkerConfig {
+        let mut config = WorkerConfig::new(1);
+        config.clock = Clock::Manual(self.env.clock.clone());
+        config.keyring = Some(self.keyring.clone());
+        config.egress = self.egress.clone();
+        config
+    }
+
+    /// Makes the next commit that completes a job fail (see `install_commit_failure`).
+    async fn arm_commit_failure(&self) {
+        sqlx::query("SELECT setval('sim_commit_failure', 1, false)")
+            .execute(&self.env.pool)
+            .await
+            .unwrap();
+    }
+
+    /// Lets commits succeed again, and says whether one failed since the arming.
+    async fn disarm_commit_failure(&self) -> bool {
+        let failed: bool = sqlx::query_scalar("SELECT is_called FROM sim_commit_failure")
+            .fetch_one(&self.env.pool)
+            .await
+            .unwrap();
+        sqlx::query("SELECT setval('sim_commit_failure', 1000000000)")
+            .execute(&self.env.pool)
+            .await
+            .unwrap();
+        failed
+    }
+
+    /// The error a job's last failed attempt left, while the job is still queued.
+    async fn last_error(&self, job: Uuid) -> Option<String> {
+        sqlx::query_scalar("SELECT last_error FROM jobs WHERE id = $1")
+            .bind(job)
+            .fetch_optional(&self.env.pool)
+            .await
+            .unwrap()
+            .flatten()
+    }
+}
+
 fn enrollment_of(payload: &Value) -> Uuid {
     payload
         .get("enrollment_id")
@@ -440,6 +489,38 @@ impl Plan {
             fenced: rng.chance(50),
         }
     }
+}
+
+/// A job whose failures before its final run are done (`begin_job`), and what its final stage
+/// needs.
+pub(super) struct Begun {
+    /// The final stage starts with a concurrent duplicate.
+    concurrent: bool,
+    fenced: bool,
+    /// The claim and the fingerprint of a commit without the ack, which the final run must not
+    /// change.
+    kept: Option<(ClaimedJob, String)>,
+    injected: bool,
+    early: bool,
+}
+
+/// The most steps one batch transaction runs: what a slot claims at once.
+const BATCH_SIZE: usize = 8;
+
+/// What the worker stores as the error of a job whose transaction did not commit.
+const NOT_COMMITTED: &str = "could not commit the job transaction";
+
+/// The enrollments that more than one of `due` names. A job of one of them runs alone: in a
+/// batch, its final run would come after the other job's, and so would its checks.
+fn shared_enrollments(due: &[Due]) -> HashSet<Uuid> {
+    let mut seen = HashSet::new();
+    let mut shared = HashSet::new();
+    for enrollment in due.iter().filter_map(|job| job.enrollment) {
+        if !seen.insert(enrollment) {
+            shared.insert(enrollment);
+        }
+    }
+    shared
 }
 
 /// How a failed attempt ended.
@@ -598,13 +679,21 @@ impl Driver<'_> {
     }
 
     /// Runs one job through its seeded plan. `early` marks a wake claimed before it was due.
+    pub(super) async fn run_job(&mut self, due: &Due, early: bool) {
+        if let Some(begun) = self.begin_job(due, early).await {
+            self.end_job(due, begun).await;
+        }
+    }
+
+    /// The failures of a job's seeded plan, before its final run; `None` when the job is gone or
+    /// its attempts ran out.
     ///
     /// An execution starts with the job's first claim. Each planned crash is repeated until it
     /// really happens: an attempt the destination answers with a retryable status ends in the
     /// handler's error and crashes nothing, so the same mode is tried again with the attempt
     /// spent. Every execution therefore meets at least one real crash before its final run,
     /// including the ones whose attempts later run out.
-    pub(super) async fn run_job(&mut self, due: &Due, early: bool) {
+    pub(super) async fn begin_job(&mut self, due: &Due, early: bool) -> Option<Begun> {
         let w = self.w;
         // The plan follows the job's label and how often that label was planned before, never the
         // clock: how far a retry delay or a lease moved it must not change what is injected.
@@ -629,12 +718,12 @@ impl Driver<'_> {
                     "{} job {} met no real crash in {MAX_FINAL_ROUNDS} attempts",
                     due.kind, due.id
                 ));
-                return;
+                return None;
             }
             let mode = plan.modes[next];
             let Some(claimed) = self.claim(due).await else {
                 self.bump("job gone before its turn");
-                return;
+                return None;
             };
             if !started {
                 started = true;
@@ -663,13 +752,31 @@ impl Driver<'_> {
                         self.note_outcomes(&claimed, events).await;
                     }
                     self.job_died(due, &claimed);
-                    return;
+                    return None;
                 }
                 Attempt::Broken => next += 1,
             }
         }
+        Some(Begun {
+            concurrent: plan.concurrent,
+            fenced: plan.fenced,
+            kept,
+            injected,
+            early,
+        })
+    }
 
-        let mut concurrent = plan.concurrent;
+    /// The final stage of a job whose failures are done: a concurrent duplicate when its plan
+    /// has one, then runs until one commits with its ack.
+    pub(super) async fn end_job(&mut self, due: &Due, begun: Begun) {
+        let w = self.w;
+        let Begun {
+            mut concurrent,
+            fenced,
+            kept,
+            mut injected,
+            early,
+        } = begun;
         for _ in 0..MAX_FINAL_ROUNDS {
             let Some(claimed) = self.claim(due).await else {
                 self.bump("job gone before its turn");
@@ -681,7 +788,7 @@ impl Driver<'_> {
                 concurrent = false;
                 self.bump(format!("concurrent duplicate {}", due.kind));
                 self.crash_injected(&mut injected);
-                self.concurrent_duplicate(&claimed, due, plan.fenced).await
+                self.concurrent_duplicate(&claimed, due, fenced).await
             } else {
                 w.finish(&claimed).await
             };
@@ -698,13 +805,7 @@ impl Driver<'_> {
                     return;
                 }
                 Final::Failed(error) => {
-                    self.problem(format!("{} job {} failed: {error}", due.kind, due.id));
-                    // Retire the job so the run goes on and the end state shows the harm.
-                    sqlx::query("UPDATE jobs SET state = 'dead', dead_at = now() WHERE id = $1")
-                        .bind(due.id)
-                        .execute(&w.env.pool)
-                        .await
-                        .unwrap();
+                    self.job_failed(due, &error).await;
                     return;
                 }
             }
@@ -713,6 +814,128 @@ impl Driver<'_> {
             "{} job {} was still not done after {MAX_FINAL_ROUNDS} attempts",
             due.kind, due.id
         ));
+    }
+
+    /// A job failed in a way no plan allows: the run records it, and retires the job so it goes
+    /// on and the end state shows the harm.
+    pub(super) async fn job_failed(&mut self, due: &Due, error: &str) {
+        self.problem(format!("{} job {} failed: {error}", due.kind, due.id));
+        sqlx::query("UPDATE jobs SET state = 'dead', dead_at = now() WHERE id = $1")
+            .bind(due.id)
+            .execute(&self.w.env.pool)
+            .await
+            .unwrap();
+    }
+
+    /// Runs the jobs due in one round as `run_job` does, except the final runs of the `flow.step`
+    /// jobs whose enrollment no other due job names: those go through batch transactions at the
+    /// end of the round (`end_jobs_batched`). Every other job, a concurrent duplicate's final
+    /// stage, and the failures before every final run, run as they do alone.
+    pub(super) async fn run_batched(&mut self, due: Vec<Due>, at: OffsetDateTime, round: u64) {
+        let shared = shared_enrollments(&due);
+        let mut batched = Vec::new();
+        for job in due {
+            let batchable = job.kind == STEP_JOB_KIND
+                && job
+                    .enrollment
+                    .is_some_and(|enrollment| !shared.contains(&enrollment));
+            if !batchable {
+                self.run_job(&job, false).await;
+                continue;
+            }
+            let Some(begun) = self.begin_job(&job, false).await else {
+                continue;
+            };
+            if begun.concurrent {
+                self.end_job(&job, begun).await;
+            } else {
+                batched.push((job, begun));
+            }
+        }
+        let mut rng = Rng::derive(self.w.seed, &[LANE_BATCH, seconds_of(at), round, 1]);
+        let mut queue = VecDeque::from(batched);
+        while !queue.is_empty() {
+            let batch: Vec<(Due, Begun)> = queue.drain(..queue.len().min(BATCH_SIZE)).collect();
+            self.end_jobs_batched(batch, rng.chance(33)).await;
+        }
+    }
+
+    /// The final runs of `waiting`, `flow.step` jobs of different enrollments whose failures are
+    /// done, in one batch transaction through the worker's own path (`run_wakes`): each is
+    /// claimed, then all run in lock order, a savepoint each, and commit once. With `inject` the
+    /// commit fails first, which must keep nothing of any of them: every one is failed back to
+    /// the queue with an attempt spent, and runs again in the next batch.
+    async fn end_jobs_batched(&mut self, mut waiting: Vec<(Due, Begun)>, mut inject: bool) {
+        let w = self.w;
+        for _ in 0..MAX_FINAL_ROUNDS {
+            if waiting.is_empty() {
+                return;
+            }
+            let mut claimed = Vec::with_capacity(waiting.len());
+            for (due, begun) in waiting.drain(..) {
+                let Some(job) = self.claim(&due).await else {
+                    self.bump("job gone before its turn");
+                    continue;
+                };
+                let before = self.watch(&job).await;
+                claimed.push((due, begun, job, before));
+            }
+            if claimed.is_empty() {
+                return;
+            }
+            // A failed commit spends an attempt of every step in it; none is left without one.
+            inject &= claimed
+                .iter()
+                .all(|(_, _, job, _)| job.attempts < job.max_attempts);
+            if inject {
+                w.arm_commit_failure().await;
+            }
+            let jobs: Vec<ClaimedJob> = claimed.iter().map(|(_, _, job, _)| job.clone()).collect();
+            let outcomes =
+                crate::worker::run_wakes(&w.env.pool, w.batch_config(), w.env.ws, jobs).await;
+            let failed = inject && w.disarm_commit_failure().await;
+            inject = false;
+            self.bump("batches");
+            if claimed.len() > 1 {
+                self.bump("batches of more than one step");
+            }
+            if failed {
+                self.bump("batch commits failed");
+            }
+            for (due, begun, job, before) in claimed {
+                self.bump("batched final runs");
+                let outcome = outcomes
+                    .iter()
+                    .find(|(id, _)| *id == job.id)
+                    .map(|(_, outcome)| *outcome);
+                match outcome {
+                    Some(Outcome::Completed) => {
+                        self.bump(format!("completed {}", due.kind));
+                        self.after_done(&due, begun.kept, before, begun.early).await;
+                    }
+                    Some(Outcome::Retried) => {
+                        let error = w.last_error(job.id).await;
+                        if failed && error.as_deref() == Some(NOT_COMMITTED) {
+                            waiting.push((due, begun));
+                        } else {
+                            let error = error.unwrap_or_else(|| "no error was stored".to_owned());
+                            self.job_failed(&due, &error).await;
+                        }
+                    }
+                    Some(Outcome::Dead) => self.job_died(&due, &job),
+                    other => self.problem(format!(
+                        "the batched {} job {} ended {other:?}",
+                        due.kind, due.id
+                    )),
+                }
+            }
+        }
+        for (due, _) in waiting {
+            self.problem(format!(
+                "{} job {} was still not done after {MAX_FINAL_ROUNDS} batches",
+                due.kind, due.id
+            ));
+        }
     }
 
     /// Settles what the seed must not leave to chance: the calls with a scenario take their
@@ -1195,6 +1418,33 @@ mod tests {
             retry_delay(backoff, Some(Duration::from_secs(9999)), cap),
             cap
         );
+    }
+
+    #[test]
+    fn only_an_enrollment_that_one_due_job_names_has_its_step_batched() {
+        let due = |label: u64, kind: &'static str, enrollment: Option<u128>| Due {
+            id: Uuid::from_u128(u128::from(label)),
+            kind,
+            label,
+            scenario: super::super::driver::Scenario::default(),
+            enrollment: enrollment.map(Uuid::from_u128),
+        };
+        let shared = shared_enrollments(&[
+            due(1, STEP_JOB_KIND, Some(10)),
+            due(2, STEP_JOB_KIND, Some(11)),
+            due(3, WEBHOOK_JOB_KIND, Some(11)),
+            due(4, STEP_JOB_KIND, Some(12)),
+            due(5, STEP_JOB_KIND, Some(12)),
+            due(6, ENROLL_JOB_KIND, None),
+            due(7, ENROLL_JOB_KIND, None),
+        ]);
+
+        assert_eq!(
+            shared,
+            HashSet::from([Uuid::from_u128(11), Uuid::from_u128(12)]),
+            "a call of the enrollment counts, and jobs that name none share nothing"
+        );
+        assert!(shared_enrollments(&[]).is_empty());
     }
 
     #[test]

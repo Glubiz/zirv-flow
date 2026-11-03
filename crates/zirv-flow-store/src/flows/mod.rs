@@ -25,8 +25,8 @@ pub use arrivals::{StoredEvent, find_event_of_person};
 pub use control::{
     ControlError, ExitBatch, LIFECYCLE_BATCH, LIFECYCLE_JOB_KIND, LifecycleAction, LifecycleBatch,
     LifecyclePayload, SETTLE_JOB_KIND, SettleItem, SettlePayload, Signal, enqueue_lifecycle,
-    exit_batch, flow_state_for_step, hold_enrollment, release_enrollment, reopen_failed_step,
-    resume_batch, resume_failed, segment_is_watched,
+    exit_batch, flow_state_for_step, flow_states_for_steps, hold_enrollment, release_enrollment,
+    reopen_failed_step, resume_batch, resume_failed, segment_is_watched,
 };
 pub(crate) use control::{enqueue_segment_settles, exit_people};
 pub use crud::{
@@ -55,8 +55,8 @@ pub use runtime::{
     NewStepExecution, NewWait, STEP_JOB_KIND, SYNC_JOB_KIND, StepEnrollment, StepJobInput,
     StepJobPayload, StepOutcome, StepRecord, WEBHOOK_JOB_KIND, clear_waits,
     count_in_flight_enrollments, find_enrollment, lock_enrollment, lock_read_enrollment,
-    read_enrollment, record_steps, register_wait, sample_enrollments, save_enrollment,
-    settle_wait_step, step_zones, wait_filters,
+    read_enrollment, read_enrollments, record_steps, register_wait, sample_enrollments,
+    save_enrollment, settle_wait_step, step_zones, wait_filters,
 };
 pub use send::{
     DELIVERY_UNCONFIRMED, EndedOrphan, HARD_BOUNCE, INTERNAL_ERROR, JOB_DEAD, SEND_JOB_KIND,

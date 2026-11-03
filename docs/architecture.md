@@ -1076,10 +1076,10 @@ events (`message.sent`, `message.skipped`, ...) that later nodes can wait for.
 - Merge: the merged-away person's active enrollments exit with reason `merge` on the merge trace and their `enrollment_waits` are removed; the survivor keeps its own enrollments. Erasure deletes enrollments, `step_executions`, `enrollment_waits` and `flow_entries` (16.3).
 - Per-node counts are computed on read from `step_executions`, with an index and a statement timeout. There are no hot counter rows.
 - Enrollment states: `active`, `waiting` (timer or event), `awaiting_conditions` (yielded at a branch; transient, since the runtime evaluates the conditions and resumes in the same transaction), `held` (a step fell due while the flow was paused; it keeps its node, timer, waits and version, and `resume_input` names the step to run on resume), `completed` (exit node or end of graph), `exited` (goal exit, exit criteria, merge, flow archived), `failed` (back to `active` on operator retry or skip).
-- Lifecycle runtime. The goal and exit criteria are matched in batched store queries (events of an apply-batch; the `segment.entered` and `segment.exited` rows of a refresh or re-evaluation, which are captured for a goal segment and for the trigger segment of a `leaves_segment` criterion too) against the version each enrollment is pinned to, and applied by the `flow.settle` job through `engine::settle`. A conversion is a `settings.goal` step row and a `flow.goal` decision, written once. A `definition_change` settles nothing. `flow.step` holds a due step of a paused flow (`flow_state_for_step` reads the flow `FOR KEY SHARE` first, so a resume that locks it `FOR UPDATE` waits for the hold). Resume, archive and the bulk exit of an older version are `flow.lifecycle` jobs of 500 enrollments per transaction, person locks in id order, a decision per enrollment under the action's trace (cause `manual`). A bulk exit is point-in-time: it ends the in-flight enrollments it meets when it runs, so a delayed `flow.enroll` job pinned to an older version can still insert an enrollment for a person it has passed, and that one is not exited. Operator routes under `/flows/{id}`: `POST enrollments/{enrollment_id}/retry`, `POST enrollments/{enrollment_id}/skip` and `POST versions/{n}/exit-enrollments`, all Admin and audited.
+- Lifecycle runtime. The goal and exit criteria are matched in batched store queries (events of an apply-batch; the `segment.entered` and `segment.exited` rows of a refresh or re-evaluation, which are captured for a goal segment and for the trigger segment of a `leaves_segment` criterion too) against the version each enrollment is pinned to, and applied by the `flow.settle` job through `engine::settle`. A conversion is a `settings.goal` step row and a `flow.goal` decision, written once. A `definition_change` settles nothing. `flow.step` holds a due step of a paused flow (`flow_state_for_step` reads the flow `FOR KEY SHARE` first, so a resume that locks it `FOR UPDATE` waits for the hold; a wake transaction, section 14, takes that lock on all its flows at once, in id order, before any person lock). Resume, archive and the bulk exit of an older version are `flow.lifecycle` jobs of 500 enrollments per transaction, person locks in id order, a decision per enrollment under the action's trace (cause `manual`). A bulk exit is point-in-time: it ends the in-flight enrollments it meets when it runs, so a delayed `flow.enroll` job pinned to an older version can still insert an enrollment for a person it has passed, and that one is not exited. Operator routes under `/flows/{id}`: `POST enrollments/{enrollment_id}/retry`, `POST enrollments/{enrollment_id}/skip` and `POST versions/{n}/exit-enrollments`, all Admin and audited.
 - Built runtime choices. `flow.step` carries `{enrollment_id, state_version, input}` where `input` is `start`, `wake` or `event`; it locks the enrollment row, so the version compare-and-set cannot lose a race, and a job is stale when the version or the status differs. `failed` enrollments still hold the person (the in-flight unique index covers `active`, `waiting` and `failed`). Enrollments are keyed on the trigger occurrence too (`occurrence_id`), so a redelivered `flow.enroll` enrolls nobody twice; a person-scoped trigger (an event, a segment entry, a single-person API enrollment) continues the trace of its trigger (the event's, the segment mark's or the request's) with the trigger's cause, while an audience run (a schedule slot or a manual start) starts a fresh trace per enrollment with the trigger's cause; no new cause kind is needed.
 - Event waits. Apply-batch (and a replay that emits triggers) runs one query per batch over the accepted events that are not `no_triggers`, joined to `enrollment_waits`, and enqueues `flow.step input=event` with the wait's `state_version`. The store cannot read the segment AST, so the step job applies the wait's property filters with the reference evaluator over the stored event; an event that fails them leaves the enrollment asleep.
-- Failure. A failed attempt rolls back to a savepoint; the job retries with the queue's backoff, and on the last attempt the enrollment is committed as `failed` with the fixed error text on the enrollment and the step row. Engine failures (an invalid time, an empty split) fail the enrollment at once. A goal conversion is recorded as a `flow.goal` decision. A webhook effect enqueues a `webhook.call` job under the effect key, and its step decision carries `inputs_fresh`, `inputs_stale` or `inputs_failing` as the reason.
+- Failure. A failed attempt rolls back to a savepoint (in a wake transaction, its own wake's, section 14); the job retries with the queue's backoff, and on the last attempt the enrollment is committed as `failed` with the fixed error text on the enrollment and the step row. Engine failures (an invalid time, an empty split) fail the enrollment at once. A goal conversion is recorded as a `flow.goal` decision. A webhook effect enqueues a `webhook.call` job under the effect key, and its step decision carries `inputs_fresh`, `inputs_stale` or `inputs_failing` as the reason.
 
 ### 9.4 Enrollment rules and test mode
 
@@ -2598,7 +2598,8 @@ future backlog (`docs/benchmarks/m5-flows.md` section 8).
 As built (#397): a worker slot claims up to eight jobs with that one statement and one commit, by
 priority band, then age, each with a lease token of its own, and runs them one after another, each
 in its own transaction exactly as a job claimed alone: its own lease check, heartbeat and fenced
-completion. The batch saves a claim round trip and a commit flush on all but one of its jobs. A
+completion (the `flow.step` jobs of one workspace share one, below). The batch saves a claim round
+trip and a commit flush on all but one of its jobs. A
 claimed job that has not started holds its lease from the claim; the slot gives it back to `ready`
 (its `run_at` kept and the claim's attempt uncounted, or deleted when an erasure marked it
 `purge_on_release`) once a sixth of the lease, at most one second, has passed since the claim
@@ -2606,6 +2607,60 @@ was sent, even while a handler runs, and at once when the worker stops. A job th
 with at least five sixths of its lease left, even when its claim waited, and jobs claimed
 behind a slow handler go to other workers instead of waiting for it. A slot that dies leaves its
 unstarted jobs, like its running one, to lease expiry.
+
+**Wake transactions (#397).** The `flow.step` jobs of one workspace that a slot claimed together
+run in one transaction, at the place of the first of them in the claim; jobs of other kinds, and a
+workspace's only step, run alone. The transaction takes the change-readers guard once, reads every
+claimed enrollment in one statement, then locks the flows of all of them `FOR KEY SHARE` in id
+order and reads each flow's state once, before any person lock. A flow version is loaded once per
+batch: version rows are immutable and cannot be deleted while their flow is locked. A person's
+zone is still read after the person lock (ruling 699e7ad5), and a read made before a wake's lock is
+checked again under it, so a merge or an erasure that came first is seen. The wakes run in lock
+order: by the lowest person id of the wake's lock group (its person, and the survivor that person
+was merged into), then by person id, a wake whose enrollment is gone first. Each runs behind a
+savepoint of its own: its lease check, the step and its decisions, and its fenced completion, with
+its heartbeat running until the completion. A wake whose handler fails, or whose lease check,
+heartbeat or completion finds the lease gone, rolls back to its savepoint, which drops its writes
+and the row locks it took, and the others go on. A failure is then written in the batch
+transaction, outside the wake's savepoint and in a savepoint of its own (ruling 4e9d24be), with
+the statement that settles a job alone's: the attempt and its error, the backoff, the cleared
+lease and the `job_error` decision (on the last attempt the enrollment fails). Its job row is
+`ready` once the batch commits, so a reaper that waited for the batch finds it settled, not a
+running job whose lease ran out while the later wakes ran. A failure that cannot be written there
+(a deadlock with a reaper that holds the row, say) is rolled back to that savepoint and settled
+after the transaction, and a lost lease leaves the job to its new owner. One commit ends the batch,
+so eight steps make one handler commit instead of eight. When the commit fails, or an error leaves
+the transaction unusable, it is rolled back: every wake that completed in it fails with `could not
+commit the job transaction`, as a job alone whose commit fails (its attempt counts and it retries),
+and every failure written in it is settled again after it, on a lease the rollback left as it was.
+A completed wake's fenced delete and a failed wake's written failure hold its job row until the
+commit, so the reaper waits for the batch instead of returning the job meanwhile. The slot begins
+no wake past the hold limit and gives the rest back as for any claim, so a wake starts with five
+sixths of its lease, and a batch holds at most eight. The decisions of one batch share their
+`recorded_at` (the column's default, the transaction's start) and keep their order by id; a
+failure written in the batch shares it too, under a random id, so in a trace it sorts after the
+enrollment's earlier steps, as before, but by its id among the rows another wake of the same
+trace wrote in the batch, and before the rows of transactions that began while the batch ran.
+`zirv_flow_job_transactions_total{kind}` counts handler transactions, so jobs per
+transaction is `zirv_flow_jobs_total` over it; a batched job's duration is its own wake plus an
+equal share of the batch's setup and commit.
+
+Every lock a batch takes follows one order: flows by id, then the people of each wake in id order,
+wake by wake in ascending order of lock group, which is the order in which merge, erasure and the
+flow lifecycle jobs lock people (`ORDER BY id FOR UPDATE`); resume and archive lock their one flow
+before any person. A batch therefore waits for another batch, a merge or an erasure, or they wait
+for it, without a deadlock. Outside that order are the list rows a step's list change holds until
+the commit, the unique-key insert of a re-evaluation, and lock groups that interleave after merges.
+A deadlock among those is found after `deadlock_timeout` (1 s by default) and PostgreSQL aborts the
+statement of one side; in a batch that is one wake, which rolls back to its savepoint and retries
+alone, while the wait has used the hold limit, so the batch gives its unbegun wakes back.
+
+The engine invariants (section 18) hold per wake as for a job alone. A wake's writes, step rows,
+next wake and completion sit inside its savepoint and commit or roll back together, with the batch,
+so a completion that commits still means that its step committed once, and a wake that rolls back
+leaves nothing. A later wake of the batch reads what the earlier ones wrote, as it would after
+their commit, and the `state_version` compare-and-set, the step and effect keys and the wake keys
+are unchanged. Both simulation layers run batches (section 18).
 
 **Completion.** The runtime opens the handler's transaction and first takes a
 key-share lock on the job row, `SELECT 1 FROM jobs WHERE id = $1 AND
@@ -3207,7 +3262,7 @@ rows, and the survivor is re-evaluated through its `merge` change class (7.1).
 |-------|-------|
 | `core`, `segments` | Inline unit and property tests; golden SQL snapshots for the compiler; the AST generators (`proptest`, behind a `test-support` feature) and the golden corpus live in `segments`, golden files blessed with `ZIRV_FLOW_BLESS` |
 | Segments on PostgreSQL | Tests in `zirv-flow-jobs` comparing compiled SQL on Postgres with the reference evaluator; CI runs fixed seeds, and a scheduled nightly workflow runs random seeds without filing issues |
-| `engine` | Inline unit tests; deterministic simulation (ruling 05ce90ec) in two layers. (1) The engine harness: `zirv-flow-engine` ships a deterministic harness with an in-memory transactional runtime model that implements the same commit protocol (`state_version` checks, idempotency keys and wake keys; a crash discards the uncommitted transaction). It runs thousands of enrollments over 90 virtual days with seeded random events and a crash after every effect, using a seeded test evaluator (the engine does not depend on `segments`, 5.1). (2) The PostgreSQL test: a test in `zirv-flow-jobs` drives the real runtime with `ManualClock` over hundreds of enrollments for 90 days and injects two failures: a rollback before commit, and a crash after commit and before the job is acknowledged, followed by a re-claim (lease expiry, and a concurrent duplicate execution). Both layers check all four invariants: no internal effect applied twice, every external effect enqueued with a stable key, no timer fires early, every enrollment ends or waits on a due wake. CI uses fixed seeds and nightly runs random ones; the seeds and population sizes are recorded. |
+| `engine` | Inline unit tests; deterministic simulation (ruling 05ce90ec) in two layers. (1) The engine harness: `zirv-flow-engine` ships a deterministic harness with an in-memory transactional runtime model that implements the same commit protocol (`state_version` checks, idempotency keys and wake keys; a crash discards the uncommitted transaction). Outside the sweep that crashes at every effect, half of its claims that find more jobs due take up to eight and run them as a wake transaction (14): in lock order, each behind a savepoint, with some failing after their writes and rolled back alone, and a crash in any of them or after the commit redelivering them all; a model whose failed step rolls back its neighbours fails the fourth invariant. It runs thousands of enrollments over 90 virtual days with seeded random events and a crash after every effect, using a seeded test evaluator (the engine does not depend on `segments`, 5.1). (2) The PostgreSQL test: a test in `zirv-flow-jobs` drives the real runtime with `ManualClock` over hundreds of enrollments for 90 days and injects two failures: a rollback before commit, and a crash after commit and before the job is acknowledged, followed by a re-claim (lease expiry, and a concurrent duplicate execution). Half of its drain rounds run the due steps through the worker's wake transactions instead, with a failed commit injected into some batches, after which every step of the batch runs again. Both layers check all four invariants: no internal effect applied twice, every external effect enqueued with a stable key, no timer fires early, every enrollment ends or waits on a due wake. CI uses fixed seeds and nightly runs random ones; the seeds and population sizes are recorded. |
 | Store and queue | Postgres-backed integration tests in CI: claim concurrency, lease expiry, fencing, unique keys, scheduler failover |
 | Ingestion and events | Idempotent replay, identity scenario suite, schema-mode and unplanned-event matrix, redaction, duplicate/late/future handling, reject replay, debugger masking and SSE latency, explorer filters/timeouts/CSV, deletion propagation, erasure table scan |
 | Connectors | Database sources against service containers; HTTP manifests against recorded fixtures and a mock server (pagination, OAuth refresh, `429`) |
