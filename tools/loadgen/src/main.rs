@@ -9,6 +9,7 @@ mod report;
 mod runner;
 mod sse;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -16,7 +17,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::{CommandFactory, FromArgMatches, Parser};
 
-use report::{Latency, PhaseReport, Report, StatusCounts, achieved_rate};
+use report::{Latency, PhaseReport, Report, StatusCounts, achieved_rate, timeline};
 use runner::{Config, Mode, Phase, PhaseOutcome, run_phase};
 
 /// Latency samples of a whole run, in microseconds.
@@ -178,6 +179,8 @@ async fn run(args: Args) -> Result<(), String> {
 
     let mut phases = Vec::new();
     let mut samples = Samples::default();
+    let mut by_second: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+    let mut offset_s = 0;
     let mut seq = 0;
     for phase in [
         Phase {
@@ -199,6 +202,7 @@ async fn run(args: Args) -> Result<(), String> {
             schedule_us,
             service_us,
             lag_us,
+            by_second: phase_seconds,
             next_seq: next,
         } = run_phase(&client, &config, &phase, seq).await;
         eprintln!(
@@ -215,6 +219,13 @@ async fn run(args: Args) -> Result<(), String> {
         samples.schedule_us.extend(schedule_us);
         samples.service_us.extend(service_us);
         samples.lag_us.extend(lag_us);
+        for (second, micros) in phase_seconds {
+            by_second
+                .entry(offset_s + second)
+                .or_default()
+                .extend(micros);
+        }
+        offset_s += phase.duration_s.ceil() as u64;
         phases.push(report);
     }
 
@@ -234,6 +245,7 @@ async fn run(args: Args) -> Result<(), String> {
         latency_note: LATENCY_NOTE,
         total: merge(&phases, samples),
         phases,
+        timeline_from_schedule: timeline(by_second),
     };
     let json = serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?;
     match &args.out {
