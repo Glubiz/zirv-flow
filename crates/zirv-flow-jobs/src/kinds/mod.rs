@@ -44,6 +44,8 @@ mod webhook_call;
 #[cfg(test)]
 mod simulation;
 
+pub(crate) use flow_step::{WakeBatch, plan_wakes};
+
 /// The rows removed by the last recorded run of `window`; none before its first run.
 #[cfg(test)]
 pub(crate) async fn recorded_run(pool: &zirv_flow_store::PgPool, window: &str) -> Option<i64> {

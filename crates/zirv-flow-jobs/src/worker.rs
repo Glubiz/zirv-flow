@@ -1,29 +1,37 @@
 //! The worker pool: claims jobs, runs them with a heartbeat, and completes each in the same
-//! transaction as the handler's own writes.
+//! transaction as the handler's own writes. The `flow.step` jobs of one workspace that a claim
+//! returns together share one transaction, a savepoint each (#397).
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use hashbrown::HashMap;
+use sqlx::Connection;
 use tokio::sync::{Notify, oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{Instrument, Span, info, info_span, warn};
+use uuid::Uuid;
 use zirv_flow_connectors::dns::DnsResolver;
 use zirv_flow_connectors::runtime::RateLimits;
+use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::egress::EgressPolicy;
 use zirv_flow_core::schedule::backoff;
 use zirv_flow_render::RenderPool;
 use zirv_flow_store::{
     ClaimedJob, Clock, DecisionRetention, EventRetention, FailOutcome, HmacKey, Keyring,
-    MessageRetention, PgPool, RetentionSettings, begin, claim_jobs, complete_job, fail_job,
-    heartbeat_job, listen_for_jobs, lock_lease, observe_pool, release_jobs, sized_like,
+    MessageRetention, PgConnection, PgPool, RetentionSettings, STEP_JOB_KIND, begin,
+    cache_change_readers, claim_jobs, complete_job, fail_job, heartbeat_job, listen_for_jobs,
+    lock_lease, observe_pool, release_jobs, sized_like,
 };
 
+use crate::JobError;
 use crate::context::{IngestSettings, JobContext};
 use crate::delivery::rate::RateGates;
+use crate::kinds::{WakeBatch, plan_wakes};
 use crate::metrics::{self, Outcome};
-use crate::registry::Registry;
+use crate::registry::{ErasedKind, Registry};
 
 /// How long a claim or a handler transaction waits for a connection of the worker's own.
 const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -31,9 +39,10 @@ const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
 /// How often the worker's pools are sampled for the pool gauges.
 const POOL_SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 
-/// How many due jobs a slot claims with one statement and one commit, to run one after another,
-/// each in its own transaction (#397). Kept small, so a batch holds little work back from the
-/// other slots and from the priorities behind it.
+/// How many due jobs a slot claims with one statement and one commit, to run one after another:
+/// each in its own transaction, but the `flow.step` jobs of a workspace in one (#397). Kept
+/// small, so a batch holds little work back from the other slots and from the priorities behind
+/// it, and a batch transaction holds few locks.
 const CLAIM_BATCH: u32 = 8;
 
 /// The longest a slot holds a claimed job it has not started; see [`hold_limit`].
@@ -317,13 +326,64 @@ fn hold_limit(lease: Duration) -> Duration {
     (lease / 6).min(MAX_HOLD)
 }
 
-/// Runs a claimed batch in claim order, each job in its own transaction exactly as if it had
-/// been claimed alone, so its lease check, heartbeat and completion are its own.
+/// What a slot runs in one transaction.
+enum Unit {
+    /// A job in a transaction of its own.
+    Alone(ClaimedJob),
+    /// The `flow.step` jobs of one workspace that one claim returned, in one transaction (#397).
+    Wakes(WorkspaceId, Vec<ClaimedJob>),
+}
+
+impl Unit {
+    fn into_jobs(self) -> Vec<ClaimedJob> {
+        match self {
+            Self::Alone(job) => vec![job],
+            Self::Wakes(_, jobs) => jobs,
+        }
+    }
+}
+
+/// Splits a claimed batch into what runs in one transaction each, in claim order. The `flow.step`
+/// jobs of a workspace join the first of them, so a slot runs a workspace's wakes in one
+/// transaction (#397); every other job, and a workspace's only wake, runs alone as before.
+fn units(batch: Vec<ClaimedJob>) -> VecDeque<Unit> {
+    let mut units: Vec<Unit> = Vec::with_capacity(batch.len());
+    let mut wakes: HashMap<Uuid, usize> = HashMap::new();
+    for job in batch {
+        let Some(workspace) = job.workspace_id.filter(|_| job.kind == STEP_JOB_KIND) else {
+            units.push(Unit::Alone(job));
+            continue;
+        };
+        match wakes
+            .get(&workspace)
+            .and_then(|index| units.get_mut(*index))
+        {
+            Some(Unit::Wakes(_, jobs)) => jobs.push(job),
+            _ => {
+                wakes.insert(workspace, units.len());
+                units.push(Unit::Wakes(WorkspaceId::from_uuid(workspace), vec![job]));
+            }
+        }
+    }
+    units
+        .into_iter()
+        .flat_map(|unit| match unit {
+            Unit::Wakes(workspace, jobs) if jobs.len() > 1 => vec![Unit::Wakes(workspace, jobs)],
+            unit => unit.into_jobs().into_iter().map(Unit::Alone).collect(),
+        })
+        .collect()
+}
+
+/// Runs a claimed batch in claim order. Each job runs in its own transaction exactly as if it
+/// had been claimed alone, so its lease check, heartbeat and completion are its own, except the
+/// `flow.step` jobs of one workspace, which share one transaction ([`execute_wakes`]) and keep a
+/// lease check, heartbeat and completion each.
 ///
 /// The jobs not started yet go back to the queue as soon as the pool is told to stop or
 /// [`hold_limit`] has passed since the claim was `sent`, even while a handler runs; the hold
-/// counts the claim's own wait, so a claim that waited long starts nothing. Should the slot die
-/// first, they run again once their leases expire, as a running job does.
+/// counts the claim's own wait, so a claim that waited long starts nothing. A wake of a shared
+/// transaction starts when it begins, so the wakes not begun by then go back too. Should the slot
+/// die first, they run again once their leases expire, as a running job does.
 async fn run_batch(
     shared: &Arc<Shared>,
     batch: Vec<ClaimedJob>,
@@ -332,41 +392,81 @@ async fn run_batch(
 ) {
     let claimed = tokio::time::Instant::now();
     let deadline = sent + hold_limit(shared.config.lease);
-    let mut held = VecDeque::from(batch);
-    while let Some(job) = held.pop_front() {
+    let mut held = units(batch);
+    while let Some(unit) = held.pop_front() {
         if *stop.borrow() || tokio::time::Instant::now() >= deadline {
-            held.push_front(job);
+            held.push_front(unit);
             break;
         }
-        // The lag runs to the start, so a wait behind the jobs claimed with this one counts.
-        metrics::record_claim_lag(
-            &job.kind,
-            job.claim_lag_seconds + claimed.elapsed().as_secs_f64(),
-        );
-        let attempt = process(shared, job);
-        tokio::pin!(attempt);
-        loop {
-            tokio::select! {
-                () = &mut attempt => break,
-                () = tokio::time::sleep_until(deadline), if !held.is_empty() => {
-                    release(shared, &mut held).await;
-                }
-                _ = stop.changed(), if !held.is_empty() => release(shared, &mut held).await,
+        match unit {
+            Unit::Alone(job) => {
+                // The lag runs to the start, so a wait behind the jobs claimed with this one
+                // counts.
+                metrics::record_claim_lag(
+                    &job.kind,
+                    job.claim_lag_seconds + claimed.elapsed().as_secs_f64(),
+                );
+                let attempt = process(shared, job);
+                hold_during(shared, attempt, &mut held, None, deadline, stop).await;
+            }
+            Unit::Wakes(workspace, jobs) => {
+                let queue = Arc::new(Queue::new(jobs));
+                let wakes = Wakes {
+                    workspace,
+                    queue: Arc::clone(&queue),
+                    claimed,
+                    deadline,
+                    stop: stop.clone(),
+                };
+                let attempt = process_wakes(shared, wakes);
+                hold_during(shared, attempt, &mut held, Some(&queue), deadline, stop).await;
             }
         }
     }
-    release(shared, &mut held).await;
+    release(shared, held_jobs(&mut held, None)).await;
 }
 
-/// Gives the claimed jobs a slot has not started back to the queue, on the heartbeat pool, as
-/// the slot's own connection may still be in its handler's transaction. A failure leaves them
-/// to lease expiry, the path of a slot that died.
-async fn release(shared: &Shared, held: &mut VecDeque<ClaimedJob>) {
+/// Waits for `attempt`, and gives back the jobs held behind it, the units in `held` and the wakes
+/// of `queue` not begun, once the hold has passed or the pool is told to stop.
+async fn hold_during<T>(
+    shared: &Shared,
+    attempt: impl Future<Output = T>,
+    held: &mut VecDeque<Unit>,
+    queue: Option<&Queue>,
+    deadline: tokio::time::Instant,
+    stop: &mut watch::Receiver<bool>,
+) {
+    tokio::pin!(attempt);
+    loop {
+        let holding = !held.is_empty() || queue.is_some_and(Queue::has_pending);
+        tokio::select! {
+            _ = &mut attempt => break,
+            () = tokio::time::sleep_until(deadline), if holding => {
+                release(shared, held_jobs(held, queue)).await;
+            }
+            _ = stop.changed(), if holding => release(shared, held_jobs(held, queue)).await,
+        }
+    }
+}
+
+/// Every job in `held`, and the wakes of `queue` not begun, taken out to be given back.
+fn held_jobs(held: &mut VecDeque<Unit>, queue: Option<&Queue>) -> Vec<ClaimedJob> {
+    let mut jobs: Vec<ClaimedJob> = held.drain(..).flat_map(Unit::into_jobs).collect();
+    if let Some(queue) = queue {
+        jobs.extend(queue.take_pending());
+    }
+    jobs
+}
+
+/// Gives claimed jobs a slot has not started back to the queue, on the heartbeat pool, as the
+/// slot's own connection may still be in its handler's transaction. A failure leaves them to lease
+/// expiry, the path of a slot that died.
+async fn release(shared: &Shared, held: Vec<ClaimedJob>) {
     if held.is_empty() {
         return;
     }
     let jobs: Vec<_> = held
-        .drain(..)
+        .into_iter()
         .map(|job| (job.id, job.lease_token))
         .collect();
     if let Err(error) = release_jobs(&shared.heartbeat_pool, &jobs).await {
@@ -393,8 +493,11 @@ enum Attempt {
     Failed(String, Option<Duration>),
 }
 
-/// Runs one claimed job inside its `job` span and records what happened to it.
-async fn process(shared: &Arc<Shared>, job: ClaimedJob) {
+/// What a job whose transaction did not commit failed with.
+const NOT_COMMITTED: &str = "could not commit the job transaction";
+
+/// The span a job runs and is settled in.
+fn job_span(job: &ClaimedJob) -> Span {
     let span = info_span!(
         "job",
         job_id = %job.id,
@@ -408,6 +511,12 @@ async fn process(shared: &Arc<Shared>, job: ClaimedJob) {
     if let Some(workspace) = job.workspace_id {
         span.record("workspace_id", tracing::field::display(workspace));
     }
+    span
+}
+
+/// Runs one claimed job inside its `job` span and records what happened to it.
+async fn process(shared: &Arc<Shared>, job: ClaimedJob) {
+    let span = job_span(&job);
     run_attempt(shared, job).instrument(span).await;
 }
 
@@ -421,18 +530,23 @@ async fn run_attempt(shared: &Arc<Shared>, job: ClaimedJob) {
         Ok(attempt) => attempt,
         Err(_) => Attempt::Failed("the job handler panicked".into(), None),
     };
+    settle(shared, &job, attempt, started.elapsed()).await;
+}
 
+/// Settles an attempt that ended, then logs and counts it; `ran` is how long it ran before.
+async fn settle(shared: &Shared, job: &ClaimedJob, attempt: Attempt, ran: Duration) -> Outcome {
+    let settling = Instant::now();
     let mut failure = None;
     let outcome = match attempt {
         Attempt::Completed => Outcome::Completed,
         Attempt::LeaseLost => Outcome::LeaseLost,
         Attempt::Failed(reason, retry_after) => {
-            let outcome = settle_failure(shared, &job, &reason, retry_after).await;
+            let outcome = settle_failure(shared, job, &reason, retry_after).await;
             failure = Some(reason);
             outcome
         }
     };
-    let elapsed = started.elapsed();
+    let elapsed = ran + settling.elapsed();
     let duration_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
     match (outcome, failure) {
         (Outcome::Completed, _) => info!(duration_ms, "job completed"),
@@ -449,6 +563,7 @@ async fn run_attempt(shared: &Arc<Shared>, job: ClaimedJob) {
         _ => warn!(duration_ms, "job lost its lease; its work was discarded"),
     }
     metrics::record_attempt(&job.kind, outcome, elapsed.as_secs_f64());
+    outcome
 }
 
 /// How long to wait before the next attempt: the backoff, or the wait the handler asked for
@@ -487,6 +602,35 @@ async fn settle_failure(
     }
 }
 
+/// The handler's context, with everything the worker's configuration gives a handler.
+fn configured<'a>(shared: &Shared, ctx: JobContext<'a>) -> JobContext<'a> {
+    let config = &shared.config;
+    ctx.with_event_retention(config.event_retention)
+        .with_export_max_bytes(config.export_max_bytes)
+        .with_message_retention(config.message_retention)
+        .with_decision_retention(config.decision_retention)
+        .with_retention_settings(config.retention_settings)
+        .with_log_retention_days(config.job_history_days, config.audit_days)
+        .with_identifier_key(config.identifier_key.clone())
+        .with_ledger_dir(config.ledger_dir.clone())
+        .with_clock(config.clock.clone())
+        .with_rate_gates(Arc::clone(&config.rate_gates))
+        .with_render_pool(config.render_pool.clone())
+        .with_dns(config.dns.clone())
+        .with_tracking(config.public_url.clone(), config.tracking_key.clone())
+        .with_outbound(
+            config.keyring.clone(),
+            Arc::clone(&config.egress),
+            Arc::clone(&config.rate_limits),
+        )
+        .with_ingest(IngestSettings {
+            pool: shared.pool.clone(),
+            redaction_key: config.redaction_key.clone(),
+            batch_size: config.ingest_drain_batch_size,
+            shards: config.ingest_drain_shards,
+        })
+}
+
 /// The handler's transaction: take its person-change guard if needed, confirm the lease,
 /// run the handler beside a heartbeat, then
 /// delete the job and commit with everything the handler wrote.
@@ -497,14 +641,12 @@ async fn execute(shared: Arc<Shared>, job: ClaimedJob) -> Attempt {
     let Ok(mut tx) = begin(&shared.pool).await else {
         return Attempt::Failed("could not start the job transaction".into(), None);
     };
+    metrics::record_transaction(&job.kind);
     if kind.needs_change_readers()
         && let Some(workspace) = job.workspace_id
-        && zirv_flow_store::cache_change_readers(
-            &mut tx,
-            zirv_flow_core::WorkspaceId::from_uuid(workspace),
-        )
-        .await
-        .is_err()
+        && cache_change_readers(&mut tx, WorkspaceId::from_uuid(workspace))
+            .await
+            .is_err()
     {
         return Attempt::Failed("could not guard person changes".into(), None);
     }
@@ -521,34 +663,7 @@ async fn execute(shared: Arc<Shared>, job: ClaimedJob) -> Attempt {
         lost,
     )));
     let result = {
-        let mut ctx = JobContext::new(&mut tx, &job)
-            .with_event_retention(shared.config.event_retention)
-            .with_export_max_bytes(shared.config.export_max_bytes)
-            .with_message_retention(shared.config.message_retention)
-            .with_decision_retention(shared.config.decision_retention)
-            .with_retention_settings(shared.config.retention_settings)
-            .with_log_retention_days(shared.config.job_history_days, shared.config.audit_days)
-            .with_identifier_key(shared.config.identifier_key.clone())
-            .with_ledger_dir(shared.config.ledger_dir.clone())
-            .with_clock(shared.config.clock.clone())
-            .with_rate_gates(Arc::clone(&shared.config.rate_gates))
-            .with_render_pool(shared.config.render_pool.clone())
-            .with_dns(shared.config.dns.clone())
-            .with_tracking(
-                shared.config.public_url.clone(),
-                shared.config.tracking_key.clone(),
-            )
-            .with_outbound(
-                shared.config.keyring.clone(),
-                Arc::clone(&shared.config.egress),
-                Arc::clone(&shared.config.rate_limits),
-            )
-            .with_ingest(IngestSettings {
-                pool: shared.pool.clone(),
-                redaction_key: shared.config.redaction_key.clone(),
-                batch_size: shared.config.ingest_drain_batch_size,
-                shards: shared.config.ingest_drain_shards,
-            });
+        let mut ctx = configured(&shared, JobContext::new(&mut tx, &job));
         let handler = kind.run(&mut ctx, job.payload.clone());
         tokio::select! {
             result = handler => Some(result),
@@ -563,13 +678,333 @@ async fn execute(shared: Arc<Shared>, job: ClaimedJob) -> Attempt {
         Some(Ok(())) => match complete_job(&mut *tx, job.id, job.lease_token).await {
             Ok(true) => match tx.commit().await {
                 Ok(()) => Attempt::Completed,
-                Err(_) => Attempt::Failed("could not commit the job transaction".into(), None),
+                Err(_) => Attempt::Failed(NOT_COMMITTED.into(), None),
             },
             // Another worker owns the job now: roll back this attempt's writes.
             Ok(false) => Attempt::LeaseLost,
             Err(_) => Attempt::Failed("could not complete the job".into(), None),
         },
     }
+}
+
+/// The wakes of a batch transaction: the ones not begun, which the transaction begins one at a
+/// time and the slot gives back once the hold has passed, and the ones begun.
+#[derive(Default)]
+struct WakeQueue {
+    pending: VecDeque<ClaimedJob>,
+    begun: Vec<ClaimedJob>,
+}
+
+/// A [`WakeQueue`] that the transaction's task and the slot share.
+struct Queue(Mutex<WakeQueue>);
+
+impl Queue {
+    fn new(jobs: Vec<ClaimedJob>) -> Self {
+        Self(Mutex::new(WakeQueue {
+            pending: jobs.into(),
+            begun: Vec::new(),
+        }))
+    }
+
+    /// Nothing panics while it holds the lock, so a poisoned lock still holds a whole queue.
+    fn lock(&self) -> MutexGuard<'_, WakeQueue> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn has_pending(&self) -> bool {
+        !self.lock().pending.is_empty()
+    }
+
+    fn pending(&self) -> Vec<ClaimedJob> {
+        self.lock().pending.iter().cloned().collect()
+    }
+
+    /// Puts the wakes not begun in the order of `key`; a stable sort keeps the claim's order
+    /// between ties.
+    fn order<K: Ord>(&self, key: impl FnMut(&ClaimedJob) -> K) {
+        self.lock().pending.make_contiguous().sort_by_key(key);
+    }
+
+    /// The next wake, which counts as begun from here.
+    fn begin_next(&self) -> Option<ClaimedJob> {
+        let mut queue = self.lock();
+        let job = queue.pending.pop_front()?;
+        queue.begun.push(job.clone());
+        Some(job)
+    }
+
+    /// Every wake not begun, which all count as begun from here.
+    fn begin_all(&self) -> Vec<ClaimedJob> {
+        let mut queue = self.lock();
+        let jobs: Vec<ClaimedJob> = queue.pending.drain(..).collect();
+        queue.begun.extend(jobs.iter().cloned());
+        jobs
+    }
+
+    /// The wakes not begun, taken out to be given back.
+    fn take_pending(&self) -> Vec<ClaimedJob> {
+        self.lock().pending.drain(..).collect()
+    }
+
+    fn begun(&self) -> Vec<ClaimedJob> {
+        self.lock().begun.clone()
+    }
+}
+
+/// A batch transaction about to run: the `flow.step` jobs of one workspace that one claim
+/// returned (#397).
+struct Wakes {
+    workspace: WorkspaceId,
+    queue: Arc<Queue>,
+    /// When the claim returned, for the claim lag.
+    claimed: tokio::time::Instant,
+    /// No wake begins at or past it: [`hold_limit`] after the claim was sent.
+    deadline: tokio::time::Instant,
+    stop: watch::Receiver<bool>,
+}
+
+/// A wake of a batch transaction and how its attempt ended. `took` is the time of its own work,
+/// from its savepoint to its release or rollback.
+struct Ran {
+    job: ClaimedJob,
+    attempt: Attempt,
+    took: Duration,
+    span: Span,
+}
+
+impl Ran {
+    fn failed(job: ClaimedJob, reason: &str) -> Self {
+        let span = job_span(&job);
+        Self {
+            job,
+            attempt: Attempt::Failed(reason.to_owned(), None),
+            took: Duration::ZERO,
+            span,
+        }
+    }
+}
+
+/// Runs a batch transaction, gives back the wakes it did not begin, then settles, logs and counts
+/// each wake it began in that wake's span, as [`process`] does a job. A job's time is its own wake
+/// and an equal share of what the transaction spent around the wakes (its beginning, guard, plan
+/// and commit), so the durations still add up to the slot's time. Returns how each begun wake
+/// ended.
+async fn process_wakes(shared: &Arc<Shared>, wakes: Wakes) -> Vec<(Uuid, Outcome)> {
+    let started = Instant::now();
+    let queue = Arc::clone(&wakes.queue);
+    let mut task = AbortOnDrop(tokio::spawn(
+        execute_wakes(Arc::clone(shared), wakes).instrument(Span::current()),
+    ));
+    let ran = match (&mut task.0).await {
+        Ok(ran) => ran,
+        // A panicking handler fails every wake begun, as it fails a job alone: the transaction
+        // rolled back with the task.
+        Err(_) => queue
+            .begun()
+            .into_iter()
+            .map(|job| Ran::failed(job, "the job handler panicked"))
+            .collect(),
+    };
+    release(shared, queue.take_pending()).await;
+    let own: Duration = ran.iter().map(|wake| wake.took).sum();
+    let count = u32::try_from(ran.len().max(1)).unwrap_or(u32::MAX);
+    let share = started.elapsed().saturating_sub(own) / count;
+    let mut outcomes = Vec::with_capacity(ran.len());
+    for wake in ran {
+        let Ran {
+            job,
+            attempt,
+            took,
+            span,
+        } = wake;
+        let outcome = settle(shared, &job, attempt, took + share)
+            .instrument(span)
+            .await;
+        outcomes.push((job.id, outcome));
+    }
+    outcomes
+}
+
+/// The batch transaction of the `flow.step` jobs of one workspace (#397): begin, take the
+/// person-change guard, read every wake's enrollment and hold their flows ([`plan_wakes`]), run
+/// the wakes one after another in the order their steps lock people in, each inside a savepoint
+/// of its own, and commit once.
+///
+/// A wake runs as a job alone does: its lease check, handler beside its heartbeat, and fenced
+/// completion, in its savepoint, which is released when the wake completes. A wake that fails or
+/// loses its lease rolls back to its savepoint, which undoes its writes and frees its locks, and
+/// the next wake goes on; the failure is settled after the transaction, with the attempt counted,
+/// as a job alone's is. A wake begins only before the deadline and while the pool runs; the rest
+/// stay in the queue, to be given back.
+///
+/// When the transaction cannot go on (a savepoint that cannot be begun, released or rolled back)
+/// or its commit fails, nothing of it is kept, and every wake that completed fails as a job alone
+/// whose commit failed: back to the queue with an attempt counted, or dead on its last attempt.
+async fn execute_wakes(shared: Arc<Shared>, wakes: Wakes) -> Vec<Ran> {
+    let Wakes {
+        workspace,
+        queue,
+        claimed,
+        deadline,
+        stop,
+    } = wakes;
+    let fail_all = |reason: &str| -> Vec<Ran> {
+        queue
+            .begin_all()
+            .into_iter()
+            .map(|job| Ran::failed(job, reason))
+            .collect()
+    };
+    let Some(kind) = shared.registry.get(STEP_JOB_KIND) else {
+        return fail_all("no handler is registered for this job kind");
+    };
+    let Ok(mut tx) = begin(&shared.pool).await else {
+        return fail_all("could not start the job transaction");
+    };
+    metrics::record_transaction(STEP_JOB_KIND);
+    if kind.needs_change_readers() && cache_change_readers(&mut tx, workspace).await.is_err() {
+        return fail_all("could not guard person changes");
+    }
+    let mut batch = match plan_wakes(&mut tx, workspace, &queue.pending()).await {
+        Ok(batch) => batch,
+        Err(error) => return fail_all(&JobError::from(error).to_string()),
+    };
+    queue.order(|job| batch.lock_order(job));
+
+    let mut ran = Vec::new();
+    let mut usable = true;
+    while usable && !*stop.borrow() && tokio::time::Instant::now() < deadline {
+        let Some(job) = queue.begin_next() else {
+            break;
+        };
+        // The lag runs to the start, so a wait behind the jobs claimed with this one counts.
+        metrics::record_claim_lag(
+            &job.kind,
+            job.claim_lag_seconds + claimed.elapsed().as_secs_f64(),
+        );
+        let span = job_span(&job);
+        let started = Instant::now();
+        let attempt = run_wake(&shared, kind, &mut tx, &job, &mut batch)
+            .instrument(span.clone())
+            .await;
+        let attempt = attempt.unwrap_or_else(|| {
+            usable = false;
+            Attempt::Failed(NOT_COMMITTED.into(), None)
+        });
+        ran.push(Ran {
+            job,
+            attempt,
+            took: started.elapsed(),
+            span,
+        });
+    }
+    if usable {
+        if tx.commit().await.is_ok() {
+            return ran;
+        }
+    } else if tx.rollback().await.is_err() {
+        // The connection is broken; the server ends the transaction when it goes.
+        warn!("could not roll back a batch transaction");
+    }
+    // Rolled back before the failures are settled, so its row locks are gone by then.
+    for wake in &mut ran {
+        if matches!(wake.attempt, Attempt::Completed) {
+            wake.attempt = Attempt::Failed(NOT_COMMITTED.into(), None);
+        }
+    }
+    ran
+}
+
+/// One wake of a batch transaction, inside a savepoint of its own. `None` means the savepoint
+/// could not be begun, released or rolled back, which leaves the transaction unusable.
+async fn run_wake(
+    shared: &Arc<Shared>,
+    kind: &'static dyn ErasedKind,
+    tx: &mut PgConnection,
+    job: &ClaimedJob,
+    batch: &mut WakeBatch,
+) -> Option<Attempt> {
+    let mut savepoint = tx.begin().await.ok()?;
+    let attempt = match lock_lease(&mut savepoint, job.id, job.lease_token).await {
+        Ok(true) => attempt_wake(shared, kind, &mut savepoint, job, batch).await,
+        Ok(false) => Attempt::LeaseLost,
+        Err(_) => Attempt::Failed("could not confirm the lease".into(), None),
+    };
+    let ended = match attempt {
+        Attempt::Completed => savepoint.commit().await,
+        Attempt::LeaseLost | Attempt::Failed(..) => savepoint.rollback().await,
+    };
+    ended.ok().map(|()| attempt)
+}
+
+/// A wake's handler beside its heartbeat, then its completion, fenced on its lease.
+async fn attempt_wake(
+    shared: &Arc<Shared>,
+    kind: &'static dyn ErasedKind,
+    connection: &mut PgConnection,
+    job: &ClaimedJob,
+    batch: &mut WakeBatch,
+) -> Attempt {
+    let (lost, mut lease_lost) = oneshot::channel();
+    let heartbeat = AbortOnDrop(tokio::spawn(heartbeat(
+        Arc::clone(shared),
+        job.clone(),
+        lost,
+    )));
+    let result = {
+        let mut ctx = configured(shared, JobContext::new(&mut *connection, job)).with_wakes(batch);
+        let handler = kind.run(&mut ctx, job.payload.clone());
+        tokio::select! {
+            result = handler => Some(result),
+            // Dropping the handler cancels it; its savepoint rolls back.
+            Ok(()) = &mut lease_lost => None,
+        }
+    };
+    // Stopped before the completion: once the job row is deleted, a beat would wait for the
+    // batch's commit.
+    drop(heartbeat);
+    match result {
+        None => Attempt::LeaseLost,
+        Some(Err(error)) => Attempt::Failed(error.to_string(), error.retry_after()),
+        Some(Ok(())) => match complete_job(&mut *connection, job.id, job.lease_token).await {
+            Ok(true) => Attempt::Completed,
+            // Another worker owns the job now: roll back this wake's writes.
+            Ok(false) => Attempt::LeaseLost,
+            Err(_) => Attempt::Failed("could not complete the job".into(), None),
+        },
+    }
+}
+
+/// Runs `jobs`, the `flow.step` jobs of `workspace` that one claim returned, in one batch
+/// transaction, and settles each as a slot does, with no hold: the test seat of
+/// [`process_wakes`].
+#[cfg(test)]
+pub(crate) async fn run_wakes(
+    pool: &PgPool,
+    config: WorkerConfig,
+    workspace: WorkspaceId,
+    jobs: Vec<ClaimedJob>,
+) -> Vec<(Uuid, Outcome)> {
+    let registry = Registry::built_in();
+    let shared = Arc::new(Shared {
+        pool: pool.clone(),
+        heartbeat_pool: pool.clone(),
+        listener_pool: pool.clone(),
+        kinds: registry.kinds(),
+        registry,
+        config,
+        wake: Notify::new(),
+    });
+    let now = tokio::time::Instant::now();
+    let (_running, stop) = watch::channel(false);
+    let wakes = Wakes {
+        workspace,
+        queue: Arc::new(Queue::new(jobs)),
+        claimed: now,
+        deadline: now + Duration::from_secs(3600),
+        stop,
+    };
+    process_wakes(&shared, wakes).await
 }
 
 /// Extends the lease every third of its length, and says so when the lease is gone.
@@ -943,6 +1378,65 @@ mod tests {
             let unit = random_unit();
             assert!((0.0..1.0).contains(&unit), "{unit}");
         }
+    }
+
+    fn claimed(kind: &str, workspace: Option<u128>, index: u128) -> ClaimedJob {
+        ClaimedJob {
+            id: Uuid::from_u128(index),
+            workspace_id: workspace.map(Uuid::from_u128),
+            kind: kind.to_owned(),
+            payload: json!({}),
+            attempts: 1,
+            max_attempts: 5,
+            lease_token: Uuid::from_u128(index),
+            unique_key: None,
+            trace: TraceContext::root(Cause::api("t")),
+            claim_lag_seconds: 0.0,
+        }
+    }
+
+    /// Each unit as `None` for a job alone or the workspace of a shared transaction, with the
+    /// indexes of its jobs.
+    fn shapes(units: VecDeque<Unit>) -> Vec<(Option<u128>, Vec<u128>)> {
+        units
+            .into_iter()
+            .map(|unit| match unit {
+                Unit::Alone(job) => (None, vec![job.id.as_u128()]),
+                Unit::Wakes(workspace, jobs) => (
+                    Some(workspace.as_uuid().as_u128()),
+                    jobs.iter().map(|job| job.id.as_u128()).collect(),
+                ),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_wakes_of_a_workspace_share_a_transaction_at_the_first_ones_place_and_the_rest_run_alone()
+    {
+        let batch = vec![
+            claimed("test.effect", Some(1), 1),
+            claimed(STEP_JOB_KIND, Some(1), 2),
+            claimed(STEP_JOB_KIND, Some(2), 3),
+            claimed(STEP_JOB_KIND, Some(1), 4),
+            claimed("test.effect", Some(1), 5),
+            claimed(STEP_JOB_KIND, None, 6),
+            claimed(STEP_JOB_KIND, Some(1), 7),
+            claimed(STEP_JOB_KIND, Some(3), 8),
+        ];
+
+        assert_eq!(
+            shapes(units(batch)),
+            [
+                (None, vec![1]),
+                (Some(1), vec![2, 4, 7]),
+                (None, vec![3]),
+                (None, vec![5]),
+                (None, vec![6]),
+                (None, vec![8]),
+            ],
+            "workspace 2 and 3 have one wake each, and a wake without a workspace runs alone"
+        );
+        assert!(units(Vec::new()).is_empty());
     }
 
     /// The handler p99.7 measured at 10 M waiting enrollments (#397).
