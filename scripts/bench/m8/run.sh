@@ -9,7 +9,7 @@ Usage: bash scripts/bench/m8/run.sh <command>
   up                   Start the isolated bench stack (pre-pulled versioned image)
   seed <name>          SQL seed: people | events | enrollments (resumable)
   smoke                Separate small stack; 60s ingest, 5s debugger, 3,000 jobs
-  ingest | debugger | explorer | jobs | timers | decisions | send | render | segments
+  ingest | batch | debugger | explorer | jobs | timers | decisions | send | render | segments
   all                  Run all registered benchmarks; note unregistered ones
   debugger             Watch streams before track load (M8_DEBUGGER_CLIENTS=1; full: 20)
   explorer             90-day queries at default/15000 ms, alongside track ingest
@@ -26,6 +26,7 @@ HELP
 bench_command() {
   case "$1" in
     ingest) cmd=(bash "$m8_dir/ingest.sh" "$raw" "$pool") ;;
+    batch) cmd=(env M8_BATCH_SIZE="${M8_BATCH_SIZE:-500}" bash "$m8_dir/ingest.sh" "$raw" "$pool") ;;
     segments) cmd=(bash "$root/scripts/bench/m4/measure.sh" all) ;;
     render) cmd=(bash "$root/scripts/bench/m7/render.sh" "$raw") ;;
     send) cmd=(bash "$root/scripts/bench/m6/run.sh" "m8-${raw##*/}") ;;
@@ -154,7 +155,7 @@ run_bench() {
   pool=$((M8_PEOPLE * 2 / 5)); [ "$pool" -le 1000000 ] || pool=1000000
   raw="$M4_STATE/../runs/$bench-$(date -u +%Y%m%dT%H%M%S)-$$"
   bench_command "$bench" || return $?
-  case "$bench" in ingest | debugger | explorer | jobs | timers) host_pg_setup ;; esac
+  case "$bench" in ingest | batch | debugger | explorer | jobs | timers) host_pg_setup ;; esac
   validate_cpus
   seed_manifest
   mkdir -p "$raw"
@@ -208,14 +209,14 @@ main() {
     seed)
       [ "$#" = 2 ] || die 'seed requires one name: people, events or enrollments'
       case "$2" in people | events | enrollments) ;; *) die "unknown seed: $2" ;; esac ;;
-    up | smoke | all | ingest | debugger | explorer | jobs | timers | decisions | send | render | segments)
+    up | smoke | all | ingest | batch | debugger | explorer | jobs | timers | decisions | send | render | segments)
       [ "$#" = 1 ] || die 'unexpected arguments' ;;
     *) die "unknown subcommand: $1" ;;
   esac
   [ "$1" != smoke ] || { smoke=1; export M8_SMOKE=1; }
   configure
   case "$1" in
-    ingest | debugger | explorer) host_pg_setup ;;
+    ingest | batch | debugger | explorer) host_pg_setup ;;
     jobs | timers | smoke | all) host_pg_setup; require_job_sampler ;;
   esac
   case "$1" in
