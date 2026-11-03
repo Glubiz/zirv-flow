@@ -212,9 +212,8 @@ pub(crate) async fn plan_wakes(
         .await?
         .into_iter()
         .collect();
-    let mut flows: Vec<Uuid> = reads.values().map(|read| read.flow_id).collect();
-    flows.sort_unstable();
-    flows.dedup();
+    // The statement orders and deduplicates the flows itself.
+    let flows: Vec<Uuid> = reads.values().map(|read| read.flow_id).collect();
     let flows = flow_states_for_steps(conn, workspace, &flows)
         .await?
         .into_iter()
