@@ -62,7 +62,7 @@ does not exist.
 | `zirv_flow_jobs` | gauge | `kind`, `state` | Queue depth for `ready`, `running` and `dead` |
 | `zirv_flow_jobs_total` | counter | `kind`, `outcome` | Job attempts by how they ended |
 | `zirv_flow_job_duration_seconds` | histogram | `kind` | Handler duration |
-| `zirv_flow_job_claim_lag_seconds` | histogram | `kind` | Time from `run_at` to the claim |
+| `zirv_flow_job_claim_lag_seconds` | histogram | `kind` | Time from `run_at` until a worker starts the job: its claim, plus its wait behind the jobs claimed with it |
 | `zirv_flow_retention_deleted_total` | counter | `table` | Rows a retention job removed; `table` is `messages`, `decision_records`, `jobs` or `audit_log` |
 | `zirv_flow_retention_last_run_timestamp_seconds` | gauge | `table` | Unix time of the last retention run of `table` |
 | `zirv_flow_egress_denied_total` | counter | `class` | Outbound requests refused by the egress policy |
@@ -164,9 +164,14 @@ use it:
 | `zirv-flow scheduler` | Elected leader (an advisory lock; the others stand by and take over within seconds): enqueues due cron schedules, returns jobs with expired leases to the queue, keeps the decision log and event partitions for this and next month, expires person exports hourly, deletes import files and rejects past their retention (see [CSV import](../guide/sources.md#csv-import)), and exports queue gauges. |
 | `zirv-flow all` | `serve`, `worker` and `scheduler` in one process (the default). |
 
-A running job holds a lease of `worker.lease_seconds`, which its worker extends
-every third of that while the handler runs. A worker that dies leaves its job to
-the scheduler, which makes it runnable again once the lease has expired; a job
+Each of a worker's `worker.concurrency` slots claims up to eight due jobs at once
+and runs them one after another. A running job holds a lease of
+`worker.lease_seconds`, which its worker extends every third of that while the
+handler runs. A claimed job waits for its turn on the lease from its claim: the
+slot gives the jobs it has not started back to the queue after a sixth of the
+lease (at most a second), so they never wait long behind a slow job, and at once
+when the worker stops. A worker that dies leaves its jobs to the scheduler, which
+makes them runnable again once their leases have expired; a job
 that fails is retried with exponential backoff and jitter, and is kept as
 `dead` after its last attempt. A job's database writes commit together with its
 completion, so a job never completes twice. Work that reaches outside the
@@ -176,8 +181,9 @@ workspace cannot take every worker.
 
 For pool sizes and the deployment connection budget, see [connection arithmetic](sizing.md#connection-arithmetic).
 
-On `SIGTERM` or Ctrl-C a worker stops claiming and has 30 seconds to finish
-running jobs; any still running are left to lease expiry. The
+On `SIGTERM` or Ctrl-C a worker stops claiming, gives back the jobs it claimed
+but has not started, and has 30 seconds to finish running jobs; any still
+running are left to lease expiry. The
 `ingest.drain` kind (one per workspace) applies that workspace's ingestion inbox; see
 [Ingestion](../people.md#ingestion). `/metrics` carries
 `zirv_flow_jobs_total{kind,outcome}`, `zirv_flow_job_duration_seconds{kind}`,
