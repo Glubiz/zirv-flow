@@ -34,7 +34,7 @@ bench_command() {
     explorer) cmd=(bash "$m8_dir/explorer.sh" "$raw" "$pool") ;;
     jobs) cmd=(bash "$m8_dir/jobs.sh" "$raw") ;;
     timers) cmd=(bash "$m8_dir/timers.sh" "$raw" "$pool") ;;
-    decisions) log 'decisions is not registered; #397 adapts ab.sh and registers it'; return 3 ;;
+    decisions) cmd=(bash "$m8_dir/decisions.sh" "$raw") ;;
   esac
 }
 
@@ -155,6 +155,15 @@ run_bench() {
   pool=$((M8_PEOPLE * 2 / 5)); [ "$pool" -le 1000000 ] || pool=1000000
   raw="$M4_STATE/../runs/$bench-$(date -u +%Y%m%dT%H%M%S)-$$"
   bench_command "$bench" || return $?
+  if [ "$bench" = decisions ]; then
+    # The A/B builds its own containers and stops the M8 stack for the run: no M8 topology, seeds or instrumentation.
+    host_pg_setup
+    mkdir -p "$raw"
+    topology="$raw/topology.ndjson"
+    "${cmd[@]}" || rc=$?
+    write_data "$bench" "$rc" "$raw" "$topology" "${cmd[@]}"
+    return "$rc"
+  fi
   case "$bench" in ingest | batch | debugger | explorer | jobs | timers) host_pg_setup ;; esac
   validate_cpus
   seed_manifest

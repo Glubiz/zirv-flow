@@ -43,12 +43,6 @@ expect_failure 'unknown subcommand' bash "$here/run.sh" nope
 expect_failure 'seed requires' bash "$here/run.sh" seed
 expect_failure 'unknown seed' bash "$here/run.sh" seed nope
 expect_failure 'unexpected arguments' bash "$here/run.sh" up extra
-for spec in 'decisions:#397'; do
-  rc=0
-  bash "$here/run.sh" "${spec%:*}" >"$work/output" 2>&1 || rc=$?
-  [ "$rc" = 3 ]
-  grep -Fq -- "${spec#*:}" "$work/output"
-done
 for spec in 'M8_SERVE_CPUSET=8-11' 'M8_WORKER_CPUSET=8-11' 'M8_WORKER_CPUSET=0-3'; do
   : >"$M8_TEST_CALLS"
   expect_failure 'overlapping cpusets' env "$spec" bash "$here/run.sh" up
@@ -72,7 +66,7 @@ export M8_TEST_MEMORY=68719476736
 seed_preflight people >"$work/preflight" 2>&1
 raw="$work/raw"; pool=1000; cmd=()
 : >"$M8_TEST_CALLS"
-for name in ingest segments send render debugger explorer jobs timers; do
+for name in ingest segments send render debugger explorer jobs timers decisions; do
   cmd=()
   bench_command "$name"
   [ "${#cmd[@]}" -gt 1 ]
