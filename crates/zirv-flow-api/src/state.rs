@@ -58,6 +58,8 @@ pub struct AppState {
     /// The connections the explorer queries use, so they never queue behind ingest; absent
     /// means the main pool serves them.
     explorer_pool: Option<PgPool>,
+    /// One permit per CSV export that may stream at once in this process.
+    export_permits: Arc<tokio::sync::Semaphore>,
     /// How long a segment preview may run before PostgreSQL cancels it (architecture 8.3).
     pub(crate) segment_preview_timeout: Duration,
     /// The clock segment paths and the webhook signature window read; a test fixes it.
@@ -125,6 +127,7 @@ impl AppState {
             keyring: None,
             explorer: ExplorerLimits::default(),
             explorer_pool: None,
+            export_permits: Arc::new(tokio::sync::Semaphore::new(1)),
             segment_preview_timeout: crate::segments::PREVIEW_TIMEOUT,
             clock: Clock::default(),
             stop: None,
@@ -249,6 +252,17 @@ impl AppState {
     /// The pool of the explorer queries when it is not the main pool.
     pub(crate) fn separate_explorer_pool(&self) -> Option<&PgPool> {
         self.explorer_pool.as_ref()
+    }
+
+    /// How many CSV exports may stream at once in this process (`explorer.max_exports`).
+    pub fn with_max_exports(mut self, max: usize) -> Self {
+        self.export_permits = Arc::new(tokio::sync::Semaphore::new(max));
+        self
+    }
+
+    /// A permit for one export, or `None` while the allowed number are streaming.
+    pub(crate) fn try_export_permit(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        Arc::clone(&self.export_permits).try_acquire_owned().ok()
     }
 
     /// The explorer's query timeouts and row limits.

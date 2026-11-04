@@ -8702,7 +8702,7 @@
             }
           },
           "503": {
-            "description": "The query ran past its time limit (`code` is `query_timeout`), or every explorer connection stayed busy for a second (`code` is `explorer_busy`; see `Retry-After`)",
+            "description": "The query ran past its time limit (`code` is `query_timeout`), or every explorer connection stayed busy for a second, or `explorer.max_exports` exports are already streaming (`code` is `explorer_busy`; see `Retry-After`)",
             "headers": {
               "Retry-After": {
                 "schema": {
