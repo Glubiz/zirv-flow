@@ -324,18 +324,27 @@ pub struct InboxHead {
     pub age_seconds: f64,
 }
 
+/// How long [`inbox_heads`] may run before PostgreSQL cancels it.
+const HEADS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// The oldest row (the lowest id) of every workspace that has any: one probe per workspace of
 /// `ingest_inbox_workspace_idx`, never a scan of the inbox. Each probe is a row comparison led by
 /// `workspace_id` and ordered by `(workspace_id, id)`, which no other index can answer: the
 /// primary key's order by `id`, filtered to the workspace, would walk every other workspace's
 /// rows to find that an empty one has none (#397).
+///
+/// The leader reads the heads every tick, so the read runs under a statement timeout of
+/// [`HEADS_TIMEOUT`], like the queue depths and the enrollment sample: a slow database or a lock
+/// on the inbox fails the read instead of holding the tick.
 pub async fn inbox_heads(pool: &PgPool) -> Result<Vec<InboxHead>, StoreError> {
+    let mut tx = crate::bounded::begin_bounded_for(pool, HEADS_TIMEOUT).await?;
     let rows: Vec<(Uuid, f64)> = sqlx::query_as(INBOX_HEADS)
         .bind(i64::MIN)
         .bind(i64::MAX)
-        .fetch_all(pool)
+        .fetch_all(&mut *tx)
         .await
         .map_err(StoreError::query)?;
+    tx.commit().await.map_err(StoreError::query)?;
     Ok(rows
         .into_iter()
         .map(|(workspace, age_seconds)| InboxHead {
@@ -2290,6 +2299,35 @@ mod tests {
                 [one]
             );
             assert!(heads.iter().all(|head| head.workspace_id != two));
+        })
+        .await;
+    }
+
+    /// The leader reads the heads every tick, so a slow inbox must not hold the tick: the read
+    /// gives up after a second. The outer timeout only keeps an unbounded read from hanging the
+    /// test on its own blocker.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_heads_give_up_after_a_second(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let mut blocker = pool.begin().await.unwrap();
+            sqlx::query("LOCK TABLE ingest_inbox IN ACCESS EXCLUSIVE MODE")
+                .execute(&mut *blocker)
+                .await
+                .unwrap();
+            let started = std::time::Instant::now();
+
+            let blocked =
+                tokio::time::timeout(std::time::Duration::from_secs(10), inbox_heads(&pool)).await;
+
+            let waited = started.elapsed();
+            blocker.rollback().await.unwrap();
+            assert!(matches!(blocked, Ok(Err(_))), "{blocked:?}");
+            assert!(
+                waited >= std::time::Duration::from_millis(900)
+                    && waited < std::time::Duration::from_secs(4),
+                "{waited:?}"
+            );
         })
         .await;
     }
