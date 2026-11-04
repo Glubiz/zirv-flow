@@ -1149,6 +1149,102 @@ mod tests {
         assert_eq!(settled_again, None);
     }
 
+    /// No index covers `outcome` (#397), so the settle of a wait writes no index entry.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn settling_a_wait_step_is_a_hot_update(pool: PgPool) {
+        let ws = workspace(&pool, "hot-settle").await;
+        let flow = create(&pool, ws, "Flow").await;
+        publish(&pool, ws, flow.id).await.unwrap();
+        let person = person(&pool, ws).await;
+        let id = enrollment_row(&pool, ws, flow.id, person).await;
+        let mut tx = crate::begin(&pool).await.unwrap();
+        let step = NewStepExecution {
+            node_id: "w",
+            outcome: StepOutcome::Waiting,
+            error: None,
+            attempt: 1,
+        };
+        record_steps(&mut tx, ws, id, std::slice::from_ref(&step))
+            .await
+            .unwrap();
+
+        let settled = settle_wait_step(&mut tx, id, "w").await.unwrap();
+
+        // This transaction's own counts, so no other test's writes are in them.
+        let (updated, hot): (i64, i64) = sqlx::query_as(
+            "SELECT pg_stat_get_xact_tuples_updated('step_executions'::regclass), \
+                    pg_stat_get_xact_tuples_hot_updated('step_executions'::regclass)",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        assert!(settled.is_some());
+        assert_eq!((updated, hot), (1, 1), "the settle wrote index entries");
+    }
+
+    /// The indexes of `step_executions` by name, and how many of them hold `outcome`.
+    async fn step_indexes(pool: &PgPool) -> (Vec<String>, i64) {
+        let names = sqlx::query_scalar(
+            "SELECT indexname::text FROM pg_indexes WHERE tablename = 'step_executions' \
+             ORDER BY indexname",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        let holding: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_index i JOIN pg_attribute a \
+               ON a.attrelid = i.indrelid AND a.attnum = ANY (i.indkey::int2[]) \
+             WHERE i.indrelid = 'step_executions'::regclass AND a.attname = 'outcome'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        (names, holding)
+    }
+
+    const STEP_INDEXES: [&str; 3] = [
+        "step_executions_id_key",
+        "step_executions_pkey",
+        "step_executions_started_idx",
+    ];
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn no_index_of_the_step_rows_holds_the_outcome(pool: PgPool) {
+        let (names, holding) = step_indexes(&pool).await;
+
+        assert_eq!(names, STEP_INDEXES);
+        assert_eq!(holding, 0);
+    }
+
+    #[sqlx::test(migrations = false)]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_hot_settle_migration_accepts_the_indexes_changed_by_hand(pool: PgPool) {
+        let mut before = sqlx::migrate!("./migrations");
+        before.migrations = before
+            .migrations
+            .iter()
+            .filter(|migration| migration.version < 90)
+            .cloned()
+            .collect();
+        before.run(&pool).await.unwrap();
+        for statement in [
+            "CREATE INDEX step_executions_started_idx \
+                 ON step_executions (workspace_id, node_id, started_at) INCLUDE (enrollment_id)",
+            "DROP INDEX step_executions_workspace_node_started_idx",
+            "DROP INDEX step_executions_workspace_idx",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+
+        crate::migrate(&pool).await.unwrap();
+
+        let (names, holding) = step_indexes(&pool).await;
+        assert_eq!(names, STEP_INDEXES);
+        assert_eq!(holding, 0);
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn waits_are_registered_replaced_found_and_cleared(pool: PgPool) {
