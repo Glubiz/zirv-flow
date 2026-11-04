@@ -174,7 +174,7 @@ and runs them one after another. A running job holds a lease of
 `worker.lease_seconds`, which its worker extends every third of that while the
 handler runs. A claimed job waits for its turn on the lease from its claim: the
 slot gives the jobs it has not started back to the queue a sixth of the lease (at
-most four seconds) after the claim, so they never wait long behind a slow job, and at
+most four seconds) after the claim returns, so they never wait long behind a slow job, and at
 once when the worker stops. The flow steps of one workspace among them run in
 one transaction with one commit, each behind a savepoint of its own: a step that
 fails is rolled back alone and its retry, with the attempt and its error, commits

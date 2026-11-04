@@ -330,11 +330,15 @@ macro_rules! claim_bands {
     };
 }
 
+/// The lease runs from the update itself, `clock_timestamp()` read once for the statement (an
+/// init plan), not from `now()`, the start of the transaction: a capped claim waits for the claim
+/// lock inside its transaction, and a lease from its start had been spent on the wait by the
+/// time the claim returned (bench phase 4a, #397).
 macro_rules! claim_update {
     () => {
         "UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, \
             lease_token = gen_random_uuid(), \
-            lease_expires_at = now() + make_interval(secs => $2) "
+            lease_expires_at = (SELECT clock_timestamp()) + make_interval(secs => $2) "
     };
 }
 
@@ -352,11 +356,13 @@ macro_rules! claim_first_due {
     };
 }
 
+/// The lag runs to the update, where the lease starts, so a wait for the claim lock counts.
 macro_rules! claim_returning {
     () => {
         " RETURNING id, workspace_id, kind, payload, priority, run_at, attempts, max_attempts, \
             lease_token, unique_key, trace_id, cause_kind, cause_id, \
-            EXTRACT(EPOCH FROM now() - run_at)::float8 AS claim_lag_seconds"
+            EXTRACT(EPOCH FROM lease_expires_at - make_interval(secs => $2) - run_at)::float8 \
+                AS claim_lag_seconds"
     };
 }
 
@@ -4657,5 +4663,76 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Waits until a connection is waiting for the claim lock that `holder` holds.
+    async fn until_waiting_for_the_claim_lock(pool: &PgPool, holder: i32) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' \
+                     AND NOT granted AND $1 = ANY(pg_blocking_pids(pid)))",
+                )
+                .bind(holder)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+                if waiting {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("no claim waited for the held claim lock");
+    }
+
+    /// Capped claims queue on the claim lock, so a claim can wait long before it claims (bench
+    /// phase 4a, #397). Its leases and its lag run from its update, not from the start of its
+    /// transaction: the jobs it returns hold their whole lease, and the lag counts the wait.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_capped_claim_that_waited_for_the_claim_lock_leases_from_its_update(pool: PgPool) {
+        let ws = workspace(&pool, "ours").await;
+        let mut new = job("a.kind");
+        new.workspace_id = Some(ws);
+        enqueue(&pool, &new).await.unwrap();
+        let mut holder = pool.begin().await.unwrap();
+        let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *holder)
+            .await
+            .unwrap();
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(CLAIM_LOCK_KEY)
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+        let claimer = pool.clone();
+        let claim =
+            tokio::spawn(
+                async move { claim_jobs(&claimer, "w", &["a.kind"], LEASE, Some(2), 8).await },
+            );
+        until_waiting_for_the_claim_lock(&pool, holder_pid).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        holder.rollback().await.unwrap();
+
+        let claimed = claim.await.unwrap().unwrap();
+        assert_eq!(claimed.len(), 1);
+        let left: f64 = sqlx::query_scalar(
+            "SELECT EXTRACT(EPOCH FROM lease_expires_at - now())::float8 FROM jobs WHERE id = $1",
+        )
+        .bind(claimed[0].id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            left > LEASE.as_secs_f64() - 1.0,
+            "{left} s of a {LEASE:?} lease left after a wait of two seconds"
+        );
+        assert!(
+            claimed[0].claim_lag_seconds >= 2.0,
+            "a lag of {} s left out the wait",
+            claimed[0].claim_lag_seconds
+        );
     }
 }

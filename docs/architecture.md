@@ -2606,10 +2606,16 @@ that walk over four times the jobs (ruling 48be9592). A
 claimed job that has not started holds its lease from the claim; the slot gives it back to `ready`
 (its `run_at` kept and the claim's attempt uncounted, or deleted when an erasure marked it
 `purge_on_release`) once a sixth of the lease, at most four seconds, has passed since the claim
-was sent, even while a handler runs, and at once when the worker stops. A job therefore starts
-with at least five sixths of its lease left, even when its claim waited, and jobs claimed
-behind a slow handler go to other workers instead of waiting for it. A slot that dies leaves its
-unstarted jobs, like its running one, to lease expiry.
+returned, even while a handler runs, and at once when the worker stops. The lease runs from the
+claim's update (`clock_timestamp()`, read once for the statement), not from the start of its
+transaction, so a claim that waited, as capped claims queue on the claim lock, has spent neither
+its leases nor its hold. A job therefore starts with five sixths of its lease left, less the
+commit and the reply between the update and the return, and jobs claimed behind a slow handler go
+to other workers instead of waiting for it. A slot that dies leaves its unstarted jobs, like its
+running one, to lease expiry. Counting the hold from the claim's sending and the lease from the
+transaction's start gave back every batch whose claim had queued past the hold: on 0.226.0 with a
+cap of 4, sixteen slots and claims of about 220 ms, each claim waited about 3 s on the lock,
+against a hold of 1 s, and nothing completed for ten minutes (bench phase 4a).
 
 **The drain's band (#397, ruling 2be8b88c).** `ingest.drain` is enqueued at priority -1
 (`DRAIN_PRIORITY`), every other kind at the default 0, so a drain is claimed next however many
