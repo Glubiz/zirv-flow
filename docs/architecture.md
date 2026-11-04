@@ -2595,14 +2595,17 @@ As built (#207): a claim walks the distinct priorities of the ready jobs upwards
 of each band with a due job in turn, so its cost depends neither on the statistics nor on the due or
 future backlog (`docs/benchmarks/m5-flows.md` section 8).
 
-As built (#397): a worker slot claims up to eight jobs with that one statement and one commit, by
+As built (#397): a worker slot claims up to 32 jobs with that one statement and one commit, by
 priority band, then age, each with a lease token of its own, and runs them one after another, each
 in its own transaction exactly as a job claimed alone: its own lease check, heartbeat and fenced
 completion (the `flow.step` jobs of one workspace share one, below). The batch saves a claim round
-trip and a commit flush on all but one of its jobs. A
+trip and a commit flush on all but one of its jobs. Most of a claim's cost is its walk over the head
+of `jobs_ready_idx`, which holds the index entries of jobs claimed or finished since the oldest
+snapshot still open; a claim of 32 costs about what a claim of 8 does, so the larger batch spreads
+that walk over four times the jobs (ruling 48be9592). A
 claimed job that has not started holds its lease from the claim; the slot gives it back to `ready`
 (its `run_at` kept and the claim's attempt uncounted, or deleted when an erasure marked it
-`purge_on_release`) once a sixth of the lease, at most one second, has passed since the claim
+`purge_on_release`) once a sixth of the lease, at most four seconds, has passed since the claim
 was sent, even while a handler runs, and at once when the worker stops. A job therefore starts
 with at least five sixths of its lease left, even when its claim waited, and jobs claimed
 behind a slow handler go to other workers instead of waiting for it. A slot that dies leaves its
@@ -2629,14 +2632,14 @@ lease and the `job_error` decision (on the last attempt the enrollment fails). I
 running job whose lease ran out while the later wakes ran. A failure that cannot be written there
 (a deadlock with a reaper that holds the row, say) is rolled back to that savepoint and settled
 after the transaction, and a lost lease leaves the job to its new owner. One commit ends the batch,
-so eight steps make one handler commit instead of eight. When the commit fails, or an error leaves
+so 32 steps make one handler commit instead of 32. When the commit fails, or an error leaves
 the transaction unusable, it is rolled back: every wake that completed in it fails with `could not
 commit the job transaction`, as a job alone whose commit fails (its attempt counts and it retries),
 and every failure written in it is settled again after it, on a lease the rollback left as it was.
 A completed wake's fenced delete and a failed wake's written failure hold its job row until the
 commit, so the reaper waits for the batch instead of returning the job meanwhile. The slot begins
 no wake past the hold limit and gives the rest back as for any claim, so a wake starts with five
-sixths of its lease, and a batch holds at most eight. The decisions of one batch share their
+sixths of its lease, and a batch holds at most 32. The decisions of one batch share their
 `recorded_at` (the column's default, the transaction's start) and keep their order by id; a
 failure written in the batch shares it too, under a random id, so in a trace it sorts after the
 enrollment's earlier steps, as before, but by its id among the rows another wake of the same
@@ -3262,7 +3265,7 @@ rows, and the survivor is re-evaluated through its `merge` change class (7.1).
 |-------|-------|
 | `core`, `segments` | Inline unit and property tests; golden SQL snapshots for the compiler; the AST generators (`proptest`, behind a `test-support` feature) and the golden corpus live in `segments`, golden files blessed with `ZIRV_FLOW_BLESS` |
 | Segments on PostgreSQL | Tests in `zirv-flow-jobs` comparing compiled SQL on Postgres with the reference evaluator; CI runs fixed seeds, and a scheduled nightly workflow runs random seeds without filing issues |
-| `engine` | Inline unit tests; deterministic simulation (ruling 05ce90ec) in two layers. (1) The engine harness: `zirv-flow-engine` ships a deterministic harness with an in-memory transactional runtime model that implements the same commit protocol (`state_version` checks, idempotency keys and wake keys; a crash discards the uncommitted transaction). Outside the sweep that crashes at every effect, half of its claims that find more jobs due take up to eight and run them as a wake transaction (14): in lock order, each behind a savepoint, with some failing after their writes and rolled back alone, and a crash in any of them or after the commit redelivering them all; a model whose failed step rolls back its neighbours fails the fourth invariant. It runs thousands of enrollments over 90 virtual days with seeded random events and a crash after every effect, using a seeded test evaluator (the engine does not depend on `segments`, 5.1). (2) The PostgreSQL test: a test in `zirv-flow-jobs` drives the real runtime with `ManualClock` over hundreds of enrollments for 90 days and injects two failures: a rollback before commit, and a crash after commit and before the job is acknowledged, followed by a re-claim (lease expiry, and a concurrent duplicate execution). Half of its drain rounds run the due steps through the worker's wake transactions instead, with a failed commit injected into some batches, after which every step of the batch runs again. Both layers check all four invariants: no internal effect applied twice, every external effect enqueued with a stable key, no timer fires early, every enrollment ends or waits on a due wake. CI uses fixed seeds and nightly runs random ones; the seeds and population sizes are recorded. |
+| `engine` | Inline unit tests; deterministic simulation (ruling 05ce90ec) in two layers. (1) The engine harness: `zirv-flow-engine` ships a deterministic harness with an in-memory transactional runtime model that implements the same commit protocol (`state_version` checks, idempotency keys and wake keys; a crash discards the uncommitted transaction). Outside the sweep that crashes at every effect, half of its claims that find more jobs due take up to 32 and run them as a wake transaction (14): in lock order, each behind a savepoint, with some failing after their writes and rolled back alone, and a crash in any of them or after the commit redelivering them all; a model whose failed step rolls back its neighbours fails the fourth invariant. It runs thousands of enrollments over 90 virtual days with seeded random events and a crash after every effect, using a seeded test evaluator (the engine does not depend on `segments`, 5.1). (2) The PostgreSQL test: a test in `zirv-flow-jobs` drives the real runtime with `ManualClock` over hundreds of enrollments for 90 days and injects two failures: a rollback before commit, and a crash after commit and before the job is acknowledged, followed by a re-claim (lease expiry, and a concurrent duplicate execution). Half of its drain rounds run the due steps through the worker's wake transactions instead, with a failed commit injected into some batches, after which every step of the batch runs again. Both layers check all four invariants: no internal effect applied twice, every external effect enqueued with a stable key, no timer fires early, every enrollment ends or waits on a due wake. CI uses fixed seeds and nightly runs random ones; the seeds and population sizes are recorded. |
 | Store and queue | Postgres-backed integration tests in CI: claim concurrency, lease expiry, fencing, unique keys, scheduler failover |
 | Ingestion and events | Idempotent replay, identity scenario suite, schema-mode and unplanned-event matrix, redaction, duplicate/late/future handling, reject replay, debugger masking and SSE latency, explorer filters/timeouts/CSV, deletion propagation, erasure table scan |
 | Connectors | Database sources against service containers; HTTP manifests against recorded fixtures and a mock server (pagination, OAuth refresh, `429`) |

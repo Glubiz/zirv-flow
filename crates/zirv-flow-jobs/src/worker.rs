@@ -40,13 +40,15 @@ const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
 const POOL_SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// How many due jobs a slot claims with one statement and one commit, to run one after another:
-/// each in its own transaction, but the `flow.step` jobs of a workspace in one (#397). Kept
-/// small, so a batch holds little work back from the other slots and from the priorities behind
-/// it, and a batch transaction holds few locks.
-const CLAIM_BATCH: u32 = 8;
+/// each in its own transaction, but the `flow.step` jobs of a workspace in one (#397). A claim
+/// costs about the same whatever it returns, since most of it is the walk over the head of the
+/// ready index, so a larger batch spreads that walk, and a workspace's share of the batch shares
+/// one transaction (ruling 48be9592). The hold limit bounds how long the batch keeps work from the
+/// other slots.
+pub(crate) const CLAIM_BATCH: u32 = 32;
 
 /// The longest a slot holds a claimed job it has not started; see [`hold_limit`].
-const MAX_HOLD: Duration = Duration::from_secs(1);
+const MAX_HOLD: Duration = Duration::from_secs(4);
 
 /// How a worker pool behaves.
 #[derive(Clone, Debug)]
@@ -1526,9 +1528,10 @@ mod tests {
             assert!(hold_limit(lease) <= MAX_HOLD);
         }
         let lease = WorkerConfig::new(1).lease;
+        assert_eq!(hold_limit(lease), MAX_HOLD);
         assert!(
             HANDLER_P997 * CLAIM_BATCH * 5 <= hold_limit(lease),
-            "eight slow handlers use a fifth of the hold at most"
+            "a batch of slow handlers uses a fifth of the hold at most"
         );
     }
 

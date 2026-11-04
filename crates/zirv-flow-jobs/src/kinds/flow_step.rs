@@ -3642,7 +3642,7 @@ pub(super) mod tests {
             &[STEP_JOB_KIND],
             Duration::from_secs(30),
             None,
-            8,
+            crate::worker::CLAIM_BATCH,
         )
         .await
         .unwrap();
@@ -3805,7 +3805,7 @@ pub(super) mod tests {
             let handle = recorder.handle();
             let _installed = ::metrics::set_default_local_recorder(&recorder);
             let env = Env::new(pool).await;
-            let enrolled = due_visits(&env, 9).await;
+            let enrolled = due_visits(&env, crate::worker::CLAIM_BATCH as usize + 1).await;
             let wakes: Vec<(Uuid, Uuid)> = sqlx::query_as(
                 "SELECT id, (payload ->> 'enrollment_id')::uuid FROM jobs WHERE kind = 'flow.step'",
             )
@@ -3819,15 +3819,15 @@ pub(super) mod tests {
                     .map(|(id, _)| *id)
                     .unwrap()
             };
-            // One wake runs alone, as every wake did before; the other eight are what a slot
-            // claims at once.
+            // One wake runs alone, as every wake did before; the others are a full batch, what a
+            // slot claims at once.
             let lone = enrolled[4].enrollment;
             assert_eq!(env.run_matching(Some("wake"), Some(lone)).await, 1);
             assert_eq!(
                 env.count("SELECT count(*) FROM jobs WHERE state = 'ready' AND run_at <= now()")
                     .await,
-                8,
-                "only the eight wakes are due"
+                i64::from(crate::worker::CLAIM_BATCH),
+                "only the batch's wakes are due"
             );
 
             work_off_steps(&env).await;
@@ -3887,9 +3887,10 @@ pub(super) mod tests {
                 )
                 .await;
             let doomed = env.enroll(failing, 1, &[ada]).await.enrolled[0].enrollment;
-            let enrolled = due_visits(&env, 3).await;
+            // More wakes than a batch held before it grew to 32 (ruling 48be9592).
+            let enrolled = due_visits(&env, 11).await;
             let before = env.enrollment(doomed).await;
-            let jobs = claim_wakes(&env, 4).await;
+            let jobs = claim_wakes(&env, 12).await;
             let doomed_job = jobs
                 .iter()
                 .find(|job| enrollment_of(job) == Some(doomed))
@@ -3901,7 +3902,7 @@ pub(super) mod tests {
             let wakes = wakes_of(&enrolled, &jobs);
             assert_eq!(
                 outcomes_of(&wakes, &outcomes),
-                [crate::metrics::Outcome::Completed; 3]
+                [crate::metrics::Outcome::Completed; 11]
             );
             assert_eq!(
                 outcomes_of(std::slice::from_ref(&doomed_job), &outcomes),
@@ -3989,7 +3990,7 @@ pub(super) mod tests {
                 &[STEP_JOB_KIND],
                 lease,
                 None,
-                8,
+                crate::worker::CLAIM_BATCH,
             )
             .await
             .unwrap();
@@ -4158,13 +4159,13 @@ pub(super) mod tests {
     ) {
         zirv_flow_store::decision_testing::checked(pool, |pool| async move {
             let env = Env::new(pool).await;
-            let enrolled = due_visits(&env, 8).await;
+            let enrolled = due_visits(&env, 12).await;
             let wakes: Vec<Uuid> =
                 sqlx::query_scalar("SELECT id FROM jobs WHERE kind = 'flow.step'")
                     .fetch_all(&env.pool)
                     .await
                     .unwrap();
-            assert_eq!(wakes.len(), 8);
+            assert_eq!(wakes.len(), 12);
             // The first commit that writes a step row fails, at the commit itself.
             for statement in [
                 "CREATE SEQUENCE commit_failures",
@@ -4211,7 +4212,7 @@ pub(super) mod tests {
             .fetch_all(&env.pool)
             .await
             .unwrap();
-            assert_eq!(steps.len(), 8);
+            assert_eq!(steps.len(), 12);
             assert!(steps.iter().all(|count| *count == steps[0]), "{steps:?}");
             // Every wake of the batch failed with it, and each ran again to its one completion.
             for wake in &wakes {

@@ -165,12 +165,12 @@ use it:
 | `zirv-flow scheduler` | Elected leader (an advisory lock; the others stand by and take over within seconds): enqueues due cron schedules, returns jobs with expired leases to the queue, keeps the decision log and event partitions for this and next month, expires person exports hourly, deletes import files and rejects past their retention (see [CSV import](../guide/sources.md#csv-import)), and exports queue gauges. |
 | `zirv-flow all` | `serve`, `worker` and `scheduler` in one process (the default). |
 
-Each of a worker's `worker.concurrency` slots claims up to eight due jobs at once
+Each of a worker's `worker.concurrency` slots claims up to 32 due jobs at once
 and runs them one after another. A running job holds a lease of
 `worker.lease_seconds`, which its worker extends every third of that while the
 handler runs. A claimed job waits for its turn on the lease from its claim: the
 slot gives the jobs it has not started back to the queue a sixth of the lease (at
-most a second) after the claim, so they never wait long behind a slow job, and at
+most four seconds) after the claim, so they never wait long behind a slow job, and at
 once when the worker stops. The flow steps of one workspace among them run in
 one transaction with one commit, each behind a savepoint of its own: a step that
 fails is rolled back alone and its retry, with the attempt and its error, commits

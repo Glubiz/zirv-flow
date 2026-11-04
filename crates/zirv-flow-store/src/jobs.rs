@@ -3783,6 +3783,124 @@ mod tests {
         assert!((0.0..30.0).contains(&first[0].claim_lag_seconds));
     }
 
+    /// A slot's claim (ruling 48be9592): thirty-two jobs, the oldest due, in age order, out of
+    /// due jobs enqueued in shuffled order beside future ones and another kind.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_claim_of_thirty_two_takes_the_thirty_two_oldest_due_jobs_in_order(pool: PgPool) {
+        sqlx::query(
+            "INSERT INTO jobs (id, kind, payload, run_at, trace_id, cause_kind, cause_id) \
+             SELECT gen_random_uuid(), CASE WHEN g % 10 = 0 THEN 'b.kind' ELSE 'a.kind' END, \
+                    jsonb_build_object('n', g), now() - make_interval(secs => 100.5 - g), \
+                    gen_random_uuid(), 'api', 'x' \
+             FROM generate_series(1, 150) g ORDER BY random()",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // The jobs after the hundredth are not due yet; the lower the number, the older the job.
+        let mut wanted: Vec<i64> = (1..=100).filter(|n| n % 10 != 0).collect();
+        wanted.truncate(32);
+
+        let claimed = claim_jobs(&pool, "w", &["a.kind"], LEASE, None, 32)
+            .await
+            .unwrap();
+
+        let got: Vec<i64> = claimed
+            .iter()
+            .map(|job| job.payload["n"].as_i64().unwrap())
+            .collect();
+        assert_eq!(got, wanted);
+    }
+
+    /// `count` due `a.kind` jobs, a millisecond apart, stored in an order unrelated to their age, as
+    /// timers set at random times are, so neighbours in `jobs_ready_idx` sit on different pages.
+    async fn seed_due(pool: &PgPool, count: i64) {
+        sqlx::query(
+            "INSERT INTO jobs (id, kind, payload, run_at, trace_id, cause_kind, cause_id) \
+             SELECT gen_random_uuid(), 'a.kind', '{}', \
+                    now() - interval '1 hour' + make_interval(secs => g * 0.001), \
+                    gen_random_uuid(), 'api', 'x' \
+             FROM generate_series(1, $1) g ORDER BY random()",
+        )
+        .bind(count)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// Deletes the `count` oldest ready jobs, as claims and completions of them do: their entries
+    /// stay at the head of `jobs_ready_idx` until nothing can still see the rows.
+    async fn finish_oldest(pool: &PgPool, count: i64) {
+        sqlx::query(
+            "DELETE FROM jobs WHERE id IN (SELECT id FROM jobs WHERE state = 'ready' \
+             ORDER BY priority, run_at LIMIT $1)",
+        )
+        .bind(count)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// A transaction on a connection of its own holding a `REPEATABLE READ` snapshot, as a long
+    /// report does, or a long transaction that holds a transaction id: a row deleted after it
+    /// began cannot be cleaned up, from the heap or from an index, until it ends.
+    async fn hold_snapshot(pool: &PgPool) -> sqlx::Transaction<'static, sqlx::Postgres> {
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("SELECT 1").execute(&mut *tx).await.unwrap();
+        tx
+    }
+
+    /// The shared buffers one claim of up to `n` `a.kind` jobs touches, from `EXPLAIN (ANALYZE,
+    /// BUFFERS)` of [`CLAIM`] in a transaction that is rolled back, so the jobs stay ready. The
+    /// claim must have taken `n`.
+    async fn claim_buffers(pool: &PgPool, n: i64) -> i64 {
+        let mut tx = pool.begin().await.unwrap();
+        let plan: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {CLAIM}"
+        )))
+        .bind("w")
+        .bind(LEASE.as_secs_f64())
+        .bind(&["a.kind"][..])
+        .bind(n)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        tx.rollback().await.unwrap();
+        let top = &plan[0]["Plan"];
+        assert_eq!(top["Actual Rows"].as_f64(), Some(n as f64), "{plan}");
+        top["Shared Hit Blocks"].as_i64().unwrap() + top["Shared Read Blocks"].as_i64().unwrap()
+    }
+
+    /// Ruling 48be9592: most of a claim's cost is its walk over the dead entries at the head of
+    /// `jobs_ready_idx`, which it pays whatever it takes, so a claim of 32 costs about what a
+    /// claim of 8 does. The entries are 2,000 finished jobs a held snapshot keeps.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_claim_of_thirty_two_reads_about_the_buffers_of_a_claim_of_eight(pool: PgPool) {
+        freeze_statistics(&pool).await;
+        seed_due(&pool, 3_000).await;
+        let snapshot = hold_snapshot(&pool).await;
+        finish_oldest(&pool, 2_000).await;
+
+        let eight = claim_buffers(&pool, 8).await;
+        let thirty_two = claim_buffers(&pool, 32).await;
+        snapshot.commit().await.unwrap();
+
+        assert!(
+            eight > 2_000,
+            "the walk over the dead head: {eight} buffers"
+        );
+        assert!(
+            thirty_two * 4 < eight * 5,
+            "a claim of 32 read {thirty_two} buffers, one of 8 read {eight}"
+        );
+    }
+
     /// Two claimers, each on a connection of its own, drain 400 due jobs of two workspaces and
     /// the instance in batches of eight, completing each batch before claiming the next: no job is
     /// claimed twice and every lease token is distinct, without a cap and under a cap of three,
