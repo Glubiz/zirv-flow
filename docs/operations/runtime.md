@@ -179,8 +179,10 @@ most four seconds) after the claim returns, so they never wait long behind a slo
 once when the worker stops. The flow steps of one workspace among them run in
 one transaction with one commit, each behind a savepoint of its own: a step that
 fails is rolled back alone and its retry, with the attempt and its error, commits
-with the others; a step that loses its lease is rolled back alone and left to its
-new owner; and when the shared commit fails every step in it is retried. A worker that dies leaves its jobs to the scheduler,
+with the others; a step that loses its lease while it runs is rolled back alone and left to its
+new owner; and when a step that ran is found to have lost its lease as the transaction completes
+its steps, or the shared commit fails, nothing of it commits: that step is left to its new owner
+and every other step in it is retried. A worker that dies leaves its jobs to the scheduler,
 which makes them runnable again once their leases have expired; a job
 that fails is retried with exponential backoff and jitter, and is kept as
 `dead` after its last attempt. A job's database writes commit together with its
