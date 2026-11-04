@@ -78,8 +78,9 @@ limit, E be `explorer.max_connections` (default 4), C be `worker.concurrency` an
   exports open, since concurrent exports have collapsed ingest throughput.
   An export reads 10,000 rows per page, one snapshot transaction and one explorer connection
   per page, so a 1 M-row export takes about 100 acquisitions of the E pool. Each open stream
-  holds one page in memory (the decoded rows and their CSV text), about 3 to 5 MB for typical
-  events and more for large `properties`; budget that per `explorer.max_exports`.
+  holds one page in memory: the decoded rows and their CSV text. The CSV text alone is about
+  3 to 5 MB at 300 to 500 bytes a row, and the decoded rows take a multiple of that, more for
+  large `properties`; budget it per `explorer.max_exports` (not yet measured).
 - `worker`: D + C × (S + 1) + 1 for the jobs pool + C for heartbeats,
   or D + (2 + S) × C + 1. `all` adds E to that.
 
