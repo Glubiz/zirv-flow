@@ -299,7 +299,9 @@ mod tests {
             .unwrap();
 
         let (level, read_only, timeout): (String, String, String) = sqlx::query_as(
-            "SELECT current_setting('transaction_isolation'),                     current_setting('transaction_read_only'), current_setting('statement_timeout')",
+            "SELECT current_setting('transaction_isolation'), \
+                    current_setting('transaction_read_only'), \
+                    current_setting('statement_timeout')",
         )
         .fetch_one(&mut *tx)
         .await
