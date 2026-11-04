@@ -598,6 +598,12 @@ pub async fn release_jobs<'e>(
 /// transaction must be abandoned. The lock is a key-share lock, which still lets the
 /// heartbeat extend the lease while the handler runs; completion is then fenced by
 /// [`complete_job`] in the same transaction.
+///
+/// The lock keeps the job from being claimed again while this transaction is open, since a claim
+/// skips locked rows, and keeps the reaper from deleting it, since a delete needs a lock that
+/// conflicts with this one. A row lock also gives the transaction an id, which holds the xmin
+/// horizon back until it ends; a kind safe to overlap with a late attempt of itself confirms its
+/// lease with [`confirm_lease`] instead (#397).
 pub async fn lock_lease(
     connection: &mut PgConnection,
     id: Uuid,
@@ -607,6 +613,26 @@ pub async fn lock_lease(
         .bind(id)
         .bind(lease_token)
         .fetch_optional(connection)
+        .await
+        .map_err(StoreError::query)?;
+    Ok(row.is_some())
+}
+
+/// Confirms the lease is still held without locking the job row: false means the row is gone
+/// or carries another token. The read takes no transaction id and keeps no snapshot once it
+/// returns, so a transaction left open across a long handler does not hold the xmin horizon
+/// back. Nothing keeps another worker from claiming the job once the reaper puts it back, so
+/// only a kind that is safe to overlap with a late attempt of itself uses this; its completion
+/// is still fenced by [`complete_job`] (#397).
+pub async fn confirm_lease<'e>(
+    executor: impl PgExecutor<'e>,
+    id: Uuid,
+    lease_token: Uuid,
+) -> Result<bool, StoreError> {
+    let row = sqlx::query("SELECT 1 FROM jobs WHERE id = $1 AND lease_token = $2")
+        .bind(id)
+        .bind(lease_token)
+        .fetch_optional(executor)
         .await
         .map_err(StoreError::query)?;
     Ok(row.is_some())
@@ -736,6 +762,8 @@ pub async fn heartbeat_job<'e>(
 /// job behind one zombie and deadlock with a handler that completes. It does wait for a worker's
 /// batch transaction (#397) that already completed or failed a job whose lease ran out while the
 /// batch's later jobs ran; once the batch commits, the row is gone or settled and is skipped.
+/// A kind that confirms its lease with [`confirm_lease`] holds no row lock, so nothing here
+/// waits on it or skips it, and its late ack is refused the same way.
 pub async fn reap_expired<'e>(executor: impl PgExecutor<'e>) -> Result<Reaped, StoreError> {
     let states: Vec<String> = sqlx::query_scalar(
         "WITH locked AS ( \
@@ -2011,6 +2039,58 @@ mod tests {
         tx.commit().await.unwrap();
 
         assert!(find_job(&pool, claimed.id).await.unwrap().is_none());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn confirming_a_lease_takes_no_transaction_id_and_leaves_the_job_claimable(pool: PgPool) {
+        enqueue(&pool, &job("a.kind")).await.unwrap();
+        let claimed = claim_job(&pool, "w", &["a.kind"], Duration::from_millis(1), None)
+            .await
+            .unwrap()
+            .unwrap();
+        const ASSIGNED: &str = "SELECT pg_current_xact_id_if_assigned()::text";
+        let mut locked = pool.begin().await.unwrap();
+        assert!(
+            lock_lease(&mut locked, claimed.id, claimed.lease_token)
+                .await
+                .unwrap()
+        );
+        let locked_xid: Option<String> = sqlx::query_scalar(ASSIGNED)
+            .fetch_one(&mut *locked)
+            .await
+            .unwrap();
+        assert!(locked_xid.is_some(), "a row lock takes a transaction id");
+        locked.rollback().await.unwrap();
+        let mut confirmed = pool.begin().await.unwrap();
+
+        assert!(
+            confirm_lease(&mut *confirmed, claimed.id, claimed.lease_token)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !confirm_lease(&mut *confirmed, claimed.id, Uuid::from_u128(7))
+                .await
+                .unwrap()
+        );
+        let confirmed_xid: Option<String> = sqlx::query_scalar(ASSIGNED)
+            .fetch_one(&mut *confirmed)
+            .await
+            .unwrap();
+        assert_eq!(confirmed_xid, None);
+        // Nothing holds the row, so the reaper puts it back and another worker claims it while
+        // the confirming transaction is still open; its late completion is then refused.
+        wait_until_expired(&pool, claimed.id).await;
+        assert_eq!(reap_expired(&pool).await.unwrap().requeued, 1);
+        let again = claim(&pool, &["a.kind"]).await.unwrap();
+        assert_eq!(again.id, claimed.id);
+        assert!(
+            !complete_job(&mut *confirmed, claimed.id, claimed.lease_token)
+                .await
+                .unwrap()
+        );
+        confirmed.rollback().await.unwrap();
     }
 
     #[sqlx::test]
@@ -3898,6 +3978,36 @@ mod tests {
         assert!(
             thirty_two * 4 < eight * 5,
             "a claim of 32 read {thirty_two} buffers, one of 8 read {eight}"
+        );
+    }
+
+    /// The xmin horizon (investigation G, candidate 2): while a snapshot older than the finished
+    /// jobs is held, every claim walks their dead entries, row by row through the heap; once it
+    /// ends, the first claim marks them dead in the index and the next skips them.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn claims_behind_a_held_snapshot_walk_the_finished_jobs_and_stop_once_it_ends(
+        pool: PgPool,
+    ) {
+        freeze_statistics(&pool).await;
+        seed_due(&pool, 6_000).await;
+        let snapshot = hold_snapshot(&pool).await;
+        finish_oldest(&pool, 5_000).await;
+
+        let held = claim_buffers(&pool, 8).await;
+        let again = claim_buffers(&pool, 8).await;
+        snapshot.commit().await.unwrap();
+        claim_buffers(&pool, 8).await;
+        let released = claim_buffers(&pool, 8).await;
+
+        assert!(held > 5_000, "{held} buffers behind the snapshot");
+        assert!(
+            again * 10 > held * 9,
+            "a held snapshot keeps the walk: {held} then {again} buffers"
+        );
+        assert!(
+            released * 10 < held,
+            "{held} buffers behind the snapshot, {released} once it ended"
         );
     }
 

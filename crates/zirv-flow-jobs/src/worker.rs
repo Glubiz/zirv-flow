@@ -22,8 +22,8 @@ use zirv_flow_render::RenderPool;
 use zirv_flow_store::{
     ClaimedJob, Clock, DecisionRetention, EventRetention, FailOutcome, HmacKey, Keyring,
     MessageRetention, PgConnection, PgPool, RetentionSettings, STEP_JOB_KIND, begin,
-    cache_change_readers, claim_jobs, complete_job, fail_job, heartbeat_job, listen_for_jobs,
-    lock_lease, observe_pool, release_jobs, sized_like,
+    cache_change_readers, claim_jobs, complete_job, confirm_lease, fail_job, heartbeat_job,
+    listen_for_jobs, lock_lease, observe_pool, release_jobs, sized_like,
 };
 
 use crate::JobError;
@@ -652,8 +652,8 @@ fn configured<'a>(shared: &Shared, ctx: JobContext<'a>) -> JobContext<'a> {
         })
 }
 
-/// The handler's transaction: take its person-change guard if needed, confirm the lease,
-/// run the handler beside a heartbeat, then
+/// The handler's transaction: take its person-change guard if needed, confirm the lease (with
+/// the job row locked, unless the kind says otherwise), run the handler beside a heartbeat, then
 /// delete the job and commit with everything the handler wrote.
 async fn execute(shared: Arc<Shared>, job: ClaimedJob) -> Attempt {
     let Some(kind) = shared.registry.get(&job.kind) else {
@@ -671,7 +671,12 @@ async fn execute(shared: Arc<Shared>, job: ClaimedJob) -> Attempt {
     {
         return Attempt::Failed("could not guard person changes".into(), None);
     }
-    match lock_lease(&mut tx, job.id, job.lease_token).await {
+    let held = if kind.locks_lease() {
+        lock_lease(&mut tx, job.id, job.lease_token).await
+    } else {
+        confirm_lease(&mut *tx, job.id, job.lease_token).await
+    };
+    match held {
         Ok(true) => {}
         Ok(false) => return Attempt::LeaseLost,
         Err(_) => return Attempt::Failed("could not confirm the lease".into(), None),
@@ -1693,6 +1698,76 @@ mod tests {
         wait_for(&pool, |counts| counts == QueueCounts::default()).await;
         stop_and_join(stop, handle).await;
     }
+
+    /// #397: a drain's job transaction confirms its lease without locking the job row, so for as
+    /// long as the run lasts (here, until its batches may take the segment guard the test holds)
+    /// it holds neither a transaction id nor a snapshot, and so does not hold the xmin horizon
+    /// back for the claims of every other job.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_running_drains_job_transaction_holds_no_transaction_id(pool: PgPool) {
+        use zirv_flow_core::{HmacPurpose, HmacRoot, MasterKey};
+        use zirv_flow_store::{IngestItem, IngestPayload, append_inbox};
+
+        migrated(&pool).await;
+        let ws = workspace(&pool).await;
+        let items: Vec<IngestItem> = (0..3)
+            .map(|n| IngestItem {
+                identifiers: vec![("anonymous_id".into(), format!("a{n}"))],
+                timestamp: None,
+                message_id: Some(format!("m-{n}")),
+                payload: IngestPayload::Track {
+                    event: "seen".into(),
+                    properties: serde_json::Map::new(),
+                },
+            })
+            .collect();
+        append_inbox(
+            &pool,
+            ws,
+            Uuid::now_v7(),
+            &TraceContext::root(Cause::api("req")),
+            &items,
+        )
+        .await
+        .unwrap();
+        let mut guard = begin(&pool).await.unwrap();
+        zirv_flow_store::lock_segments(&mut guard, ws)
+            .await
+            .unwrap();
+        let mut config = test_config(1);
+        config.redaction_key = Some(Arc::new(
+            HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction),
+        ));
+        let (stop, handle) = start(&pool, config);
+        wait_until(
+            &pool,
+            "a drain batch to wait for the segment guard",
+            "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted)",
+        )
+        .await;
+
+        let job_transactions: Vec<(Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT backend_xid::text, backend_xmin::text FROM pg_stat_activity \
+             WHERE datname = current_database() AND state = 'idle in transaction' \
+             AND query LIKE 'SELECT 1 FROM jobs WHERE id = $1 AND lease_token = $2%'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        guard.rollback().await.unwrap();
+        wait_until(
+            &pool,
+            "the inbox to drain",
+            "SELECT NOT EXISTS (SELECT 1 FROM ingest_inbox)",
+        )
+        .await;
+        wait_for(&pool, |counts| counts == QueueCounts::default()).await;
+        stop_and_join(stop, handle).await;
+
+        assert_eq!(job_transactions, [(None, None)]);
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn ten_thousand_jobs_on_four_workers_each_take_effect_exactly_once(pool: PgPool) {

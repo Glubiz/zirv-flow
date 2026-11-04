@@ -2693,6 +2693,21 @@ heartbeat and dead are fenced on the token the same way. `last_error` is cut to
 2 KB and never holds payload values; handlers return a typed error with a fixed
 message.
 
+The key-share lock also keeps the job from being claimed again while the attempt's transaction is
+open, since a claim skips locked rows, even once the lease ran out and the reaper put the job back;
+and it keeps the reaper's delete of a job an erasure marked waiting for the attempt. But a row lock
+gives the transaction an id, which holds the xmin horizon back for as long as the handler runs, and
+with it the dead entries at the head of `jobs_ready_idx` that every claim walks. `ingest.drain`
+runs up to its 20 s budget, back to back while ingest is busy, so it held the horizon almost all
+the time. It therefore confirms its lease with a plain read instead (`JobKind::LOCKS_LEASE` false,
+`store::confirm_lease`, #397): its job transaction takes no id and keeps no snapshot until the
+fenced completion. That is safe for the drain alone among the built-in kinds. Its writes commit on
+transactions of its own, each of which locks its inbox rows `FOR UPDATE SKIP LOCKED`, applies them
+and deletes them, and leaves out a bucket's rows after one another drain holds, so an overlapping
+late attempt applies no row twice and no key out of order. No erasure marks a drain job, whose
+payload names a workspace and no person, so the reaper's skip of a marked job a handler holds does
+not apply. Its completion stays fenced on the token, so a late attempt's ack is refused.
+
 **Scheduler slots.** A slot is enqueued only by `UPDATE schedules SET
 next_run_at = $next WHERE id = $id AND next_run_at = $slot`, a compare-and-set
 in the same transaction as the enqueue, with unique key `schedule:<id>:<slot>`.
