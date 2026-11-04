@@ -444,6 +444,15 @@ mod tests {
 
         assert!(one_tree(&[]).is_err(), "an empty response is no tree");
 
+        // The first record is `segment.entered` now that an accepted event writes no decision of
+        // its own; a trace that lost it is incomplete.
+        assert_eq!(text(&records[0], "action"), Some("segment.entered"));
+        let failure = complete(&records[1..]).expect_err("a trace without its root is reported");
+        assert!(
+            failure.contains("no `segment.entered` decision"),
+            "{failure}"
+        );
+
         // Two records whose causes name each other, and nothing else, are cut off from the root.
         let mut island = records.clone();
         island.push(json!({"id": "a", "cause": {"kind": "event", "id": "b"}, "subject_ids": {}}));
