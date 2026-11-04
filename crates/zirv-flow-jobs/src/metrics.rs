@@ -91,6 +91,33 @@ pub(crate) fn record_claim_lag(kind: &str, seconds: f64) {
         .record(seconds);
 }
 
+/// What ended the wait of a worker slot whose claim found nothing to run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IdleEnd {
+    /// A job was enqueued, or the listener reconnected and may have missed one.
+    Enqueued,
+    /// A job of the same worker left running under a per-workspace cap (#397).
+    Freed,
+    /// The poll interval ran out.
+    Polled,
+}
+
+impl IdleEnd {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Enqueued => "enqueued",
+            Self::Freed => "freed",
+            Self::Polled => "poll",
+        }
+    }
+}
+
+/// Counts an idle slot's wait by what ended it: `zirv_flow_job_idle_waits_total{ended}`. A wait
+/// the poll interval ended while jobs were due is a slot that slept through work.
+pub(crate) fn record_idle_wait(ended: IdleEnd) {
+    metrics::counter!("zirv_flow_job_idle_waits_total", "ended" => ended.as_str()).increment(1);
+}
+
 /// Counts what a drained batch did: `zirv_flow_ingest_applied_total{kind,outcome}` and
 /// `zirv_flow_ingest_late_total`.
 pub(crate) fn record_drained(outcome: &DrainOutcome) {
@@ -690,6 +717,29 @@ mod tests {
             "{output}"
         );
         assert!(output.contains("kind=\"a.kind\""), "{output}");
+    }
+
+    #[test]
+    fn an_idle_wait_is_counted_by_what_ended_it() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+
+        metrics::with_local_recorder(&recorder, || {
+            record_idle_wait(IdleEnd::Polled);
+            record_idle_wait(IdleEnd::Polled);
+            record_idle_wait(IdleEnd::Freed);
+            record_idle_wait(IdleEnd::Enqueued);
+        });
+
+        let output = handle.render();
+        for (ended, count) in [("poll", 2), ("freed", 1), ("enqueued", 1)] {
+            assert!(
+                output.contains(&format!(
+                    "zirv_flow_job_idle_waits_total{{ended=\"{ended}\"}} {count}"
+                )),
+                "{output}"
+            );
+        }
     }
 
     #[test]
