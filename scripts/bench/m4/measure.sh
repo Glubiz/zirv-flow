@@ -22,8 +22,10 @@
 #                  POST .../refresh, from the job's created_at to the job's absence, with
 #                  the median; targets < 2 min                                      refresh-trait.json
 #   refresh-agg    D4.6  the same for the aggregate segment; target < 10 min        refresh-agg.json
-#   incremental    D4.7  with a saved aggregate segment refreshed, loadgen sends track events
-#                  (bench_order_placed among them) at M4_INC_RATE/s for M4_INC_SECONDS; once
+#   incremental    D4.7  with a saved aggregate segment refreshed (plan = pro and at least one
+#                  bench_order_placed in the last 3 hours, defs/agg_recent.json: the seed's events are older,
+#                  so nobody is a member at first and every first order of a pro person is an entry), loadgen
+#                  sends track events (bench_order_placed among them) at M4_INC_RATE/s for M4_INC_SECONDS; once
 #                  the marks drain, incremental-latency.sql gives the p95 from an event's
 #                  receipt to its segment.entered decision; target p95 < 60 s
 #                                                                                   incremental.json, incremental-loadgen.json
@@ -286,7 +288,7 @@ phase_incremental() {
   name="m4-incremental-$(date -u +%H%M%S)"
   t_call="$(pg -At -c 'SELECT clock_timestamp()')"
   created="$(api_json POST "/workspaces/$ws/segments" \
-    "$(jq -nc --arg n "$name" --slurpfile d "$m4_dir/defs/agg90.json" '{name: $n, definition: $d[0], cadence_minutes: 10080}')")"
+    "$(jq -nc --arg n "$name" --slurpfile d "$m4_dir/defs/agg_recent.json" '{name: $n, definition: $d[0], cadence_minutes: 10080}')")"
   seg="$(jq -r .id <<<"$created")"
   job_wait "$seg" "$t_call" >/dev/null
   before="$(api GET "/workspaces/$ws/segments/$seg" | jq -c '{member_count, computed_version}')"
@@ -305,12 +307,13 @@ phase_incremental() {
   done
   latency="$(pg -At -v ws="$ws" -v segment="$seg" -v since="$since" -f - <"$m4_dir/incremental-latency.sql")"
   after="$(api GET "/workspaces/$ws/segments/$seg" | jq -c '{member_count, computed_version}')"
-  jq -n --arg seg "$seg" --arg since "$since" --argjson before "$before" --argjson after "$after" \
+  diag="$(pg -At -v ws="$ws" -v since="$since" -f - <"$m4_dir/incremental-diagnostics.sql")"
+  jq -n --argjson diag "$diag" --arg seg "$seg" --arg since "$since" --argjson before "$before" --argjson after "$after" \
     --argjson latency "$latency" --arg pending "$pending" --arg ws "$ws" --arg at "$(date -u +%FT%TZ)" \
     --argjson rate "$inc_rate" --argjson seconds "$inc_seconds" --argjson pool "$inc_pool" \
     --slurpfile lg "$M4_OUT/incremental-loadgen.json" '
     {phase: "incremental", workspace: $ws, measured_at: $at, segment: $seg, since: $since,
-     definition_name: "agg90", loadgen: {rate_per_s: $rate, seconds: $seconds, people: $pool,
+     definition_name: "agg_recent", diagnostics: $diag, loadgen: {rate_per_s: $rate, seconds: $seconds, people: $pool,
        total: ($lg[0].total // null)},
      members_before: $before, members_after: $after, pending_after_wait: ($pending | tonumber),
      latency_s: $latency, target_p95_s: 60,
@@ -319,6 +322,11 @@ phase_incremental() {
   jq -c '{phase, members_before, members_after, pending_after_wait, latency_s}' "$M4_OUT/incremental.json"
   # Leave the database as the other phases expect it: nothing re-evaluates this segment any more.
   api POST "/workspaces/$ws/segments/$seg/archive" >/dev/null
+  # A run with no event-caused entry has measured nothing: fail it instead of recording a valid run.
+  if [ "$(jq -r .latency_s.entries_caused_by_events "$M4_OUT/incremental.json")" = 0 ]; then
+    jq -c .diagnostics "$M4_OUT/incremental.json" >&2
+    die "incremental: no entry was caused by an event, so the latency was not measured (diagnostics above)"
+  fi
 }
 
 [ "$#" -gt 0 ] || { sed -n '2,/^# Usage/p' "$0" >&2; exit 2; }
