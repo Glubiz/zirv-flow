@@ -288,6 +288,12 @@ over the seeded rows. The seed writes the rows the app writes (checked against a
 track sent through the API); it does not write the source-record ledger, decisions, event
 deduplication rows or event message ids, which no segment query reads.
 
+The incremental phase saves a segment of `plan = pro` and at least one `bench_order_placed` in the
+last 3 hours (`m4/defs/agg_recent.json`). The seed's events are older, so nobody is a member at first
+and every first order of a pro person in the loadgen pool is an event-caused entry. The phase records
+the orders and people created since its start (`diagnostics`) and fails when no entry was caused by
+an event: an earlier definition (two orders in 90 days) recorded such a run as valid.
+
 ## 10. Timer benchmark (M5, issue #169)
 
 `scripts/bench/m5/` measures timer lateness at 1,000,000 waiting enrollments (architecture 9.3 and
@@ -480,10 +486,17 @@ Every arm is wrapped by `run_bench` in a quiet start and shared instrumentation 
 `instrument/` under the raw directory: serve `/metrics` before and after, `pg-stats-before/after.json`
 (`pg_current_wal_lsn()`, `pg_stat_wal`, `pg_stat_io`, checkpoint counters from
 `pg_stat_checkpointer` or, on 16, `pg_stat_bgwriter`), `pg-statements.json` (top 30 by
-`total_exec_time` since the arm's `pg_stat_statements_reset()`) and `docker-stats.tsv` (read-only
-`docker stats --no-stream` of the four stack containers every `M8_DOCKER_STATS_TICK_S=10` seconds).
-The ingest arm (`m8/ingest.sh`) adds `instrument/waits.ndjson`, the wait events of the client
-backends once per second (ingest backends flagged by their inbox statements); loadgen's report
+`total_exec_time` since the arm's `pg_stat_statements_reset()`) and `docker-stats.ndjson` (read-only
+`docker stats --no-stream`, one JSON line per container per sample, keyed by container name so it
+survives the recreate of a service, about every `M8_DOCKER_STATS_TICK_S=1` second plus the call's
+own ~1 s) and `waits.ndjson`, the wait events of the client backends once per second
+(`pg-waits.sql`, every arm but render). Every sampler (docker stats, waits, the per-kind sampler)
+is registered in `$M8_STATE/samplers`, its database sessions carry `application_name`
+`m8-sampler*`, and it stops on exit, INT and TERM (the sessions are also ended in PostgreSQL). An
+arm refuses to start while a sampler of an earlier run is alive (live pid or session) and prints
+how to clear it. The final topology check follows an image switch made during the run (the
+containers must agree on the tag the serve container runs at the end) and records it as
+`topology.image_switch`. The ingest arm flags its inbox backends in the wait samples (ingest backends flagged by their inbox statements); loadgen's report
 gains `timeline_from_schedule`, per scheduled second the requests, p50, p99 and max latency from
 schedule (loadgen had no timeline before). Rebuild `target/release/loadgen` to get it. If changing the PG
 cap, size `M8_SHARED_BUFFERS` with it. `up` rejects intersections among all three CPU allocations
@@ -559,13 +572,13 @@ seed to finish first; all three targets must be supplied together when selecting
 |---|---|
 | `ingest` | `tools/loadgen` track workload on the running stack |
 | `segments` | `m4/measure.sh all`, including the incremental load window |
-| `send` | M6 sink/setup and `m6/run.sh`; SQL email/consent fixtures on existing M8 people |
+| `send` | M6 sink/setup and `m6/run.sh`; SQL email/consent fixtures on existing M8 people. `PEOPLE` sets the audience (default 20000, up to the first workspace's people), `M8_WORKER_CONCURRENCY` the worker concurrency; `delivery-attempts.json` holds `delivery_attempts.duration_ms` p50, p95 and p99 over the steady window (the SMTP call time) |
 | `render` | `m7/render.sh` with prebuilt `tools/renderbench`; **native host tool, outside Docker CPU/memory caps**, explicitly labelled in JSON |
 | `debugger` | Watcher receipts and host SQL latency/clock report, alongside track load |
 | `explorer` | 90-day count/breakdown/list/CSV queries at both timeout budgets, alongside track ingest |
 | `jobs` | SQL no-op throughput and busy/quiet workspace fairness, with and without a cap |
 | `timers` | M5 lateness query on the M8 waiting seed, idle and alongside track ingest |
-| `decisions` | Non-zero until #397 adapts `ab.sh`, which currently deletes its own fixed stack and launches unpinned Windows processes |
+| `decisions` | `m8/decisions.sh`: the #75 A/B in container networking, `M8_DECISIONS_RUNS=3` interleaved rounds per side (the first side alternates); per run docker stats, `pg_stat_statements`, `pg_stat_wal` and waits; added p95 from `zirv_flow_decision_append_seconds`, throughput loss paired per round with its spread. Build the binaries with `m8/build-ab.sh [rev]` (default: newest `origin/main`; `source-rev` records it) |
 
 `all` and `smoke` note and skip only unregistered commands; a registered benchmark failure stops
 the suite. Bench setup may use the existing authenticated APIs; scale seeds do not. Each completed
@@ -613,7 +626,13 @@ set to `15000`. It verifies the container environment, waits for readiness, and 
 serve configuration on success, error, INT and TERM. Export keeps its shipped 60,000 ms timeout
 per statement and 1,000,000-row cap. Each budget measures track ingest alone, then with **1, 4
 and 16** explorer clients at `M8_RATE` for `M8_SECONDS` (smoke: five seconds and one client).
-`M8_DRAIN_SECONDS=60` bounds inbox draining between scenarios. Explorer clients run closed loop,
+`M8_DRAIN_SECONDS=60` bounds inbox draining between scenarios.
+`M8_EXPLORER_SHAPES` (`export`, `interactive` or shape names, comma separated; default all seven)
+runs one family of shapes, for example an export-only and an interactive-only 4-client arm;
+`M8_EXPLORER_CONTAINER=1` runs the explorer loadgen in a Linux container on the bench network
+(the Linux loadgen under `$M8_STATE/send-tools/linux/loadgen`, as for the debugger), so the host
+path is out of the explorer measurement. `M8_EXPLORER_CLIENTS` and `M8_EXPLORER_SETTINGS` pick the
+scenarios. Explorer clients run closed loop,
 cycling the seven shapes with staggered starting positions, and finish outstanding requests after
 the launch window. The client deadline for an entire response is 300 seconds
 (`--request-timeout-seconds`); it is reported separately from server `503 query_timeout`.
