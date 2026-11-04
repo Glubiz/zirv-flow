@@ -281,6 +281,10 @@ calls = pathlib.Path(sys.argv[1]).read_text().splitlines()
 assert len(calls) == 2
 assert all('--clients 1 --duration 5' in c for c in calls)
 PYTEST
+# Shapes reach the loadgen; container mode needs the Linux loadgen.
+: >"$work/explorer-calls"
+(export M8_SMOKE=1 M8_EXPLORER_SHAPES=export; explorer_stub_run "$work/shapes-explorer") >"$work/explorer-output" 2>&1
+grep -Fq -- '--shapes export' "$work/explorer-calls"
 # Running in a fresh shell preserves errexit while expect_failure observes the exit status.
 export -f explorer_stub_run
 export work here
