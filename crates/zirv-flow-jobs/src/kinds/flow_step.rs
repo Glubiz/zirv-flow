@@ -4255,6 +4255,9 @@ pub(super) mod tests {
         .await;
     }
 
+    /// The round trips of a warm batch of 32 timer wakes on 0.231.0.
+    const BEFORE: u64 = 490;
+
     /// The round trips of a wake of a full batch (#397), counted on the wire after a first batch
     /// prepared every statement on the connection, for the bench's timer: a wait, then the end.
     /// On 0.231.0 a batch of 32 made 490 of them, 15.3 a wake; one clock read per batch, one
@@ -4262,8 +4265,6 @@ pub(super) mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_wake_of_a_full_batch_makes_three_round_trips_fewer(pool: PgPool) {
-        /// The round trips of a batch of 32 such wakes on 0.231.0.
-        const BEFORE: u64 = 490;
         zirv_flow_store::decision_testing::checked(pool, |pool| async move {
             let env = Env::new(pool).await;
             let batch = crate::worker::CLAIM_BATCH as usize;
