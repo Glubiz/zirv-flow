@@ -162,7 +162,7 @@ async fn run(args: Args) -> Result<(), String> {
         .unwrap_or_else(|| format!("{:x}", started.as_millis()));
     init_tls();
     let client = reqwest::Client::builder()
-        .pool_max_idle_per_host(args.max_in_flight.min(1024) as usize)
+        .pool_max_idle_per_host(idle_pool_size(args.max_in_flight))
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|error| error.to_string())?;
@@ -289,9 +289,21 @@ fn command() -> clap::Command {
         .args_conflicts_with_subcommands(true)
 }
 
+/// One idle connection per request that can be in flight, so an open-loop run reuses sockets
+/// instead of opening a new one per request and exhausting the host's ephemeral ports.
+fn idle_pool_size(max_in_flight: u32) -> usize {
+    max_in_flight as usize
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_idle_pool_holds_one_connection_per_in_flight_request() {
+        assert_eq!(idle_pool_size(10_000), 10_000);
+        assert_eq!(idle_pool_size(1), 1);
+    }
 
     #[test]
     fn the_explorer_subcommand_needs_its_seed_window_and_positive_concurrency() {
