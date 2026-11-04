@@ -194,6 +194,8 @@ cleanup() {
   rm -rf "$tmp"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 : >"$out/queue.csv"
 : >"$out/queue.misses"
 sampler &
@@ -265,6 +267,16 @@ for f in "$out"/metrics-w*.txt; do metrics_args+=(--metrics "$f"); done
 # Whether the bucket (or the workers) was the limit: a queue stood in the steady window.
 echo "queue_in_window=$(jq -c .queue "$out/report.json") cpu_in_window=$(jq -c .cpu "$out/report.json")" >>"$out/variant.txt"
 jq -c .metrics "$out/report.json" >&2
+# The SMTP call time: duration_ms of this run's delivery attempts inside the steady window. The window is
+# on the sink's (host) clock, attempted_at on the database's, so the window moves by the measured offset.
+mid_offset_us=$(( (offset_before + offset_after) / 2 ))
+pgc -At -v dest="$dest" -v ws="$ws" -v s="$(jq -r .window.start_us "$out/report.json")" -v e="$(jq -r .window.end_us "$out/report.json")"   -v off="$mid_offset_us" -c   "SELECT coalesce(jsonb_pretty(jsonb_build_object('attempts', count(*), 'duration_ms_p50', percentile_disc(0.5) WITHIN GROUP (ORDER BY duration_ms),
+     'duration_ms_p95', percentile_disc(0.95) WITHIN GROUP (ORDER BY duration_ms),
+     'duration_ms_p99', percentile_disc(0.99) WITHIN GROUP (ORDER BY duration_ms),
+     'measurement', 'delivery_attempts.duration_ms of this destination over the steady window; the SMTP call time, sink included')), '{}')
+   FROM delivery_attempts WHERE workspace_id = :'ws' AND destination_id = :'dest' AND subject_kind = 'message'
+     AND attempted_at >= to_timestamp((:'s'::bigint + :'off'::bigint) / 1e6) AND attempted_at < to_timestamp((:'e'::bigint + :'off'::bigint) / 1e6)" >"$out/delivery-attempts.json"
+jq -c . "$out/delivery-attempts.json" >&2
 # Whether cargo.exe ran inside the steady window.
 ws_us="$(jq -r .window.start_us "$out/report.json")"
 we_us="$(jq -r .window.end_us "$out/report.json")"

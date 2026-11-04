@@ -133,8 +133,17 @@ prepare_send() {
     state_put M6_WS "$(state_get M4_WS)"
   )
   bash "$root/scripts/bench/m6/setup.sh"
-  export PEOPLE="$pool" WORKERS=1 RUN_TIMEOUT_S=300
-  [ "$PEOPLE" -le 20000 ] || export PEOPLE=20000
+  # PEOPLE (the audience) defaults to 20000 and may be set up to the first workspace's people (for example 60000).
+  # M8_WORKER_CONCURRENCY reaches the M6 run as WORKER_CONCURRENCY (its worker processes read BENCH_WORKER_CONCURRENCY).
+  positive_integer M8_WORKER_CONCURRENCY "${M8_WORKER_CONCURRENCY:-4}"
+  if [ -n "${PEOPLE:-}" ]; then
+    positive_integer PEOPLE "$PEOPLE"
+    [ "$PEOPLE" -le "$pool" ] || die "PEOPLE ($PEOPLE) exceeds the first workspace's $pool people"
+  else
+    PEOPLE=$((pool < 20000 ? pool : 20000))
+  fi
+  export PEOPLE WORKERS=1 WORKER_CONCURRENCY="${M8_WORKER_CONCURRENCY:-4}"
+  export RUN_TIMEOUT_S="${RUN_TIMEOUT_S:-$((PEOPLE / 50 + 300))}"
   # M6's measurement is reused; its API people seeder is replaced by SQL bench fixtures.
   pg -v n="$PEOPLE" -f - <<'SQL'
 BEGIN;
