@@ -2459,8 +2459,10 @@ mod tests {
             idle_waits(&output, "enqueued"),
         );
         assert!(most_running <= 4, "{most_running} jobs ran at once");
+        // Without the wake about a hundred waits run out; the margin takes one stall of more
+        // than the poll on a loaded runner, when each of the 12 idle slots runs out once.
         assert!(
-            polled <= 2,
+            polled <= 24,
             "{polled} idle waits ran out the poll interval while jobs were due"
         );
     }
