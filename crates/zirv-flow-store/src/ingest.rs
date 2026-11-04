@@ -37,12 +37,6 @@ use crate::{NewJob, PgConnection, PgPool, StoreError, begin, commit, enqueue};
 /// The job kind that drains a workspace's inbox.
 pub const DRAIN_JOB_KIND: &str = "ingest.drain";
 
-/// The drain's priority band, ahead of every job enqueued at the default 0, such as the due
-/// `flow.step` wakes: a drain is claimed next however many older wakes are due, so the inbox
-/// stays current under a wake backlog. The drain's work then takes database time the wakes would
-/// have had, so wakes run slower while ingest is busy (ruling 2be8b88c, #397).
-pub const DRAIN_PRIORITY: i16 = -1;
-
 /// The `source` every ingested record and event carries.
 const SOURCE: &str = "api";
 
@@ -309,7 +303,6 @@ fn drain_job(workspace: WorkspaceId, trace: &TraceContext) -> NewJob {
     let mut job = NewJob::new(DRAIN_JOB_KIND, trace.clone());
     job.workspace_id = Some(workspace);
     job.payload = json!({ "workspace_id": workspace.as_uuid() });
-    job.priority = DRAIN_PRIORITY;
     job.unique_key = Some(format!("{DRAIN_JOB_KIND}:{}", workspace.as_uuid()));
     job
 }
@@ -1304,9 +1297,13 @@ mod tests {
         .await;
     }
 
+    /// A drain is queued at the default priority, in age order with every other job, so it waits
+    /// behind older due wakes like any job (supervisor ruling 98e6546e): a band of its own ahead of
+    /// the wakes let more backlogged workspaces than slots, each draining for up to 20 s, starve
+    /// every other kind.
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_drain_enqueued_behind_a_thousand_due_wakes_is_claimed_next(pool: PgPool) {
+    async fn a_drain_enqueued_behind_due_wakes_waits_its_turn(pool: PgPool) {
         crate::decision_testing::checked(pool, |pool| async move {
             const STEP: &str = "flow.step";
             let lease = std::time::Duration::from_secs(60);
@@ -1334,55 +1331,18 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-            assert!(priority < 0 && priority == DRAIN_PRIORITY);
-            let kinds = [STEP, DRAIN_JOB_KIND];
-            let wake = |job: &crate::ClaimedJob| job.payload["n"].as_i64();
-            let give_back = |claimed: &[crate::ClaimedJob]| {
-                claimed
-                    .iter()
-                    .map(|job| (job.id, job.lease_token))
-                    .collect::<Vec<_>>()
-            };
+            assert_eq!(priority, 0);
 
-            let next = crate::claim_jobs(&pool, "w", &kinds, lease, None, 1)
-                .await
-                .unwrap();
-            assert_eq!(next.len(), 1);
-            assert_eq!(next[0].kind, DRAIN_JOB_KIND);
-            crate::release_jobs(&pool, &give_back(&next)).await.unwrap();
-
-            // A batch takes the drain's band first and fills up from the wakes' band.
-            let batch = crate::claim_jobs(&pool, "w", &kinds, lease, None, 32)
-                .await
-                .unwrap();
-            assert_eq!(batch[0].kind, DRAIN_JOB_KIND);
-            assert_eq!(
-                batch[1..].iter().map(wake).collect::<Vec<_>>(),
-                (1..=31).map(Some).collect::<Vec<_>>()
-            );
-            crate::release_jobs(&pool, &give_back(&batch))
-                .await
-                .unwrap();
-
-            // Under a cap smaller than the batch, a claim takes the best band offered alone (ruling
-            // a894b5c2): the drain, and the wakes wait for the next claim.
-            let capped = crate::claim_jobs(&pool, "w", &kinds, lease, Some(8), 32)
+            let batch = crate::claim_jobs(&pool, "w", &[STEP, DRAIN_JOB_KIND], lease, None, 32)
                 .await
                 .unwrap();
             assert_eq!(
-                capped
+                batch
                     .iter()
-                    .map(|job| job.kind.as_str())
+                    .map(|job| job.payload["n"].as_i64())
                     .collect::<Vec<_>>(),
-                [DRAIN_JOB_KIND]
-            );
-            let after = crate::claim_jobs(&pool, "w", &kinds, lease, Some(8), 32)
-                .await
-                .unwrap();
-            assert_eq!(
-                after.iter().map(wake).collect::<Vec<_>>(),
-                (1..=7).map(Some).collect::<Vec<_>>(),
-                "the next claim takes the wakes, up to the cap"
+                (1..=32).map(Some).collect::<Vec<_>>(),
+                "the oldest wakes, not the younger drain"
             );
         })
         .await;

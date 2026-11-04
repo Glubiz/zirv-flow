@@ -196,10 +196,7 @@ On `SIGTERM` or Ctrl-C a worker stops claiming, gives back the jobs it claimed
 but has not started, and has 30 seconds to finish running jobs; any still
 running are left to lease expiry. The
 `ingest.drain` kind (one per workspace) applies that workspace's ingestion inbox; see
-[Ingestion](../people.md#ingestion). It is queued ahead of every other kind (priority -1, the
-others 0), so a backlog of due flow steps cannot hold the inbox back: the drain is claimed next
-and the inbox stays current. The cost is wake throughput while ingest is busy: at about 2,000
-events/s the drain takes about two PostgreSQL cores, and the flow steps run slower for it. Its
+[Ingestion](../people.md#ingestion). Its
 job transaction confirms the lease without a row lock, so a drain that runs for its whole
 20 second budget does not hold back the cleanup that keeps the claims cheap; see
 [architecture section 14](../architecture.md#14-queue-and-scheduler). `/metrics` carries
