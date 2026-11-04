@@ -314,6 +314,15 @@ fn drain_job(workspace: WorkspaceId, trace: &TraceContext) -> NewJob {
     job
 }
 
+/// Every workspace's oldest inbox row, `$1` and `$2` being the lowest and highest ids.
+const INBOX_HEADS: &str = "SELECT w.id, EXTRACT(EPOCH FROM now() - head.received_at)::float8 \
+    FROM workspaces w \
+    CROSS JOIN LATERAL ( \
+        SELECT i.received_at FROM ingest_inbox i \
+        WHERE ROW(i.workspace_id, i.id) >= ROW(w.id, $1::bigint) \
+          AND ROW(i.workspace_id, i.id) <= ROW(w.id, $2::bigint) \
+        ORDER BY i.workspace_id, i.id LIMIT 1) head";
+
 /// A workspace's oldest inbox row.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct InboxHead {
@@ -322,19 +331,18 @@ pub struct InboxHead {
     pub age_seconds: f64,
 }
 
-/// The oldest row (the lowest id) of every workspace that has any: one index probe per
-/// workspace on `(workspace_id, id)`, never a scan of the inbox.
+/// The oldest row (the lowest id) of every workspace that has any: one probe per workspace of
+/// `ingest_inbox_workspace_idx`, never a scan of the inbox. Each probe is a row comparison led by
+/// `workspace_id` and ordered by `(workspace_id, id)`, which no other index can answer: the
+/// primary key's order by `id`, filtered to the workspace, would walk every other workspace's
+/// rows to find that an empty one has none (#397).
 pub async fn inbox_heads(pool: &PgPool) -> Result<Vec<InboxHead>, StoreError> {
-    let rows: Vec<(Uuid, f64)> = sqlx::query_as(
-        "SELECT w.id, EXTRACT(EPOCH FROM now() - head.received_at)::float8 \
-         FROM workspaces w \
-         CROSS JOIN LATERAL ( \
-             SELECT received_at FROM ingest_inbox WHERE workspace_id = w.id \
-             ORDER BY id LIMIT 1) head",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(StoreError::query)?;
+    let rows: Vec<(Uuid, f64)> = sqlx::query_as(INBOX_HEADS)
+        .bind(i64::MIN)
+        .bind(i64::MAX)
+        .fetch_all(pool)
+        .await
+        .map_err(StoreError::query)?;
     Ok(rows
         .into_iter()
         .map(|(workspace, age_seconds)| InboxHead {
@@ -2253,6 +2261,74 @@ mod tests {
             assert_eq!(heads.len(), 1);
             assert_eq!(heads[0].workspace_id, one);
             assert!((29.0..60.0).contains(&heads[0].age_seconds), "{heads:?}");
+            assert!(heads.iter().all(|head| head.workspace_id != two));
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_heads_probe_the_workspace_index_beside_a_large_inbox_and_an_empty_one(
+        pool: PgPool,
+    ) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let one = workspace(&pool, "one").await;
+            let name = WorkspaceName::parse("two").unwrap();
+            let slug = Slug::parse("two").unwrap();
+            let two = create_workspace(&pool, &name, &slug).await.unwrap().id;
+            sqlx::query(
+            "INSERT INTO ingest_inbox (workspace_id, api_key_id, kind, item, message_id, trace_id) \
+             SELECT $1, gen_random_uuid(), 'track', '{}', 'm-' || g, gen_random_uuid() \
+             FROM generate_series(1, 20000) g",
+        )
+        .bind(one.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+            sqlx::query("ANALYZE ingest_inbox")
+                .execute(&pool)
+                .await
+                .unwrap();
+
+            let plan: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {INBOX_HEADS}"
+            )))
+            .bind(i64::MIN)
+            .bind(i64::MAX)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let heads = inbox_heads(&pool).await.unwrap();
+
+            let mut stack = vec![&plan[0]["Plan"]];
+            let mut inbox_scans = Vec::new();
+            while let Some(node) = stack.pop() {
+                if node["Relation Name"] == "ingest_inbox" {
+                    inbox_scans.push((
+                        node["Node Type"].as_str().unwrap_or_default(),
+                        node["Index Name"].as_str().unwrap_or_default(),
+                    ));
+                }
+                if let Some(children) = node["Plans"].as_array() {
+                    stack.extend(children);
+                }
+            }
+            assert_eq!(
+                inbox_scans,
+                [("Index Scan", "ingest_inbox_workspace_idx")],
+                "{plan}"
+            );
+            let top = &plan[0]["Plan"];
+            let buffers = top["Shared Hit Blocks"].as_i64().unwrap()
+                + top["Shared Read Blocks"].as_i64().unwrap();
+            assert!(buffers < 50, "{buffers} buffers\n{plan}");
+            assert_eq!(
+                heads
+                    .iter()
+                    .map(|head| head.workspace_id)
+                    .collect::<Vec<_>>(),
+                [one]
+            );
             assert!(heads.iter().all(|head| head.workspace_id != two));
         })
         .await;

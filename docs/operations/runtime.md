@@ -42,9 +42,13 @@ spans are exported, so a filter such as `warn` exports none.
 closed sets (a route template, a kind, an outcome, a feature) or are ids; no email, phone, name,
 property value, key, prompt or model output is ever a label. The queue, enrollment, freshness,
 destination and dirty-set gauges are sampled by the scheduler leader, so they appear where the
-leader runs. The enrollment gauges read the live rows through `enrollments_live_idx` under a 5 second
-statement timeout; at 11 million live rows the count takes about half a second and the overdue-timer
-lookup well under a millisecond. A test fails when a `zirv_flow_` series is emitted in `crates/` and missing from this
+leader runs. The enrollment gauges read the live rows through `enrollments_live_idx` under a 1 second
+statement timeout: each state is counted up to 10,000 rows, and above that the gauge is the
+planner's estimate from the table statistics (as current as the last `ANALYZE`, and never below
+10,001), so the sample costs the same at 10,000 live rows and at 11 million. The overdue-timer
+lookup is the first entry of the `waiting` range, well under a millisecond. The queue-depth gauge
+works the same way: each kind's `ready` count is exact up to 10,000 and estimated above, while the
+`running` and `dead` counts are exact, under a 1 second timeout. A test fails when a `zirv_flow_` series is emitted in `crates/` and missing from this
 table.
 
 Example Prometheus alert rules are in [`docs/operations/alerts.rules.yml`](alerts.rules.yml),
@@ -59,7 +63,7 @@ does not exist.
 | `zirv_flow_http_request_duration_seconds` | histogram | `method`, `route` | HTTP request latency |
 | `zirv_flow_db_pool_connections` | gauge | `pool`, `state` | Pool connections by state; `pool` is `main`, `explorer` (a `serve` process), `jobs` or `heartbeat` |
 | `zirv_flow_db_pool_max_connections` | gauge | `pool` | Pool size limit |
-| `zirv_flow_jobs` | gauge | `kind`, `state` | Queue depth for `ready`, `running` and `dead`; refreshed at most every 15 s |
+| `zirv_flow_jobs` | gauge | `kind`, `state` | Queue depth for `ready`, `running` and `dead`; refreshed at most every 15 s; a kind's `ready` count is exact up to 10,000 and the planner's estimate above |
 | `zirv_flow_jobs_total` | counter | `kind`, `outcome` | Job attempts by how they ended |
 | `zirv_flow_job_duration_seconds` | histogram | `kind` | Handler duration; a flow step run in a shared transaction counts its own run plus an equal share of the transaction's setup and commit |
 | `zirv_flow_job_claim_lag_seconds` | histogram | `kind` | Time from `run_at` until a worker starts the job: its claim, plus its wait behind the jobs claimed with it |
@@ -103,7 +107,7 @@ does not exist.
 | `zirv_flow_segment_dirty_age_seconds` | gauge | none | Age of the oldest dirty mark |
 | `zirv_flow_flow_enrollments_total` | counter | `trigger`, `outcome` | People a `flow.enroll` enrolled or found enrolled |
 | `zirv_flow_flow_enroll_skips_total` | counter | `trigger`, `reason` | Enrollments refused, by reason |
-| `zirv_flow_enrollments` | gauge | `state` | Enrollments that are `active` or `waiting`; sampled every 60 s |
+| `zirv_flow_enrollments` | gauge | `state` | Enrollments that are `active` or `waiting`; sampled every 60 s; exact up to 10,000 per state and the planner's estimate above |
 | `zirv_flow_enrollments_last_sample_timestamp_seconds` | gauge | none | Unix time of the last successful enrollment sample; alert on it going stale, since a failed sample leaves the gauges at their last values |
 | `zirv_flow_timer_lateness_seconds` | gauge | none | Age of the oldest `waiting` enrollment whose `wake_at` has passed; 0 with none |
 | `zirv_flow_timer_wake_lateness_seconds` | histogram | none | Time between a timer's `wake_at` and its `flow.step` running |

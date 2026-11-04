@@ -854,30 +854,72 @@ pub async fn queue_counts<'e>(executor: impl PgExecutor<'e>) -> Result<QueueCoun
     })
 }
 
-/// Job counts by kind and state, for the queue-depth gauges.
-pub async fn queue_depths<'e>(
-    executor: impl PgExecutor<'e>,
-) -> Result<Vec<QueueDepth>, StoreError> {
-    sqlx::query_as("SELECT kind, state, count(*) AS count FROM jobs GROUP BY kind, state")
-        .fetch_all(executor)
-        .await
-        .map_err(StoreError::query)
+/// Up to this many ready jobs of a kind are counted; above it the count is an estimate.
+const DEPTH_EXACT: i64 = 10_000;
+
+/// The planner's estimate of a kind's jobs in a state, for a ready count above [`DEPTH_EXACT`].
+const DEPTH_ESTIMATE: &str = "SELECT 1 FROM jobs WHERE state = $1 AND kind = $2";
+
+/// The depths with the ready jobs of each kind counted up to `$1`: a skip scan of
+/// `jobs_ready_kind_idx` finds the kinds with ready jobs, one probe each, and each kind's count
+/// reads at most `$1` entries of its range there. The running jobs are as many as the worker
+/// slots hold and the dead ones as many as retention keeps, so both are counted in full from
+/// their partial indexes. No part reads the whole table, however long the queue (#397).
+const DEPTHS: &str = "WITH RECURSIVE kinds (kind) AS ( \
+        (SELECT kind FROM jobs WHERE state = 'ready' ORDER BY kind LIMIT 1) \
+        UNION ALL \
+        SELECT (SELECT j.kind FROM jobs j WHERE j.state = 'ready' AND j.kind > k.kind \
+                ORDER BY j.kind LIMIT 1) \
+        FROM kinds k WHERE k.kind IS NOT NULL) \
+    SELECT k.kind, 'ready' AS state, \
+        (SELECT count(*) FROM (SELECT 1 FROM jobs j WHERE j.state = 'ready' AND j.kind = k.kind \
+                               ORDER BY j.run_at LIMIT $1) c) AS count \
+    FROM kinds k WHERE k.kind IS NOT NULL \
+    UNION ALL \
+    SELECT kind, 'running', count(*) FROM jobs WHERE state = 'running' GROUP BY kind \
+    UNION ALL \
+    SELECT kind, 'dead', count(*) FROM jobs WHERE state = 'dead' GROUP BY kind";
+
+/// Job counts by kind and state, for the queue-depth gauges. The running and dead counts are
+/// exact, and so is each kind's ready count up to 10,000; above that it is the planner's
+/// estimate from the table statistics, and never below 10,001, so a long backlog costs no more to
+/// gauge than a short one.
+pub async fn queue_depths(connection: &mut PgConnection) -> Result<Vec<QueueDepth>, StoreError> {
+    depths_up_to(connection, DEPTH_EXACT).await
 }
 
-/// The longest the queue-depth gauge query may run.
-const DEPTH_TIMEOUT: &str = "5s";
+async fn depths_up_to(
+    connection: &mut PgConnection,
+    exact: i64,
+) -> Result<Vec<QueueDepth>, StoreError> {
+    // Planned for the limit's value each time, never with a generic plan.
+    let mut depths: Vec<QueueDepth> = sqlx::query_as(DEPTHS)
+        .persistent(false)
+        .bind(exact + 1)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
+    for depth in depths.iter_mut().filter(|depth| depth.state == "ready") {
+        depth.count = crate::bounded::count_or_estimate(
+            connection,
+            depth.count,
+            exact,
+            DEPTH_ESTIMATE,
+            &["ready", depth.kind.as_str()],
+        )
+        .await?;
+    }
+    Ok(depths)
+}
 
-/// [`queue_depths`] under a statement timeout, for the leader's gauges: no index covers kind and
-/// state, so on a table of millions of jobs the count is a full scan that must not hold the tick.
+/// The longest a queue-depth gauge statement may run.
+const DEPTH_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// [`queue_depths`] under a statement timeout of a second, for the leader's gauges: the reads
+/// are bounded, and the timeout keeps a slow database from holding the tick.
 pub async fn sample_queue_depths(pool: &PgPool) -> Result<Vec<QueueDepth>, StoreError> {
-    let mut tx = pool.begin().await.map_err(StoreError::query)?;
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        "SET LOCAL statement_timeout = '{DEPTH_TIMEOUT}'"
-    )))
-    .execute(&mut *tx)
-    .await
-    .map_err(StoreError::query)?;
-    let depths = queue_depths(&mut *tx).await?;
+    let mut tx = crate::bounded::begin_bounded_for(pool, DEPTH_TIMEOUT).await?;
+    let depths = queue_depths(&mut tx).await?;
     tx.commit().await.map_err(StoreError::query)?;
     Ok(depths)
 }
@@ -1376,16 +1418,138 @@ mod tests {
         enqueue(&pool, &job("a.kind")).await.unwrap();
         enqueue(&pool, &job("a.kind")).await.unwrap();
         enqueue(&pool, &job("b.kind")).await.unwrap();
+        enqueue(&pool, &job("c.kind")).await.unwrap();
         claim(&pool, &["b.kind"]).await.unwrap();
+        sqlx::query(
+            "INSERT INTO jobs (id, kind, payload, state, dead_at, trace_id, cause_kind, cause_id) \
+             SELECT gen_random_uuid(), k, '{}', 'dead', now(), gen_random_uuid(), 'api', 'x' \
+             FROM unnest(ARRAY['a.kind', 'c.kind', 'c.kind']) k",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
-        let mut depths = queue_depths(&pool).await.unwrap();
-        depths.sort_by(|a, b| a.kind.cmp(&b.kind));
+        let depths = sorted(
+            queue_depths(&mut pool.acquire().await.unwrap())
+                .await
+                .unwrap(),
+        );
 
         let summary: Vec<(&str, &str, i64)> = depths
             .iter()
             .map(|d| (d.kind.as_str(), d.state.as_str(), d.count))
             .collect();
-        assert_eq!(summary, [("a.kind", "ready", 2), ("b.kind", "running", 1)]);
+        assert_eq!(
+            summary,
+            [
+                ("a.kind", "dead", 1),
+                ("a.kind", "ready", 2),
+                ("b.kind", "running", 1),
+                ("c.kind", "dead", 2),
+                ("c.kind", "ready", 1)
+            ]
+        );
+        let full: Vec<QueueDepth> =
+            sqlx::query_as("SELECT kind, state, count(*) AS count FROM jobs GROUP BY kind, state")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            depths,
+            sorted(full),
+            "below the limit, every count is exact"
+        );
+    }
+
+    fn sorted(mut depths: Vec<QueueDepth>) -> Vec<QueueDepth> {
+        depths.sort_by(|a, b| (&a.kind, &a.state).cmp(&(&b.kind, &b.state)));
+        depths
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_ready_count_above_the_limit_is_the_planners_estimate(pool: PgPool) {
+        sqlx::query(
+            "INSERT INTO jobs (id, kind, payload, trace_id, cause_kind, cause_id) \
+             SELECT gen_random_uuid(), CASE WHEN g <= 3 THEN 'b.kind' ELSE 'a.kind' END, '{}', \
+                    gen_random_uuid(), 'api', 'x' \
+             FROM generate_series(1, 403) g",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("ANALYZE jobs").execute(&pool).await.unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+
+        let depths = sorted(depths_up_to(&mut connection, 5).await.unwrap());
+
+        let summary: Vec<(&str, i64)> = depths.iter().map(|d| (d.kind.as_str(), d.count)).collect();
+        // ANALYZE reads every row of a table this small, so the estimate is the count.
+        assert_eq!(summary, [("a.kind", 400), ("b.kind", 3)]);
+        assert!(depths.iter().all(|d| d.state == "ready"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_queue_depths_read_a_bounded_part_of_a_long_queue(pool: PgPool) {
+        sqlx::query(
+            "INSERT INTO jobs (id, kind, payload, run_at, trace_id, cause_kind, cause_id) \
+             SELECT gen_random_uuid(), CASE WHEN g % 1000 = 0 THEN 'b.kind' ELSE 'a.kind' END, \
+                    '{}', now() - make_interval(secs => g), gen_random_uuid(), 'api', 'x' \
+             FROM generate_series(1, 60000) g ORDER BY random()",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        enqueue(&pool, &job("c.kind")).await.unwrap();
+        claim(&pool, &["c.kind"]).await.unwrap();
+        sqlx::query("ANALYZE jobs").execute(&pool).await.unwrap();
+        let pages: i64 = sqlx::query_scalar(
+            "SELECT pg_relation_size('jobs') / current_setting('block_size')::bigint",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        // A limit of 100 here, so the bound shows against a table a test can fill.
+        let plan: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {DEPTHS}"
+        )))
+        .bind(101_i64)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let top = &plan[0]["Plan"];
+        let buffers = top["Shared Hit Blocks"].as_i64().unwrap()
+            + top["Shared Read Blocks"].as_i64().unwrap();
+
+        let scanned: Vec<&Value> = plan_nodes(top)
+            .into_iter()
+            .filter(|node| node["Node Type"] == "Seq Scan")
+            .collect();
+        assert!(scanned.is_empty(), "{plan}");
+        assert_eq!(top["Actual Rows"], 3, "{plan}");
+        // The ready count of `a.kind` stops at the limit: about one heap page per entry it reads,
+        // against the whole table's.
+        assert!(pages > 800, "{pages}");
+        assert!(buffers < 400, "{buffers} buffers for {pages} pages\n{plan}");
+        let depths = sorted(
+            queue_depths(&mut pool.acquire().await.unwrap())
+                .await
+                .unwrap(),
+        );
+        assert_eq!(
+            depths
+                .iter()
+                .map(|d| (d.kind.as_str(), d.state.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("a.kind", "ready"),
+                ("b.kind", "ready"),
+                ("c.kind", "running")
+            ]
+        );
+        assert!(depths[0].count > DEPTH_EXACT, "{depths:?}");
+        assert_eq!(depths[1].count, 60, "{depths:?}");
     }
 
     #[sqlx::test]
@@ -1395,15 +1559,38 @@ mod tests {
         enqueue(&pool, &job("b.kind")).await.unwrap();
         claim(&pool, &["b.kind"]).await.unwrap();
 
-        let mut timed = sample_queue_depths(&pool).await.unwrap();
-        let mut plain = queue_depths(&pool).await.unwrap();
-        timed.sort_by(|a, b| a.kind.cmp(&b.kind));
-        plain.sort_by(|a, b| a.kind.cmp(&b.kind));
+        let timed = sorted(sample_queue_depths(&pool).await.unwrap());
+        let plain = sorted(
+            queue_depths(&mut pool.acquire().await.unwrap())
+                .await
+                .unwrap(),
+        );
 
         assert_eq!(timed, plain);
         assert_eq!(timed.len(), 2);
         pool.close().await;
         assert!(sample_queue_depths(&pool).await.is_err());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_timed_queue_depths_give_up_after_a_second(pool: PgPool) {
+        let mut blocker = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE jobs IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+        let started = std::time::Instant::now();
+
+        let blocked = sample_queue_depths(&pool).await;
+
+        let waited = started.elapsed();
+        blocker.rollback().await.unwrap();
+        assert!(blocked.is_err());
+        assert!(
+            waited >= Duration::from_millis(900) && waited < Duration::from_secs(4),
+            "{waited:?}"
+        );
     }
 
     #[sqlx::test]
