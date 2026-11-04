@@ -363,26 +363,32 @@ impl DecisionBuffer {
     }
 
     /// The position to hand to [`DecisionBuffer::discard_after`], taken before a savepoint.
-    pub(crate) fn mark(&self) -> usize {
+    pub fn mark(&self) -> usize {
         self.pending.len()
     }
 
     /// Drops what was pushed after `mark`, for a savepoint that rolled back.
-    pub(crate) fn discard_after(&mut self, mark: usize) {
+    pub fn discard_after(&mut self, mark: usize) {
         self.pending.truncate(mark);
     }
 
-    /// Appends everything pushed so far, in push order, and empties the buffer.
+    /// Appends everything pushed so far, in push order, and empties the buffer. A failed append
+    /// keeps the records, so a caller that rolls back to a savepoint taken at a [`mark`] can drop
+    /// what came after it and keep the rest.
+    ///
+    /// [`mark`]: DecisionBuffer::mark
     pub async fn flush(&mut self, connection: &mut PgConnection) -> Result<(), StoreError> {
         if self.pending.is_empty() {
             return Ok(());
         }
-        let pending = std::mem::take(&mut self.pending);
-        let identified: Vec<(Uuid, &NewDecision)> = pending
+        let identified: Vec<(Uuid, &NewDecision)> = self
+            .pending
             .iter()
             .map(|(id, decision)| (*id, decision))
             .collect();
-        insert_identified(connection, &identified).await
+        insert_identified(connection, &identified).await?;
+        self.pending.clear();
+        Ok(())
     }
 }
 
@@ -489,6 +495,7 @@ pub(crate) async fn list_enrollment_decisions(
 
 #[cfg(test)]
 mod tests {
+    use sqlx::Connection;
     use time::macros::date;
     use zirv_flow_core::decision_actions;
     use zirv_flow_core::{Slug, WorkspaceName};
@@ -1023,6 +1030,33 @@ mod tests {
         let stored: Vec<&str> = records.iter().map(|r| r.action.as_str()).collect();
         assert_eq!(stored, ["kept-1", "kept-2"]);
         assert_eq!(statements_that_wrote(&pool, ws).await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_failed_flush_keeps_its_records_for_the_savepoint_that_rolls_back(pool: PgPool) {
+        let ws = workspace(&pool, "ours").await;
+        let trace = TraceContext::root(Cause::api("req-1"));
+        let enrollment = Uuid::new_v4();
+        let missing = WorkspaceId::from_uuid(Uuid::now_v7());
+        let mut buffer = DecisionBuffer::default();
+        let mut tx = crate::begin(&pool).await.unwrap();
+        buffer.push(of_enrollment(ws, &trace, enrollment, "kept"));
+        let mark = buffer.mark();
+        let mut savepoint = tx.begin().await.unwrap();
+        buffer.push(of_enrollment(missing, &trace, enrollment, "refused"));
+
+        assert!(buffer.flush(&mut savepoint).await.is_err());
+        savepoint.rollback().await.unwrap();
+        assert_eq!(buffer.mark(), 2, "the failed flush emptied the buffer");
+        buffer.discard_after(mark);
+        buffer.flush(&mut tx).await.unwrap();
+        crate::commit(tx).await.unwrap();
+
+        let (records, _) = list_trace(&pool, ws, trace.trace_id, 10).await.unwrap();
+        let stored: Vec<&str> = records.iter().map(|r| r.action.as_str()).collect();
+        assert_eq!(stored, ["kept"]);
+        assert_eq!(buffer.mark(), 0, "a flush that wrote empties the buffer");
     }
 
     #[sqlx::test]

@@ -704,6 +704,33 @@ pub async fn complete_job<'e>(
     Ok(done.rows_affected() == 1)
 }
 
+/// [`complete_job`] for the jobs that completed in one batch transaction (#397), in one
+/// statement, each fenced on its lease token. Returns the ids it deleted: a job missing from them
+/// lost its lease, and the caller must roll back the transaction it ran the handlers in. The rows
+/// are taken `FOR UPDATE` in id order, the order the reaper, a release and an erasure lock in.
+pub async fn complete_jobs<'e>(
+    executor: impl PgExecutor<'e>,
+    jobs: &[(Uuid, Uuid)],
+) -> Result<Vec<Uuid>, StoreError> {
+    if jobs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (ids, tokens): (Vec<Uuid>, Vec<Uuid>) = jobs.iter().copied().unzip();
+    sqlx::query_scalar(
+        "WITH held AS ( \
+             SELECT j.id FROM jobs j \
+             JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) \
+               ON j.id = t.id AND j.lease_token = t.lease_token \
+             ORDER BY j.id FOR UPDATE OF j) \
+         DELETE FROM jobs WHERE id IN (SELECT id FROM held) RETURNING id",
+    )
+    .bind(&ids)
+    .bind(&tokens)
+    .fetch_all(executor)
+    .await
+    .map_err(StoreError::query)
+}
+
 /// Records a failed attempt: back to `ready` after `retry_in`, or `dead` when the attempts
 /// are used up. `None` means the lease was lost and nothing changed.
 ///
@@ -810,8 +837,9 @@ pub async fn heartbeat_job<'e>(
 /// this pass: its handler's `complete_job` or `fail_job` deletes it, or a later reap does. The
 /// reaper therefore never waits on a handler's lease lock, which would stall every other expired
 /// job behind one zombie and deadlock with a handler that completes. It does wait for a worker's
-/// batch transaction (#397) that already completed or failed a job whose lease ran out while the
-/// batch's later jobs ran; once the batch commits, the row is gone or settled and is skipped.
+/// batch transaction (#397) that failed a job whose lease ran out while the batch's later jobs
+/// ran, or that is completing its jobs ([`complete_jobs`]); once the batch commits, the row is gone
+/// or settled and is skipped.
 /// A kind that confirms its lease with [`confirm_lease`] holds no row lock, so nothing here
 /// waits on it or skips it, and its late ack is refused the same way.
 pub async fn reap_expired<'e>(executor: impl PgExecutor<'e>) -> Result<Reaped, StoreError> {
@@ -2080,6 +2108,38 @@ mod tests {
                 .await
                 .unwrap()
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn completing_a_batch_deletes_the_jobs_still_held_and_names_them(pool: PgPool) {
+        for _ in 0..3 {
+            enqueue(&pool, &job("a.kind")).await.unwrap();
+        }
+        let claimed = claim_jobs(&pool, "test-worker", &["a.kind"], LEASE, None, 3)
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 3);
+        // The second lost its lease: the reaper or another worker holds it now.
+        sqlx::query("UPDATE jobs SET lease_token = gen_random_uuid() WHERE id = $1")
+            .bind(claimed[1].id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let held: Vec<(Uuid, Uuid)> = claimed
+            .iter()
+            .map(|job| (job.id, job.lease_token))
+            .collect();
+
+        let mut deleted = complete_jobs(&pool, &held).await.unwrap();
+
+        deleted.sort();
+        let mut expected = vec![claimed[0].id, claimed[2].id];
+        expected.sort();
+        assert_eq!(deleted, expected);
+        assert_eq!(only_job(&pool).await.id, claimed[1].id);
+        assert!(complete_jobs(&pool, &held).await.unwrap().is_empty());
+        assert!(complete_jobs(&pool, &[]).await.unwrap().is_empty());
     }
 
     #[sqlx::test]
