@@ -1839,7 +1839,7 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_drain_of_track_items_writes_fewer_decision_rows_and_wal_than_one_accepted_decision_per_event(
+    async fn a_track_drain_writes_decision_rows_only_for_new_people_and_rejects_and_the_dropped_rows_cost_wal(
         pool: PgPool,
     ) {
         crate::decision_testing::checked(pool, |pool| async move {
@@ -1847,7 +1847,9 @@ mod tests {
         let rows: i64 = added.iter().map(|(_, count)| count).sum();
 
         // What the removed decisions would have cost: 490 rows of the shape earlier versions
-        // wrote, inserted in one statement and rolled back.
+        // wrote, inserted in one statement and rolled back. This is a measured price of the
+        // dropped rows, not a before and after run; the drain's own WAL is only printed, because
+        // the log position is shared with every other test on the server.
         let mut tx = pool.begin().await.unwrap();
         let plan: serde_json::Value = sqlx::query_scalar(
             "EXPLAIN (ANALYZE, WAL, FORMAT JSON) \
