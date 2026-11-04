@@ -562,7 +562,9 @@ pub async fn explore_breakdown(
 /// Which of the page's traces (`$2`) hold a decision: one probe per trace on the decision trace
 /// index, with the workspace and trace filter of `list_trace`. It runs in the page's snapshot and
 /// under its statement timeout.
-const TRACES_WITH_DECISIONS: &str = "SELECT t.trace_id FROM unnest($2::uuid[]) AS t(trace_id)      WHERE EXISTS (SELECT 1 FROM decision_records d                    WHERE d.workspace_id = $1 AND d.trace_id = t.trace_id)";
+const TRACES_WITH_DECISIONS: &str = "SELECT t.trace_id FROM unnest($2::uuid[]) AS t(trace_id) \
+     WHERE EXISTS (SELECT 1 FROM decision_records d \
+                   WHERE d.workspace_id = $1 AND d.trace_id = t.trace_id)";
 
 #[derive(FromRow)]
 struct EventRow {
@@ -804,7 +806,10 @@ mod tests {
         assert!(!flag("seen_again"), "it changed nothing");
 
         sqlx::query(
-            "INSERT INTO decision_records              (id, workspace_id, trace_id, action, outcome, cause_kind, cause_id)              SELECT gen_random_uuid(), $1, gen_random_uuid(), 'step', 'done', 'api', 'x'              FROM generate_series(1, 50000)",
+            "INSERT INTO decision_records \
+                 (id, workspace_id, trace_id, action, outcome, cause_kind, cause_id) \
+             SELECT gen_random_uuid(), $1, gen_random_uuid(), 'step', 'done', 'api', 'x' \
+             FROM generate_series(1, 50000)",
         )
         .bind(ws.as_uuid())
         .execute(&pool)
@@ -823,10 +828,7 @@ mod tests {
         .fetch_all(&pool)
         .await
         .unwrap();
-        let plan = plan.join(
-            "
-",
-        );
+        let plan = plan.join("\n");
         eprintln!("{plan}");
         let month: String = sqlx::query_scalar(
             "SELECT 'decision_records_y' || to_char(now(), 'YYYY') || 'm' || to_char(now(), 'MM')",
