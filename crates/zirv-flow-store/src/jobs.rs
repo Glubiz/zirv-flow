@@ -1577,7 +1577,7 @@ mod tests {
             .filter(|node| node["Node Type"] == "Seq Scan")
             .collect();
         assert!(scanned.is_empty(), "{plan}");
-        assert_eq!(top["Actual Rows"], 3, "{plan}");
+        assert_eq!(top["Actual Rows"].as_f64(), Some(3.0), "{plan}");
         // The ready count of `a.kind` stops at the limit: about one heap page per entry it reads,
         // against the whole table's.
         assert!(pages > 800, "{pages}");
