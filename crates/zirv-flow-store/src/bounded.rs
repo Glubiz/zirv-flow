@@ -59,11 +59,108 @@ pub(crate) async fn begin_snapshot_for(
     Ok(tx)
 }
 
+/// The planner's estimate of how many rows `sql` returns, from the table statistics: the
+/// statement is planned and never run, so the estimate costs a plan however many rows match.
+/// `binds` are its text parameters, `$1` first; it is sent as an unnamed statement, so it is
+/// planned for their values and never with a generic plan. It is as current as the last
+/// `ANALYZE` of the table and the table's size.
+pub(crate) async fn planned_rows(
+    connection: &mut PgConnection,
+    sql: &'static str,
+    binds: &[&str],
+) -> Result<i64, StoreError> {
+    let mut query = sqlx::query_scalar::<_, serde_json::Value>(sqlx::AssertSqlSafe(format!(
+        "EXPLAIN (FORMAT JSON) {sql}"
+    )))
+    .persistent(false);
+    for bind in binds {
+        query = query.bind(*bind);
+    }
+    let plan = query
+        .fetch_one(connection)
+        .await
+        .map_err(StoreError::query)?;
+    let rows = plan
+        .pointer("/0/Plan/Plan Rows")
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or(0.0);
+    // A float that does not fit saturates.
+    Ok(rows.round() as i64)
+}
+
+/// A count that stays cheap however many rows match. `counted` is how many rows a read limited
+/// to `exact + 1` found: up to `exact` it is the count; above, the count is [`planned_rows`] of
+/// `sql`, and never less than `counted`.
+pub(crate) async fn count_or_estimate(
+    connection: &mut PgConnection,
+    counted: i64,
+    exact: i64,
+    sql: &'static str,
+    binds: &[&str],
+) -> Result<i64, StoreError> {
+    if counted <= exact {
+        return Ok(counted);
+    }
+    Ok(planned_rows(connection, sql, binds).await?.max(counted))
+}
+
 #[cfg(test)]
 mod tests {
     use sqlx::PgPool;
 
     use super::*;
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_count_above_its_exact_limit_is_the_planners_estimate(pool: PgPool) {
+        const PROBE: &str = "SELECT 1 FROM estimate_probe WHERE tag = $1";
+        sqlx::query("CREATE TABLE estimate_probe (tag text NOT NULL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO estimate_probe SELECT CASE WHEN g <= 3 THEN 'few' ELSE 'many' END \
+             FROM generate_series(1, 5000) g",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("ANALYZE estimate_probe")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+
+        let many = planned_rows(&mut connection, PROBE, &["many"])
+            .await
+            .unwrap();
+        let few = planned_rows(&mut connection, PROBE, &["few"])
+            .await
+            .unwrap();
+
+        // ANALYZE samples every row of a table this small, so the estimates are the counts.
+        assert_eq!((many, few), (4997, 3));
+        assert_eq!(
+            count_or_estimate(&mut connection, 3, 10, PROBE, &["few"])
+                .await
+                .unwrap(),
+            3,
+            "exact up to the limit"
+        );
+        assert_eq!(
+            count_or_estimate(&mut connection, 11, 10, PROBE, &["many"])
+                .await
+                .unwrap(),
+            4997
+        );
+        assert_eq!(
+            count_or_estimate(&mut connection, 11, 10, PROBE, &["few"])
+                .await
+                .unwrap(),
+            11,
+            "never below the rows read"
+        );
+    }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]

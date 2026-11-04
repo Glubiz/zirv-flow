@@ -307,6 +307,15 @@ fn drain_job(workspace: WorkspaceId, trace: &TraceContext) -> NewJob {
     job
 }
 
+/// Every workspace's oldest inbox row, `$1` and `$2` being the lowest and highest ids.
+const INBOX_HEADS: &str = "SELECT w.id, EXTRACT(EPOCH FROM now() - head.received_at)::float8 \
+    FROM workspaces w \
+    CROSS JOIN LATERAL ( \
+        SELECT i.received_at FROM ingest_inbox i \
+        WHERE ROW(i.workspace_id, i.id) >= ROW(w.id, $1::bigint) \
+          AND ROW(i.workspace_id, i.id) <= ROW(w.id, $2::bigint) \
+        ORDER BY i.workspace_id, i.id LIMIT 1) head";
+
 /// A workspace's oldest inbox row.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct InboxHead {
@@ -315,19 +324,27 @@ pub struct InboxHead {
     pub age_seconds: f64,
 }
 
-/// The oldest row (the lowest id) of every workspace that has any: one index probe per
-/// workspace on `(workspace_id, id)`, never a scan of the inbox.
+/// How long [`inbox_heads`] may run before PostgreSQL cancels it.
+const HEADS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The oldest row (the lowest id) of every workspace that has any: one probe per workspace of
+/// `ingest_inbox_workspace_idx`, never a scan of the inbox. Each probe is a row comparison led by
+/// `workspace_id` and ordered by `(workspace_id, id)`, which no other index can answer: the
+/// primary key's order by `id`, filtered to the workspace, would walk every other workspace's
+/// rows to find that an empty one has none (#397).
+///
+/// The leader reads the heads every tick, so the read runs under a statement timeout of
+/// [`HEADS_TIMEOUT`], like the queue depths and the enrollment sample: a slow database or a lock
+/// on the inbox fails the read instead of holding the tick.
 pub async fn inbox_heads(pool: &PgPool) -> Result<Vec<InboxHead>, StoreError> {
-    let rows: Vec<(Uuid, f64)> = sqlx::query_as(
-        "SELECT w.id, EXTRACT(EPOCH FROM now() - head.received_at)::float8 \
-         FROM workspaces w \
-         CROSS JOIN LATERAL ( \
-             SELECT received_at FROM ingest_inbox WHERE workspace_id = w.id \
-             ORDER BY id LIMIT 1) head",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(StoreError::query)?;
+    let mut tx = crate::bounded::begin_bounded_for(pool, HEADS_TIMEOUT).await?;
+    let rows: Vec<(Uuid, f64)> = sqlx::query_as(INBOX_HEADS)
+        .bind(i64::MIN)
+        .bind(i64::MAX)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(StoreError::query)?;
+    tx.commit().await.map_err(StoreError::query)?;
     Ok(rows
         .into_iter()
         .map(|(workspace, age_seconds)| InboxHead {
@@ -1284,6 +1301,57 @@ mod tests {
                     DRAIN_JOB_KIND.to_owned(),
                     Some(format!("ingest.drain:{}", ws.as_uuid()))
                 )]
+            );
+        })
+        .await;
+    }
+
+    /// A drain is queued at the default priority, in age order with every other job, so it waits
+    /// behind older due wakes like any job (supervisor ruling 98e6546e): a band of its own ahead of
+    /// the wakes let more backlogged workspaces than slots, each draining for up to 20 s, starve
+    /// every other kind.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_drain_enqueued_behind_due_wakes_waits_its_turn(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            const STEP: &str = "flow.step";
+            let lease = std::time::Duration::from_secs(60);
+            let ws = workspace(&pool, "ours").await;
+            sqlx::query(
+                "INSERT INTO jobs (id, workspace_id, kind, payload, run_at, unique_key, trace_id, \
+                               cause_kind, cause_id) \
+             SELECT gen_random_uuid(), $1, $2, jsonb_build_object('n', g), \
+                    now() - interval '1 hour' + make_interval(secs => g), \
+                    'wake:' || g, gen_random_uuid(), 'api', 'x' \
+             FROM generate_series(1, 1000) g",
+            )
+            .bind(ws.as_uuid())
+            .bind(STEP)
+            .execute(&pool)
+            .await
+            .unwrap();
+            assert!(
+                enqueue_drain(&pool, ws, &TraceContext::root(Cause::api("req-1")))
+                    .await
+                    .unwrap()
+            );
+            let priority: i16 = sqlx::query_scalar("SELECT priority FROM jobs WHERE kind = $1")
+                .bind(DRAIN_JOB_KIND)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(priority, 0);
+
+            let batch = crate::claim_jobs(&pool, "w", &[STEP, DRAIN_JOB_KIND], lease, None, 32)
+                .await
+                .unwrap();
+            assert_eq!(
+                batch
+                    .iter()
+                    .map(|job| job.payload["n"].as_i64())
+                    .collect::<Vec<_>>(),
+                (1..=32).map(Some).collect::<Vec<_>>(),
+                "the oldest wakes, not the younger drain"
             );
         })
         .await;
@@ -2304,6 +2372,103 @@ mod tests {
             assert_eq!(heads[0].workspace_id, one);
             assert!((29.0..60.0).contains(&heads[0].age_seconds), "{heads:?}");
             assert!(heads.iter().all(|head| head.workspace_id != two));
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_heads_probe_the_workspace_index_beside_a_large_inbox_and_an_empty_one(
+        pool: PgPool,
+    ) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let one = workspace(&pool, "one").await;
+            let name = WorkspaceName::parse("two").unwrap();
+            let slug = Slug::parse("two").unwrap();
+            let two = create_workspace(&pool, &name, &slug).await.unwrap().id;
+            sqlx::query(
+            "INSERT INTO ingest_inbox (workspace_id, api_key_id, kind, item, message_id, trace_id) \
+             SELECT $1, gen_random_uuid(), 'track', '{}', 'm-' || g, gen_random_uuid() \
+             FROM generate_series(1, 20000) g",
+        )
+        .bind(one.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+            sqlx::query("ANALYZE ingest_inbox")
+                .execute(&pool)
+                .await
+                .unwrap();
+
+            let plan: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {INBOX_HEADS}"
+            )))
+            .bind(i64::MIN)
+            .bind(i64::MAX)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let heads = inbox_heads(&pool).await.unwrap();
+
+            let mut stack = vec![&plan[0]["Plan"]];
+            let mut inbox_scans = Vec::new();
+            while let Some(node) = stack.pop() {
+                if node["Relation Name"] == "ingest_inbox" {
+                    inbox_scans.push((
+                        node["Node Type"].as_str().unwrap_or_default(),
+                        node["Index Name"].as_str().unwrap_or_default(),
+                    ));
+                }
+                if let Some(children) = node["Plans"].as_array() {
+                    stack.extend(children);
+                }
+            }
+            assert_eq!(
+                inbox_scans,
+                [("Index Scan", "ingest_inbox_workspace_idx")],
+                "{plan}"
+            );
+            let top = &plan[0]["Plan"];
+            let buffers = top["Shared Hit Blocks"].as_i64().unwrap()
+                + top["Shared Read Blocks"].as_i64().unwrap();
+            assert!(buffers < 50, "{buffers} buffers\n{plan}");
+            assert_eq!(
+                heads
+                    .iter()
+                    .map(|head| head.workspace_id)
+                    .collect::<Vec<_>>(),
+                [one]
+            );
+            assert!(heads.iter().all(|head| head.workspace_id != two));
+        })
+        .await;
+    }
+
+    /// The leader reads the heads every tick, so a slow inbox must not hold the tick: the read
+    /// gives up after a second. The outer timeout only keeps an unbounded read from hanging the
+    /// test on its own blocker.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_heads_give_up_after_a_second(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let mut blocker = pool.begin().await.unwrap();
+            sqlx::query("LOCK TABLE ingest_inbox IN ACCESS EXCLUSIVE MODE")
+                .execute(&mut *blocker)
+                .await
+                .unwrap();
+            let started = std::time::Instant::now();
+
+            let blocked =
+                tokio::time::timeout(std::time::Duration::from_secs(10), inbox_heads(&pool)).await;
+
+            let waited = started.elapsed();
+            blocker.rollback().await.unwrap();
+            assert!(matches!(blocked, Ok(Err(_))), "{blocked:?}");
+            assert!(
+                waited >= std::time::Duration::from_millis(900)
+                    && waited < std::time::Duration::from_secs(4),
+                "{waited:?}"
+            );
         })
         .await;
     }

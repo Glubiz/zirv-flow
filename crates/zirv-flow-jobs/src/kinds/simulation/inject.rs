@@ -505,7 +505,7 @@ pub(super) struct Begun {
 }
 
 /// The most steps one batch transaction runs: what a slot claims at once.
-const BATCH_SIZE: usize = 8;
+const BATCH_SIZE: usize = 32;
 
 /// What the worker stores as the error of a job whose transaction did not commit.
 const NOT_COMMITTED: &str = "could not commit the job transaction";

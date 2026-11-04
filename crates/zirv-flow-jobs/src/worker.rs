@@ -22,8 +22,8 @@ use zirv_flow_render::RenderPool;
 use zirv_flow_store::{
     ClaimedJob, Clock, DecisionRetention, EventRetention, FailOutcome, HmacKey, Keyring,
     MessageRetention, PgConnection, PgPool, RetentionSettings, STEP_JOB_KIND, begin,
-    cache_change_readers, claim_jobs, complete_job, fail_job, heartbeat_job, listen_for_jobs,
-    lock_lease, observe_pool, release_jobs, sized_like,
+    cache_change_readers, claim_jobs, complete_job, confirm_lease, fail_job, heartbeat_job,
+    listen_for_jobs, lock_lease, observe_pool, release_jobs, sized_like,
 };
 
 use crate::JobError;
@@ -40,13 +40,15 @@ const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
 const POOL_SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// How many due jobs a slot claims with one statement and one commit, to run one after another:
-/// each in its own transaction, but the `flow.step` jobs of a workspace in one (#397). Kept
-/// small, so a batch holds little work back from the other slots and from the priorities behind
-/// it, and a batch transaction holds few locks.
-const CLAIM_BATCH: u32 = 8;
+/// each in its own transaction, but the `flow.step` jobs of a workspace in one (#397). A claim
+/// costs about the same whatever it returns, since most of it is the walk over the head of the
+/// ready index, so a larger batch spreads that walk, and a workspace's share of the batch shares
+/// one transaction (ruling 48be9592). The hold limit bounds how long the batch keeps work from the
+/// other slots.
+pub(crate) const CLAIM_BATCH: u32 = 32;
 
 /// The longest a slot holds a claimed job it has not started; see [`hold_limit`].
-const MAX_HOLD: Duration = Duration::from_secs(1);
+const MAX_HOLD: Duration = Duration::from_secs(4);
 
 /// How a worker pool behaves.
 #[derive(Clone, Debug)]
@@ -286,8 +288,6 @@ async fn work(shared: Arc<Shared>, slot: usize, mut stop: watch::Receiver<bool>)
         tokio::pin!(woken);
         woken.as_mut().enable();
 
-        // Taken before the claim is sent, so no later than the database takes the leases.
-        let sent = tokio::time::Instant::now();
         match claim_jobs(
             &shared.pool,
             &name,
@@ -299,7 +299,7 @@ async fn work(shared: Arc<Shared>, slot: usize, mut stop: watch::Receiver<bool>)
         .await
         {
             Ok(batch) if !batch.is_empty() => {
-                run_batch(&shared, batch, sent, &mut stop).await;
+                run_batch(&shared, batch, &mut stop).await;
                 continue;
             }
             Ok(_) => {}
@@ -317,11 +317,12 @@ async fn work(shared: Arc<Shared>, slot: usize, mut stop: watch::Receiver<bool>)
 /// How long a slot may hold the claimed jobs it has not started: a sixth of the lease, and at
 /// most [`MAX_HOLD`].
 ///
-/// A job claimed with others starts within this of its claim or is given back, so it starts
-/// with five sixths of its lease left. Its heartbeat beats a third and two thirds of a lease
-/// after the start, both before the lease taken at the claim ends, so a held job survives one
-/// failed beat as a job claimed alone does. The cap keeps the jobs claimed behind a slow handler
-/// from waiting long for it.
+/// A job claimed with others starts within this of its claim's return or is given back. Its
+/// lease runs from the claim's update, however long the claim waited before it, so it starts
+/// with five sixths of its lease left, less the commit and the reply between the update and the
+/// return. Its heartbeat beats a third and two thirds of a lease after the start, both before the
+/// lease taken at the claim ends, so a held job survives one failed beat as a job claimed alone
+/// does. The cap keeps the jobs claimed behind a slow handler from waiting long for it.
 fn hold_limit(lease: Duration) -> Duration {
     (lease / 6).min(MAX_HOLD)
 }
@@ -380,18 +381,15 @@ fn units(batch: Vec<ClaimedJob>) -> VecDeque<Unit> {
 /// lease check, heartbeat and completion each.
 ///
 /// The jobs not started yet go back to the queue as soon as the pool is told to stop or
-/// [`hold_limit`] has passed since the claim was `sent`, even while a handler runs; the hold
-/// counts the claim's own wait, so a claim that waited long starts nothing. A wake of a shared
-/// transaction starts when it begins, so the wakes not begun by then go back too. Should the slot
-/// die first, they run again once their leases expire, as a running job does.
-async fn run_batch(
-    shared: &Arc<Shared>,
-    batch: Vec<ClaimedJob>,
-    sent: tokio::time::Instant,
-    stop: &mut watch::Receiver<bool>,
-) {
+/// [`hold_limit`] has passed since the claim returned, even while a handler runs. The hold does
+/// not count the claim's own wait, since the leases run from the claim's update: counting it
+/// gave back unstarted every batch whose claim had queued on the claim lock past the hold, so
+/// under a cap nothing ran (bench phase 4a, #397). A wake of a shared transaction starts when it
+/// begins, so the wakes not begun by then go back too. Should the slot die first, they run again
+/// once their leases expire, as a running job does.
+async fn run_batch(shared: &Arc<Shared>, batch: Vec<ClaimedJob>, stop: &mut watch::Receiver<bool>) {
     let claimed = tokio::time::Instant::now();
-    let deadline = sent + hold_limit(shared.config.lease);
+    let deadline = claimed + hold_limit(shared.config.lease);
     let mut held = units(batch);
     while let Some(unit) = held.pop_front() {
         if *stop.borrow() || tokio::time::Instant::now() >= deadline {
@@ -650,8 +648,8 @@ fn configured<'a>(shared: &Shared, ctx: JobContext<'a>) -> JobContext<'a> {
         })
 }
 
-/// The handler's transaction: take its person-change guard if needed, confirm the lease,
-/// run the handler beside a heartbeat, then
+/// The handler's transaction: take its person-change guard if needed, confirm the lease (with
+/// the job row locked, unless the kind says otherwise), run the handler beside a heartbeat, then
 /// delete the job and commit with everything the handler wrote.
 async fn execute(shared: Arc<Shared>, job: ClaimedJob) -> Attempt {
     let Some(kind) = shared.registry.get(&job.kind) else {
@@ -669,7 +667,12 @@ async fn execute(shared: Arc<Shared>, job: ClaimedJob) -> Attempt {
     {
         return Attempt::Failed("could not guard person changes".into(), None);
     }
-    match lock_lease(&mut tx, job.id, job.lease_token).await {
+    let held = if kind.locks_lease() {
+        lock_lease(&mut tx, job.id, job.lease_token).await
+    } else {
+        confirm_lease(&mut *tx, job.id, job.lease_token).await
+    };
+    match held {
         Ok(true) => {}
         Ok(false) => return Attempt::LeaseLost,
         Err(_) => return Attempt::Failed("could not confirm the lease".into(), None),
@@ -777,7 +780,7 @@ struct Wakes {
     queue: Arc<Queue>,
     /// When the claim returned, for the claim lag.
     claimed: tokio::time::Instant,
-    /// No wake begins at or past it: [`hold_limit`] after the claim was sent.
+    /// No wake begins at or past it: [`hold_limit`] after the claim returned.
     deadline: tokio::time::Instant,
     stop: watch::Receiver<bool>,
 }
@@ -1526,9 +1529,10 @@ mod tests {
             assert!(hold_limit(lease) <= MAX_HOLD);
         }
         let lease = WorkerConfig::new(1).lease;
+        assert_eq!(hold_limit(lease), MAX_HOLD);
         assert!(
             HANDLER_P997 * CLAIM_BATCH * 5 <= hold_limit(lease),
-            "eight slow handlers use a fifth of the hold at most"
+            "a batch of slow handlers uses a fifth of the hold at most"
         );
     }
 
@@ -1690,6 +1694,76 @@ mod tests {
         wait_for(&pool, |counts| counts == QueueCounts::default()).await;
         stop_and_join(stop, handle).await;
     }
+
+    /// #397: a drain's job transaction confirms its lease without locking the job row, so for as
+    /// long as the run lasts (here, until its batches may take the segment guard the test holds)
+    /// it holds neither a transaction id nor a snapshot, and so does not hold the xmin horizon
+    /// back for the claims of every other job.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_running_drains_job_transaction_holds_no_transaction_id(pool: PgPool) {
+        use zirv_flow_core::{HmacPurpose, HmacRoot, MasterKey};
+        use zirv_flow_store::{IngestItem, IngestPayload, append_inbox};
+
+        migrated(&pool).await;
+        let ws = workspace(&pool).await;
+        let items: Vec<IngestItem> = (0..3)
+            .map(|n| IngestItem {
+                identifiers: vec![("anonymous_id".into(), format!("a{n}"))],
+                timestamp: None,
+                message_id: Some(format!("m-{n}")),
+                payload: IngestPayload::Track {
+                    event: "seen".into(),
+                    properties: serde_json::Map::new(),
+                },
+            })
+            .collect();
+        append_inbox(
+            &pool,
+            ws,
+            Uuid::now_v7(),
+            &TraceContext::root(Cause::api("req")),
+            &items,
+        )
+        .await
+        .unwrap();
+        let mut guard = begin(&pool).await.unwrap();
+        zirv_flow_store::lock_segments(&mut guard, ws)
+            .await
+            .unwrap();
+        let mut config = test_config(1);
+        config.redaction_key = Some(Arc::new(
+            HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction),
+        ));
+        let (stop, handle) = start(&pool, config);
+        wait_until(
+            &pool,
+            "a drain batch to wait for the segment guard",
+            "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted)",
+        )
+        .await;
+
+        let job_transactions: Vec<(Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT backend_xid::text, backend_xmin::text FROM pg_stat_activity \
+             WHERE datname = current_database() AND state = 'idle in transaction' \
+             AND query LIKE 'SELECT 1 FROM jobs WHERE id = $1 AND lease_token = $2%'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        guard.rollback().await.unwrap();
+        wait_until(
+            &pool,
+            "the inbox to drain",
+            "SELECT NOT EXISTS (SELECT 1 FROM ingest_inbox)",
+        )
+        .await;
+        wait_for(&pool, |counts| counts == QueueCounts::default()).await;
+        stop_and_join(stop, handle).await;
+
+        assert_eq!(job_transactions, [(None, None)]);
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn ten_thousand_jobs_on_four_workers_each_take_effect_exactly_once(pool: PgPool) {
@@ -2133,13 +2207,38 @@ mod tests {
         );
     }
 
-    /// Under a cap a claim is a transaction, and its leases run from its start, so a claim that
-    /// waited has used up part of them by the time it returns: the slot gives such a batch back
-    /// unstarted, and its jobs run on a fresh claim instead.
+    /// Notes in `given_back` each job that goes back from running to ready unstarted.
+    async fn note_jobs_given_back(pool: &PgPool) {
+        sqlx::raw_sql(
+            "CREATE TABLE given_back (job uuid); \
+             CREATE FUNCTION note_given_back() RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN INSERT INTO given_back VALUES (NEW.id); RETURN NULL; END $$; \
+             CREATE TRIGGER given_back AFTER UPDATE OF state ON jobs FOR EACH ROW \
+             WHEN (OLD.state = 'running' AND NEW.state = 'ready') \
+             EXECUTE FUNCTION note_given_back();",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn given_back(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM given_back")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// Under a cap a claim is a transaction that can wait, here for a table lock. Its leases run
+    /// from its update and the hold from its return, so the slot runs the batch it waited for,
+    /// each job with five sixths of its lease left, and gives none of it back. Before, the
+    /// leases ran from the transaction's start and the hold from the claim's sending, so a batch
+    /// that waited past the hold went back unstarted (bench phase 4a, #397).
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_claim_that_waited_past_the_hold_is_given_back_and_claimed_anew(pool: PgPool) {
+    async fn a_claim_that_waited_keeps_its_leases_and_runs_its_batch(pool: PgPool) {
         migrated(&pool).await;
+        note_jobs_given_back(&pool).await;
         sqlx::query(
             "CREATE TABLE leases (job uuid PRIMARY KEY, expires timestamptz, left_s float8)",
         )
@@ -2149,7 +2248,7 @@ mod tests {
         for _ in 0..2 {
             enqueue(&pool, &new_job("test.lease")).await.unwrap();
         }
-        // The worker's claim waits for this lock, its leases already running.
+        // The worker's claim waits for this lock.
         let mut blocker = pool.begin().await.unwrap();
         sqlx::query("LOCK TABLE jobs IN EXCLUSIVE MODE")
             .execute(&mut *blocker)
@@ -2166,7 +2265,7 @@ mod tests {
              WHERE relation = 'jobs'::regclass AND NOT granted)",
         )
         .await;
-        // Three of the six seconds pass before the claim returns, well past the hold of one.
+        // Three seconds pass before the claim returns, well past the hold of one.
         tokio::time::sleep(Duration::from_secs(3)).await;
         blocker.commit().await.unwrap();
 
@@ -2179,10 +2278,61 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(started, 2);
+        assert_eq!(
+            given_back(&pool).await,
+            0,
+            "the batch that waited went back"
+        );
         assert!(
             least_left > 4.5,
-            "a job started on the claim that waited, with {least_left} s of its lease left"
+            "a job started with {least_left} s of its lease left"
         );
+    }
+
+    /// Bench phase 4a's livelock (#397): capped claims queue on the claim lock, so with sixteen
+    /// slots and slow claims (a quarter of a second each, here from a trigger) every claim
+    /// waits seconds, far past the hold of half a second. The jobs still run: each slot starts
+    /// what it claimed, and every job completes once.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn capped_claims_queued_past_the_hold_still_run_their_jobs(pool: PgPool) {
+        migrated(&pool).await;
+        let ws = workspace(&pool).await;
+        sqlx::query(
+            "INSERT INTO jobs (id, workspace_id, kind, payload, trace_id, cause_kind, cause_id) \
+             SELECT gen_random_uuid(), $1, 'test.effect', jsonb_build_object('index', index), \
+                    gen_random_uuid(), 'manual', '' \
+             FROM generate_series(0, 39) AS index",
+        )
+        .bind(ws.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+        // Every statement on `jobs` in a transaction holding an advisory lock, which under a cap
+        // only a claim does, takes a quarter of a second more.
+        sqlx::raw_sql(
+            "CREATE FUNCTION slow_claim() RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN \
+                 IF EXISTS (SELECT FROM pg_locks WHERE pid = pg_backend_pid() \
+                            AND locktype = 'advisory' AND granted) THEN \
+                     PERFORM pg_sleep(0.25); \
+                 END IF; \
+                 RETURN NULL; \
+             END $$; \
+             CREATE TRIGGER slow_claim AFTER UPDATE ON jobs FOR EACH STATEMENT \
+             EXECUTE FUNCTION slow_claim();",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut config = test_config(16);
+        config.lease = Duration::from_secs(3);
+        config.max_running_per_workspace = Some(4);
+        let (stop, handle) = start(&pool, config);
+
+        wait_for(&pool, |counts| counts == QueueCounts::default()).await;
+        stop_and_join(stop, handle).await;
+        assert_eq!(effect_count(&pool).await, 40);
     }
 
     /// The slot claims the gated job and the effect behind it, and runs the gated one, which

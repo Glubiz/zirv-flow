@@ -1,6 +1,6 @@
 //! `ingest.drain`: applies a workspace's ingestion inbox (architecture section 7.1). Each
 //! batch is one transaction of its own that applies the oldest rows in id order and deletes
-//! them, so the job's transaction only holds the lease.
+//! them, so the job's transaction only confirms the lease, with no row lock, and completes it.
 //!
 //! A run first buckets the workspace's rows that have no bucket yet (appended before the
 //! column existed, or by a pre-0.29 serve), so every row joins its key's queue by id. Then
@@ -49,6 +49,14 @@ pub(crate) struct IngestDrain;
 
 impl JobKind for IngestDrain {
     const KIND: &'static str = DRAIN_JOB_KIND;
+
+    /// A run writes nothing in its job transaction, which would otherwise hold a transaction id,
+    /// and so the xmin horizon, for the whole time budget (#397). A late run that overlaps a new
+    /// one is safe without the row lock: each batch locks the inbox rows it takes, applies and
+    /// deletes them in one transaction, and leaves out a bucket's rows after one another batch
+    /// holds, so no row applies twice and no key out of order, as between this run's own shards.
+    /// No erasure marks a drain job, and the completion stays fenced on the lease token.
+    const LOCKS_LEASE: bool = false;
 
     async fn run(&self, ctx: &mut JobContext<'_>, payload: Value) -> Result<(), JobError> {
         let workspace = payload

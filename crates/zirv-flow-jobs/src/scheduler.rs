@@ -44,11 +44,12 @@ const SYNC_RECONCILE_INTERVAL: Duration = Duration::from_secs(60);
 const FRESHNESS_INTERVAL: Duration = Duration::from_secs(30);
 /// How often the destination gauges and counters are refreshed.
 const DESTINATION_INTERVAL: Duration = Duration::from_secs(15);
-/// How often the enrollment and timer gauges are sampled. Each sample counts the live
-/// enrollments, which on a table of millions of rows takes seconds of database time.
+/// How often the enrollment and timer gauges are sampled. A sample counts each live state up to
+/// 10,000 enrollments and estimates above that, under a second's statement timeout (#397).
 const ENROLLMENT_INTERVAL: Duration = Duration::from_secs(60);
-/// How often the queue-depth gauges are refreshed. The count scans the jobs table, so it does not
-/// run on every tick.
+/// How often the queue-depth gauges are refreshed. Each kind's ready jobs are counted up to
+/// 10,000 and estimated above that, under a second's statement timeout, so the refresh reads a
+/// bounded part of the jobs table however long the queue (#397).
 const QUEUE_DEPTH_INTERVAL: Duration = Duration::from_secs(15);
 /// How often the leader looks for sending domains that are due a DNS check.
 const SENDING_DOMAIN_SCAN_INTERVAL: Duration = Duration::from_secs(60);
@@ -849,6 +850,28 @@ mod tests {
         assert_eq!(inside.fired, 1);
         assert_eq!(inside.counts.ready, 0, "refreshed inside the interval");
         assert_eq!(after.counts.ready, 1, "not refreshed after the interval");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_enrollment_gauges_are_sampled_at_most_once_per_interval(pool: PgPool) {
+        migrated(&pool).await;
+        let mut leader = scheduler(&pool);
+
+        led(leader.tick_at(BASE).await.unwrap());
+        let first = leader.enrollments_checked;
+        led(leader.tick_at(BASE).await.unwrap());
+        let inside = leader.enrollments_checked;
+        leader.enrollments_checked = Instant::now().checked_sub(ENROLLMENT_INTERVAL);
+        let stale = leader.enrollments_checked;
+        led(leader.tick_at(BASE).await.unwrap());
+
+        assert!(first.is_some(), "sampled on gaining leadership");
+        assert_eq!(inside, first, "sampled again inside the interval");
+        assert!(
+            leader.enrollments_checked > stale,
+            "not sampled after the interval"
+        );
     }
 
     fn hourly(next_run_at: OffsetDateTime) -> NewSchedule {

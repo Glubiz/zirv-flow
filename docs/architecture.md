@@ -2622,18 +2622,33 @@ As built (#207): a claim walks the distinct priorities of the ready jobs upwards
 of each band with a due job in turn, so its cost depends neither on the statistics nor on the due or
 future backlog (`docs/benchmarks/m5-flows.md` section 8).
 
-As built (#397): a worker slot claims up to eight jobs with that one statement and one commit, by
+As built (#397): a worker slot claims up to 32 jobs with that one statement and one commit, by
 priority band, then age, each with a lease token of its own, and runs them one after another, each
 in its own transaction exactly as a job claimed alone: its own lease check, heartbeat and fenced
 completion (the `flow.step` jobs of one workspace share one, below). The batch saves a claim round
-trip and a commit flush on all but one of its jobs. A
+trip and a commit flush on all but one of its jobs. Most of a claim's cost is its walk over the head
+of `jobs_ready_idx`, which holds the index entries of jobs claimed or finished since the oldest
+snapshot still open; a claim of 32 costs about what a claim of 8 does, so the larger batch spreads
+that walk over four times the jobs (ruling 48be9592). A batch takes at most one `ingest.drain`
+(ruling 98e6546e): a drain runs for up to 20 seconds, so further drains in its batch would wait
+out the hold behind it and go back to the queue while idle slots could have run them. The claim
+walks the other kinds apart from the drains, adds the oldest due drain (one `jobs_ready_kind_idx`
+probe; the capped claim keeps the oldest of the drains its workspaces offer) and keeps the batch
+in band and age order. While a drain is due, a claim that walks the bands can lock one job it
+does not claim, the drain or its own youngest, until its transaction ends. A
 claimed job that has not started holds its lease from the claim; the slot gives it back to `ready`
 (its `run_at` kept and the claim's attempt uncounted, or deleted when an erasure marked it
-`purge_on_release`) once a sixth of the lease, at most one second, has passed since the claim
-was sent, even while a handler runs, and at once when the worker stops. A job therefore starts
-with at least five sixths of its lease left, even when its claim waited, and jobs claimed
-behind a slow handler go to other workers instead of waiting for it. A slot that dies leaves its
-unstarted jobs, like its running one, to lease expiry.
+`purge_on_release`) once a sixth of the lease, at most four seconds, has passed since the claim
+returned, even while a handler runs, and at once when the worker stops. The lease runs from the
+claim's update (`clock_timestamp()`, read once for the statement), not from the start of its
+transaction, so a claim that waited, as capped claims queue on the claim lock, has spent neither
+its leases nor its hold. A job therefore starts with five sixths of its lease left, less the
+commit and the reply between the update and the return, and jobs claimed behind a slow handler go
+to other workers instead of waiting for it. A slot that dies leaves its unstarted jobs, like its
+running one, to lease expiry. Counting the hold from the claim's sending and the lease from the
+transaction's start gave back every batch whose claim had queued past the hold: on 0.226.0 with a
+cap of 4, sixteen slots and claims of about 220 ms, each claim waited about 3 s on the lock,
+against a hold of 1 s, and nothing completed for ten minutes (bench phase 4a).
 
 **Wake transactions (#397).** The `flow.step` jobs of one workspace that a slot claimed together
 run in one transaction, at the place of the first of them in the claim; jobs of other kinds, and a
@@ -2656,14 +2671,14 @@ lease and the `job_error` decision (on the last attempt the enrollment fails). I
 running job whose lease ran out while the later wakes ran. A failure that cannot be written there
 (a deadlock with a reaper that holds the row, say) is rolled back to that savepoint and settled
 after the transaction, and a lost lease leaves the job to its new owner. One commit ends the batch,
-so eight steps make one handler commit instead of eight. When the commit fails, or an error leaves
+so 32 steps make one handler commit instead of 32. When the commit fails, or an error leaves
 the transaction unusable, it is rolled back: every wake that completed in it fails with `could not
 commit the job transaction`, as a job alone whose commit fails (its attempt counts and it retries),
 and every failure written in it is settled again after it, on a lease the rollback left as it was.
 A completed wake's fenced delete and a failed wake's written failure hold its job row until the
 commit, so the reaper waits for the batch instead of returning the job meanwhile. The slot begins
 no wake past the hold limit and gives the rest back as for any claim, so a wake starts with five
-sixths of its lease, and a batch holds at most eight. The decisions of one batch share their
+sixths of its lease, and a batch holds at most 32. The decisions of one batch share their
 `recorded_at` (the column's default, the transaction's start) and keep their order by id; a
 failure written in the batch shares it too, under a random id, so in a trace it sorts after the
 enrollment's earlier steps, as before, but by its id among the rows another wake of the same
@@ -2704,6 +2719,21 @@ heartbeat and dead are fenced on the token the same way. `last_error` is cut to
 2 KB and never holds payload values; handlers return a typed error with a fixed
 message.
 
+The key-share lock also keeps the job from being claimed again while the attempt's transaction is
+open, since a claim skips locked rows, even once the lease ran out and the reaper put the job back;
+and it keeps the reaper's delete of a job an erasure marked waiting for the attempt. But a row lock
+gives the transaction an id, which holds the xmin horizon back for as long as the handler runs, and
+with it the dead entries at the head of `jobs_ready_idx` that every claim walks. `ingest.drain`
+runs up to its 20 s budget, back to back while ingest is busy, so it held the horizon almost all
+the time. It therefore confirms its lease with a plain read instead (`JobKind::LOCKS_LEASE` false,
+`store::confirm_lease`, #397): its job transaction takes no id and keeps no snapshot until the
+fenced completion. That is safe for the drain alone among the built-in kinds. Its writes commit on
+transactions of its own, each of which locks its inbox rows `FOR UPDATE SKIP LOCKED`, applies them
+and deletes them, and leaves out a bucket's rows after one another drain holds, so an overlapping
+late attempt applies no row twice and no key out of order. No erasure marks a drain job, whose
+payload names a workspace and no person, so the reaper's skip of a marked job a handler holds does
+not apply. Its completion stays fenced on the token, so a late attempt's ack is refused.
+
 **Scheduler slots.** A slot is enqueued only by `UPDATE schedules SET
 next_run_at = $next WHERE id = $id AND next_run_at = $slot`, a compare-and-set
 in the same transaction as the enqueue, with unique key `schedule:<id>:<slot>`.
@@ -2727,6 +2757,17 @@ its running jobs and the batch's together, and the batch takes only the offers o
 the best band offered, instance jobs included, so a capped batch never puts a later
 band before an earlier one. It is smaller when that band offers fewer jobs, and
 empty for one poll when other transactions lock them all (#397, ruling a894b5c2).
+A probe for a workspace's due jobs reads its first jobs of the worker's kinds from the start
+of the band, as many as it wants, and keeps those of the band that are due, which come
+first. Bounded by `ROW(workspace_id, priority, run_at) <= ROW(.., .., now())` instead, it
+read on through every later job of a workspace whose band held fewer due jobs than it
+wanted, on every claim, since PostgreSQL 16 ends a btree scan on a row comparison's first
+column only (bench phase 4a: about 10,900 buffers a claim); comparing the columns one by
+one would let the planner take `jobs_ready_idx` filtered on the workspace, which steps
+over a capped workspace's flood (#207). The statement that takes the claim lock also
+turns JIT off for the claim's transaction: the plan's estimates grow with the queue,
+past `jit_above_cost`, and compiling it took longer than running it (about 260-375 ms
+of a claim against a 3 M-job queue, #397).
 Weighted claiming is rejected for v1: it is more complex and nothing yet shows the
 cap is not enough. M8 validates the cap under load.
 
@@ -3275,7 +3316,7 @@ rows, and the survivor is re-evaluated through its `merge` change class (7.1).
 | Area | Design |
 |------|--------|
 | Logs and traces | Structured JSON through `tracing` on standard error for the long-running commands (`serve`, `worker`, `scheduler`, `all`); one-shot commands print plain text. An `http.request` span carries `request_id`, `trace_id`, `method` and the matched `route`; a `job` span carries `job_id`, `kind`, `workspace_id`, `attempt`, `trace_id`, `cause_kind` and `cause_id`. JSON lines include the current span's fields. The response header `x-trace-id` and the `trace_id` of problem bodies name the trace; with `log.otlp.endpoint` set, spans are exported over OTLP/HTTP (protobuf, batched, dropped on a full queue or a collector error, flushed at shutdown) with the zirv trace id as the OTel trace id and no invented parent span, so `x-trace-id`, the logged `trace_id`, the decision log and the exported trace agree; a valid `traceparent` request header becomes a span link on `http.request` and never a parent or the trace id, `log.filter` applies to exported spans too, and export is off (no provider, layer or task) without the setting. Operational spans link to, but never replace, the customer-event, audit or decision stores in section 12. |
-| Metrics | Prometheus, `zirv_flow_` prefix; the [runtime metric table](operations/runtime.md#metrics) lists every series and a test fails when one in `crates/` is missing from it. HTTP: `zirv_flow_http_requests_total`, `zirv_flow_http_request_duration_seconds`. Queue: depth `zirv_flow_jobs{kind,state}` for `ready`, `running` and `dead`, claim lag `zirv_flow_job_claim_lag_seconds{kind}` (`now - run_at` when the job starts), handler duration `zirv_flow_job_duration_seconds{kind}`, attempts `zirv_flow_jobs_total{kind,outcome}`. Ingestion: `zirv_flow_ingest_requests_total`, `zirv_flow_ingest_items_total`, `zirv_flow_ingest_applied_total{kind,outcome}`, `zirv_flow_ingest_late_total`, `zirv_flow_ingest_inbox_age_seconds`. Debugger: `zirv_flow_debugger_clients` and `zirv_flow_debugger_delivery_seconds` (the server-side part, from the feed row to the frame write). Explorer: `zirv_flow_explorer_query_seconds{kind}`, `zirv_flow_explorer_timeouts_total{kind}`, `zirv_flow_explorer_exports_total`. Decision log: `zirv_flow_decision_append_seconds` (nothing in a `bench-no-decisions` build) and the size gauge `zirv_flow_decision_log_bytes` (emitted with the partition work, #378). Sync: `zirv_flow_sync_runs_total`, `zirv_flow_sync_run_duration_seconds`, `zirv_flow_sync_records_total`, `zirv_flow_sync_events_total`, stream freshness `zirv_flow_stream_freshness_seconds`, `zirv_flow_stream_state` and `zirv_flow_streams`. Segments: `zirv_flow_segment_refresh_seconds`, `zirv_flow_segment_refresh_people`, `zirv_flow_segment_dirty_backlog`, `zirv_flow_segment_dirty_age_seconds`. Flows: `zirv_flow_enrollments{state}` (`active`, `waiting`), `zirv_flow_enrollments_last_sample_timestamp_seconds` (when the sampler last succeeded), `zirv_flow_timer_lateness_seconds` (the oldest overdue timer) and `zirv_flow_timer_wake_lateness_seconds` (the p99 section 19 states). Destinations: queue depth and age, attempts and outcomes, forwarding depth and lag, `zirv_flow_destination_forwarding_dead_total`. Rendering: `zirv_flow_render_duration_seconds{channel}`, `zirv_flow_render_failures_total`. Assistant: `zirv_flow_ai_calls_total{feature,outcome}`, `zirv_flow_ai_tokens_total{feature,direction}`, `zirv_flow_ai_estimated_cost_micros_total{feature}`, `zirv_flow_ai_latency_seconds{feature}`, `zirv_flow_ai_refusals_total{reason}` (budget denials are `reason="budget_exceeded"`). DB pool `zirv_flow_db_pool_connections{pool,state}` and `zirv_flow_db_pool_max_connections{pool}`. `/metrics` is served only by processes that run `serve` (so not by a worker-only or scheduler-only process, #21); the leader exports the queue, enrollment, freshness and destination gauges, so they appear where `serve` and the leader run together |
+| Metrics | Prometheus, `zirv_flow_` prefix; the [runtime metric table](operations/runtime.md#metrics) lists every series and a test fails when one in `crates/` is missing from it. HTTP: `zirv_flow_http_requests_total`, `zirv_flow_http_request_duration_seconds`. Queue: depth `zirv_flow_jobs{kind,state}` for `ready`, `running` and `dead` (a kind's ready count is exact up to 10,000 and the planner's estimate above, #397), claim lag `zirv_flow_job_claim_lag_seconds{kind}` (`now - run_at` when the job starts), handler duration `zirv_flow_job_duration_seconds{kind}`, attempts `zirv_flow_jobs_total{kind,outcome}`. Ingestion: `zirv_flow_ingest_requests_total`, `zirv_flow_ingest_items_total`, `zirv_flow_ingest_applied_total{kind,outcome}`, `zirv_flow_ingest_late_total`, `zirv_flow_ingest_inbox_age_seconds`. Debugger: `zirv_flow_debugger_clients` and `zirv_flow_debugger_delivery_seconds` (the server-side part, from the feed row to the frame write). Explorer: `zirv_flow_explorer_query_seconds{kind}`, `zirv_flow_explorer_timeouts_total{kind}`, `zirv_flow_explorer_exports_total`. Decision log: `zirv_flow_decision_append_seconds` (nothing in a `bench-no-decisions` build) and the size gauge `zirv_flow_decision_log_bytes` (emitted with the partition work, #378). Sync: `zirv_flow_sync_runs_total`, `zirv_flow_sync_run_duration_seconds`, `zirv_flow_sync_records_total`, `zirv_flow_sync_events_total`, stream freshness `zirv_flow_stream_freshness_seconds`, `zirv_flow_stream_state` and `zirv_flow_streams`. Segments: `zirv_flow_segment_refresh_seconds`, `zirv_flow_segment_refresh_people`, `zirv_flow_segment_dirty_backlog`, `zirv_flow_segment_dirty_age_seconds`. Flows: `zirv_flow_enrollments{state}` (`active`, `waiting`; each exact up to 10,000 and the planner's estimate above), `zirv_flow_enrollments_last_sample_timestamp_seconds` (when the sampler last succeeded), `zirv_flow_timer_lateness_seconds` (the oldest overdue timer) and `zirv_flow_timer_wake_lateness_seconds` (the p99 section 19 states). Destinations: queue depth and age, attempts and outcomes, forwarding depth and lag, `zirv_flow_destination_forwarding_dead_total`. Rendering: `zirv_flow_render_duration_seconds{channel}`, `zirv_flow_render_failures_total`. Assistant: `zirv_flow_ai_calls_total{feature,outcome}`, `zirv_flow_ai_tokens_total{feature,direction}`, `zirv_flow_ai_estimated_cost_micros_total{feature}`, `zirv_flow_ai_latency_seconds{feature}`, `zirv_flow_ai_refusals_total{reason}` (budget denials are `reason="budget_exceeded"`). DB pool `zirv_flow_db_pool_connections{pool,state}` and `zirv_flow_db_pool_max_connections{pool}`. `/metrics` is served only by processes that run `serve` (so not by a worker-only or scheduler-only process, #21); the leader exports the queue, enrollment, freshness and destination gauges, so they appear where `serve` and the leader run together |
 | Health | `/healthz` liveness; `/readyz` readiness (DB reachable, schema version matches, role loops running) |
 | Config | TOML file + env overrides `ZIRV_FLOW_<SECTION>__<KEY>` (e.g. `ZIRV_FLOW_DATABASE__URL`). Sections: `server` (bind, `public_url` for tracking links), `database` (url, `read_url`, pool, `migrate_on_start`), `worker` (concurrency, kinds), `ops` (`bind`, off by default: metrics and health listener for worker-only and scheduler-only processes), `log` (`filter`, an EnvFilter directive, default `info`; `format`, `json` or `text`, default `json`), `secrets` (`master_key_file`, `master_key`), `ai` (allowed providers/models/base URLs). `config check` prints the result with secrets redacted. |
 | Migrations | sqlx, embedded, forward-only. `zirv-flow migrate` explicitly, or guarded `database.migrate_on_start` / `--migrate` under an advisory lock (one migrator). Startup refuses an unknown (newer) schema, and pending migrations when migrating is not enabled. |
@@ -3289,7 +3330,7 @@ rows, and the survivor is re-evaluated through its `merge` change class (7.1).
 |-------|-------|
 | `core`, `segments` | Inline unit and property tests; golden SQL snapshots for the compiler; the AST generators (`proptest`, behind a `test-support` feature) and the golden corpus live in `segments`, golden files blessed with `ZIRV_FLOW_BLESS` |
 | Segments on PostgreSQL | Tests in `zirv-flow-jobs` comparing compiled SQL on Postgres with the reference evaluator; CI runs fixed seeds, and a scheduled nightly workflow runs random seeds without filing issues |
-| `engine` | Inline unit tests; deterministic simulation (ruling 05ce90ec) in two layers. (1) The engine harness: `zirv-flow-engine` ships a deterministic harness with an in-memory transactional runtime model that implements the same commit protocol (`state_version` checks, idempotency keys and wake keys; a crash discards the uncommitted transaction). Outside the sweep that crashes at every effect, half of its claims that find more jobs due take up to eight and run them as a wake transaction (14): in lock order, each behind a savepoint, with some failing after their writes and rolled back alone, and a crash in any of them or after the commit redelivering them all; a model whose failed step rolls back its neighbours fails the fourth invariant. It runs thousands of enrollments over 90 virtual days with seeded random events and a crash after every effect, using a seeded test evaluator (the engine does not depend on `segments`, 5.1). (2) The PostgreSQL test: a test in `zirv-flow-jobs` drives the real runtime with `ManualClock` over hundreds of enrollments for 90 days and injects two failures: a rollback before commit, and a crash after commit and before the job is acknowledged, followed by a re-claim (lease expiry, and a concurrent duplicate execution). Half of its drain rounds run the due steps through the worker's wake transactions instead, with a failed commit injected into some batches, after which every step of the batch runs again. Both layers check all four invariants: no internal effect applied twice, every external effect enqueued with a stable key, no timer fires early, every enrollment ends or waits on a due wake. CI uses fixed seeds and nightly runs random ones; the seeds and population sizes are recorded. |
+| `engine` | Inline unit tests; deterministic simulation (ruling 05ce90ec) in two layers. (1) The engine harness: `zirv-flow-engine` ships a deterministic harness with an in-memory transactional runtime model that implements the same commit protocol (`state_version` checks, idempotency keys and wake keys; a crash discards the uncommitted transaction). Outside the sweep that crashes at every effect, half of its claims that find more jobs due take up to 32 and run them as a wake transaction (14): in lock order, each behind a savepoint, with some failing after their writes and rolled back alone, and a crash in any of them or after the commit redelivering them all; a model whose failed step rolls back its neighbours fails the fourth invariant. It runs thousands of enrollments over 90 virtual days with seeded random events and a crash after every effect, using a seeded test evaluator (the engine does not depend on `segments`, 5.1). (2) The PostgreSQL test: a test in `zirv-flow-jobs` drives the real runtime with `ManualClock` over hundreds of enrollments for 90 days and injects two failures: a rollback before commit, and a crash after commit and before the job is acknowledged, followed by a re-claim (lease expiry, and a concurrent duplicate execution). Half of its drain rounds run the due steps through the worker's wake transactions instead, with a failed commit injected into some batches, after which every step of the batch runs again. Both layers check all four invariants: no internal effect applied twice, every external effect enqueued with a stable key, no timer fires early, every enrollment ends or waits on a due wake. CI uses fixed seeds and nightly runs random ones; the seeds and population sizes are recorded. |
 | Store and queue | Postgres-backed integration tests in CI: claim concurrency, lease expiry, fencing, unique keys, scheduler failover |
 | Ingestion and events | Idempotent replay, identity scenario suite, schema-mode and unplanned-event matrix, redaction, duplicate/late/future handling, reject replay, debugger masking and SSE latency, explorer filters/timeouts/CSV, deletion propagation, erasure table scan |
 | Connectors | Database sources against service containers; HTTP manifests against recorded fixtures and a mock server (pagination, OAuth refresh, `429`) |
