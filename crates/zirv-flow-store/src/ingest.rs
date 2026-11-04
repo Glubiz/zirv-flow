@@ -1850,7 +1850,12 @@ mod tests {
         // wrote, inserted in one statement and rolled back.
         let mut tx = pool.begin().await.unwrap();
         let plan: serde_json::Value = sqlx::query_scalar(
-            "EXPLAIN (ANALYZE, WAL, FORMAT JSON)              INSERT INTO decision_records                 (id, workspace_id, trace_id, action, outcome, cause_kind, cause_id, subject_ids)              SELECT gen_random_uuid(), $1, gen_random_uuid(), 'event.accepted', 'unplanned', 'api',                     'x', jsonb_build_object('event', gen_random_uuid(), 'person', gen_random_uuid())              FROM generate_series(1, 490)",
+            "EXPLAIN (ANALYZE, WAL, FORMAT JSON) \
+             INSERT INTO decision_records \
+                (id, workspace_id, trace_id, action, outcome, cause_kind, cause_id, subject_ids) \
+             SELECT gen_random_uuid(), $1, gen_random_uuid(), 'event.accepted', 'unplanned', 'api', \
+                    'x', jsonb_build_object('event', gen_random_uuid(), 'person', gen_random_uuid()) \
+             FROM generate_series(1, 490)",
         )
         .bind(ws.as_uuid())
         .fetch_one(&mut *tx)

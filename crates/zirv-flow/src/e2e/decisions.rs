@@ -665,16 +665,19 @@ mod tests {
         problems
     }
 
+    /// Whether `text` names `name` as a whole word.
+    fn mentions(text: &str, name: &str) -> bool {
+        text.match_indices(name).any(|(at, _)| {
+            let before = text[..at].chars().next_back();
+            let after = text[at + name.len()..].chars().next();
+            let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+            !word(before) && !word(after)
+        })
+    }
+
     /// Whether production code names `name` as a whole word.
     fn uses(sources: &[(String, String)], name: &str) -> bool {
-        sources.iter().any(|(_, text)| {
-            text.match_indices(name).any(|(at, _)| {
-                let before = text[..at].chars().next_back();
-                let after = text[at + name.len()..].chars().next();
-                let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
-                !word(before) && !word(after)
-            })
-        })
+        sources.iter().any(|(_, text)| mentions(text, name))
     }
 
     /// The names of the rows no production code uses, apart from the historical-only ones.
@@ -804,7 +807,7 @@ mod tests {
             let users: Vec<&str> = sources
                 .iter()
                 .filter(|(path, _)| !SPEC_BUILDERS.contains(&path.as_str()))
-                .filter(|(_, text)| uses(&[(String::new(), text.clone())], name))
+                .filter(|(_, text)| mentions(text, name))
                 .map(|(path, _)| path.as_str())
                 .collect();
             assert!(
