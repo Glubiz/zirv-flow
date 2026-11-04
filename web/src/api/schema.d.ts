@@ -17586,7 +17586,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query ran past its time limit (`code` is `query_timeout`), or every explorer connection stayed busy for a second (`code` is `explorer_busy`; see `Retry-After`) */
+            /** @description The query ran past its time limit (`code` is `query_timeout`), or every explorer connection stayed busy for a second, or `explorer.max_exports` exports are already streaming (`code` is `explorer_busy`; see `Retry-After`) */
             503: {
                 headers: {
                     /** @description Whole seconds to wait before retrying `explorer_busy` */

@@ -9713,6 +9713,55 @@ email,b@example.com,
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_second_export_answers_503_explorer_busy_until_the_first_stream_is_dropped(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let router = router(
+            AppState::new(pool.clone(), Arc::new(String::new))
+                .with_hmac_root(&zirv_flow_core::HmacRoot::bootstrap_from(
+                    &zirv_flow_core::MasterKey::generate(),
+                ))
+                .with_max_exports(1),
+        );
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let export = || async {
+            let request = Request::builder()
+                .method("POST")
+                .uri(explore_uri(&ws, "export"))
+                .header(header::CONTENT_TYPE, "application/json");
+            let request = with_auth(request, Auth::Session(&owner))
+                .body(Body::from(with_range(json!({})).to_string()))
+                .unwrap();
+            router.clone().oneshot(request).await.unwrap()
+        };
+
+        let first = export().await;
+        let second = export().await;
+        let count = call(
+            &router,
+            "POST",
+            &explore_uri(&ws, "count"),
+            Some(with_range(json!({"bucket": "day"}))),
+            Auth::Session(&owner),
+        )
+        .await;
+        drop(first);
+        let third = export().await;
+
+        assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(second.headers().contains_key(header::RETRY_AFTER));
+        let problem: Value =
+            serde_json::from_slice(&second.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(problem["code"], "explorer_busy");
+        assert_eq!(count.status, StatusCode::OK, "{:?}", count.body);
+        assert_eq!(third.status(), StatusCode::OK);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_explorer_applies_the_configured_fifteen_second_statement_timeout(pool: PgPool) {
         zirv_flow_store::migrate(&pool).await.unwrap();
         let router = app_limits(crate::ExplorerLimits {
