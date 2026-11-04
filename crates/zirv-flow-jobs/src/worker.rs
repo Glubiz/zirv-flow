@@ -1731,16 +1731,26 @@ mod tests {
         zirv_flow_store::lock_segments(&mut guard, ws)
             .await
             .unwrap();
+        let holder: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *guard)
+            .await
+            .unwrap();
         let mut config = test_config(1);
         config.redaction_key = Some(Arc::new(
             HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction),
         ));
         let (stop, handle) = start(&pool, config);
-        wait_until(
-            &pool,
-            "a drain batch to wait for the segment guard",
-            "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted)",
-        )
+        // Scoped to the guard: pg_locks spans the cluster, where other tests' waits show too.
+        eventually("a drain batch to wait for the segment guard", || async {
+            sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' \
+                 AND NOT granted AND $1 = ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(holder)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        })
         .await;
 
         let job_transactions: Vec<(Option<String>, Option<String>)> = sqlx::query_as(
