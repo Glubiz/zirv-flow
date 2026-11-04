@@ -45,6 +45,10 @@ pub(crate) struct EventEntryBody {
     flags: Vec<String>,
     /// Look it up with `GET /api/v1/workspaces/{ws}/traces/{trace_id}`.
     trace_id: String,
+    /// Whether the trace holds any decision. An accepted event writes no decision of its own, so
+    /// the trace of an event that created a person, changed a trait or started something has
+    /// records and any other event's trace answers 404.
+    has_decisions: bool,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -106,6 +110,7 @@ fn event_body(event: TimelineEvent, reveal: bool) -> EventEntryBody {
         validation_state: event.validation_state,
         flags: event.flags,
         trace_id: trace_text(event.trace_id),
+        has_decisions: event.has_decisions,
     }
 }
 
@@ -189,12 +194,13 @@ fn parse_page(query: &str) -> Result<Page, ApiError> {
 
 /// A person's timeline, newest first: their events, and the decisions the system made about
 /// them (trait changes, merges, consent changes, list membership, identity conflicts). Each
-/// entry has a `trace_id` that opens the decisions behind it. A person that was merged into
+/// entry has a `trace_id` that opens the decisions behind it; an event entry whose
+/// `has_decisions` is false has none, and its trace answers 404. A person that was merged into
 /// another reads as the survivor, with the merged people's entries included. Event properties
 /// the schema flags as PII are masked for callers who may not see values.
 ///
 /// `event.accepted` decisions duplicate the event entry and are left out unless
-/// `all_decisions=true`.
+/// `all_decisions=true`. Only events accepted before 0.231.0 have one.
 #[utoipa::path(
     get,
     operation_id = "get_person_timeline",
@@ -206,7 +212,7 @@ fn parse_page(query: &str) -> Result<Page, ApiError> {
         ("limit" = Option<u32>, Query, description = "Entries per page, 1 to 200; default 50"),
         ("cursor" = Option<String>, Query, description = "The next_cursor of the previous page"),
         ("kinds" = Option<String>, Query, description = "`event`, `decision` or both separated by a comma; default both"),
-        ("all_decisions" = Option<bool>, Query, description = "Include the `event.accepted` decisions; default false")
+        ("all_decisions" = Option<bool>, Query, description = "Include the `event.accepted` decisions that versions before 0.231.0 wrote; default false")
     ),
     responses(
         (status = 200, description = "A page of entries", body = TimelineBody),
@@ -271,6 +277,7 @@ mod tests {
             validation_state: "valid".into(),
             flags: vec!["late".into()],
             trace_id: Uuid::nil(),
+            has_decisions: true,
         }
     }
 

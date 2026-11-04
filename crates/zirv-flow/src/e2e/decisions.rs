@@ -31,16 +31,28 @@ mod tests {
         Untestable(&'static str),
     }
 
-    use Coverage::Test;
+    use Coverage::{Test, Untestable};
+
+    /// Why a historical-only row has no producer.
+    const NO_LONGER_WRITTEN: &str = "historical: no code writes it since 0.231.0 (#397); rows written before still read in the timeline and trace view";
+
+    /// Registry rows kept only so the rows that earlier versions wrote still read, render,
+    /// export and erase. No production code constructs them, and the source scan allows exactly
+    /// these: a name here that production code uses again, or that the registry lost, fails.
+    const HISTORICAL_ONLY: &[(&str, &str)] = &[
+        ("EVENT_ACCEPTED_VALID", NO_LONGER_WRITTEN),
+        ("EVENT_ACCEPTED_FLAGGED", NO_LONGER_WRITTEN),
+        ("EVENT_ACCEPTED_UNPLANNED", NO_LONGER_WRITTEN),
+    ];
 
     const SEND_PATH: &str = "the_send_path_and_its_trace_hold_end_to_end";
 
     /// Every registry row, by constant name, with what covers it.
     #[rustfmt::skip]
     const COVERAGE: &[(&str, Coverage)] = &[
-        ("EVENT_ACCEPTED_VALID", Test(SEND_PATH)),
-        ("EVENT_ACCEPTED_FLAGGED", Test("event_accepted_flagged")),
-        ("EVENT_ACCEPTED_UNPLANNED", Test("event_accepted_unplanned")),
+        ("EVENT_ACCEPTED_VALID", Untestable(NO_LONGER_WRITTEN)),
+        ("EVENT_ACCEPTED_FLAGGED", Untestable(NO_LONGER_WRITTEN)),
+        ("EVENT_ACCEPTED_UNPLANNED", Untestable(NO_LONGER_WRITTEN)),
         ("EVENT_REJECTED", Test("decisions_name_ids_and_codes_only")),
         ("RECORD_REJECTED_APPLY_FAILED", Test("an_unmappable_identify_row_becomes_a_record_reject")),
         ("EVENT_REPLAYED_VALID", Test("a_replay_after_a_schema_fix_stores_the_event_once_and_a_second_changes_nothing")),
@@ -653,18 +665,24 @@ mod tests {
         problems
     }
 
-    /// The names of the rows no production code uses.
+    /// Whether `text` names `name` as a whole word.
+    fn mentions(text: &str, name: &str) -> bool {
+        text.match_indices(name).any(|(at, _)| {
+            let before = text[..at].chars().next_back();
+            let after = text[at + name.len()..].chars().next();
+            let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+            !word(before) && !word(after)
+        })
+    }
+
+    /// Whether production code names `name` as a whole word.
+    fn uses(sources: &[(String, String)], name: &str) -> bool {
+        sources.iter().any(|(_, text)| mentions(text, name))
+    }
+
+    /// The names of the rows no production code uses, apart from the historical-only ones.
     fn unused_rows(sources: &[(String, String)]) -> Vec<&'static str> {
-        let uses = |name: &str| {
-            sources.iter().any(|(_, text)| {
-                text.match_indices(name).any(|(at, _)| {
-                    let before = text[..at].chars().next_back();
-                    let after = text[at + name.len()..].chars().next();
-                    let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
-                    !word(before) && !word(after)
-                })
-            })
-        };
+        let uses = |name: &str| uses(sources, name);
         let branch_cases = uses("BRANCH_CASES");
         decision_actions::NAMES
             .iter()
@@ -673,7 +691,8 @@ mod tests {
                 let by_table = branch_cases
                     && name.starts_with("FLOW_BRANCH_CASE_")
                     && *name != "FLOW_BRANCH_CASE_MORE";
-                !by_table && !uses(name)
+                let historical = HISTORICAL_ONLY.iter().any(|(row, _)| row == name);
+                !by_table && !historical && !uses(name)
             })
             .collect()
     }
@@ -773,6 +792,40 @@ mod tests {
         let unused = unused_rows(&production_sources());
 
         assert!(unused.is_empty(), "rows no code constructs: {unused:?}");
+    }
+
+    #[test]
+    fn a_historical_only_row_is_in_the_registry_and_no_production_code_uses_it() {
+        let sources = production_sources();
+
+        for (name, reason) in HISTORICAL_ONLY {
+            assert!(
+                decision_actions::NAMES.contains(name),
+                "{name} is no longer in the registry; the rows written earlier would not read"
+            );
+            assert!(!reason.is_empty(), "{name} needs a reason");
+            let users: Vec<&str> = sources
+                .iter()
+                .filter(|(path, _)| !SPEC_BUILDERS.contains(&path.as_str()))
+                .filter(|(_, text)| mentions(text, name))
+                .map(|(path, _)| path.as_str())
+                .collect();
+            assert!(
+                users.is_empty(),
+                "{name} is used by production code again ({users:?}); drop it from HISTORICAL_ONLY"
+            );
+        }
+    }
+
+    #[test]
+    fn a_historical_only_row_a_producer_uses_is_found() {
+        let sources = vec![(
+            "x.rs".to_owned(),
+            "let _ = EVENT_ACCEPTED_VALID;".to_owned(),
+        )];
+
+        assert!(uses(&sources, "EVENT_ACCEPTED_VALID"));
+        assert!(!uses(&sources, "EVENT_ACCEPTED_FLAGGED"));
     }
 
     #[test]
@@ -945,14 +998,14 @@ mod tests {
     fn a_row_no_code_uses_is_found() {
         let sources = vec![(
             "x.rs".to_owned(),
-            "use a::FLOW_STEP_DONE; let _ = EVENT_ACCEPTED_VALID_X;".to_owned(),
+            "use a::FLOW_STEP_DONE; let _ = FLOW_STEP_ENQUEUED_X;".to_owned(),
         )];
 
         let unused = unused_rows(&sources);
 
         assert!(!unused.contains(&"FLOW_STEP_DONE"));
         assert!(
-            unused.contains(&"EVENT_ACCEPTED_VALID"),
+            unused.contains(&"FLOW_STEP_ENQUEUED"),
             "a longer name is not a use"
         );
     }
@@ -1007,7 +1060,11 @@ mod tests {
     #[test]
     fn every_registry_row_has_a_producing_test() {
         for (row, coverage) in COVERAGE {
-            assert!(matches!(coverage, Coverage::Test(_)), "{row}: {coverage:?}");
+            let historical = HISTORICAL_ONLY.iter().any(|(name, _)| name == row);
+            assert!(
+                matches!(coverage, Coverage::Test(_)) || historical,
+                "{row}: {coverage:?}"
+            );
         }
     }
 

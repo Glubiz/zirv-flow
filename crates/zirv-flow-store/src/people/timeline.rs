@@ -19,7 +19,8 @@ use zirv_flow_core::events::SchemaProperty;
 use crate::StoreError;
 use crate::bounded::begin_bounded;
 
-/// The action of the decision that duplicates an event entry.
+/// The action of the decision that duplicates an event entry. Versions before 0.231.0 wrote one
+/// per accepted event; later ones write none, so only older rows match.
 const EVENT_ACCEPTED: &str = "event.accepted";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -70,7 +71,8 @@ pub struct TimelineCursor {
 pub struct TimelineFilter {
     pub events: bool,
     pub decisions: bool,
-    /// Include `event.accepted`, which duplicates the event entry.
+    /// Include `event.accepted`, which duplicates the event entry. Only events accepted by
+    /// versions before 0.231.0 have one.
     pub all_decisions: bool,
 }
 
@@ -98,6 +100,9 @@ pub struct TimelineEvent {
     pub validation_state: String,
     pub flags: Vec<String>,
     pub trace_id: Uuid,
+    /// Whether the trace holds any decision. An accepted event writes none of its own, so the
+    /// trace of an event that changed nothing is empty and the trace API answers 404 for it.
+    pub has_decisions: bool,
 }
 
 // Event properties are personal data.
@@ -165,6 +170,7 @@ struct EventRow {
     validation_state: String,
     flags: Vec<String>,
     trace_id: Uuid,
+    has_decisions: bool,
 }
 
 #[derive(FromRow)]
@@ -242,7 +248,10 @@ pub async fn load_timeline(
     if filter.events {
         let rows: Vec<EventRow> = sqlx::query_as(
             "SELECT e.id, e.occurred_at, e.name, e.properties, v.properties AS schema, \
-                    e.validation_state, e.flags, e.trace_id \
+                    e.validation_state, e.flags, e.trace_id, \
+                    EXISTS (SELECT 1 FROM decision_records d \
+                            WHERE d.workspace_id = e.workspace_id AND d.trace_id = e.trace_id) \
+                        AS has_decisions \
              FROM events e LEFT JOIN event_schema_versions v \
                 ON v.workspace_id = e.workspace_id AND v.name = e.name \
                AND v.version = e.schema_version \
@@ -272,6 +281,7 @@ pub async fn load_timeline(
                 validation_state: row.validation_state,
                 flags: row.flags,
                 trace_id: row.trace_id,
+                has_decisions: row.has_decisions,
             })
         }));
     }
@@ -411,6 +421,23 @@ mod tests {
         }
     }
 
+    /// A decision as versions before 0.231.0 wrote it for an accepted event, which no code writes
+    /// now.
+    async fn insert_legacy_accepted(pool: &PgPool, ws: WorkspaceId, event: Uuid) {
+        sqlx::query(
+            "INSERT INTO decision_records \
+                (id, workspace_id, trace_id, action, outcome, cause_kind, cause_id, subject_ids) \
+             SELECT gen_random_uuid(), workspace_id, trace_id, 'event.accepted', 'unplanned', \
+                    'api', 'test', jsonb_build_object('event', id, 'person', person_id) \
+             FROM events WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(event)
+        .bind(ws.as_uuid())
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     async fn set_decision_time(pool: &PgPool, action: &str, at: OffsetDateTime) {
         sqlx::query("UPDATE decision_records SET recorded_at = $2 WHERE action = $1")
             .bind(action)
@@ -447,6 +474,7 @@ mod tests {
         .await;
         assert_ne!(survivor, merged);
         let event = track(pool, ws, SECRET_EVENT, SECRET_EMAIL).await;
+        insert_legacy_accepted(pool, ws, event).await;
         let mut tx = begin(pool).await.unwrap();
         set_consent(
             &mut tx,
@@ -605,6 +633,99 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_event_entry_says_whether_its_trace_holds_a_decision(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let first = track(&pool, ws, "first_seen", SECRET_EMAIL).await;
+        let second = track(&pool, ws, "seen_again", SECRET_EMAIL).await;
+        let person: Uuid = sqlx::query_scalar("SELECT person_id FROM events WHERE id = $1")
+            .bind(first)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        let page = load_timeline(
+            &pool,
+            ws,
+            person,
+            TimelineFilter {
+                decisions: false,
+                ..TimelineFilter::default()
+            },
+            50,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        let flags: Vec<(Uuid, bool)> = page
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                TimelineEntry::Event(event) => Some((event.id, event.has_decisions)),
+                TimelineEntry::Decision(_) => None,
+            })
+            .collect();
+        assert!(flags.contains(&(first, true)), "it created the person");
+        assert!(flags.contains(&(second, false)), "it changed nothing");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_decision_probe_of_an_event_entry_is_an_index_scan_on_the_trace_index(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        sqlx::query(
+            "INSERT INTO decision_records \
+                 (id, workspace_id, trace_id, action, outcome, cause_kind, cause_id) \
+             SELECT gen_random_uuid(), $1, gen_random_uuid(), 'step', 'done', 'api', 'x' \
+             FROM generate_series(1, 50000)",
+        )
+        .bind(ws.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("VACUUM (ANALYZE) decision_records")
+            .execute(&pool)
+            .await
+            .unwrap();
+        track(&pool, ws, "first_seen", SECRET_EMAIL).await;
+
+        let plan: Vec<String> = sqlx::query_scalar(
+            "EXPLAIN (COSTS OFF) SELECT e.id, EXISTS (SELECT 1 FROM decision_records d \
+                 WHERE d.workspace_id = e.workspace_id AND d.trace_id = e.trace_id) \
+             FROM events e WHERE e.workspace_id = $1 AND e.occurred_at < now() + interval '1 day' \
+             ORDER BY e.occurred_at DESC, e.id DESC LIMIT 51",
+        )
+        .bind(ws.as_uuid())
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+
+        let plan = plan.join(
+            "
+",
+        );
+        eprintln!("{plan}");
+        // The rows are in this month's partition; the empty ones read as a trivial sequential scan.
+        let month: String = sqlx::query_scalar(
+            "SELECT 'decision_records_y' || to_char(now(), 'YYYY') || 'm' || to_char(now(), 'MM')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            plan.contains(&format!(
+                "Index Only Scan using {month}_workspace_id_trace_id"
+            )),
+            "{plan}"
+        );
+        assert!(!plan.contains(&format!("Seq Scan on {month}")), "{plan}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn event_accepted_is_left_out_unless_all_decisions_are_asked_for(pool: PgPool) {
         let seeded = seed(&pool, "one").await;
 
@@ -638,7 +759,10 @@ mod tests {
         .await;
 
         assert!(!default.contains(&"event.accepted".to_owned()));
-        assert!(all.contains(&"event.accepted".to_owned()));
+        assert!(
+            all.contains(&"event.accepted".to_owned()),
+            "an old row still reads"
+        );
         assert_eq!(events_only, ["event"]);
         assert!(!decisions_only.contains(&"event".to_owned()));
         assert!(decisions_only.contains(&"person.merge".to_owned()));

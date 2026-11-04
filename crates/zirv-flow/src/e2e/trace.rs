@@ -9,8 +9,7 @@ use serde_json::{Value, json};
 /// The decisions the trace of the send path must hold once: action, outcome and, when it
 /// matters, the reason. What each message must hold is [`GATES`].
 pub(super) const REQUIRED: &[(&str, &str, Option<&str>)] = &[
-    // The track call and what it caused.
-    ("event.accepted", "valid", None),
+    // What the track call caused; the event row records the acceptance, no decision does.
     ("segment.entered", "entered", None),
     ("flow.enroll", "enrolled", None),
     // The steps: queued, a wait, its wake and the end of the flow.
@@ -42,7 +41,6 @@ pub(super) const GATES: &[&str] = &[
 /// A transient send retries twice, fails on its last attempt, and a signed hard-bounce
 /// webhook suppresses the address on the same trace.
 const FAILING: &[(&str, &str, Option<&str>)] = &[
-    ("event.accepted", "valid", None),
     ("segment.entered", "entered", Some("data_change")),
     ("flow.enroll", "enrolled", None),
     ("flow.step", "enqueued", Some("inputs_fresh")),
@@ -86,7 +84,7 @@ pub(super) fn failing_complete(records: &[Value]) -> Result<(), String> {
         .enumerate()
     {
         if record["attempt"].as_u64() != Some(index as u64 + 1)
-            || record["job_id"] != records[6]["job_id"]
+            || record["job_id"] != records[5]["job_id"]
         {
             return Err("the failing send retries are not consecutive attempts of one job".into());
         }
@@ -95,7 +93,7 @@ pub(super) fn failing_complete(records: &[Value]) -> Result<(), String> {
         .iter()
         .find(|record| text(record, "action") == Some("message.send"))
         .unwrap();
-    if send["attempt"] != 3 || send["job_id"] != records[6]["job_id"] {
+    if send["attempt"] != 3 || send["job_id"] != records[5]["job_id"] {
         return Err("the failed send is not the last attempt of the retrying job".into());
     }
     one_tree(records)
@@ -138,12 +136,13 @@ fn ids_of(record: &Value) -> Vec<&str> {
 /// Whether the records are one tree. A record's cause names the parent: the id of a record or of
 /// a subject (an event, a segment, an enrollment) that another record is about. The first record
 /// is the root, started by a cause outside the response; every other record must be reached from
-/// it by following those links.
+/// it by following those links. The root's own cause counts as reached: the records an event
+/// causes name that event, which no decision describes since an accepted event writes none.
 pub(super) fn one_tree(records: &[Value]) -> Result<(), String> {
     let Some(root) = records.first() else {
         return Err("the trace is not one tree: it has no records".to_owned());
     };
-    let mut known: HashSet<&str> = ids_of(root).into_iter().collect();
+    let mut known: HashSet<&str> = ids_of(root).into_iter().chain(cause_id(root)).collect();
     let mut reached = vec![false; records.len()];
     reached[0] = true;
     loop {
@@ -365,7 +364,7 @@ mod tests {
             );
         }
         let mut broken = records;
-        broken[17]["cause"]["id"] = json!("unreachable");
+        broken[16]["cause"]["id"] = json!("unreachable");
         assert!(
             failing_complete(&broken)
                 .unwrap_err()
@@ -443,10 +442,16 @@ mod tests {
             "{failure}"
         );
 
-        let mut no_root = records.clone();
-        no_root.remove(0);
-        assert!(one_tree(&no_root).is_err(), "no root record is left");
         assert!(one_tree(&[]).is_err(), "an empty response is no tree");
+
+        // The first record is `segment.entered` now that an accepted event writes no decision of
+        // its own; a trace that lost it is incomplete.
+        assert_eq!(text(&records[0], "action"), Some("segment.entered"));
+        let failure = complete(&records[1..]).expect_err("a trace without its root is reported");
+        assert!(
+            failure.contains("no `segment.entered` decision"),
+            "{failure}"
+        );
 
         // Two records whose causes name each other, and nothing else, are cut off from the root.
         let mut island = records.clone();
@@ -628,11 +633,20 @@ mod tests {
             else {
                 panic!("accepted event");
             };
-            (
-                input.trace,
-                ("event.accepted", outcome, None),
-                json!({"event": event, "person": person}),
+            // The event row records the acceptance; since 0.231.0 no decision does.
+            let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE id = $1")
+                .bind(event)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            let written: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM decision_records WHERE action = 'event.accepted'",
             )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!((stored, written), (1, 0));
+            return;
         };
         zirv_flow_store::decision_testing::assert_fixture(&pool, ws, &trace, triple, subjects)
             .await;
@@ -640,7 +654,7 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn event_accepted_flagged(pool: sqlx::PgPool) {
+    async fn a_flagged_event_is_stored_with_no_accepted_decision(pool: sqlx::PgPool) {
         zirv_flow_store::decision_testing::checked(pool, |pool| async move {
             event_fixture(pool, "flagged", false).await;
         })
@@ -649,7 +663,7 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn event_accepted_unplanned(pool: sqlx::PgPool) {
+    async fn an_unplanned_event_is_stored_with_no_accepted_decision(pool: sqlx::PgPool) {
         zirv_flow_store::decision_testing::checked(pool, |pool| async move {
             event_fixture(pool, "unplanned", false).await;
         })

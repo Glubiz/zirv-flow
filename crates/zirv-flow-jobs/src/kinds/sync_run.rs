@@ -4365,7 +4365,7 @@ mod tests {
         assert_eq!(env.count("SELECT count(*) FROM people").await, 40);
         assert_eq!(env.count("SELECT count(*) FROM events").await, 40);
         assert_eq!(env.count("SELECT count(*) FROM list_members").await, 20);
-        // Each event is under the run's trace, with the sync_run cause on its decision.
+        // Each event is under the run's trace.
         let traced: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE trace_id = $1")
             .bind(first.trace_id)
             .fetch_one(&pool)
@@ -4375,10 +4375,11 @@ mod tests {
         assert_eq!(
             env.count(
                 "SELECT count(*) FROM decision_records \
-                 WHERE action = 'event.accepted' AND cause_kind = 'sync_run'"
+                 WHERE action = 'event.accepted'"
             )
             .await,
-            40
+            0,
+            "an accepted event is recorded by its event row, not by a decision"
         );
         assert_eq!(
             env.count("SELECT count(*) FROM list_members WHERE source = 'sync'")

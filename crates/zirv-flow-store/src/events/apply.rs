@@ -464,18 +464,6 @@ async fn judge_event_record(
         id: event_id,
         occurred_at: timing.occurred_at,
     });
-    decide(
-        batch,
-        workspace,
-        record,
-        match state {
-            ValidationState::Valid => &decision_actions::EVENT_ACCEPTED_VALID,
-            ValidationState::Flagged => &decision_actions::EVENT_ACCEPTED_FLAGGED,
-            ValidationState::Unplanned => &decision_actions::EVENT_ACCEPTED_UNPLANNED,
-        },
-        None,
-        vec![("event", event_id), ("person", person_id)],
-    );
     Ok(EventOutcome::Accepted {
         event_id,
         person_id,
@@ -1073,7 +1061,7 @@ mod tests {
             .unwrap();
         assert_eq!(duplicates, 3);
         let decisions = count(&pool, "decision_records").await;
-        assert_eq!(decisions, 2, "one person.created and one event.accepted");
+        assert_eq!(decisions, 1, "one person.created and no event.accepted");
     }
 
     #[sqlx::test]
@@ -1584,7 +1572,7 @@ mod tests {
         assert!(matches!(outcome, EventOutcome::Duplicate { .. }));
         assert_eq!(count(&pool, "people").await, 1);
         assert_eq!(count(&pool, "identities").await, 1);
-        assert_eq!(count(&pool, "decision_records").await, 2);
+        assert_eq!(count(&pool, "decision_records").await, 1);
     }
 
     #[sqlx::test]
@@ -1723,7 +1711,7 @@ mod tests {
         let (refused, _) = list_trace(&pool, ws, rejected_trace, 10).await.unwrap();
         let mut actions: Vec<&str> = ok.iter().map(|d| d.action.as_str()).collect();
         actions.sort_unstable();
-        assert_eq!(actions, ["event.accepted", "person.created"]);
+        assert_eq!(actions, ["person.created"]);
         assert_eq!(refused.len(), 1);
         assert_eq!(
             (

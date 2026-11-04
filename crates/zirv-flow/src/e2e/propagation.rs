@@ -687,8 +687,7 @@ mod tests {
             assert_eq!(one_tree(&records), Ok(()), "{records:#?}");
             // The inbox preserves the request trace but reconstructs the cause from its API key.
             assert_ne!(ingest_key.to_string(), header_of(&reply, "x-request-id"));
-            let accepted = cause_at(&records, "event.accepted", "valid", "api", &ingest_key.to_string());
-            assert_eq!(accepted["subject_ids"]["event"], event.to_string());
+            assert!(records.iter().all(|record| record["action"] != "event.accepted"));
             let forwarded = cause_at(&records, "event.forward", "dead", "event", &event.to_string());
             assert_eq!(forwarded["subject_ids"]["outbox"], outbox.to_string());
             let lines = captured.json_lines();

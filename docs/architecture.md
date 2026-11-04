@@ -1992,11 +1992,26 @@ before M5, so nothing consumes the flag yet (`EventFlag::NoTriggers` documents t
   displays counts over time and property breakdowns; exports the filtered set
   as CSV. Interactive and export queries have separate statement timeouts and
   row limits, always use workspace and partition predicates, and report a
-  timeout rather than running without a bound.
+  timeout rather than running without a bound. Each listed event carries
+  `has_decisions`, probed on the decision trace index in the page's own snapshot
+  and timeout; the event's detail sheet links to its trace only when it is true,
+  because an accepted event writes no decision of its own and an empty trace
+  answers 404.
 - **Person timeline:** interleaves customer events with relevant decision
   records, including merges, consent and trait changes, segment changes,
   enrollments, steps, sends and skips. Each system record links to its trace
   tree; values remain subject to the caller's PII access.
+- **Trace of an accepted event:** since 0.231.0 an accepted event writes no `event.accepted`
+  decision, on the ingest drain, in a sync run or through `apply_event_batch` (#397): the event
+  row already records the acceptance with its id, person, trace and state, and the decision
+  made up 86 % of the decision rows of a track-only drain. A trace that begins at ingestion
+  therefore shows `person.created` (for a new person), trait changes and the decisions that follow,
+  but no "event was accepted" line; the event is read from the person timeline or the explorer.
+  A trace with no decision answers 404, so each event entry of the person timeline carries
+  `has_decisions` (one `EXISTS` probe per event entry on `decision_records_trace_idx`) and the page
+  links an event to its trace only when it is true.
+  There is no index on `events (workspace_id, trace_id)`, so the trace view does not list a
+  trace's events. Rejects, quarantines and replays still write their decisions.
 
 As built (people search, profile and person timeline):
 
@@ -2021,7 +2036,8 @@ As built (people search, profile and person timeline):
 - **Timeline** (`store::people::load_timeline`). Two keyset streams, events by `occurred_at`
   (across partitions) and decisions by `recorded_at`, for the person and everyone merged into
   it, are merged newest first under the cursor `(at, kind, id)`; at equal times a decision
-  sorts before an event, then ids descend. `event.accepted` is left out unless asked for.
+  sorts before an event, then ids descend. `event.accepted` is left out unless asked for; only
+  events accepted by versions before 0.231.0 have one (see 12.4).
   Each event carries the published schema version it was validated against, so the API can
   mask PII properties; an event with no schema is masked entirely for callers without value
   access.
@@ -2125,6 +2141,13 @@ no cause kind. Every external-effect step decision
 records the freshness of the flow's inputs (9.1, OQ-14).
 A sync writes one decision per record, appended with one multi-row insert per
 batch in the apply-batch transaction.
+
+An accepted event writes no decision of its own since 0.231.0 (#397, ruling 3fc88974): the event
+row records it, on the ingest drain and in sync runs alike. The `event.accepted` rows stay in the
+registry as historical-only rows (no code writes them; the producer scan lists them as such), so
+the rows that earlier versions wrote still read, render in the timeline and trace view, export and
+erase. Rejects, quarantines (`event.rejected`), replays (`event.replayed`) and `person.created`
+are still written.
 
 As built (M3): the `sync_run` cause carries the run id, and the run's trace is
 the trace of its jobs and of every decision it writes. An applied record is
