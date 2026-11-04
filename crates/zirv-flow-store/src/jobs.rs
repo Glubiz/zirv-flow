@@ -402,7 +402,16 @@ const CLAIM: &str = concat!(
 /// `$4`. A claim's cost is therefore bounded by the workspaces with ready jobs, their bands and
 /// `$4`, not by any workspace's backlog (#207); as in [`CLAIM`], due jobs of other kinds are
 /// stepped over. Every workspace probe is a row comparison led by `workspace_id`, so no index
-/// but that one can answer it, whatever the statistics.
+/// but that one can answer it, whatever the statistics. A probe for due jobs reads, from the
+/// start of the band, the first jobs of the kinds, as many as it wants, and keeps those of the
+/// band that are due: they come first, so it keeps as many as before and reads no further. It
+/// is not bounded by `ROW(workspace_id, priority, run_at) <= ROW(.., .., now())` instead:
+/// PostgreSQL 16 ends a btree scan on a row comparison's first column only, so such a probe
+/// read on through every later job of a workspace whose band held fewer due jobs than it wanted
+/// (bench phase 4a, #397), and comparing each column on its own lets the planner take
+/// `jobs_ready_idx` instead. The probe tests the kind as `(kind = ANY($3)) IS TRUE`, which no
+/// index can answer, so that without the row's upper bound the planner cannot take
+/// `jobs_ready_kind_idx` instead either.
 ///
 /// A batch takes only the offers of the best band offered (`best`), workspace and instance
 /// offers alike: a workspace offers from its own first band alone, so a later band's offers
@@ -432,14 +441,15 @@ const CLAIM_CAPPED: &str = concat!(
                 THEN p.priority ELSE 32767::smallint END) \
             ORDER BY j.workspace_id, j.priority LIMIT 1) n \
         LEFT JOIN LATERAL ( \
-            SELECT j.id, j.run_at FROM jobs j \
-            WHERE n.workspace_id NOT IN (SELECT workspace_id FROM capped) \
-            AND j.state = 'ready' AND j.workspace_id IS NOT NULL \
-            AND ROW(j.workspace_id, j.priority) >= ROW(n.workspace_id, n.priority) \
-            AND ROW(j.workspace_id, j.priority, j.run_at) \
-                <= ROW(n.workspace_id, n.priority, now()) \
-            AND j.kind = ANY($3) \
-            ORDER BY j.workspace_id, j.priority, j.run_at LIMIT 1) h ON true), \
+            SELECT f.id, f.run_at FROM ( \
+                SELECT j.workspace_id, j.priority, j.id, j.run_at FROM jobs j \
+                WHERE n.workspace_id NOT IN (SELECT workspace_id FROM capped) \
+                AND j.state = 'ready' AND j.workspace_id IS NOT NULL \
+                AND ROW(j.workspace_id, j.priority) >= ROW(n.workspace_id, n.priority) \
+                AND (j.kind = ANY($3)) IS TRUE \
+                ORDER BY j.workspace_id, j.priority, j.run_at LIMIT 1) f \
+            WHERE f.workspace_id = n.workspace_id AND f.priority = n.priority \
+            AND f.run_at <= now()) h ON true), \
     instance_bands (priority) AS ( \
         (SELECT priority FROM jobs WHERE state = 'ready' AND workspace_id IS NULL \
          ORDER BY priority LIMIT 1) \
@@ -458,14 +468,15 @@ const CLAIM_CAPPED: &str = concat!(
             SELECT o.id, h.priority, o.run_at FROM heads h \
             LEFT JOIN running r ON r.workspace_id = h.workspace_id \
             CROSS JOIN LATERAL ( \
-                SELECT j.id, j.run_at FROM jobs j \
-                WHERE j.state = 'ready' AND j.workspace_id IS NOT NULL \
-                AND ROW(j.workspace_id, j.priority) >= ROW(h.workspace_id, h.priority) \
-                AND ROW(j.workspace_id, j.priority, j.run_at) \
-                    <= ROW(h.workspace_id, h.priority, now()) \
-                AND j.kind = ANY($3) \
-                ORDER BY j.workspace_id, j.priority, j.run_at \
-                LIMIT LEAST($4, $5 - COALESCE(r.running, 0))) o \
+                SELECT f.id, f.run_at FROM ( \
+                    SELECT j.workspace_id, j.priority, j.id, j.run_at FROM jobs j \
+                    WHERE j.state = 'ready' AND j.workspace_id IS NOT NULL \
+                    AND ROW(j.workspace_id, j.priority) >= ROW(h.workspace_id, h.priority) \
+                    AND (j.kind = ANY($3)) IS TRUE \
+                    ORDER BY j.workspace_id, j.priority, j.run_at \
+                    LIMIT LEAST($4, $5 - COALESCE(r.running, 0))) f \
+                WHERE f.workspace_id = h.workspace_id AND f.priority = h.priority \
+                AND f.run_at <= now()) o \
             WHERE h.id IS NOT NULL \
             UNION ALL \
             (SELECT i.id, b.priority, i.run_at FROM instance_bands b CROSS JOIN LATERAL ( \
@@ -482,6 +493,11 @@ const CLAIM_CAPPED: &str = concat!(
     LIMIT $4) END)",
     claim_returning!()
 );
+
+/// Takes the claim lock until a capped claim's transaction ends, and turns JIT off for it: the
+/// capped claim's estimates grow with the queue, far past `jit_above_cost`, and compiling it cost
+/// more than running it (about 260-375 ms a claim against a queue of 3 million, #397).
+const TAKE_CLAIM_LOCK: &str = "SELECT pg_advisory_xact_lock($1), set_config('jit', 'off', true)";
 
 /// Claims up to `n` runnable jobs of one of `kinds`, by priority, then age; none when nothing is
 /// due.
@@ -517,7 +533,7 @@ pub async fn claim_jobs(
         // include the claims before it.
         Some(cap) => {
             let mut tx = pool.begin().await.map_err(StoreError::query)?;
-            sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            sqlx::query(TAKE_CLAIM_LOCK)
                 .bind(CLAIM_LOCK_KEY)
                 .execute(&mut *tx)
                 .await
@@ -4733,6 +4749,102 @@ mod tests {
             claimed[0].claim_lag_seconds >= 2.0,
             "a lag of {} s left out the wait",
             claimed[0].claim_lag_seconds
+        );
+    }
+
+    /// The shared buffers one capped claim of up to `n` `flow.step` jobs under a cap of `cap`
+    /// touches, from `EXPLAIN (ANALYZE, BUFFERS)` in a transaction that is rolled back. The claim
+    /// must have taken `taken`.
+    async fn capped_claim_buffers(pool: &PgPool, n: i64, cap: i64, taken: f64) -> i64 {
+        let mut tx = pool.begin().await.unwrap();
+        let plan: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {CLAIM_CAPPED}"
+        )))
+        .bind("w")
+        .bind(LEASE.as_secs_f64())
+        .bind(&["flow.step"][..])
+        .bind(n)
+        .bind(cap)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        tx.rollback().await.unwrap();
+        let top = &plan[0]["Plan"];
+        assert_eq!(top["Actual Rows"].as_f64(), Some(taken), "{plan}");
+        top["Shared Hit Blocks"].as_i64().unwrap() + top["Shared Read Blocks"].as_i64().unwrap()
+    }
+
+    /// Bench phase 4a (#397): in PostgreSQL 16 only the first column of a row comparison can end
+    /// a btree scan, so a workspace probe bounded by `ROW(workspace_id, priority, run_at) <= ...`
+    /// alone read on past the due jobs through every later job of the workspace, on each claim.
+    /// A workspace at its cap with due jobs, one with only later jobs, and one with a due job
+    /// before its later ones: what a capped claim reads does not grow with the later jobs.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_capped_claim_reads_no_further_than_the_due_jobs_of_a_workspace(pool: PgPool) {
+        freeze_statistics(&pool).await;
+        let busy = workspace(&pool, "busy").await;
+        let waiting = workspace(&pool, "waiting").await;
+        let mixed = workspace(&pool, "mixed").await;
+        seed_running(&pool, busy, 2).await;
+        seed_wakes(&pool, busy, "busy", 100, -60.0, 0.0).await;
+        seed_wakes(&pool, mixed, "due", 1, -120.0, -60.0).await;
+        for (n, ws) in [waiting, mixed].into_iter().enumerate() {
+            seed_wakes(&pool, ws, &format!("later-{n}"), 1_000, 600.0, 2_400.0).await;
+        }
+        vacuum_and_analyze(&pool).await;
+        let few = capped_claim_buffers(&pool, 8, 2, 1.0).await;
+        for (n, ws) in [waiting, mixed].into_iter().enumerate() {
+            seed_wakes(&pool, ws, &format!("more-{n}"), 19_000, 600.0, 2_400.0).await;
+        }
+        vacuum_and_analyze(&pool).await;
+        let many = capped_claim_buffers(&pool, 8, 2, 1.0).await;
+
+        assert!(
+            many < few * 2,
+            "{few} buffers with 1,000 later jobs a workspace, {many} with 20,000"
+        );
+    }
+
+    /// The capped claim is planned on estimates that grow with the queue, past `jit_above_cost`,
+    /// and compiling it cost more than running it (bench phase 4a: about 375 ms of a 630 ms
+    /// claim, #397). The statement that takes the claim lock turns JIT off for the claim.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_capped_claim_is_not_compiled_however_costly_its_plan(pool: PgPool) {
+        let ws = workspace(&pool, "ours").await;
+        seed_wakes(&pool, ws, "due", 10, -60.0, 0.0).await;
+        let mut tx = pool.begin().await.unwrap();
+        for setting in [
+            "SET LOCAL jit = on",
+            "SET LOCAL jit_above_cost = 0",
+            "SET LOCAL jit_inline_above_cost = 0",
+            "SET LOCAL jit_optimize_above_cost = 0",
+        ] {
+            sqlx::query(setting).execute(&mut *tx).await.unwrap();
+        }
+        sqlx::query(TAKE_CLAIM_LOCK)
+            .bind(CLAIM_LOCK_KEY)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let plan: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN (ANALYZE, FORMAT JSON) {CLAIM_CAPPED}"
+        )))
+        .bind("w")
+        .bind(LEASE.as_secs_f64())
+        .bind(&["flow.step"][..])
+        .bind(8_i64)
+        .bind(2_i64)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        tx.rollback().await.unwrap();
+
+        assert_eq!(plan[0]["Plan"]["Actual Rows"].as_f64(), Some(2.0), "{plan}");
+        assert!(
+            plan[0].get("JIT").is_none(),
+            "the claim was compiled: {plan}"
         );
     }
 }

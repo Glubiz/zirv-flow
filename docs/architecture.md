@@ -2737,6 +2737,17 @@ its running jobs and the batch's together, and the batch takes only the offers o
 the best band offered, instance jobs included, so a capped batch never puts a later
 band before an earlier one. It is smaller when that band offers fewer jobs, and
 empty for one poll when other transactions lock them all (#397, ruling a894b5c2).
+A probe for a workspace's due jobs reads its first jobs of the worker's kinds from the start
+of the band, as many as it wants, and keeps those of the band that are due, which come
+first. Bounded by `ROW(workspace_id, priority, run_at) <= ROW(.., .., now())` instead, it
+read on through every later job of a workspace whose band held fewer due jobs than it
+wanted, on every claim, since PostgreSQL 16 ends a btree scan on a row comparison's first
+column only (bench phase 4a: about 10,900 buffers a claim); comparing the columns one by
+one would let the planner take `jobs_ready_idx` filtered on the workspace, which steps
+over a capped workspace's flood (#207). The statement that takes the claim lock also
+turns JIT off for the claim's transaction: the plan's estimates grow with the queue,
+past `jit_above_cost`, and compiling it took longer than running it (about 260-375 ms
+of a claim against a 3 M-job queue, #397).
 Weighted claiming is rejected for v1: it is more complex and nothing yet shows the
 cap is not enough. M8 validates the cap under load.
 
