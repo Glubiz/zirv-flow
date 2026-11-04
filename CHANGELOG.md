@@ -15,3 +15,19 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.232.0 (2026-11-04)
+
+### Performance
+
+- export pages of 10,000 rows and a one-statement snapshot begin (#397)
+
+### Documentation
+
+- state the export memory per stream as CSV text plus a multiple (#397)
+- export page size and memory per stream; bump to 0.232.0 (#397)
+
+### Chores
+
+- scope the drain test's lock wait to its own guard (#397)
+- tidy the snapshot test's query string (#397)
+
