@@ -73,6 +73,9 @@ limit, E be `explorer.max_connections` (default 4), C be `worker.concurrency` an
   so a burst of them waits for its E connections and never takes one from ingest.
   A query that waits one second for a connection answers `503` with the code
   `explorer_busy` and `Retry-After`.
+  `explorer.max_exports` (default 1) caps the CSV exports streaming at once per process; a
+  further export answers the same `503`. Raise it only after measuring ingest with that many
+  exports open, since concurrent exports have collapsed ingest throughput.
 - `worker`: D + C × (S + 1) + 1 for the jobs pool + C for heartbeats,
   or D + (2 + S) × C + 1. `all` adds E to that.
 

@@ -39,7 +39,7 @@ use zirv_flow_store::{
     JOB_HISTORY_DAYS_BOUNDS, TEST_SEND_MONTHS_BOUNDS,
 };
 
-pub(crate) const CONFIG_KEYS: [&str; 67] = [
+pub(crate) const CONFIG_KEYS: [&str; 68] = [
     "server.bind",
     "server.cookie_secure",
     "server.public_url",
@@ -93,6 +93,7 @@ pub(crate) const CONFIG_KEYS: [&str; 67] = [
     "explorer.interactive_row_limit",
     "explorer.export_row_limit",
     "explorer.max_connections",
+    "explorer.max_exports",
     "render.pool_size",
     "render.deadline_ms",
     "render.memory_limit_mib",
@@ -489,6 +490,8 @@ struct ExplorerConfig {
     export_row_limit: u32,
     /// Connections the explorer's own pool holds per serve process, apart from the main pool.
     max_connections: u32,
+    /// CSV exports that may stream at once per serve process; another answers `explorer_busy`.
+    max_exports: u32,
 }
 
 struct SecretUrl(Url);
@@ -674,6 +677,7 @@ impl Config {
                 1_000_000_u32,
             ))
             .merge(Serialized::default("explorer.max_connections", 4_u32))
+            .merge(Serialized::default("explorer.max_exports", 1_u32))
             .merge(Serialized::default("render.pool_size", 2_u32))
             .merge(Serialized::default("render.deadline_ms", 5_000_u64))
             .merge(Serialized::default("render.memory_limit_mib", 512_u64))
@@ -748,6 +752,7 @@ impl Config {
                 config.explorer.export_row_limit,
             ),
             ("explorer.max_connections", config.explorer.max_connections),
+            ("explorer.max_exports", config.explorer.max_exports),
         ]
         .into_iter()
         .chain(
@@ -1357,6 +1362,11 @@ impl Config {
     /// The size of the explorer's own connection pool in this process.
     pub(crate) fn explorer_max_connections(&self) -> u32 {
         self.explorer.max_connections
+    }
+
+    /// How many CSV exports may stream at once in this process.
+    pub(crate) fn explorer_max_exports(&self) -> usize {
+        self.explorer.max_exports as usize
     }
 
     /// The event explorer's query timeouts and row limits.
@@ -3057,6 +3067,7 @@ output_price_per_mtok = 15000000
         );
         assert!(toml::to_string(&config).unwrap().contains("[explorer]"));
         assert_eq!(config.explorer_max_connections(), 4);
+        assert_eq!(config.explorer_max_exports(), 1);
     }
 
     #[test]
@@ -3068,6 +3079,7 @@ output_price_per_mtok = 15000000
             ("INTERACTIVE_ROW_LIMIT", "50"),
             ("EXPORT_ROW_LIMIT", "77"),
             ("MAX_CONNECTIONS", "2"),
+            ("MAX_EXPORTS", "3"),
         ] {
             env.push((format!("ZIRV_FLOW_EXPLORER__{key}").into(), value.into()));
         }
@@ -3075,6 +3087,7 @@ output_price_per_mtok = 15000000
         let config = Config::load(None, env).unwrap();
         let limits = config.explorer_limits();
         assert_eq!(config.explorer_max_connections(), 2);
+        assert_eq!(config.explorer_max_exports(), 3);
 
         assert_eq!(
             limits.interactive_timeout,
@@ -3091,6 +3104,7 @@ output_price_per_mtok = 15000000
             "INTERACTIVE_ROW_LIMIT",
             "EXPORT_ROW_LIMIT",
             "MAX_CONNECTIONS",
+            "MAX_EXPORTS",
         ] {
             let mut env = database_env("postgres://localhost/database");
             env.push((format!("ZIRV_FLOW_EXPLORER__{key}").into(), "0".into()));

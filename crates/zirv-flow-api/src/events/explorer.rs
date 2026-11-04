@@ -552,7 +552,7 @@ enum Export {
         (status = 403, description = "A key without the read scope, a missing CSRF token, or a probe of a PII property by a caller who may not see values (`code` is `pii_property_not_explorable`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "A malformed range or filter", body = Problem, content_type = "application/problem+json"),
-        (status = 503, description = "The query ran past its time limit (`code` is `query_timeout`), or every explorer connection stayed busy for a second (`code` is `explorer_busy`; see `Retry-After`)", body = Problem, content_type = "application/problem+json", headers(("Retry-After" = u64, description = "Whole seconds to wait before retrying `explorer_busy`")))
+        (status = 503, description = "The query ran past its time limit (`code` is `query_timeout`), or every explorer connection stayed busy for a second, or `explorer.max_exports` exports are already streaming (`code` is `explorer_busy`; see `Retry-After`)", body = Problem, content_type = "application/problem+json", headers(("Retry-After" = u64, description = "Whole seconds to wait before retrying `explorer_busy`")))
     ),
     security(("session" = []), ("api_key" = []))
 )]
@@ -566,6 +566,10 @@ pub(crate) async fn export(
     let filters = request.filters()?;
     let reveal = may_view_pii(&state, &principal, workspace.id).await;
     let limits = state.explorer.export();
+    // Exports streaming at once are bounded: several of them starve ingest of connections.
+    let permit = state
+        .try_export_permit()
+        .ok_or_else(ApiError::explorer_busy)?;
 
     // Count first: a bad filter or a timeout is an error response, not a broken stream, and
     // the audit entry exists whether or not the client reads to the end.
@@ -608,6 +612,7 @@ pub(crate) async fn export(
         limits,
         reveal,
         truncated: u64::try_from(matched).unwrap_or(0) > rows,
+        _permit: permit,
     };
     let body = stream::unfold((source, Export::Header), |(source, phase)| async move {
         match phase {
@@ -708,6 +713,8 @@ struct ExportSource {
     reveal: bool,
     /// More events matched than the row limit.
     truncated: bool,
+    /// Held until the stream ends, fails or is dropped.
+    _permit: tokio::sync::OwnedSemaphorePermit,
 }
 
 impl ExportSource {

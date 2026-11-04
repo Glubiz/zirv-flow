@@ -2089,7 +2089,11 @@ As built (debugger, explorer):
   The export counts first (so a timeout is an error response and the audit entry exists),
   audits `events.exported` with operators and counts only, then streams keyset pages and
   ends with a `#` comment when the row limit cut it short. The `[explorer]` settings hold the
-  timeouts and row limits.
+  timeouts and row limits. At most `explorer.max_exports` (default 1) exports stream at once per
+  `serve` process: the export takes a permit before it counts, answers `503 explorer_busy` with
+  `Retry-After` when none is free, and releases it when the stream ends, fails or the client
+  goes away. Counts, breakdowns and lists take none. Several streams at once starved ingest of
+  main-pool connections in the M8 bench (#397).
 
 ### 12.4 End-to-end causality
 
