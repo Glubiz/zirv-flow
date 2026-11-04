@@ -27,7 +27,7 @@ use crate::{ArrivedEvent, EnrollmentState, Outcome, StepContext, StepInput, Wait
 pub(super) const DAYS: i64 = 90;
 
 /// The most jobs one claim takes, and so one batch transaction runs: the runtime's `CLAIM_BATCH`.
-const BATCH: usize = 8;
+const BATCH: usize = 32;
 
 /// One step in this many of a batch fails in its handler after writing, and rolls back to its
 /// savepoint alone.

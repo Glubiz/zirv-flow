@@ -441,8 +441,22 @@ pub async fn count_in_flight_enrollments(
     .map_err(StoreError::query)
 }
 
-/// The longest the live-enrollment sampler's queries may run.
-const SAMPLE_TIMEOUT: &str = "5s";
+/// The longest one of the live-enrollment sampler's statements may run.
+const SAMPLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Up to this many enrollments in a state are counted; above it the count is an estimate.
+const SAMPLE_EXACT: i64 = 10_000;
+
+/// The `active` and the `waiting` enrollments, each read from `enrollments_live_idx` up to `$1`
+/// of them. The states are literals, so the plan always proves the index's predicate.
+const SAMPLE_COUNTS: &str = "SELECT \
+        (SELECT count(*) FROM (SELECT 1 FROM enrollments WHERE state = 'active' \
+                               ORDER BY wake_at LIMIT $1) a), \
+        (SELECT count(*) FROM (SELECT 1 FROM enrollments WHERE state = 'waiting' \
+                               ORDER BY wake_at LIMIT $1) w)";
+
+/// The planner's estimate of the enrollments in a state, for a count above [`SAMPLE_EXACT`].
+const SAMPLE_ESTIMATE: &str = "SELECT 1 FROM enrollments WHERE state = $1";
 
 /// What the leader samples of the live enrollments, over all workspaces.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -455,22 +469,29 @@ pub struct EnrollmentSample {
 }
 
 /// Counts the `active` and `waiting` enrollments and finds the oldest overdue timer, from
-/// `enrollments_live_idx`, under a statement timeout so a table of millions of waiting rows
-/// cannot hold the leader's tick.
+/// `enrollments_live_idx`, under a statement timeout of a second. Each state is counted up to
+/// 10,000 enrollments; above that its count is the planner's estimate from the table
+/// statistics, never below 10,001, so millions of waiting rows cost no more to sample than ten
+/// thousand do (#397). The oldest overdue timer is the first entry of the `waiting` range.
 pub async fn sample_enrollments(pool: &PgPool) -> Result<EnrollmentSample, StoreError> {
-    let mut tx = pool.begin().await.map_err(StoreError::query)?;
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        "SET LOCAL statement_timeout = '{SAMPLE_TIMEOUT}'"
-    )))
-    .execute(&mut *tx)
-    .await
-    .map_err(StoreError::query)?;
-    let (active, waiting): (i64, i64) = sqlx::query_as(
-        "SELECT count(*) FILTER (WHERE state = 'active'),                 count(*) FILTER (WHERE state = 'waiting')          FROM enrollments WHERE state IN ('active', 'waiting')",
-    )
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(StoreError::query)?;
+    sample_up_to(pool, SAMPLE_EXACT).await
+}
+
+async fn sample_up_to(pool: &PgPool, exact: i64) -> Result<EnrollmentSample, StoreError> {
+    let mut tx = crate::bounded::begin_bounded_for(pool, SAMPLE_TIMEOUT).await?;
+    // Planned for the limit's value each time, never with a generic plan.
+    let (active, waiting): (i64, i64) = sqlx::query_as(SAMPLE_COUNTS)
+        .persistent(false)
+        .bind(exact + 1)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(StoreError::query)?;
+    let active =
+        crate::bounded::count_or_estimate(&mut tx, active, exact, SAMPLE_ESTIMATE, &["active"])
+            .await?;
+    let waiting =
+        crate::bounded::count_or_estimate(&mut tx, waiting, exact, SAMPLE_ESTIMATE, &["waiting"])
+            .await?;
     let late: Option<i64> = sqlx::query_scalar(
         "SELECT EXTRACT(EPOCH FROM now() - min(wake_at))::bigint FROM enrollments          WHERE state = 'waiting' AND wake_at <= now()",
     )
@@ -985,6 +1006,51 @@ mod tests {
                 waiting: 1,
                 oldest_late_seconds: 0
             }
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_state_above_the_exact_limit_is_sampled_from_the_planners_estimate(pool: PgPool) {
+        let ws = workspace(&pool, "sample-estimate").await;
+        let flow = create(&pool, ws, "Flow").await;
+        publish(&pool, ws, flow.id).await.unwrap();
+        for _ in 0..40 {
+            timed_enrollment(&pool, ws, flow.id, "waiting", Some(-60)).await;
+        }
+        timed_enrollment(&pool, ws, flow.id, "active", None).await;
+        sqlx::query("ANALYZE enrollments")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let sample = sample_up_to(&pool, 5).await.unwrap();
+
+        // ANALYZE reads every row of a table this small, so the estimate is the count; the
+        // `active` state is under the limit and counted.
+        assert_eq!((sample.active, sample.waiting), (1, 40));
+        assert!((60..70).contains(&sample.oldest_late_seconds), "{sample:?}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_sample_gives_up_after_a_second(pool: PgPool) {
+        let mut blocker = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE enrollments IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+        let started = std::time::Instant::now();
+
+        let blocked = sample_enrollments(&pool).await;
+
+        let waited = started.elapsed();
+        blocker.rollback().await.unwrap();
+        assert!(blocked.is_err());
+        assert!(
+            waited >= std::time::Duration::from_millis(900)
+                && waited < std::time::Duration::from_secs(4),
+            "{waited:?}"
         );
     }
 

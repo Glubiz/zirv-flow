@@ -330,33 +330,52 @@ macro_rules! claim_bands {
     };
 }
 
+/// The lease runs from the update itself, `clock_timestamp()` read once for the statement (an
+/// init plan), not from `now()`, the start of the transaction: a capped claim waits for the claim
+/// lock inside its transaction, and a lease from its start had been spent on the wait by the
+/// time the claim returned (bench phase 4a, #397).
 macro_rules! claim_update {
     () => {
         "UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, \
             lease_token = gen_random_uuid(), \
-            lease_expires_at = now() + make_interval(secs => $2) "
+            lease_expires_at = (SELECT clock_timestamp()) + make_interval(secs => $2) "
     };
 }
 
-/// The oldest due jobs of one of `$3`, up to `$4`, band by band upwards, locked.
+/// The oldest due jobs of one of `$3`, up to `$4`, band by band upwards, locked, with at most one
+/// `ingest.drain` among them: the oldest due jobs of other kinds, up to `$4`, and the oldest due
+/// drain (one `jobs_ready_kind_idx` probe), whichever come first.
 macro_rules! claim_first_due {
     () => {
-        "ARRAY(SELECT c.id FROM bands b CROSS JOIN LATERAL ( \
-            SELECT j.id FROM jobs j \
-            WHERE j.state = 'ready' AND j.priority = b.priority AND j.run_at <= now() \
-            AND j.kind = ANY($3) \
-            ORDER BY j.run_at \
-            LIMIT $4 \
-            FOR UPDATE SKIP LOCKED) c \
+        "ARRAY(SELECT m.id FROM ( \
+            (SELECT c.id, b.priority, c.run_at FROM bands b CROSS JOIN LATERAL ( \
+                SELECT j.id, j.run_at FROM jobs j \
+                WHERE j.state = 'ready' AND j.priority = b.priority AND j.run_at <= now() \
+                AND j.kind = ANY($3) AND j.kind <> 'ingest.drain' \
+                ORDER BY j.run_at \
+                LIMIT $4 \
+                FOR UPDATE SKIP LOCKED) c \
+             LIMIT $4) \
+            UNION ALL \
+            SELECT d.id, d.priority, d.run_at FROM ( \
+                SELECT j.id, j.priority, j.run_at FROM jobs j \
+                WHERE 'ingest.drain' = ANY($3) \
+                AND j.state = 'ready' AND j.kind = 'ingest.drain' AND j.run_at <= now() \
+                ORDER BY j.run_at \
+                LIMIT 1 \
+                FOR UPDATE SKIP LOCKED) d) m \
+            ORDER BY m.priority, m.run_at \
             LIMIT $4)"
     };
 }
 
+/// The lag runs to the update, where the lease starts, so a wait for the claim lock counts.
 macro_rules! claim_returning {
     () => {
         " RETURNING id, workspace_id, kind, payload, priority, run_at, attempts, max_attempts, \
             lease_token, unique_key, trace_id, cause_kind, cause_id, \
-            EXTRACT(EPOCH FROM now() - run_at)::float8 AS claim_lag_seconds"
+            EXTRACT(EPOCH FROM lease_expires_at - make_interval(secs => $2) - run_at)::float8 \
+                AS claim_lag_seconds"
     };
 }
 
@@ -369,7 +388,15 @@ macro_rules! claim_returning {
 /// recursion yields the bands in ascending order and the outer `LIMIT` stops at the band that
 /// fills the batch, so a later band is read only while the bands before it held fewer than `$4`
 /// due jobs. Due jobs of kinds outside `$3` in a band are stepped over. A row is locked as the
-/// limit takes it, so a claim locks only the jobs it claims.
+/// limit takes it, so a claim locks only the jobs it claims, except while a drain is due: then it
+/// also locks the drain or the batch's youngest other job without claiming it, until it ends.
+///
+/// A claim takes at most one `ingest.drain` (supervisor ruling 98e6546e): a drain runs for up to
+/// 20 s, so further drains in its batch would wait out the hold behind it while idle slots could
+/// have run them. The bands are walked without the drains, and the oldest due drain joins the
+/// batch in age order: it is claimed if it is older than the batch's youngest job, which then
+/// stays for the next claim. Drains are all enqueued at the default priority, so the oldest is
+/// the first.
 const CLAIM: &str = concat!(
     "WITH RECURSIVE ",
     claim_bands!(),
@@ -396,7 +423,16 @@ const CLAIM: &str = concat!(
 /// `$4`. A claim's cost is therefore bounded by the workspaces with ready jobs, their bands and
 /// `$4`, not by any workspace's backlog (#207); as in [`CLAIM`], due jobs of other kinds are
 /// stepped over. Every workspace probe is a row comparison led by `workspace_id`, so no index
-/// but that one can answer it, whatever the statistics.
+/// but that one can answer it, whatever the statistics. A probe for due jobs reads, from the
+/// start of the band, the first jobs of the kinds, as many as it wants, and keeps those of the
+/// band that are due: they come first, so it keeps as many as before and reads no further. It
+/// is not bounded by `ROW(workspace_id, priority, run_at) <= ROW(.., .., now())` instead:
+/// PostgreSQL 16 ends a btree scan on a row comparison's first column only, so such a probe
+/// read on through every later job of a workspace whose band held fewer due jobs than it wanted
+/// (bench phase 4a, #397), and comparing each column on its own lets the planner take
+/// `jobs_ready_idx` instead. The probe tests the kind as `(kind = ANY($3)) IS TRUE`, which no
+/// index can answer, so that without the row's upper bound the planner cannot take
+/// `jobs_ready_kind_idx` instead either.
 ///
 /// A batch takes only the offers of the best band offered (`best`), workspace and instance
 /// offers alike: a workspace offers from its own first band alone, so a later band's offers
@@ -407,6 +443,9 @@ const CLAIM: &str = concat!(
 /// only the rows it takes; an offer that is locked is passed over until the next claim. Claims
 /// under a cap are serialised by [`claim_jobs`], so no other claim moves a head or changes a
 /// running count meanwhile.
+///
+/// Of the drains offered, at most one per workspace, only the oldest is tried, so a batch takes
+/// at most one `ingest.drain`, as in [`CLAIM`] (supervisor ruling 98e6546e).
 const CLAIM_CAPPED: &str = concat!(
     "WITH RECURSIVE running AS MATERIALIZED ( \
         SELECT workspace_id, count(*) AS running FROM jobs \
@@ -426,14 +465,15 @@ const CLAIM_CAPPED: &str = concat!(
                 THEN p.priority ELSE 32767::smallint END) \
             ORDER BY j.workspace_id, j.priority LIMIT 1) n \
         LEFT JOIN LATERAL ( \
-            SELECT j.id, j.run_at FROM jobs j \
-            WHERE n.workspace_id NOT IN (SELECT workspace_id FROM capped) \
-            AND j.state = 'ready' AND j.workspace_id IS NOT NULL \
-            AND ROW(j.workspace_id, j.priority) >= ROW(n.workspace_id, n.priority) \
-            AND ROW(j.workspace_id, j.priority, j.run_at) \
-                <= ROW(n.workspace_id, n.priority, now()) \
-            AND j.kind = ANY($3) \
-            ORDER BY j.workspace_id, j.priority, j.run_at LIMIT 1) h ON true), \
+            SELECT f.id, f.run_at FROM ( \
+                SELECT j.workspace_id, j.priority, j.id, j.run_at FROM jobs j \
+                WHERE n.workspace_id NOT IN (SELECT workspace_id FROM capped) \
+                AND j.state = 'ready' AND j.workspace_id IS NOT NULL \
+                AND ROW(j.workspace_id, j.priority) >= ROW(n.workspace_id, n.priority) \
+                AND (j.kind = ANY($3)) IS TRUE \
+                ORDER BY j.workspace_id, j.priority, j.run_at LIMIT 1) f \
+            WHERE f.workspace_id = n.workspace_id AND f.priority = n.priority \
+            AND f.run_at <= now()) h ON true), \
     instance_bands (priority) AS ( \
         (SELECT priority FROM jobs WHERE state = 'ready' AND workspace_id IS NULL \
          ORDER BY priority LIMIT 1) \
@@ -448,27 +488,32 @@ const CLAIM_CAPPED: &str = concat!(
     claim_first_due!(),
     " ELSE ARRAY(SELECT l.id FROM ( \
         SELECT c.id, c.run_at FROM ( \
-        SELECT c.id, c.priority, c.run_at, min(c.priority) OVER () AS best FROM ( \
-            SELECT o.id, h.priority, o.run_at FROM heads h \
+        SELECT c.id, c.run_at, c.drain, \
+            row_number() OVER (PARTITION BY c.drain ORDER BY c.run_at) AS nth FROM ( \
+        SELECT c.id, c.priority, c.run_at, c.drain, min(c.priority) OVER () AS best FROM ( \
+            SELECT o.id, h.priority, o.run_at, o.kind = 'ingest.drain' AS drain FROM heads h \
             LEFT JOIN running r ON r.workspace_id = h.workspace_id \
             CROSS JOIN LATERAL ( \
-                SELECT j.id, j.run_at FROM jobs j \
-                WHERE j.state = 'ready' AND j.workspace_id IS NOT NULL \
-                AND ROW(j.workspace_id, j.priority) >= ROW(h.workspace_id, h.priority) \
-                AND ROW(j.workspace_id, j.priority, j.run_at) \
-                    <= ROW(h.workspace_id, h.priority, now()) \
-                AND j.kind = ANY($3) \
-                ORDER BY j.workspace_id, j.priority, j.run_at \
-                LIMIT LEAST($4, $5 - COALESCE(r.running, 0))) o \
+                SELECT f.id, f.run_at, f.kind FROM ( \
+                    SELECT j.workspace_id, j.priority, j.id, j.run_at, j.kind FROM jobs j \
+                    WHERE j.state = 'ready' AND j.workspace_id IS NOT NULL \
+                    AND ROW(j.workspace_id, j.priority) >= ROW(h.workspace_id, h.priority) \
+                    AND (j.kind = ANY($3)) IS TRUE \
+                    ORDER BY j.workspace_id, j.priority, j.run_at \
+                    LIMIT LEAST($4, $5 - COALESCE(r.running, 0))) f \
+                WHERE f.workspace_id = h.workspace_id AND f.priority = h.priority \
+                AND f.run_at <= now()) o \
             WHERE h.id IS NOT NULL \
             UNION ALL \
-            (SELECT i.id, b.priority, i.run_at FROM instance_bands b CROSS JOIN LATERAL ( \
-                SELECT j.id, j.run_at FROM jobs j \
+            (SELECT i.id, b.priority, i.run_at, i.kind = 'ingest.drain' FROM instance_bands b \
+             CROSS JOIN LATERAL ( \
+                SELECT j.id, j.run_at, j.kind FROM jobs j \
                 WHERE j.state = 'ready' AND j.workspace_id IS NULL AND j.priority = b.priority \
                 AND j.run_at <= now() AND j.kind = ANY($3) \
                 ORDER BY j.run_at LIMIT $4) i \
              LIMIT $4)) c) c \
-        WHERE c.priority = c.best \
+        WHERE c.priority = c.best) c \
+        WHERE NOT c.drain OR c.nth = 1 \
         ORDER BY c.run_at) c \
     CROSS JOIN LATERAL ( \
         SELECT j.id FROM jobs j WHERE j.id = c.id AND j.state = 'ready' \
@@ -476,6 +521,11 @@ const CLAIM_CAPPED: &str = concat!(
     LIMIT $4) END)",
     claim_returning!()
 );
+
+/// Takes the claim lock until a capped claim's transaction ends, and turns JIT off for it: the
+/// capped claim's estimates grow with the queue, far past `jit_above_cost`, and compiling it cost
+/// more than running it (about 260-375 ms a claim against a queue of 3 million, #397).
+const TAKE_CLAIM_LOCK: &str = "SELECT pg_advisory_xact_lock($1), set_config('jit', 'off', true)";
 
 /// Claims up to `n` runnable jobs of one of `kinds`, by priority, then age; none when nothing is
 /// due.
@@ -511,7 +561,7 @@ pub async fn claim_jobs(
         // include the claims before it.
         Some(cap) => {
             let mut tx = pool.begin().await.map_err(StoreError::query)?;
-            sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            sqlx::query(TAKE_CLAIM_LOCK)
                 .bind(CLAIM_LOCK_KEY)
                 .execute(&mut *tx)
                 .await
@@ -598,6 +648,12 @@ pub async fn release_jobs<'e>(
 /// transaction must be abandoned. The lock is a key-share lock, which still lets the
 /// heartbeat extend the lease while the handler runs; completion is then fenced by
 /// [`complete_job`] in the same transaction.
+///
+/// The lock keeps the job from being claimed again while this transaction is open, since a claim
+/// skips locked rows, and keeps the reaper from deleting it, since a delete needs a lock that
+/// conflicts with this one. A row lock also gives the transaction an id, which holds the xmin
+/// horizon back until it ends; a kind safe to overlap with a late attempt of itself confirms its
+/// lease with [`confirm_lease`] instead (#397).
 pub async fn lock_lease(
     connection: &mut PgConnection,
     id: Uuid,
@@ -607,6 +663,26 @@ pub async fn lock_lease(
         .bind(id)
         .bind(lease_token)
         .fetch_optional(connection)
+        .await
+        .map_err(StoreError::query)?;
+    Ok(row.is_some())
+}
+
+/// Confirms the lease is still held without locking the job row: false means the row is gone
+/// or carries another token. The read takes no transaction id and keeps no snapshot once it
+/// returns, so a transaction left open across a long handler does not hold the xmin horizon
+/// back. Nothing keeps another worker from claiming the job once the reaper puts it back, so
+/// only a kind that is safe to overlap with a late attempt of itself uses this; its completion
+/// is still fenced by [`complete_job`] (#397).
+pub async fn confirm_lease<'e>(
+    executor: impl PgExecutor<'e>,
+    id: Uuid,
+    lease_token: Uuid,
+) -> Result<bool, StoreError> {
+    let row = sqlx::query("SELECT 1 FROM jobs WHERE id = $1 AND lease_token = $2")
+        .bind(id)
+        .bind(lease_token)
+        .fetch_optional(executor)
         .await
         .map_err(StoreError::query)?;
     Ok(row.is_some())
@@ -736,6 +812,8 @@ pub async fn heartbeat_job<'e>(
 /// job behind one zombie and deadlock with a handler that completes. It does wait for a worker's
 /// batch transaction (#397) that already completed or failed a job whose lease ran out while the
 /// batch's later jobs ran; once the batch commits, the row is gone or settled and is skipped.
+/// A kind that confirms its lease with [`confirm_lease`] holds no row lock, so nothing here
+/// waits on it or skips it, and its late ack is refused the same way.
 pub async fn reap_expired<'e>(executor: impl PgExecutor<'e>) -> Result<Reaped, StoreError> {
     let states: Vec<String> = sqlx::query_scalar(
         "WITH locked AS ( \
@@ -826,30 +904,72 @@ pub async fn queue_counts<'e>(executor: impl PgExecutor<'e>) -> Result<QueueCoun
     })
 }
 
-/// Job counts by kind and state, for the queue-depth gauges.
-pub async fn queue_depths<'e>(
-    executor: impl PgExecutor<'e>,
-) -> Result<Vec<QueueDepth>, StoreError> {
-    sqlx::query_as("SELECT kind, state, count(*) AS count FROM jobs GROUP BY kind, state")
-        .fetch_all(executor)
-        .await
-        .map_err(StoreError::query)
+/// Up to this many ready jobs of a kind are counted; above it the count is an estimate.
+const DEPTH_EXACT: i64 = 10_000;
+
+/// The planner's estimate of a kind's jobs in a state, for a ready count above [`DEPTH_EXACT`].
+const DEPTH_ESTIMATE: &str = "SELECT 1 FROM jobs WHERE state = $1 AND kind = $2";
+
+/// The depths with the ready jobs of each kind counted up to `$1`: a skip scan of
+/// `jobs_ready_kind_idx` finds the kinds with ready jobs, one probe each, and each kind's count
+/// reads at most `$1` entries of its range there. The running jobs are as many as the worker
+/// slots hold and the dead ones as many as retention keeps, so both are counted in full from
+/// their partial indexes. No part reads the whole table, however long the queue (#397).
+const DEPTHS: &str = "WITH RECURSIVE kinds (kind) AS ( \
+        (SELECT kind FROM jobs WHERE state = 'ready' ORDER BY kind LIMIT 1) \
+        UNION ALL \
+        SELECT (SELECT j.kind FROM jobs j WHERE j.state = 'ready' AND j.kind > k.kind \
+                ORDER BY j.kind LIMIT 1) \
+        FROM kinds k WHERE k.kind IS NOT NULL) \
+    SELECT k.kind, 'ready' AS state, \
+        (SELECT count(*) FROM (SELECT 1 FROM jobs j WHERE j.state = 'ready' AND j.kind = k.kind \
+                               ORDER BY j.run_at LIMIT $1) c) AS count \
+    FROM kinds k WHERE k.kind IS NOT NULL \
+    UNION ALL \
+    SELECT kind, 'running', count(*) FROM jobs WHERE state = 'running' GROUP BY kind \
+    UNION ALL \
+    SELECT kind, 'dead', count(*) FROM jobs WHERE state = 'dead' GROUP BY kind";
+
+/// Job counts by kind and state, for the queue-depth gauges. The running and dead counts are
+/// exact, and so is each kind's ready count up to 10,000; above that it is the planner's
+/// estimate from the table statistics, and never below 10,001, so a long backlog costs no more to
+/// gauge than a short one.
+pub async fn queue_depths(connection: &mut PgConnection) -> Result<Vec<QueueDepth>, StoreError> {
+    depths_up_to(connection, DEPTH_EXACT).await
 }
 
-/// The longest the queue-depth gauge query may run.
-const DEPTH_TIMEOUT: &str = "5s";
+async fn depths_up_to(
+    connection: &mut PgConnection,
+    exact: i64,
+) -> Result<Vec<QueueDepth>, StoreError> {
+    // Planned for the limit's value each time, never with a generic plan.
+    let mut depths: Vec<QueueDepth> = sqlx::query_as(DEPTHS)
+        .persistent(false)
+        .bind(exact + 1)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
+    for depth in depths.iter_mut().filter(|depth| depth.state == "ready") {
+        depth.count = crate::bounded::count_or_estimate(
+            connection,
+            depth.count,
+            exact,
+            DEPTH_ESTIMATE,
+            &["ready", depth.kind.as_str()],
+        )
+        .await?;
+    }
+    Ok(depths)
+}
 
-/// [`queue_depths`] under a statement timeout, for the leader's gauges: no index covers kind and
-/// state, so on a table of millions of jobs the count is a full scan that must not hold the tick.
+/// The longest a queue-depth gauge statement may run.
+const DEPTH_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// [`queue_depths`] under a statement timeout of a second, for the leader's gauges: the reads
+/// are bounded, and the timeout keeps a slow database from holding the tick.
 pub async fn sample_queue_depths(pool: &PgPool) -> Result<Vec<QueueDepth>, StoreError> {
-    let mut tx = pool.begin().await.map_err(StoreError::query)?;
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        "SET LOCAL statement_timeout = '{DEPTH_TIMEOUT}'"
-    )))
-    .execute(&mut *tx)
-    .await
-    .map_err(StoreError::query)?;
-    let depths = queue_depths(&mut *tx).await?;
+    let mut tx = crate::bounded::begin_bounded_for(pool, DEPTH_TIMEOUT).await?;
+    let depths = queue_depths(&mut tx).await?;
     tx.commit().await.map_err(StoreError::query)?;
     Ok(depths)
 }
@@ -1348,16 +1468,138 @@ mod tests {
         enqueue(&pool, &job("a.kind")).await.unwrap();
         enqueue(&pool, &job("a.kind")).await.unwrap();
         enqueue(&pool, &job("b.kind")).await.unwrap();
+        enqueue(&pool, &job("c.kind")).await.unwrap();
         claim(&pool, &["b.kind"]).await.unwrap();
+        sqlx::query(
+            "INSERT INTO jobs (id, kind, payload, state, dead_at, trace_id, cause_kind, cause_id) \
+             SELECT gen_random_uuid(), k, '{}', 'dead', now(), gen_random_uuid(), 'api', 'x' \
+             FROM unnest(ARRAY['a.kind', 'c.kind', 'c.kind']) k",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
-        let mut depths = queue_depths(&pool).await.unwrap();
-        depths.sort_by(|a, b| a.kind.cmp(&b.kind));
+        let depths = sorted(
+            queue_depths(&mut pool.acquire().await.unwrap())
+                .await
+                .unwrap(),
+        );
 
         let summary: Vec<(&str, &str, i64)> = depths
             .iter()
             .map(|d| (d.kind.as_str(), d.state.as_str(), d.count))
             .collect();
-        assert_eq!(summary, [("a.kind", "ready", 2), ("b.kind", "running", 1)]);
+        assert_eq!(
+            summary,
+            [
+                ("a.kind", "dead", 1),
+                ("a.kind", "ready", 2),
+                ("b.kind", "running", 1),
+                ("c.kind", "dead", 2),
+                ("c.kind", "ready", 1)
+            ]
+        );
+        let full: Vec<QueueDepth> =
+            sqlx::query_as("SELECT kind, state, count(*) AS count FROM jobs GROUP BY kind, state")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            depths,
+            sorted(full),
+            "below the limit, every count is exact"
+        );
+    }
+
+    fn sorted(mut depths: Vec<QueueDepth>) -> Vec<QueueDepth> {
+        depths.sort_by(|a, b| (&a.kind, &a.state).cmp(&(&b.kind, &b.state)));
+        depths
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_ready_count_above_the_limit_is_the_planners_estimate(pool: PgPool) {
+        sqlx::query(
+            "INSERT INTO jobs (id, kind, payload, trace_id, cause_kind, cause_id) \
+             SELECT gen_random_uuid(), CASE WHEN g <= 3 THEN 'b.kind' ELSE 'a.kind' END, '{}', \
+                    gen_random_uuid(), 'api', 'x' \
+             FROM generate_series(1, 403) g",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("ANALYZE jobs").execute(&pool).await.unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+
+        let depths = sorted(depths_up_to(&mut connection, 5).await.unwrap());
+
+        let summary: Vec<(&str, i64)> = depths.iter().map(|d| (d.kind.as_str(), d.count)).collect();
+        // ANALYZE reads every row of a table this small, so the estimate is the count.
+        assert_eq!(summary, [("a.kind", 400), ("b.kind", 3)]);
+        assert!(depths.iter().all(|d| d.state == "ready"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_queue_depths_read_a_bounded_part_of_a_long_queue(pool: PgPool) {
+        sqlx::query(
+            "INSERT INTO jobs (id, kind, payload, run_at, trace_id, cause_kind, cause_id) \
+             SELECT gen_random_uuid(), CASE WHEN g % 1000 = 0 THEN 'b.kind' ELSE 'a.kind' END, \
+                    '{}', now() - make_interval(secs => g), gen_random_uuid(), 'api', 'x' \
+             FROM generate_series(1, 60000) g ORDER BY random()",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        enqueue(&pool, &job("c.kind")).await.unwrap();
+        claim(&pool, &["c.kind"]).await.unwrap();
+        sqlx::query("ANALYZE jobs").execute(&pool).await.unwrap();
+        let pages: i64 = sqlx::query_scalar(
+            "SELECT pg_relation_size('jobs') / current_setting('block_size')::bigint",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        // A limit of 100 here, so the bound shows against a table a test can fill.
+        let plan: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {DEPTHS}"
+        )))
+        .bind(101_i64)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let top = &plan[0]["Plan"];
+        let buffers = top["Shared Hit Blocks"].as_i64().unwrap()
+            + top["Shared Read Blocks"].as_i64().unwrap();
+
+        let scanned: Vec<&Value> = plan_nodes(top)
+            .into_iter()
+            .filter(|node| node["Node Type"] == "Seq Scan")
+            .collect();
+        assert!(scanned.is_empty(), "{plan}");
+        assert_eq!(top["Actual Rows"].as_f64(), Some(3.0), "{plan}");
+        // The ready count of `a.kind` stops at the limit: about one heap page per entry it reads,
+        // against the whole table's.
+        assert!(pages > 800, "{pages}");
+        assert!(buffers < 400, "{buffers} buffers for {pages} pages\n{plan}");
+        let depths = sorted(
+            queue_depths(&mut pool.acquire().await.unwrap())
+                .await
+                .unwrap(),
+        );
+        assert_eq!(
+            depths
+                .iter()
+                .map(|d| (d.kind.as_str(), d.state.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("a.kind", "ready"),
+                ("b.kind", "ready"),
+                ("c.kind", "running")
+            ]
+        );
+        assert!(depths[0].count > DEPTH_EXACT, "{depths:?}");
+        assert_eq!(depths[1].count, 60, "{depths:?}");
     }
 
     #[sqlx::test]
@@ -1367,15 +1609,38 @@ mod tests {
         enqueue(&pool, &job("b.kind")).await.unwrap();
         claim(&pool, &["b.kind"]).await.unwrap();
 
-        let mut timed = sample_queue_depths(&pool).await.unwrap();
-        let mut plain = queue_depths(&pool).await.unwrap();
-        timed.sort_by(|a, b| a.kind.cmp(&b.kind));
-        plain.sort_by(|a, b| a.kind.cmp(&b.kind));
+        let timed = sorted(sample_queue_depths(&pool).await.unwrap());
+        let plain = sorted(
+            queue_depths(&mut pool.acquire().await.unwrap())
+                .await
+                .unwrap(),
+        );
 
         assert_eq!(timed, plain);
         assert_eq!(timed.len(), 2);
         pool.close().await;
         assert!(sample_queue_depths(&pool).await.is_err());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_timed_queue_depths_give_up_after_a_second(pool: PgPool) {
+        let mut blocker = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE jobs IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+        let started = std::time::Instant::now();
+
+        let blocked = sample_queue_depths(&pool).await;
+
+        let waited = started.elapsed();
+        blocker.rollback().await.unwrap();
+        assert!(blocked.is_err());
+        assert!(
+            waited >= Duration::from_millis(900) && waited < Duration::from_secs(4),
+            "{waited:?}"
+        );
     }
 
     #[sqlx::test]
@@ -2011,6 +2276,58 @@ mod tests {
         tx.commit().await.unwrap();
 
         assert!(find_job(&pool, claimed.id).await.unwrap().is_none());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn confirming_a_lease_takes_no_transaction_id_and_leaves_the_job_claimable(pool: PgPool) {
+        enqueue(&pool, &job("a.kind")).await.unwrap();
+        let claimed = claim_job(&pool, "w", &["a.kind"], Duration::from_millis(1), None)
+            .await
+            .unwrap()
+            .unwrap();
+        const ASSIGNED: &str = "SELECT pg_current_xact_id_if_assigned()::text";
+        let mut locked = pool.begin().await.unwrap();
+        assert!(
+            lock_lease(&mut locked, claimed.id, claimed.lease_token)
+                .await
+                .unwrap()
+        );
+        let locked_xid: Option<String> = sqlx::query_scalar(ASSIGNED)
+            .fetch_one(&mut *locked)
+            .await
+            .unwrap();
+        assert!(locked_xid.is_some(), "a row lock takes a transaction id");
+        locked.rollback().await.unwrap();
+        let mut confirmed = pool.begin().await.unwrap();
+
+        assert!(
+            confirm_lease(&mut *confirmed, claimed.id, claimed.lease_token)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !confirm_lease(&mut *confirmed, claimed.id, Uuid::from_u128(7))
+                .await
+                .unwrap()
+        );
+        let confirmed_xid: Option<String> = sqlx::query_scalar(ASSIGNED)
+            .fetch_one(&mut *confirmed)
+            .await
+            .unwrap();
+        assert_eq!(confirmed_xid, None);
+        // Nothing holds the row, so the reaper puts it back and another worker claims it while
+        // the confirming transaction is still open; its late completion is then refused.
+        wait_until_expired(&pool, claimed.id).await;
+        assert_eq!(reap_expired(&pool).await.unwrap().requeued, 1);
+        let again = claim(&pool, &["a.kind"]).await.unwrap();
+        assert_eq!(again.id, claimed.id);
+        assert!(
+            !complete_job(&mut *confirmed, claimed.id, claimed.lease_token)
+                .await
+                .unwrap()
+        );
+        confirmed.rollback().await.unwrap();
     }
 
     #[sqlx::test]
@@ -3329,8 +3646,9 @@ mod tests {
     }
 
     /// Whether every read of `jobs` under `node` is a probe of `jobs_ready_workspace_idx` or
-    /// `jobs_ready_instance_idx` (checked on its own by [`unbounded_step`]) or of the running
-    /// jobs: a sort of such reads orders at most the heads of the workspaces, or the running set.
+    /// `jobs_ready_instance_idx` (checked on its own by [`unbounded_step`]), of the running jobs
+    /// or of the ready drains: a sort of such reads orders at most the heads of the workspaces,
+    /// the running set or one drain per workspace.
     fn reads_only_bounded_sets(node: &Value) -> bool {
         plan_nodes(node).into_iter().all(|read| {
             match (
@@ -3339,6 +3657,7 @@ mod tests {
             ) {
                 ("", "jobs") => plan_text(read, "Node Type") == "Bitmap Heap Scan",
                 ("", _) => true,
+                ("jobs_ready_kind_idx", _) => drain_probe(read),
                 (index, _) => [
                     "jobs_ready_workspace_idx",
                     "jobs_ready_instance_idx",
@@ -3349,17 +3668,48 @@ mod tests {
         })
     }
 
+    /// Whether `read` probes `jobs_ready_kind_idx` for the drains alone: at most one is ready per
+    /// workspace, so its range is bounded by the workspaces, not by the queue.
+    fn drain_probe(read: &Value) -> bool {
+        plan_text(read, "Index Cond").contains("kind = 'ingest.drain'::text")
+    }
+
+    /// Whether what the sort `node` orders is bounded: each input is a `Limit` or reads only the
+    /// bounded sets of [`reads_only_bounded_sets`]. A `Limit` above a sort is not enough, since
+    /// the sort below it reads all its input; that sort is checked on its own.
+    fn sorts_a_bounded_input(node: &Value) -> bool {
+        let inputs = node
+            .get("Plans")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        inputs.iter().all(|input| {
+            let step = plan_text(input, "Node Type");
+            if step == "Limit" {
+                true
+            } else if step.ends_with("Sort")
+                || !plan_text(input, "Index Name").is_empty()
+                || !plan_text(input, "Relation Name").is_empty()
+            {
+                reads_only_bounded_sets(input)
+            } else {
+                sorts_a_bounded_input(input)
+            }
+        })
+    }
+
     /// The step of a claim plan whose cost grows with the queue, if any: a sort of anything but
-    /// workspace heads, a sequential scan of `jobs`, the kind index (whose order is not the
-    /// claim's), a scan of a band-ordered ready index that does not start at a priority and stop
-    /// at the first entry, a scan of `jobs_ready_workspace_idx` not bounded by a workspace, and
-    /// (the cap path) a ready index scan that filters on the workspace, which steps over a capped
-    /// workspace's jobs row by row, or a running count per row.
+    /// workspace heads or limited inputs, a sequential scan of `jobs`, the kind index (whose
+    /// order is not the claim's) except for the drain probe, a scan of a band-ordered ready index
+    /// that does not start at a priority and stop at the first entry, a scan of
+    /// `jobs_ready_workspace_idx` not bounded by a workspace, and (the cap path) a ready index
+    /// scan that filters on the workspace, which steps over a capped workspace's jobs row by row,
+    /// or a running count per row.
     fn unbounded_step(plan: &Value) -> Option<String> {
         for node in plan_nodes(plan) {
             let text = |key: &str| plan_text(node, key);
             let step = text("Node Type");
-            if (step.ends_with("Sort") && !reads_only_bounded_sets(node))
+            if (step.ends_with("Sort") && !sorts_a_bounded_input(node))
                 || (step == "Seq Scan" && text("Relation Name") == "jobs")
             {
                 return Some(step.to_owned());
@@ -3367,7 +3717,9 @@ mod tests {
             let (bound, filter) = (text("Index Cond"), text("Filter"));
             let first_entry = bound.is_empty() && filter.is_empty();
             match text("Index Name") {
-                "jobs_ready_kind_idx" => return Some("jobs_ready_kind_idx".to_owned()),
+                "jobs_ready_kind_idx" if !drain_probe(node) => {
+                    return Some("jobs_ready_kind_idx".to_owned());
+                }
                 "jobs_workspace_running_idx" if bound.contains("workspace_id =") => {
                     return Some(format!("a running count per row on {bound:?}"));
                 }
@@ -3781,6 +4133,154 @@ mod tests {
         // Each job's lag is that of its own `run_at`.
         assert!((89.0..600.0).contains(&first[1].claim_lag_seconds));
         assert!((0.0..30.0).contains(&first[0].claim_lag_seconds));
+    }
+
+    /// A slot's claim (ruling 48be9592): thirty-two jobs, the oldest due, in age order, out of
+    /// due jobs enqueued in shuffled order beside future ones and another kind.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_claim_of_thirty_two_takes_the_thirty_two_oldest_due_jobs_in_order(pool: PgPool) {
+        sqlx::query(
+            "INSERT INTO jobs (id, kind, payload, run_at, trace_id, cause_kind, cause_id) \
+             SELECT gen_random_uuid(), CASE WHEN g % 10 = 0 THEN 'b.kind' ELSE 'a.kind' END, \
+                    jsonb_build_object('n', g), now() - make_interval(secs => 100.5 - g), \
+                    gen_random_uuid(), 'api', 'x' \
+             FROM generate_series(1, 150) g ORDER BY random()",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // The jobs after the hundredth are not due yet; the lower the number, the older the job.
+        let mut wanted: Vec<i64> = (1..=100).filter(|n| n % 10 != 0).collect();
+        wanted.truncate(32);
+
+        let claimed = claim_jobs(&pool, "w", &["a.kind"], LEASE, None, 32)
+            .await
+            .unwrap();
+
+        let got: Vec<i64> = claimed
+            .iter()
+            .map(|job| job.payload["n"].as_i64().unwrap())
+            .collect();
+        assert_eq!(got, wanted);
+    }
+
+    /// `count` due `a.kind` jobs, a millisecond apart, stored in an order unrelated to their age, as
+    /// timers set at random times are, so neighbours in `jobs_ready_idx` sit on different pages.
+    async fn seed_due(pool: &PgPool, count: i64) {
+        sqlx::query(
+            "INSERT INTO jobs (id, kind, payload, run_at, trace_id, cause_kind, cause_id) \
+             SELECT gen_random_uuid(), 'a.kind', '{}', \
+                    now() - interval '1 hour' + make_interval(secs => g * 0.001), \
+                    gen_random_uuid(), 'api', 'x' \
+             FROM generate_series(1, $1) g ORDER BY random()",
+        )
+        .bind(count)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// Deletes the `count` oldest ready jobs, as claims and completions of them do: their entries
+    /// stay at the head of `jobs_ready_idx` until nothing can still see the rows.
+    async fn finish_oldest(pool: &PgPool, count: i64) {
+        sqlx::query(
+            "DELETE FROM jobs WHERE id IN (SELECT id FROM jobs WHERE state = 'ready' \
+             ORDER BY priority, run_at LIMIT $1)",
+        )
+        .bind(count)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// A transaction on a connection of its own holding a `REPEATABLE READ` snapshot, as a long
+    /// report does, or a long transaction that holds a transaction id: a row deleted after it
+    /// began cannot be cleaned up, from the heap or from an index, until it ends.
+    async fn hold_snapshot(pool: &PgPool) -> sqlx::Transaction<'static, sqlx::Postgres> {
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("SELECT 1").execute(&mut *tx).await.unwrap();
+        tx
+    }
+
+    /// The shared buffers one claim of up to `n` `a.kind` jobs touches, from `EXPLAIN (ANALYZE,
+    /// BUFFERS)` of [`CLAIM`] in a transaction that is rolled back, so the jobs stay ready. The
+    /// claim must have taken `n`.
+    async fn claim_buffers(pool: &PgPool, n: i64) -> i64 {
+        let mut tx = pool.begin().await.unwrap();
+        let plan: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {CLAIM}"
+        )))
+        .bind("w")
+        .bind(LEASE.as_secs_f64())
+        .bind(&["a.kind"][..])
+        .bind(n)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        tx.rollback().await.unwrap();
+        let top = &plan[0]["Plan"];
+        assert_eq!(top["Actual Rows"].as_f64(), Some(n as f64), "{plan}");
+        top["Shared Hit Blocks"].as_i64().unwrap() + top["Shared Read Blocks"].as_i64().unwrap()
+    }
+
+    /// Ruling 48be9592: most of a claim's cost is its walk over the dead entries at the head of
+    /// `jobs_ready_idx`, which it pays whatever it takes, so a claim of 32 costs about what a
+    /// claim of 8 does. The entries are 2,000 finished jobs a held snapshot keeps.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_claim_of_thirty_two_reads_about_the_buffers_of_a_claim_of_eight(pool: PgPool) {
+        freeze_statistics(&pool).await;
+        seed_due(&pool, 3_000).await;
+        let snapshot = hold_snapshot(&pool).await;
+        finish_oldest(&pool, 2_000).await;
+
+        let eight = claim_buffers(&pool, 8).await;
+        let thirty_two = claim_buffers(&pool, 32).await;
+        snapshot.commit().await.unwrap();
+
+        assert!(
+            eight > 2_000,
+            "the walk over the dead head: {eight} buffers"
+        );
+        assert!(
+            thirty_two * 4 < eight * 5,
+            "a claim of 32 read {thirty_two} buffers, one of 8 read {eight}"
+        );
+    }
+
+    /// The xmin horizon (investigation G, candidate 2): while a snapshot older than the finished
+    /// jobs is held, every claim walks their dead entries, row by row through the heap; once it
+    /// ends, the first claim marks them dead in the index and the next skips them.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn claims_behind_a_held_snapshot_walk_the_finished_jobs_and_stop_once_it_ends(
+        pool: PgPool,
+    ) {
+        freeze_statistics(&pool).await;
+        seed_due(&pool, 6_000).await;
+        let snapshot = hold_snapshot(&pool).await;
+        finish_oldest(&pool, 5_000).await;
+
+        let held = claim_buffers(&pool, 8).await;
+        let again = claim_buffers(&pool, 8).await;
+        snapshot.commit().await.unwrap();
+        claim_buffers(&pool, 8).await;
+        let released = claim_buffers(&pool, 8).await;
+
+        assert!(held > 5_000, "{held} buffers behind the snapshot");
+        assert!(
+            again * 10 > held * 9,
+            "a held snapshot keeps the walk: {held} then {again} buffers"
+        );
+        assert!(
+            released * 10 < held,
+            "{held} buffers behind the snapshot, {released} once it ended"
+        );
     }
 
     /// Two claimers, each on a connection of its own, drain 400 due jobs of two workspaces and
@@ -4241,6 +4741,234 @@ mod tests {
                      {claims:.1} claims/s, {empty:.1} empty claims/s"
                 );
             }
+        }
+    }
+
+    /// Waits until a connection is waiting for the claim lock that `holder` holds.
+    async fn until_waiting_for_the_claim_lock(pool: &PgPool, holder: i32) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' \
+                     AND NOT granted AND $1 = ANY(pg_blocking_pids(pid)))",
+                )
+                .bind(holder)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+                if waiting {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("no claim waited for the held claim lock");
+    }
+
+    /// Capped claims queue on the claim lock, so a claim can wait long before it claims (bench
+    /// phase 4a, #397). Its leases and its lag run from its update, not from the start of its
+    /// transaction: the jobs it returns hold their whole lease, and the lag counts the wait.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_capped_claim_that_waited_for_the_claim_lock_leases_from_its_update(pool: PgPool) {
+        let ws = workspace(&pool, "ours").await;
+        let mut new = job("a.kind");
+        new.workspace_id = Some(ws);
+        enqueue(&pool, &new).await.unwrap();
+        let mut holder = pool.begin().await.unwrap();
+        let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *holder)
+            .await
+            .unwrap();
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(CLAIM_LOCK_KEY)
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+        let claimer = pool.clone();
+        let claim =
+            tokio::spawn(
+                async move { claim_jobs(&claimer, "w", &["a.kind"], LEASE, Some(2), 8).await },
+            );
+        until_waiting_for_the_claim_lock(&pool, holder_pid).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        holder.rollback().await.unwrap();
+
+        let claimed = claim.await.unwrap().unwrap();
+        assert_eq!(claimed.len(), 1);
+        let left: f64 = sqlx::query_scalar(
+            "SELECT EXTRACT(EPOCH FROM lease_expires_at - now())::float8 FROM jobs WHERE id = $1",
+        )
+        .bind(claimed[0].id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            left > LEASE.as_secs_f64() - 1.0,
+            "{left} s of a {LEASE:?} lease left after a wait of two seconds"
+        );
+        assert!(
+            claimed[0].claim_lag_seconds >= 2.0,
+            "a lag of {} s left out the wait",
+            claimed[0].claim_lag_seconds
+        );
+    }
+
+    /// The shared buffers one capped claim of up to `n` `flow.step` jobs under a cap of `cap`
+    /// touches, from `EXPLAIN (ANALYZE, BUFFERS)` in a transaction that is rolled back. The claim
+    /// must have taken `taken`.
+    async fn capped_claim_buffers(pool: &PgPool, n: i64, cap: i64, taken: f64) -> i64 {
+        let mut tx = pool.begin().await.unwrap();
+        let plan: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {CLAIM_CAPPED}"
+        )))
+        .bind("w")
+        .bind(LEASE.as_secs_f64())
+        .bind(&["flow.step"][..])
+        .bind(n)
+        .bind(cap)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        tx.rollback().await.unwrap();
+        let top = &plan[0]["Plan"];
+        assert_eq!(top["Actual Rows"].as_f64(), Some(taken), "{plan}");
+        top["Shared Hit Blocks"].as_i64().unwrap() + top["Shared Read Blocks"].as_i64().unwrap()
+    }
+
+    /// Bench phase 4a (#397): in PostgreSQL 16 only the first column of a row comparison can end
+    /// a btree scan, so a workspace probe bounded by `ROW(workspace_id, priority, run_at) <= ...`
+    /// alone read on past the due jobs through every later job of the workspace, on each claim.
+    /// A workspace at its cap with due jobs, one with only later jobs, and one with a due job
+    /// before its later ones: what a capped claim reads does not grow with the later jobs.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_capped_claim_reads_no_further_than_the_due_jobs_of_a_workspace(pool: PgPool) {
+        freeze_statistics(&pool).await;
+        let busy = workspace(&pool, "busy").await;
+        let waiting = workspace(&pool, "waiting").await;
+        let mixed = workspace(&pool, "mixed").await;
+        seed_running(&pool, busy, 2).await;
+        seed_wakes(&pool, busy, "busy", 100, -60.0, 0.0).await;
+        seed_wakes(&pool, mixed, "due", 1, -120.0, -60.0).await;
+        for (n, ws) in [waiting, mixed].into_iter().enumerate() {
+            seed_wakes(&pool, ws, &format!("later-{n}"), 1_000, 600.0, 2_400.0).await;
+        }
+        vacuum_and_analyze(&pool).await;
+        let few = capped_claim_buffers(&pool, 8, 2, 1.0).await;
+        for (n, ws) in [waiting, mixed].into_iter().enumerate() {
+            seed_wakes(&pool, ws, &format!("more-{n}"), 19_000, 600.0, 2_400.0).await;
+        }
+        vacuum_and_analyze(&pool).await;
+        let many = capped_claim_buffers(&pool, 8, 2, 1.0).await;
+
+        assert!(
+            many < few * 2,
+            "{few} buffers with 1,000 later jobs a workspace, {many} with 20,000"
+        );
+    }
+
+    /// The capped claim is planned on estimates that grow with the queue, past `jit_above_cost`,
+    /// and compiling it cost more than running it (bench phase 4a: about 375 ms of a 630 ms
+    /// claim, #397). The statement that takes the claim lock turns JIT off for the claim.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_capped_claim_is_not_compiled_however_costly_its_plan(pool: PgPool) {
+        let ws = workspace(&pool, "ours").await;
+        seed_wakes(&pool, ws, "due", 10, -60.0, 0.0).await;
+        let mut tx = pool.begin().await.unwrap();
+        for setting in [
+            "SET LOCAL jit = on",
+            "SET LOCAL jit_above_cost = 0",
+            "SET LOCAL jit_inline_above_cost = 0",
+            "SET LOCAL jit_optimize_above_cost = 0",
+        ] {
+            sqlx::query(setting).execute(&mut *tx).await.unwrap();
+        }
+        sqlx::query(TAKE_CLAIM_LOCK)
+            .bind(CLAIM_LOCK_KEY)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let plan: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN (ANALYZE, FORMAT JSON) {CLAIM_CAPPED}"
+        )))
+        .bind("w")
+        .bind(LEASE.as_secs_f64())
+        .bind(&["flow.step"][..])
+        .bind(8_i64)
+        .bind(2_i64)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        tx.rollback().await.unwrap();
+
+        assert_eq!(plan[0]["Plan"]["Actual Rows"].as_f64(), Some(2.0), "{plan}");
+        assert!(
+            plan[0].get("JIT").is_none(),
+            "the claim was compiled: {plan}"
+        );
+    }
+
+    /// A claim takes at most one `ingest.drain` (supervisor ruling 98e6546e): a drain runs for up
+    /// to 20 s, so drains claimed with it would wait out the hold behind it in its slot while
+    /// idle slots could have run them. Thirty-two workspaces each hold a ready drain older than
+    /// their other due jobs: a claim of 32, uncapped, capped with room for the batch (the band
+    /// walk) and capped below it (the workspace walk), takes one drain and fills up with the
+    /// other due jobs.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_claim_takes_at_most_one_drain_and_fills_up_with_other_due_jobs(pool: PgPool) {
+        for n in 0..32 {
+            let ws = workspace(&pool, &format!("w{n}")).await;
+            crate::enqueue_drain(&pool, ws, &TraceContext::root(Cause::api("req")))
+                .await
+                .unwrap();
+            for _ in 0..4 {
+                let mut other = job("a.kind");
+                other.workspace_id = Some(ws);
+                enqueue(&pool, &other).await.unwrap();
+            }
+        }
+        sqlx::query("UPDATE jobs SET run_at = now() - interval '1 hour' WHERE kind = $1")
+            .bind(crate::DRAIN_JOB_KIND)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let kinds = [crate::DRAIN_JOB_KIND, "a.kind"];
+
+        let mut taken = Vec::new();
+        for cap in [None, Some(64), Some(8)] {
+            let claimed = claim_jobs(&pool, "w", &kinds, LEASE, cap, 32)
+                .await
+                .unwrap();
+            let drains = claimed
+                .iter()
+                .filter(|job| job.kind == crate::DRAIN_JOB_KIND)
+                .count();
+            taken.push((cap, claimed.len(), drains));
+            let held: Vec<(Uuid, Uuid)> = claimed
+                .iter()
+                .map(|job| (job.id, job.lease_token))
+                .collect();
+            release_jobs(&pool, &held).await.unwrap();
+        }
+
+        assert_eq!(
+            taken,
+            [(None, 32, 1), (Some(64), 32, 1), (Some(8), 32, 1)],
+            "(cap, jobs, drains) per claim"
+        );
+    }
+
+    /// The claims name the drain kind as a literal, so the planner can bound the drain probe by
+    /// it: the literal must stay the kind the ingest feature enqueues.
+    #[test]
+    fn the_claims_bound_the_drain_kind_the_ingest_feature_enqueues() {
+        let literal = format!("'{}'", crate::DRAIN_JOB_KIND);
+        for (name, sql) in [("CLAIM", CLAIM), ("CLAIM_CAPPED", CLAIM_CAPPED)] {
+            assert!(sql.contains(&literal), "{name} does not name {literal}");
         }
     }
 }
