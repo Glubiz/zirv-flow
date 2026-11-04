@@ -2602,7 +2602,13 @@ completion (the `flow.step` jobs of one workspace share one, below). The batch s
 trip and a commit flush on all but one of its jobs. Most of a claim's cost is its walk over the head
 of `jobs_ready_idx`, which holds the index entries of jobs claimed or finished since the oldest
 snapshot still open; a claim of 32 costs about what a claim of 8 does, so the larger batch spreads
-that walk over four times the jobs (ruling 48be9592). A
+that walk over four times the jobs (ruling 48be9592). A batch takes at most one `ingest.drain`
+(ruling 98e6546e): a drain runs for up to 20 seconds, so further drains in its batch would wait
+out the hold behind it and go back to the queue while idle slots could have run them. The claim
+walks the other kinds apart from the drains, adds the oldest due drain (one `jobs_ready_kind_idx`
+probe; the capped claim keeps the oldest of the drains its workspaces offer) and keeps the batch
+in band and age order. While a drain is due, a claim that walks the bands can lock one job it
+does not claim, the drain or its own youngest, until its transaction ends. A
 claimed job that has not started holds its lease from the claim; the slot gives it back to `ready`
 (its `run_at` kept and the claim's attempt uncounted, or deleted when an erasure marked it
 `purge_on_release`) once a sixth of the lease, at most four seconds, has passed since the claim

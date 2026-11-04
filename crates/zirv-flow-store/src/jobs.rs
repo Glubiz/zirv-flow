@@ -342,16 +342,29 @@ macro_rules! claim_update {
     };
 }
 
-/// The oldest due jobs of one of `$3`, up to `$4`, band by band upwards, locked.
+/// The oldest due jobs of one of `$3`, up to `$4`, band by band upwards, locked, with at most one
+/// `ingest.drain` among them: the oldest due jobs of other kinds, up to `$4`, and the oldest due
+/// drain (one `jobs_ready_kind_idx` probe), whichever come first.
 macro_rules! claim_first_due {
     () => {
-        "ARRAY(SELECT c.id FROM bands b CROSS JOIN LATERAL ( \
-            SELECT j.id FROM jobs j \
-            WHERE j.state = 'ready' AND j.priority = b.priority AND j.run_at <= now() \
-            AND j.kind = ANY($3) \
-            ORDER BY j.run_at \
-            LIMIT $4 \
-            FOR UPDATE SKIP LOCKED) c \
+        "ARRAY(SELECT m.id FROM ( \
+            (SELECT c.id, b.priority, c.run_at FROM bands b CROSS JOIN LATERAL ( \
+                SELECT j.id, j.run_at FROM jobs j \
+                WHERE j.state = 'ready' AND j.priority = b.priority AND j.run_at <= now() \
+                AND j.kind = ANY($3) AND j.kind <> 'ingest.drain' \
+                ORDER BY j.run_at \
+                LIMIT $4 \
+                FOR UPDATE SKIP LOCKED) c \
+             LIMIT $4) \
+            UNION ALL \
+            SELECT d.id, d.priority, d.run_at FROM ( \
+                SELECT j.id, j.priority, j.run_at FROM jobs j \
+                WHERE 'ingest.drain' = ANY($3) \
+                AND j.state = 'ready' AND j.kind = 'ingest.drain' AND j.run_at <= now() \
+                ORDER BY j.run_at \
+                LIMIT 1 \
+                FOR UPDATE SKIP LOCKED) d) m \
+            ORDER BY m.priority, m.run_at \
             LIMIT $4)"
     };
 }
@@ -375,7 +388,15 @@ macro_rules! claim_returning {
 /// recursion yields the bands in ascending order and the outer `LIMIT` stops at the band that
 /// fills the batch, so a later band is read only while the bands before it held fewer than `$4`
 /// due jobs. Due jobs of kinds outside `$3` in a band are stepped over. A row is locked as the
-/// limit takes it, so a claim locks only the jobs it claims.
+/// limit takes it, so a claim locks only the jobs it claims, except while a drain is due: then it
+/// also locks the drain or the batch's youngest other job without claiming it, until it ends.
+///
+/// A claim takes at most one `ingest.drain` (supervisor ruling 98e6546e): a drain runs for up to
+/// 20 s, so further drains in its batch would wait out the hold behind it while idle slots could
+/// have run them. The bands are walked without the drains, and the oldest due drain joins the
+/// batch in age order: it is claimed if it is older than the batch's youngest job, which then
+/// stays for the next claim. Drains are all enqueued at the default priority, so the oldest is
+/// the first.
 const CLAIM: &str = concat!(
     "WITH RECURSIVE ",
     claim_bands!(),
@@ -422,6 +443,9 @@ const CLAIM: &str = concat!(
 /// only the rows it takes; an offer that is locked is passed over until the next claim. Claims
 /// under a cap are serialised by [`claim_jobs`], so no other claim moves a head or changes a
 /// running count meanwhile.
+///
+/// Of the drains offered, at most one per workspace, only the oldest is tried, so a batch takes
+/// at most one `ingest.drain`, as in [`CLAIM`] (supervisor ruling 98e6546e).
 const CLAIM_CAPPED: &str = concat!(
     "WITH RECURSIVE running AS MATERIALIZED ( \
         SELECT workspace_id, count(*) AS running FROM jobs \
@@ -464,12 +488,14 @@ const CLAIM_CAPPED: &str = concat!(
     claim_first_due!(),
     " ELSE ARRAY(SELECT l.id FROM ( \
         SELECT c.id, c.run_at FROM ( \
-        SELECT c.id, c.priority, c.run_at, min(c.priority) OVER () AS best FROM ( \
-            SELECT o.id, h.priority, o.run_at FROM heads h \
+        SELECT c.id, c.run_at, c.drain, \
+            row_number() OVER (PARTITION BY c.drain ORDER BY c.run_at) AS nth FROM ( \
+        SELECT c.id, c.priority, c.run_at, c.drain, min(c.priority) OVER () AS best FROM ( \
+            SELECT o.id, h.priority, o.run_at, o.kind = 'ingest.drain' AS drain FROM heads h \
             LEFT JOIN running r ON r.workspace_id = h.workspace_id \
             CROSS JOIN LATERAL ( \
-                SELECT f.id, f.run_at FROM ( \
-                    SELECT j.workspace_id, j.priority, j.id, j.run_at FROM jobs j \
+                SELECT f.id, f.run_at, f.kind FROM ( \
+                    SELECT j.workspace_id, j.priority, j.id, j.run_at, j.kind FROM jobs j \
                     WHERE j.state = 'ready' AND j.workspace_id IS NOT NULL \
                     AND ROW(j.workspace_id, j.priority) >= ROW(h.workspace_id, h.priority) \
                     AND (j.kind = ANY($3)) IS TRUE \
@@ -479,13 +505,15 @@ const CLAIM_CAPPED: &str = concat!(
                 AND f.run_at <= now()) o \
             WHERE h.id IS NOT NULL \
             UNION ALL \
-            (SELECT i.id, b.priority, i.run_at FROM instance_bands b CROSS JOIN LATERAL ( \
-                SELECT j.id, j.run_at FROM jobs j \
+            (SELECT i.id, b.priority, i.run_at, i.kind = 'ingest.drain' FROM instance_bands b \
+             CROSS JOIN LATERAL ( \
+                SELECT j.id, j.run_at, j.kind FROM jobs j \
                 WHERE j.state = 'ready' AND j.workspace_id IS NULL AND j.priority = b.priority \
                 AND j.run_at <= now() AND j.kind = ANY($3) \
                 ORDER BY j.run_at LIMIT $4) i \
              LIMIT $4)) c) c \
-        WHERE c.priority = c.best \
+        WHERE c.priority = c.best) c \
+        WHERE NOT c.drain OR c.nth = 1 \
         ORDER BY c.run_at) c \
     CROSS JOIN LATERAL ( \
         SELECT j.id FROM jobs j WHERE j.id = c.id AND j.state = 'ready' \
@@ -3618,8 +3646,9 @@ mod tests {
     }
 
     /// Whether every read of `jobs` under `node` is a probe of `jobs_ready_workspace_idx` or
-    /// `jobs_ready_instance_idx` (checked on its own by [`unbounded_step`]) or of the running
-    /// jobs: a sort of such reads orders at most the heads of the workspaces, or the running set.
+    /// `jobs_ready_instance_idx` (checked on its own by [`unbounded_step`]), of the running jobs
+    /// or of the ready drains: a sort of such reads orders at most the heads of the workspaces,
+    /// the running set or one drain per workspace.
     fn reads_only_bounded_sets(node: &Value) -> bool {
         plan_nodes(node).into_iter().all(|read| {
             match (
@@ -3628,6 +3657,7 @@ mod tests {
             ) {
                 ("", "jobs") => plan_text(read, "Node Type") == "Bitmap Heap Scan",
                 ("", _) => true,
+                ("jobs_ready_kind_idx", _) => drain_probe(read),
                 (index, _) => [
                     "jobs_ready_workspace_idx",
                     "jobs_ready_instance_idx",
@@ -3638,17 +3668,48 @@ mod tests {
         })
     }
 
+    /// Whether `read` probes `jobs_ready_kind_idx` for the drains alone: at most one is ready per
+    /// workspace, so its range is bounded by the workspaces, not by the queue.
+    fn drain_probe(read: &Value) -> bool {
+        plan_text(read, "Index Cond").contains("kind = 'ingest.drain'::text")
+    }
+
+    /// Whether what the sort `node` orders is bounded: each input is a `Limit` or reads only the
+    /// bounded sets of [`reads_only_bounded_sets`]. A `Limit` above a sort is not enough, since
+    /// the sort below it reads all its input; that sort is checked on its own.
+    fn sorts_a_bounded_input(node: &Value) -> bool {
+        let inputs = node
+            .get("Plans")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        inputs.iter().all(|input| {
+            let step = plan_text(input, "Node Type");
+            if step == "Limit" {
+                true
+            } else if step.ends_with("Sort")
+                || !plan_text(input, "Index Name").is_empty()
+                || !plan_text(input, "Relation Name").is_empty()
+            {
+                reads_only_bounded_sets(input)
+            } else {
+                sorts_a_bounded_input(input)
+            }
+        })
+    }
+
     /// The step of a claim plan whose cost grows with the queue, if any: a sort of anything but
-    /// workspace heads, a sequential scan of `jobs`, the kind index (whose order is not the
-    /// claim's), a scan of a band-ordered ready index that does not start at a priority and stop
-    /// at the first entry, a scan of `jobs_ready_workspace_idx` not bounded by a workspace, and
-    /// (the cap path) a ready index scan that filters on the workspace, which steps over a capped
-    /// workspace's jobs row by row, or a running count per row.
+    /// workspace heads or limited inputs, a sequential scan of `jobs`, the kind index (whose
+    /// order is not the claim's) except for the drain probe, a scan of a band-ordered ready index
+    /// that does not start at a priority and stop at the first entry, a scan of
+    /// `jobs_ready_workspace_idx` not bounded by a workspace, and (the cap path) a ready index
+    /// scan that filters on the workspace, which steps over a capped workspace's jobs row by row,
+    /// or a running count per row.
     fn unbounded_step(plan: &Value) -> Option<String> {
         for node in plan_nodes(plan) {
             let text = |key: &str| plan_text(node, key);
             let step = text("Node Type");
-            if (step.ends_with("Sort") && !reads_only_bounded_sets(node))
+            if (step.ends_with("Sort") && !sorts_a_bounded_input(node))
                 || (step == "Seq Scan" && text("Relation Name") == "jobs")
             {
                 return Some(step.to_owned());
@@ -3656,7 +3717,9 @@ mod tests {
             let (bound, filter) = (text("Index Cond"), text("Filter"));
             let first_entry = bound.is_empty() && filter.is_empty();
             match text("Index Name") {
-                "jobs_ready_kind_idx" => return Some("jobs_ready_kind_idx".to_owned()),
+                "jobs_ready_kind_idx" if !drain_probe(node) => {
+                    return Some("jobs_ready_kind_idx".to_owned());
+                }
                 "jobs_workspace_running_idx" if bound.contains("workspace_id =") => {
                     return Some(format!("a running count per row on {bound:?}"));
                 }
@@ -4846,5 +4909,66 @@ mod tests {
             plan[0].get("JIT").is_none(),
             "the claim was compiled: {plan}"
         );
+    }
+
+    /// A claim takes at most one `ingest.drain` (supervisor ruling 98e6546e): a drain runs for up
+    /// to 20 s, so drains claimed with it would wait out the hold behind it in its slot while
+    /// idle slots could have run them. Thirty-two workspaces each hold a ready drain older than
+    /// their other due jobs: a claim of 32, uncapped, capped with room for the batch (the band
+    /// walk) and capped below it (the workspace walk), takes one drain and fills up with the
+    /// other due jobs.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_claim_takes_at_most_one_drain_and_fills_up_with_other_due_jobs(pool: PgPool) {
+        for n in 0..32 {
+            let ws = workspace(&pool, &format!("w{n}")).await;
+            crate::enqueue_drain(&pool, ws, &TraceContext::root(Cause::api("req")))
+                .await
+                .unwrap();
+            for _ in 0..4 {
+                let mut other = job("a.kind");
+                other.workspace_id = Some(ws);
+                enqueue(&pool, &other).await.unwrap();
+            }
+        }
+        sqlx::query("UPDATE jobs SET run_at = now() - interval '1 hour' WHERE kind = $1")
+            .bind(crate::DRAIN_JOB_KIND)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let kinds = [crate::DRAIN_JOB_KIND, "a.kind"];
+
+        let mut taken = Vec::new();
+        for cap in [None, Some(64), Some(8)] {
+            let claimed = claim_jobs(&pool, "w", &kinds, LEASE, cap, 32)
+                .await
+                .unwrap();
+            let drains = claimed
+                .iter()
+                .filter(|job| job.kind == crate::DRAIN_JOB_KIND)
+                .count();
+            taken.push((cap, claimed.len(), drains));
+            let held: Vec<(Uuid, Uuid)> = claimed
+                .iter()
+                .map(|job| (job.id, job.lease_token))
+                .collect();
+            release_jobs(&pool, &held).await.unwrap();
+        }
+
+        assert_eq!(
+            taken,
+            [(None, 32, 1), (Some(64), 32, 1), (Some(8), 32, 1)],
+            "(cap, jobs, drains) per claim"
+        );
+    }
+
+    /// The claims name the drain kind as a literal, so the planner can bound the drain probe by
+    /// it: the literal must stay the kind the ingest feature enqueues.
+    #[test]
+    fn the_claims_bound_the_drain_kind_the_ingest_feature_enqueues() {
+        let literal = format!("'{}'", crate::DRAIN_JOB_KIND);
+        for (name, sql) in [("CLAIM", CLAIM), ("CLAIM_CAPPED", CLAIM_CAPPED)] {
+            assert!(sql.contains(&literal), "{name} does not name {literal}");
+        }
     }
 }

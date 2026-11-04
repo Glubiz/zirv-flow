@@ -170,7 +170,8 @@ use it:
 | `zirv-flow all` | `serve`, `worker` and `scheduler` in one process (the default). |
 
 Each of a worker's `worker.concurrency` slots claims up to 32 due jobs at once
-and runs them one after another. A running job holds a lease of
+and runs them one after another. A batch holds at most one inbox drain, which
+can run for up to 20 seconds, so due drains spread over the slots. A running job holds a lease of
 `worker.lease_seconds`, which its worker extends every third of that while the
 handler runs. A claimed job waits for its turn on the lease from its claim: the
 slot gives the jobs it has not started back to the queue a sixth of the lease (at
