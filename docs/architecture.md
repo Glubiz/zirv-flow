@@ -2087,8 +2087,9 @@ As built (debugger, explorer):
   use only `eq` and `exists` on PII or undeclared properties and cannot break them down
   (`403 pii_property_not_explorable`). Count, breakdown, list and export share one `WHERE`.
   The export counts first (so a timeout is an error response and the audit entry exists),
-  audits `events.exported` with operators and counts only, then streams keyset pages and
-  ends with a `#` comment when the row limit cut it short. The `[explorer]` settings hold the
+  audits `events.exported` with operators and counts only, then streams keyset pages of
+  10,000 rows (one snapshot transaction and one explorer connection per page, about 3 to 5 MB
+  held per open stream) and ends with a `#` comment when the row limit cut it short. The `[explorer]` settings hold the
   timeouts and row limits. At most `explorer.max_exports` (default 1) exports stream at once per
   `serve` process: the export takes a permit before it counts, answers `503 explorer_busy` with
   `Retry-After` when none is free, and releases it when the stream ends, fails or the client
