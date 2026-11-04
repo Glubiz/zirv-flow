@@ -15,3 +15,9 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.227.0 (2026-11-04)
+
+### Chores
+
+- use a marker no timestamp or id can contain by chance (#397)
+
