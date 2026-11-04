@@ -64,6 +64,7 @@ function eventEntry(id: string, at: string, overrides: Record<string, unknown> =
     validation_state: "valid",
     flags: [],
     trace_id: TRACE,
+    has_decisions: true,
     ...overrides,
   };
 }
@@ -354,6 +355,26 @@ describe("a person's timeline", () => {
     for (const item of items) {
       expect(within(item).getByRole("link", { name: /View trace/ })).toHaveAttribute("href", `/w/ws1/traces/${TRACE}`);
     }
+  });
+
+  it("links an event to its trace only when the trace holds a decision", async () => {
+    asOwner({
+      [TIMELINE_ROUTE]: () =>
+        json({
+          entries: [
+            eventEntry("e2", "2026-10-02T09:00:00Z", { name: "seen_again", has_decisions: false }),
+            eventEntry("e1", "2026-10-01T09:00:00Z", { name: "first_seen", has_decisions: true }),
+          ],
+          next_cursor: null,
+        }),
+    });
+    mount();
+
+    const list = await screen.findByRole("list", { name: "Timeline, newest first" });
+    const items = within(list).getAllByRole("listitem");
+    expect(items).toHaveLength(2);
+    expect(within(items[0]!).queryByRole("link", { name: /View trace/ })).not.toBeInTheDocument();
+    expect(within(items[1]!).getByRole("link", { name: /View trace/ })).toBeInTheDocument();
   });
 
   it("discloses an event's properties and shows masked ones as Hidden", async () => {

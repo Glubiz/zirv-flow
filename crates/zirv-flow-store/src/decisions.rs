@@ -589,18 +589,10 @@ mod tests {
         );
         let ws = workspace(&pool, "bench").await;
 
-        // The shapes the drain writes (events/apply.rs, people/apply.rs): a stored event is one
-        // `event.accepted`, a changed profile one `trait.change`; a new person adds a
-        // `person.created`.
+        // The shapes the drain writes (events/apply.rs, people/apply.rs): a changed profile is one
+        // `trait.change` and a new person one `person.created`. A stored event writes none.
         type Decision = (&'static DecisionSpec, &'static [&'static str]);
-        let shapes: [(&str, &[Decision]); 3] = [
-            (
-                "track",
-                &[(
-                    &decision_actions::EVENT_ACCEPTED_VALID,
-                    &["event", "person"],
-                )],
-            ),
+        let shapes: [(&str, &[Decision]); 2] = [
             (
                 "identify",
                 &[(
@@ -610,16 +602,10 @@ mod tests {
             ),
             (
                 "track_new_person",
-                &[
-                    (
-                        &decision_actions::PERSON_CREATED,
-                        &["person", "source_record"],
-                    ),
-                    (
-                        &decision_actions::EVENT_ACCEPTED_VALID,
-                        &["event", "person"],
-                    ),
-                ],
+                &[(
+                    &decision_actions::PERSON_CREATED,
+                    &["person", "source_record"],
+                )],
             ),
         ];
         let mut report = Vec::new();

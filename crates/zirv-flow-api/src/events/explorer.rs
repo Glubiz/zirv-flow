@@ -350,6 +350,9 @@ pub(crate) struct ExploredEventBody {
     masked: Vec<String>,
     /// 32 lowercase hex characters.
     trace_id: String,
+    /// Whether the trace holds any decision. An accepted event writes no decision of its own, so
+    /// the trace of an event that changed nothing answers 404.
+    has_decisions: bool,
 }
 
 fn event_body(row: ExploreRow, reveal: bool) -> ExploredEventBody {
@@ -369,6 +372,7 @@ fn event_body(row: ExploreRow, reveal: bool) -> ExploredEventBody {
         properties: masked.properties,
         masked: masked.masked,
         trace_id: TraceId::from_uuid(row.trace_id).to_string(),
+        has_decisions: row.has_decisions,
     }
 }
 
@@ -782,6 +786,7 @@ mod tests {
             validation_state: "valid".into(),
             flags: vec!["late".into(), "replayed".into()],
             trace_id: Uuid::nil(),
+            has_decisions: true,
             properties: properties.as_object().cloned().unwrap(),
             schema: schema.map(std::sync::Arc::new),
         }

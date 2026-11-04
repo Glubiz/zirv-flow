@@ -54,6 +54,7 @@ const EVENT = {
   properties: { plan: "pro", email: null },
   masked: ["email"],
   trace_id: "0".repeat(32),
+  has_decisions: true,
 };
 
 function routes(overrides: Record<string, () => Response> = {}) {
@@ -97,6 +98,22 @@ describe("event explorer", () => {
     expect(body.filters).toEqual([]);
     expect(new Date(body.to).getTime()).toBeGreaterThan(new Date(body.from).getTime());
     expect(await screen.findByRole("table", { name: "Matching events" })).toBeInTheDocument();
+  });
+
+  it("opens the trace from an event only when the trace holds a decision", async () => {
+    const user = userEvent.setup();
+    mockApi(
+      routes({
+        [`POST ${BASE}/events/explore/list`]: () =>
+          json({ events: [{ ...EVENT, has_decisions: false }], next_cursor: null }),
+      }),
+    );
+    open();
+
+    await user.click(await screen.findByText(/Show properties/));
+
+    expect(screen.getByRole("link", { name: "Open the person" })).toBeVisible();
+    expect(screen.queryByRole("link", { name: "Open the trace" })).not.toBeInTheDocument();
   });
 
   it("lists events with masked properties and links to the person and the trace", async () => {
