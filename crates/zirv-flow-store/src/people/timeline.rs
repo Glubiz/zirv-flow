@@ -248,7 +248,10 @@ pub async fn load_timeline(
     if filter.events {
         let rows: Vec<EventRow> = sqlx::query_as(
             "SELECT e.id, e.occurred_at, e.name, e.properties, v.properties AS schema, \
-                    e.validation_state, e.flags, e.trace_id,                     EXISTS (SELECT 1 FROM decision_records d                             WHERE d.workspace_id = e.workspace_id                               AND d.trace_id = e.trace_id) AS has_decisions \
+                    e.validation_state, e.flags, e.trace_id, \
+                    EXISTS (SELECT 1 FROM decision_records d \
+                            WHERE d.workspace_id = e.workspace_id AND d.trace_id = e.trace_id) \
+                        AS has_decisions \
              FROM events e LEFT JOIN event_schema_versions v \
                 ON v.workspace_id = e.workspace_id AND v.name = e.name \
                AND v.version = e.schema_version \
@@ -674,7 +677,10 @@ mod tests {
     ) {
         let ws = workspace(&pool, "one").await;
         sqlx::query(
-            "INSERT INTO decision_records              (id, workspace_id, trace_id, action, outcome, cause_kind, cause_id)              SELECT gen_random_uuid(), $1, gen_random_uuid(), 'step', 'done', 'api', 'x'              FROM generate_series(1, 50000)",
+            "INSERT INTO decision_records \
+                 (id, workspace_id, trace_id, action, outcome, cause_kind, cause_id) \
+             SELECT gen_random_uuid(), $1, gen_random_uuid(), 'step', 'done', 'api', 'x' \
+             FROM generate_series(1, 50000)",
         )
         .bind(ws.as_uuid())
         .execute(&pool)
@@ -687,7 +693,10 @@ mod tests {
         track(&pool, ws, "first_seen", SECRET_EMAIL).await;
 
         let plan: Vec<String> = sqlx::query_scalar(
-            "EXPLAIN (COSTS OFF) SELECT e.id, EXISTS (SELECT 1 FROM decision_records d                 WHERE d.workspace_id = e.workspace_id AND d.trace_id = e.trace_id)              FROM events e WHERE e.workspace_id = $1 AND e.occurred_at < now() + interval '1 day'              ORDER BY e.occurred_at DESC, e.id DESC LIMIT 51",
+            "EXPLAIN (COSTS OFF) SELECT e.id, EXISTS (SELECT 1 FROM decision_records d \
+                 WHERE d.workspace_id = e.workspace_id AND d.trace_id = e.trace_id) \
+             FROM events e WHERE e.workspace_id = $1 AND e.occurred_at < now() + interval '1 day' \
+             ORDER BY e.occurred_at DESC, e.id DESC LIMIT 51",
         )
         .bind(ws.as_uuid())
         .fetch_all(&pool)
