@@ -7058,6 +7058,73 @@ email,b@example.com,
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_event_entry_says_whether_its_trace_holds_any_decision(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let workspace_id: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
+        let key = zirv_flow_core::HmacRoot::bootstrap_from(&zirv_flow_core::MasterKey::generate())
+            .hmac_key(zirv_flow_core::HmacPurpose::Redaction);
+        let track = |name: &str| zirv_flow_store::EventRecord {
+            source_record_id: None,
+            source: "web".into(),
+            identifiers: vec![("email".into(), "known@example.com".into())],
+            name: name.into(),
+            properties: Default::default(),
+            timestamp: None,
+            received_at: time::OffsetDateTime::now_utc(),
+            message_id: None,
+            trace: zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api(name)),
+        };
+        let mut person = None;
+        for name in ["first_seen", "seen_again"] {
+            let outcome =
+                zirv_flow_store::apply_event_batch(&pool, workspace_id, &key, &[track(name)])
+                    .await
+                    .unwrap()
+                    .remove(0);
+            let zirv_flow_store::EventOutcome::Accepted { person_id, .. } = outcome else {
+                panic!("not accepted");
+            };
+            person = Some(person_id);
+        }
+        let uri = people_uri(&ws, &format!("/{}/timeline", person.unwrap()));
+
+        let reply = call(&router, "GET", &uri, None, Auth::Session(&owner)).await;
+
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+        let flag = |name: &str| {
+            reply.body["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["type"] == "event" && e["name"] == name)
+                .unwrap()["has_decisions"]
+                .clone()
+        };
+        assert_eq!(flag("first_seen"), json!(true), "it created the person");
+        assert_eq!(flag("seen_again"), json!(false), "it changed nothing");
+        for entry in reply.body["entries"].as_array().unwrap() {
+            let trace = entry["trace_id"].as_str().unwrap();
+            let opened = call(
+                &router,
+                "GET",
+                &format!("/api/v1/workspaces/{ws}/traces/{trace}"),
+                None,
+                Auth::Session(&owner),
+            )
+            .await;
+            let expected = if entry["has_decisions"] == json!(false) {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::OK
+            };
+            assert_eq!(opened.status, expected, "{entry}");
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_timeline_pages_by_cursor_filters_by_kind_and_refuses_bad_queries(pool: PgPool) {
         let router = app(&pool).await;
         let owner = owner(&pool, &router).await;

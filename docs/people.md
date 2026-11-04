@@ -97,7 +97,10 @@ cover trait changes, merges, consent changes, list membership and identity confl
 people merged into this one are included. `kinds` is `event`, `decision` or both separated by
 a comma. The `event.accepted` decision repeats the event entry, so it is left out unless you
 pass `all_decisions=true`; only events accepted before version 0.231.0 have one. Every entry has a `trace_id` that opens in **Traces**
-(`GET .../traces/{trace_id}`), where the decisions hold ids and reason codes only.
+(`GET .../traces/{trace_id}`), where the decisions hold ids and reason codes only. An event
+entry also has `has_decisions`: an accepted event writes no decision of its own, so the trace of an
+event that changed nothing is empty and answers 404, and the page shows **View trace** for an event
+only when `has_decisions` is true.
 
 **Masking.** Identifier values, PII-flagged field values and the PII properties of events
 are shown to the owner, workspace admins and `admin` keys, memberships with `view_pii`,

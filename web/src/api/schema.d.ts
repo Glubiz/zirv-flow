@@ -2661,7 +2661,8 @@ export interface paths {
         /**
          * A person's timeline, newest first: their events, and the decisions the system made about
          *     them (trait changes, merges, consent changes, list membership, identity conflicts). Each
-         *     entry has a `trace_id` that opens the decisions behind it. A person that was merged into
+         *     entry has a `trace_id` that opens the decisions behind it; an event entry whose
+         *     `has_decisions` is false has none, and its trace answers 404. A person that was merged into
          *     another reads as the survivor, with the merged people's entries included. Event properties
          *     the schema flags as PII are masked for callers who may not see values.
          * @description `event.accepted` decisions duplicate the event entry and are left out unless
@@ -6719,6 +6720,12 @@ export interface components {
             at: string;
             /** @description Timing flags such as `late` or `future`. */
             flags: string[];
+            /**
+             * @description Whether the trace holds any decision. An accepted event writes no decision of its own, so
+             *     the trace of an event that created a person, changed a trait or started something has
+             *     records and any other event's trace answers 404.
+             */
+            has_decisions: boolean;
             /** Format: uuid */
             id: string;
             /** @description The names of the properties whose values were replaced by null. */

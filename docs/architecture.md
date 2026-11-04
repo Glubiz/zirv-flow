@@ -2003,6 +2003,9 @@ before M5, so nothing consumes the flag yet (`EventFlag::NoTriggers` documents t
   made up 86 % of the decision rows of a track-only drain. A trace that begins at ingestion
   therefore shows `person.created` (for a new person), trait changes and the decisions that follow,
   but no "event was accepted" line; the event is read from the person timeline or the explorer.
+  A trace with no decision answers 404, so each event entry of the person timeline carries
+  `has_decisions` (one `EXISTS` probe per event entry on `decision_records_trace_idx`) and the page
+  links an event to its trace only when it is true.
   There is no index on `events (workspace_id, trace_id)`, so the trace view does not list a
   trace's events. Rejects, quarantines and replays still write their decisions.
 

@@ -90,9 +90,11 @@ function TimelineItem({ workspaceId, entry }: { workspaceId: string; entry: Time
           )}
         </div>
         {entry.type === "event" ? <EventDetails entry={entry} /> : null}
-        <Link to={`/w/${workspaceId}/traces/${entry.trace_id}`}>
-          View trace<span className="visually-hidden"> of {title}</span>
-        </Link>
+        {entry.type === "decision" || entry.has_decisions ? (
+          <Link to={`/w/${workspaceId}/traces/${entry.trace_id}`}>
+            View trace<span className="visually-hidden"> of {title}</span>
+          </Link>
+        ) : null}
       </div>
     </li>
   );
