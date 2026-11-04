@@ -9,9 +9,12 @@
 --
 --   PGOPTIONS="-c bench.since=2026-01-01T10:00:00Z" psql "$DATABASE_URL" -f scripts/bench/applied-latency.sql
 --
--- track:    decision_records.recorded_at of the `event.accepted` decision minus
---           events.received_at. The decision names its event in subject_ids->>'event';
---           received_at is the inbox row's arrival time, copied when the event is stored.
+-- track:    the moment the drain minted the event id, minus events.received_at. The id is a v7
+--           uuid and carries that moment as a millisecond timestamp in its first 48 bits, read
+--           here in SQL so the script works before PostgreSQL 17. The drain mints the id in
+--           judge_event_record, BEFORE person resolution, the dedupe claim, the events insert
+--           and the commit; received_at is the inbox row's arrival time, copied when the event
+--           is stored. No decision is written for an accepted event (since 0.231.0).
 -- identify: decision_records.recorded_at of the LATEST `trait.change` decision of a
 --           source record (subject_ids->>'source_record') minus the observation time the
 --           record keeps for its traits ("at" in source_records.traits). The inbox row is
@@ -19,9 +22,16 @@
 --           arrival, so the loadgen sends none. Only the latest change per record is
 --           comparable, because "at" is overwritten by every later change.
 --
--- recorded_at defaults to now(), which is the START of the draining transaction, so the
--- figure leaves out the time a row waits inside its own drain batch (bounded by
--- ingest.drain_batch_size rows); it is a slight under-estimate.
+-- Bounds. For identify, recorded_at defaults to now(), which is the START of the draining
+-- transaction, so that figure leaves out the time a row waits inside its own drain batch
+-- (bounded by ingest.drain_batch_size rows); it is a slight under-estimate. The track figure
+-- ends later in that batch (when the event id is minted) but still before the rest of the
+-- transaction, so it understates completion by at most the rest of that drain batch's
+-- transaction. No metric records one batch's duration: zirv_flow_job_duration_seconds is per
+-- ingest.drain job, which runs many batches, so it is only a loose ceiling.
+--
+-- Track figures taken before 0.231.0 ended at the decision's recorded_at (the transaction start)
+-- and are not comparable with these; compare only runs of one version.
 --
 -- Output, one row per kind (zero items give NULL percentiles): items, p50_ms, p95_ms,
 -- p99_ms, max_ms.
@@ -31,12 +41,12 @@ WITH bounds AS (
 ),
 track AS (
     SELECT 'track'::text AS kind,
-           extract(epoch FROM d.recorded_at - e.received_at) AS seconds
-    FROM decision_records d
-    JOIN events e
-      ON e.id = (d.subject_ids ->> 'event')::uuid AND e.workspace_id = d.workspace_id
+           extract(epoch FROM
+               to_timestamp(('x' || substr(replace(e.id::text, '-', ''), 1, 12))::bit(48)::bigint / 1000.0)
+               - e.received_at) AS seconds
+    FROM events e
     CROSS JOIN bounds
-    WHERE d.action = 'event.accepted' AND e.source = 'api' AND e.received_at >= bounds.since
+    WHERE e.source = 'api' AND e.received_at >= bounds.since
 ),
 latest_change AS (
     SELECT DISTINCT ON (d.subject_ids ->> 'source_record')

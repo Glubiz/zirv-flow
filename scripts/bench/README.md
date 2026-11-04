@@ -600,6 +600,43 @@ citations (links relative to the report or literal paths starting at `docs/`; ne
 `image_version` string and a `topology` object. Invalid input exits 1; absent reports are skipped
 and zero data files pass. CI always checks fixtures and data, and checks the report once present.
 
+`ingest` and `burst` cover the section 19 rows "Ingestion API latency", "Inbox to applied profile" and
+"Sustained / burst ingestion" in two runs on the seeded, running stack (`run.sh up` and the seeds first):
+
+```sh
+bash scripts/bench/m8/run.sh ingest   # 2,000/s track for M8_SECONDS (600), then the applied latency
+bash scripts/bench/m8/run.sh burst    # 10,000/s batch for M8_BURST_SECONDS (600), then the drain time
+```
+
+`ingest` (track mode, not the `batch` arm) waits for the inbox to empty after the load, bounded by
+`M8_APPLIED_DRAIN_SECONDS` (600), and runs `scripts/bench/applied-latency.sql` from the run's start
+(database clock). It writes `ingest-applied.json` beside the loadgen report, so the data JSON carries
+`results["ingest-applied.json"]` with `items`, `p50_ms`, `p95_ms`, `p99_ms`, `max_ms`, `within_target`
+(p95 under 5 s) and `drain_wait_seconds`. The run fails, and the file says `valid: false` and why, if the
+inbox does not drain within its bound or if the measured track items differ from the items the API
+accepted; no latency is computed from a partial set. The SQL reads the apply time from the v7 event id
+(0.231.0 and later); with an older image it measures nothing and the run fails. Wall time: about 12 to
+15 minutes (quiet start, 10 minutes of load, a drain of seconds).
+
+`burst` recreates the serve container with `BENCH_RATE_PER_KEY=20000 BENCH_BURST_PER_KEY=40000` (the way
+`tier.sh` does; `compose.bench.yaml` reads them), checks the container really runs those limits, runs
+`loadgen --mode batch --batch-size 100 --burst-rate 10000 --burst-duration 600`, then times the inbox
+drain to empty from the end of the burst, capped at `M8_BURST_DRAIN_CAP_SECONDS` (1800). The stack's own
+limits are restored afterwards (the serve container restarts again, after the instrumentation has
+scraped its metrics). `results["burst.json"]` holds `achieved_rate`, `api_latency_ms` (p50/p95/p99/max from
+schedule), `rejected_or_failed` (429, 5xx, other, transport, gave up, abandoned and their total),
+`inbox_backlog_peak_rows` (sampled every `M8_INBOX_TICK_S`, 5 s, plus every drain poll),
+`drain_seconds`, `drain_within_15_min` (900 s), `rate_held` (at least 98% of 10,000/s and nothing
+rejected or failed) and `passed` (both). A drain past the cap fails the run (`burst.failed.json`,
+`drain_timed_out: true`). A missed 15-minute target is a measured result, not a failure. Wall time: about
+12 minutes if the backlog drains with the burst, up to 15 to 20 minutes with a 15-minute drain, and
+about 45 minutes at the 30-minute cap.
+
+`M8_BURST_SECONDS` shortens the burst for a trial run (`M8_BURST_SECONDS=30 bash scripts/bench/m8/run.sh
+burst`). Any value other than 600 marks the run as smoke: the data lands under `data/m8/smoke/`, the
+JSON says `smoke: true` and `shortened: true`, and `check-report.sh` rejects it as a citation. Under
+`run.sh smoke` the burst defaults to 10 seconds. `burst` is also part of `run.sh all`.
+
 `debugger` starts `M8_DEBUGGER_CLIENTS=1` streams (set **20** for the full run), waits for all to
 connect, then offers track load at `M8_RATE=2000` for `M8_SECONDS=600`. Connection allowance is
 `M8_DEBUGGER_CONNECT_SECONDS=15`; drain allowance is `M8_DRAIN_SECONDS=60` (both five in smoke).

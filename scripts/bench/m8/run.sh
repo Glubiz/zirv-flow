@@ -9,7 +9,9 @@ Usage: bash scripts/bench/m8/run.sh <command>
   up                   Start the isolated bench stack (pre-pulled versioned image)
   seed <name>          SQL seed: people | events | enrollments (resumable)
   smoke                Separate small stack; 60s ingest, 5s debugger, 3,000 jobs
-  ingest | batch | debugger | explorer | jobs | timers | decisions | send | render | segments
+  ingest | burst | batch | debugger | explorer | jobs | timers | decisions | send | render | segments
+  ingest               Track load at 2,000/s plus inbox-to-applied latency (ingest-applied.json)
+  burst                10,000/s batch burst (M8_BURST_SECONDS, 600) at a raised key limit, then the inbox drain time
   all                  Run all registered benchmarks; note unregistered ones
   debugger             Watch streams before track load (M8_DEBUGGER_CLIENTS=1; full: 20)
   explorer             90-day queries at default/15000 ms, alongside track ingest
@@ -26,6 +28,7 @@ HELP
 bench_command() {
   case "$1" in
     ingest) cmd=(bash "$m8_dir/ingest.sh" "$raw" "$pool") ;;
+    burst) cmd=(bash "$m8_dir/burst.sh" "$raw" "$pool") ;;
     batch) cmd=(env M8_BATCH_SIZE="${M8_BATCH_SIZE:-500}" bash "$m8_dir/ingest.sh" "$raw" "$pool") ;;
     segments) cmd=(bash "$root/scripts/bench/m4/measure.sh" ${M8_SEGMENTS_PHASES:-all}) ;;
     render) cmd=(bash "$root/scripts/bench/m7/render.sh" "$raw") ;;
@@ -164,6 +167,13 @@ run_bench() {
   pool=$((M8_PEOPLE * 2 / 5)); [ "$pool" -le 1000000 ] || pool=1000000
   raw="$M4_STATE/../runs/$bench-$(date -u +%Y%m%dT%H%M%S)-$$"
   bench_command "$bench" || return $?
+  if [ "$bench" = burst ]; then
+    # A shortened burst is a smoke run: the data lands under smoke/ and the gate rejects it as a citation.
+    burst_seconds >/dev/null
+    ! burst_shortened || smoke=1
+    trap run_exit EXIT
+    raise_serve_limits
+  fi
   if [ "$bench" = decisions ]; then
     # The A/B builds its own containers and stops the M8 stack for the run: no M8 topology, seeds or instrumentation.
     host_pg_setup
@@ -187,7 +197,7 @@ run_bench() {
   capture_topology "$topology"
   if [ "$bench" != render ]; then
     assert_no_samplers
-    trap stop_samplers EXIT
+    trap run_exit EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
     quiet_start
@@ -199,6 +209,8 @@ run_bench() {
     log "instrumentation incomplete for $bench"
     [ "$rc" != 0 ] || rc=1
   fi
+  # After instrument_end: the restart resets the serve metrics that instrument_end scrapes.
+  restore_serve_limits || { log 'could not restore the serve limits'; [ "$rc" != 0 ] || rc=1; }
   if [ "$rc" = 0 ]; then finish_topology "$topology"; fi
   write_data "$bench" "$rc" "$raw" "$topology" "${cmd[@]}"
   return "$rc"
@@ -244,14 +256,14 @@ main() {
     seed)
       [ "$#" = 2 ] || die 'seed requires one name: people, events or enrollments'
       case "$2" in people | events | enrollments) ;; *) die "unknown seed: $2" ;; esac ;;
-    up | smoke | all | ingest | batch | debugger | explorer | jobs | timers | decisions | send | render | segments)
+    up | smoke | all | ingest | burst | batch | debugger | explorer | jobs | timers | decisions | send | render | segments)
       [ "$#" = 1 ] || die 'unexpected arguments' ;;
     *) die "unknown subcommand: $1" ;;
   esac
   [ "$1" != smoke ] || { smoke=1; export M8_SMOKE=1; }
   configure
   case "$1" in
-    ingest | batch | debugger | explorer) host_pg_setup ;;
+    ingest | burst | batch | debugger | explorer) host_pg_setup ;;
     jobs | timers | smoke | all) host_pg_setup; require_job_sampler ;;
   esac
   case "$1" in

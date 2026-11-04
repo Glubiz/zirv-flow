@@ -36,7 +36,7 @@ expect_failure() {
   grep -Fq "$message" "$work/output" || { cat "$work/output" >&2; exit 1; }
 }
 bash "$here/run.sh" --help >"$work/help"
-for name in up seed smoke ingest debugger explorer jobs timers decisions send render segments all --self-test; do
+for name in up seed smoke ingest burst debugger explorer jobs timers decisions send render segments all --self-test; do
   grep -Fq -- "$name" "$work/help"
 done
 expect_failure 'unknown subcommand' bash "$here/run.sh" nope
@@ -66,12 +66,12 @@ export M8_TEST_MEMORY=68719476736
 seed_preflight people >"$work/preflight" 2>&1
 raw="$work/raw"; pool=1000; cmd=()
 : >"$M8_TEST_CALLS"
-for name in ingest segments send render debugger explorer jobs timers decisions; do
+for name in ingest burst segments send render debugger explorer jobs timers decisions; do
   cmd=()
   bench_command "$name"
   [ "${#cmd[@]}" -gt 1 ]
   case "$name" in
-    debugger | explorer | jobs | timers)
+    burst | debugger | explorer | jobs | timers)
       [ "${cmd[0]}" = bash ]
       [ "${cmd[1]}" = "$here/$name.sh" ]
       [ "${cmd[2]}" = "$raw" ] ;;
@@ -97,6 +97,7 @@ for setting in wal_compression=lz4 shared_preload_libraries=pg_stat_statements m
   grep -Fq -- "$setting" "$here/compose.m8.yaml" || { echo "self-test FAILED: compose.m8.yaml lacks $setting" >&2; exit 1; }
 done
 bash -n "$here/ingest.sh"
+bash -n "$here/burst.sh"
 expect_failure 'seconds must be an integer' env M8_SECONDS=0 bash "$here/explorer.sh" "$raw" "$pool"
 expect_failure 'M8_JOBS_CAP must be an integer' env M8_JOBS_CAP=0 bash "$here/jobs.sh" "$raw"
 expect_failure 'must be below M8_JOBS_CONCURRENCY (16)' env M8_JOBS_CAP=16 bash "$here/jobs.sh" "$raw"
@@ -375,5 +376,134 @@ expect_failure 'is not a versioned tag' bash -c '. "$1/common.sh"; image_tag_of 
 )
 # The send audience is bounded by the first workspace's people.
 expect_failure 'exceeds the first workspace' bash -c '. "$1/run.sh"; configure; raw=/nonexistent; pool=1000; PEOPLE=2000; prepare_send' _ "$here"
+
+# Burst arm and applied latency (#397), with stub psql, loadgen and docker: no stack.
+burst_seconds_of() ( unset M8_BURST_SECONDS; [ -z "${1:-}" ] || M8_BURST_SECONDS="$1"; smoke="${2:-}"; burst_seconds )
+[ "$(burst_seconds_of)" = 600 ] && [ "$(burst_seconds_of 30)" = 30 ] && [ "$(burst_seconds_of '' 1)" = 10 ]
+expect_failure 'M8_BURST_SECONDS must be an integer' env M8_BURST_SECONDS=0 bash -c '. "$1/common.sh"; burst_seconds' _ "$here"
+(unset M8_BURST_SECONDS; ! burst_shortened)
+(export M8_BURST_SECONDS=600; ! burst_shortened)
+(export M8_BURST_SECONDS=30; burst_shortened)
+# run_bench marks a shortened burst as smoke, raises the key limit before the arm and restores it after.
+burst_run() ( # $1 = M8_BURST_SECONDS, $2 = log file
+  export M8_BURST_SECONDS="$1"
+  M8_RESULT="$2"
+  smoke=''; M4_STATE="$work/rb-state"; M8_STATE="$work/rb-state"; out="$work/rb-out"; mkdir -p "$M4_STATE/.."
+  host_pg_setup() { :; }; validate_cpus() { :; }; seed_manifest() { :; }; capture_topology() { :; }
+  assert_no_samplers() { :; }; quiet_start() { :; }; instrument_begin() { :; }; instrument_end() { :; }
+  finish_topology() { :; }; run_exit() { :; }
+  raise_serve_limits() { echo raise >>"$M8_RESULT"; }
+  restore_serve_limits() { echo restore >>"$M8_RESULT"; }
+  write_data() { echo "write smoke=${smoke:-} rc=$2" >>"$M8_RESULT"; }
+  bash() { [ "$1" != arm ] || echo arm >>"$M8_RESULT"; }
+  bench_command() { cmd=(bash arm); }
+  run_bench burst
+)
+rm -f "$work/rb-short" "$work/rb-full"
+burst_run 30 "$work/rb-short"
+[ "$(paste -sd, "$work/rb-short")" = 'raise,arm,restore,write smoke=1 rc=0' ]
+burst_run 600 "$work/rb-full"
+[ "$(paste -sd, "$work/rb-full")" = 'raise,arm,restore,write smoke= rc=0' ]
+
+cat >"$work/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *'ps -q zirv-flow'*) echo m8-serve ;;
+  'inspect --format {{json .Config.Env}} m8-serve') echo "$M8_TEST_SERVE_ENV" ;;
+  *'psql '*) cat >/dev/null; echo 0 ;;
+  *) echo "unexpected docker invocation: $*" >&2; exit 99 ;;
+esac
+STUB
+cat >"$work/bin/psql" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *to_char*) echo 2026-11-04T10:00:00.000000Z ;;
+  *'count(*) FROM ingest_inbox'*)
+    if [ "${PGAPPNAME:-}" = m8-sampler-inbox ]; then echo 7; exit 0; fi
+    v="$(head -n1 "$M8_TEST_INBOX_SEQ")"
+    if [ "$(wc -l <"$M8_TEST_INBOX_SEQ")" -gt 1 ]; then sed -i 1d "$M8_TEST_INBOX_SEQ"; fi
+    echo "$v" ;;
+  *-f*) echo applied >>"$M8_TEST_APPLIED_CALLS"; cat "$M8_TEST_APPLIED_CSV" ;;
+  *) echo "unexpected psql: $*" >&2; exit 99 ;;
+esac
+STUB
+cat >"$work/bin/stub-loadgen" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$M8_TEST_LOADGEN_ARGS"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --out ]; then cp "$M8_TEST_LOAD_JSON" "$2"; exit "${M8_TEST_LOADGEN_RC:-0}"; fi
+  shift
+done
+exit 99
+STUB
+chmod +x "$work/bin/docker" "$work/bin/psql" "$work/bin/stub-loadgen"
+export LOADGEN="$work/bin/stub-loadgen" M8_TEST_LOADGEN_ARGS="$work/loadgen-args" M8_TEST_INBOX_SEQ="$work/inbox-seq"
+export M8_TEST_APPLIED_CALLS="$work/applied-calls" M8_TEST_APPLIED_CSV="$work/applied.csv" M8_TEST_LOAD_JSON="$work/load.json"
+export M8_INBOX_TICK_S=1
+printf 'kind,items,p50_ms,p95_ms,p99_ms,max_ms\nidentify,0,,,,\ntrack,1200,10.0,40.5,90.1,200.0\n' >"$work/applied.csv"
+printf '%s\n' '{"total":{"achieved_rate":10000.0,"items_offered":6000000,"items_accepted":1200,
+  "status":{"accepted_202":60000,"rate_limited_429":0,"server_5xx":0,"other":0,"transport_errors":0},
+  "gave_up_after_retries":0,"abandoned_requests":0,
+  "latency_from_schedule":{"count":60000,"p50_ms":3.0,"p95_ms":9.0,"p99_ms":20.0,"max_ms":80.0}}}' >"$work/load.json"
+export M8_TEST_SERVE_ENV='["PATH=/bin","ZIRV_FLOW_INGEST__RATE_PER_KEY=20000","ZIRV_FLOW_INGEST__BURST_PER_KEY=40000"]'
+json_of() { python3 -I -c 'import json,sys; r=json.load(open(sys.argv[1])); exec(sys.argv[2])' "$1" "$2"; }
+
+# Ingest arm: the applied latency lands in ingest-applied.json beside the loadgen report.
+mkdir -p "$work/ing-ok"; printf '0\n' >"$M8_TEST_INBOX_SEQ"; : >"$M8_TEST_APPLIED_CALLS"
+bash "$here/ingest.sh" "$work/ing-ok" 1000 >/dev/null 2>&1
+json_of "$work/ing-ok/ingest-applied.json" "assert r['valid'] and r['items']==1200 and r['p95_ms']==40.5 and r['p99_ms']==90.1 and r['within_target'] and r['drain_wait_seconds']==0 and r['since']=='2026-11-04T10:00:00.000000Z'"
+grep -Fq -- '--mode track' "$M8_TEST_LOADGEN_ARGS"
+# A measured set that differs from the accepted items is partial: no latency is reported.
+mkdir -p "$work/ing-partial"; printf '0\n' >"$M8_TEST_INBOX_SEQ"
+sed 's/"items_accepted":1200/"items_accepted":1300/' "$work/load.json" >"$work/load-partial.json"
+(export M8_TEST_LOAD_JSON="$work/load-partial.json"
+ expect_failure 'inbox-to-applied latency not measured' bash "$here/ingest.sh" "$work/ing-partial" 1000)
+json_of "$work/ing-partial/ingest-applied.json" "assert not r['valid'] and 'p95_ms' not in r and 'accepted 1300' in r['error']"
+# A drain that does not finish in its bound fails the run and never queries the latency.
+mkdir -p "$work/ing-stuck"; printf '5\n' >"$M8_TEST_INBOX_SEQ"; : >"$M8_TEST_APPLIED_CALLS"
+(export M8_APPLIED_DRAIN_SECONDS=2
+ expect_failure 'inbox-to-applied latency not measured' bash "$here/ingest.sh" "$work/ing-stuck" 1000)
+json_of "$work/ing-stuck/ingest-applied.json" "assert not r['valid'] and r['drain_wait_seconds'] is None and r['drain_cap_seconds']==2 and 'did not drain' in r['error']"
+[ ! -s "$M8_TEST_APPLIED_CALLS" ]
+# The batch arm measures no applied latency.
+mkdir -p "$work/ing-batch"; printf '0\n' >"$M8_TEST_INBOX_SEQ"
+M8_BATCH_SIZE=500 bash "$here/ingest.sh" "$work/ing-batch" 1000 >/dev/null 2>&1
+[ ! -e "$work/ing-batch/ingest-applied.json" ]
+
+# Burst arm: load flags, drain timing, backlog peak, pass/fail against 15 minutes, failure on a drain timeout.
+mkdir -p "$work/burst-ok"; : >"$M8_TEST_LOADGEN_ARGS"; printf '5\n3\n0\n' >"$M8_TEST_INBOX_SEQ"
+bash "$here/burst.sh" "$work/burst-ok" 1000 >/dev/null 2>&1
+grep -Fq -- '--mode batch --batch-size 100 --burst-rate 10000 --burst-duration 600 --people 1000' "$M8_TEST_LOADGEN_ARGS"
+json_of "$work/burst-ok/burst.json" "assert r['measure']=='burst' and not r['shortened'] and r['burst_seconds']==600 and r['achieved_rate']==10000.0 and r['api_latency_ms']['p99_ms']==20.0 and r['rejected_or_failed']['total']==0 and r['inbox_backlog_peak_rows']==7 and 2<=r['drain_seconds']<=4 and not r['drain_timed_out'] and r['drain_within_15_min'] and r['rate_held'] and r['passed'] and r['rate_per_key']==20000 and r['burst_per_key']==40000"
+# Rejected requests show in the data and break rate_held.
+mkdir -p "$work/burst-429"; printf '0\n' >"$M8_TEST_INBOX_SEQ"
+sed 's/"rate_limited_429":0/"rate_limited_429":9/' "$work/load.json" >"$work/load-429.json"
+(export M8_TEST_LOAD_JSON="$work/load-429.json"; bash "$here/burst.sh" "$work/burst-429" 1000 >/dev/null 2>&1)
+json_of "$work/burst-429/burst.json" "assert r['rejected_or_failed']['total']==9 and not r['rate_held'] and not r['passed'] and r['drain_within_15_min']"
+# A drain past the cap is a failed run; the data records the timeout and no drain time.
+mkdir -p "$work/burst-stuck"; printf '5\n' >"$M8_TEST_INBOX_SEQ"
+(export M8_BURST_DRAIN_CAP_SECONDS=2
+ expect_failure 'did not drain within 2s' bash "$here/burst.sh" "$work/burst-stuck" 1000)
+json_of "$work/burst-stuck/burst.json" "assert r['drain_timed_out'] and r['drain_seconds'] is None and not r['drain_within_15_min'] and not r['passed'] and r['inbox_backlog_peak_rows']==7"
+# A shortened burst says so and runs for the shortened time.
+mkdir -p "$work/burst-short"; : >"$M8_TEST_LOADGEN_ARGS"; printf '0\n' >"$M8_TEST_INBOX_SEQ"
+M8_BURST_SECONDS=20 bash "$here/burst.sh" "$work/burst-short" 1000 >/dev/null 2>&1
+grep -Fq -- '--burst-duration 20 ' "$M8_TEST_LOADGEN_ARGS"
+json_of "$work/burst-short/burst.json" "assert r['shortened'] and r['burst_seconds']==20"
+# The arm refuses a serve container that still has the default limits, and a failing loadgen fails the arm.
+mkdir -p "$work/burst-limits"; : >"$M8_TEST_LOADGEN_ARGS"
+(export M8_TEST_SERVE_ENV='["ZIRV_FLOW_INGEST__RATE_PER_KEY=10000","ZIRV_FLOW_INGEST__BURST_PER_KEY=20000"]'
+ expect_failure 'not the raised 20000/40000' bash "$here/burst.sh" "$work/burst-limits" 1000)
+[ ! -s "$M8_TEST_LOADGEN_ARGS" ]
+mkdir -p "$work/burst-rc"
+(export M8_TEST_LOADGEN_RC=3; expect_failure 'loadgen exited 3' bash "$here/burst.sh" "$work/burst-rc" 1000)
+[ ! -e "$work/burst-rc/burst.json" ]
+# Both arms' data reaches the data JSON through write_data (results hold the files under the raw directory).
+(smoke=1; write_data burst 0 "$work/burst-short" "$work/topology" bash burst.sh)
+python3 -I -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["smoke"] and r["results"]["burst.json"]["shortened"] and r["exit_code"]==0' "$out/smoke/burst.json"
+write_data ingest 0 "$work/ing-ok" "$work/topology" bash ingest.sh
+python3 -I -c 'import json,sys; r=json.load(open(sys.argv[1])); assert not r["smoke"] and r["results"]["ingest-applied.json"]["valid"]' "$out/ingest.json"
+write_data burst 1 "$work/burst-stuck" "$work/topology" bash burst.sh
+python3 -I -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["exit_code"]==1' "$out/burst.failed.json"
 
 echo 'm8 self-test: parsing, registration, cpusets, disk/memory guards, metadata and prebuilt render passed'

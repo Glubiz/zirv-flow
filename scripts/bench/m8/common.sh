@@ -4,7 +4,7 @@ m8_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$m8_dir/../../.." && pwd)"
 cd "$root"
 label='reference-resource emulation, not a reference-hardware run'
-benches=(ingest debugger explorer jobs timers decisions send render segments)
+benches=(ingest burst debugger explorer jobs timers decisions send render segments)
 # Git Bash rewrites container paths (/bench/..., /usr/local/...) in docker arguments; other hosts ignore this.
 export MSYS2_ARG_CONV_EXCL='/bench/;/usr/local/;/var/lib/'
 log() { echo "[m8] $*" >&2; }
@@ -448,3 +448,119 @@ temp.write_text(json.dumps(report, indent=2) + '\n')
 temp.replace(target)
 PY
 }
+
+# Waits for the ingest inbox to empty, polling every second. Prints the seconds waited; returns 1 when the
+# inbox is still not empty after $1 seconds (nothing is printed then) and 2 when the count cannot be read.
+# The highest count seen goes to the file named by M8_INBOX_PEAK_FILE when that is set.
+drain_inbox() {
+  local cap="$1" started=$SECONDS rows peak=0
+  while :; do
+    rows="$(host_pg -At -c 'SELECT count(*) FROM ingest_inbox')" || return 2
+    rows="${rows%$'\r'}"
+    [[ "$rows" =~ ^[0-9]+$ ]] || return 2
+    [ "$rows" -le "$peak" ] || peak="$rows"
+    [ -z "${M8_INBOX_PEAK_FILE:-}" ] || echo "$peak" >"$M8_INBOX_PEAK_FILE"
+    [ "$rows" != 0 ] || break
+    [ $((SECONDS - started)) -lt "$cap" ] || return 1
+    sleep 1
+  done
+  echo $((SECONDS - started))
+}
+
+db_now() { host_pg -At -c "SELECT to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')"; }
+
+# Inbox-to-applied latency of the run that started at $2 (database UTC), from applied-latency.sql, written to
+# $1/ingest-applied.json. $3 is the loadgen report. The inbox must be empty first (bounded by
+# M8_APPLIED_DRAIN_SECONDS, default 600) and the measured items must equal the items the API accepted; any other
+# outcome writes the file with valid=false and returns 1, so a partial set never yields a latency.
+measure_applied() {
+  local raw="$1" since="$2" load="$3" cap="${M8_APPLIED_DRAIN_SECONDS:-600}" waited rc=0 csv=''
+  positive_integer M8_APPLIED_DRAIN_SECONDS "$cap"
+  waited="$(drain_inbox "$cap")" || rc=$?
+  if [ "$rc" = 0 ]; then
+    csv="$(PGOPTIONS="-c bench.since=$since" host_pg -A --csv -f "${APPLIED_SQL:-$root/scripts/bench/applied-latency.sql}")" || rc=3
+  fi
+  python3 -I - "$raw/ingest-applied.json" "$rc" "${waited:-}" "$cap" "$since" "$load" "$csv" <<'PY'
+import csv, io, json, sys
+path, rc, waited, cap, since, load, rows = sys.argv[1:]
+rc, cap = int(rc), int(cap)
+out = dict(measure='inbox_to_applied', valid=False, since=since, target_p95_ms=5000,
+           drain_wait_seconds=int(waited) if rc == 0 and waited else None, drain_cap_seconds=cap)
+accepted = json.load(open(load))['total']['items_accepted']
+out['items_accepted'] = accepted
+if rc == 1:
+    out['error'] = f'inbox did not drain within {cap} s'
+elif rc == 2:
+    out['error'] = 'cannot read the inbox count'
+elif rc != 0:
+    out['error'] = 'applied-latency.sql failed'
+else:
+    track = next((r for r in csv.DictReader(io.StringIO(rows)) if r['kind'] == 'track'), None)
+    if track is None or not track['p95_ms']:
+        out['error'] = 'no track items measured'
+    elif int(track['items']) != accepted:
+        out['error'] = f"measured {track['items']} track items but the API accepted {accepted}"
+    else:
+        out.update(valid=True, items=int(track['items']), p50_ms=float(track['p50_ms']),
+                   p95_ms=float(track['p95_ms']), p99_ms=float(track['p99_ms']), max_ms=float(track['max_ms']))
+        out['within_target'] = out['p95_ms'] < out['target_p95_ms']
+with open(path, 'w') as f:
+    json.dump(out, f, indent=2)
+    f.write('\n')
+sys.exit(0 if out['valid'] else 1)
+PY
+}
+
+# Burst arm helpers. The arm needs the per-key limit raised the way tier.sh does (BENCH_RATE_PER_KEY and
+# BENCH_BURST_PER_KEY, read by compose.bench.yaml) and restores the stack's own limits afterwards.
+burst_seconds() {
+  local s="${M8_BURST_SECONDS:-600}"
+  [ -n "${M8_BURST_SECONDS:-}" ] || [ -z "${smoke:-}" ] || s=10
+  positive_integer M8_BURST_SECONDS "$s"
+  echo "$s"
+}
+burst_shortened() { [ "$(burst_seconds)" != 600 ]; }
+
+limits_raised=''
+recreate_serve() {
+  compose up -d --no-build --no-deps --force-recreate --wait --wait-timeout 300 zirv-flow
+}
+raise_serve_limits() {
+  limits_raised=1
+  BENCH_RATE_PER_KEY=20000 BENCH_BURST_PER_KEY=40000 recreate_serve
+}
+restore_serve_limits() {
+  [ -n "$limits_raised" ] || return 0
+  limits_raised=''
+  recreate_serve
+}
+# "rate burst" per-key limits of the running serve container.
+serve_limits() {
+  local cid
+  cid="$(compose ps -q zirv-flow)"
+  [ -n "$cid" ] || die 'no running zirv-flow; run up first'
+  docker inspect --format '{{json .Config.Env}}' "$cid" | python3 -I -c '
+import json, sys
+env = dict(e.split("=", 1) for e in json.load(sys.stdin) if "=" in e)
+print(env.get("ZIRV_FLOW_INGEST__RATE_PER_KEY", ""), env.get("ZIRV_FLOW_INGEST__BURST_PER_KEY", ""))' | tr -d '\r'
+}
+
+inbox_pid=''
+start_inbox_sampler() { # csv file: epoch,rows every M8_INBOX_TICK_S (5) seconds
+  (
+    export PGAPPNAME=m8-sampler-inbox
+    while :; do
+      rows="$(host_pg -At -c 'SELECT count(*) FROM ingest_inbox')" && echo "$(date +%s),$rows" || true
+      sleep "${M8_INBOX_TICK_S:-5}"
+    done
+  ) >"$1" 2>"$1.err" &
+  inbox_pid=$!
+  register_sampler inbox "$inbox_pid"
+}
+stop_inbox_sampler() {
+  stop_sampler inbox "$inbox_pid"
+  inbox_pid=''
+  terminate_pg_samplers m8-sampler-inbox
+}
+
+run_exit() { stop_samplers; restore_serve_limits || log 'could not restore the serve limits'; }
