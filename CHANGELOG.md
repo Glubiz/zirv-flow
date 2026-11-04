@@ -15,3 +15,9 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.229.0 (2026-11-04)
+
+### Performance
+
+- bound concurrent CSV exports per serve with explorer.max_exports (#397)
+
