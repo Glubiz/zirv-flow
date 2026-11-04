@@ -571,7 +571,7 @@ seed to finish first; all three targets must be supplied together when selecting
 | Command | Existing measurement / registration |
 |---|---|
 | `ingest` | `tools/loadgen` track workload on the running stack |
-| `segments` | `m4/measure.sh all`, including the incremental load window |
+| `segments` | `m4/measure.sh all`, including the incremental load window; `M8_SEGMENTS_PHASES=incremental` runs only that phase |
 | `send` | M6 sink/setup and `m6/run.sh`; SQL email/consent fixtures on existing M8 people. `PEOPLE` sets the audience (default 20000, up to the first workspace's people), `M8_WORKER_CONCURRENCY` the worker concurrency; `delivery-attempts.json` holds `delivery_attempts.duration_ms` p50, p95 and p99 over the steady window (the SMTP call time) |
 | `render` | `m7/render.sh` with prebuilt `tools/renderbench`; **native host tool, outside Docker CPU/memory caps**, explicitly labelled in JSON |
 | `debugger` | Watcher receipts and host SQL latency/clock report, alongside track load |

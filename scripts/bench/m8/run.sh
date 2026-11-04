@@ -27,7 +27,7 @@ bench_command() {
   case "$1" in
     ingest) cmd=(bash "$m8_dir/ingest.sh" "$raw" "$pool") ;;
     batch) cmd=(env M8_BATCH_SIZE="${M8_BATCH_SIZE:-500}" bash "$m8_dir/ingest.sh" "$raw" "$pool") ;;
-    segments) cmd=(bash "$root/scripts/bench/m4/measure.sh" all) ;;
+    segments) cmd=(bash "$root/scripts/bench/m4/measure.sh" ${M8_SEGMENTS_PHASES:-all}) ;;
     render) cmd=(bash "$root/scripts/bench/m7/render.sh" "$raw") ;;
     send) cmd=(bash "$root/scripts/bench/m6/run.sh" "m8-${raw##*/}") ;;
     debugger) cmd=(bash "$m8_dir/debugger.sh" "$raw" "$pool") ;;
