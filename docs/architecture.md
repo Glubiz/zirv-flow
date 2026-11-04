@@ -2611,6 +2611,19 @@ with at least five sixths of its lease left, even when its claim waited, and job
 behind a slow handler go to other workers instead of waiting for it. A slot that dies leaves its
 unstarted jobs, like its running one, to lease expiry.
 
+**The drain's band (#397, ruling 2be8b88c).** `ingest.drain` is enqueued at priority -1
+(`DRAIN_PRIORITY`), every other kind at the default 0, so a drain is claimed next however many
+older wakes are due: the inbox stays current under a wake backlog instead of waiting behind it
+(the bench saw the inbox fall millions of events behind while its drain sat in the wakes' FIFO
+band). The trade-off is throughput: at about 2,000 events/s the drain takes about two PostgreSQL
+cores, which the wakes then do not get, so while ingest is busy the wakes run slower (about
+1.3-1.6 k/s on 0.225.0's costs against about 2 k/s with the drain starved). An uncapped batch
+takes the drain's band first and fills up with the oldest wakes; the drain runs first, and when
+it runs longer than the hold limit the slot gives back the wakes claimed behind it. Under a cap
+smaller than the batch, a claim takes the best band offered alone (ruling a894b5c2), so a claim
+offered a drain takes the drains only and the wakes wait for the next claim: one smaller batch
+per drain run, which is accepted, since a workspace has at most one drain ready or running.
+
 **Wake transactions (#397).** The `flow.step` jobs of one workspace that a slot claimed together
 run in one transaction, at the place of the first of them in the claim; jobs of other kinds, and a
 workspace's only step, run alone. The transaction takes the change-readers guard once, reads every
@@ -3548,7 +3561,9 @@ they were ruled as their capabilities were added to the plan.
 
 - **OQ-8:** A per-workspace running cap in the claim query
   (`worker.max_running_per_workspace`, default unlimited); weighted claiming is
-  rejected for v1. M8 validates it under load (section 14).
+  rejected for v1. M8 validates it under load (section 14). The drain's band ahead
+  of the wakes keeps working under a cap: a capped claim offered a drain takes the
+  drains alone, and the wakes come with the next claim (#397).
 - **OQ-3:** No unmerge in v1. Per-kind identifier rules (7.3) prevent bad
   merges. A blocked merge is reviewed as an identity conflict, and the review
   either keeps the people separate or moves the identifier to one person. Every
