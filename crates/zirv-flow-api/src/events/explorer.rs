@@ -480,7 +480,9 @@ fn observe_query<T>(kind: &'static str, started: Instant, result: &Result<T, Exp
 
 const EXPORT_HEADER: &str =
     "id,occurred_at,name,source,person_id,validation_state,flags,trace_id,properties,masked\n";
-const EXPORT_PAGE: u32 = 1_000;
+/// Rows per page transaction. A page is one pool acquisition and one snapshot, so a larger page
+/// means fewer queue waits behind interactive queries, at about 10 times the memory per stream.
+const EXPORT_PAGE: u32 = 10_000;
 
 /// A cell that a spreadsheet would run as a formula is made text.
 fn cell(value: &str) -> String {
@@ -612,9 +614,28 @@ pub(crate) async fn export(
         limits,
         reveal,
         truncated: u64::try_from(matched).unwrap_or(0) > rows,
-        _permit: permit,
+        page: EXPORT_PAGE,
+        _permit: Some(permit),
     };
-    let body = stream::unfold((source, Export::Header), |(source, phase)| async move {
+    let body = export_stream(source);
+    let mut response = Response::new(Body::from_stream(body));
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        "text/csv; charset=utf-8".parse().unwrap(),
+    );
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        "attachment; filename=\"events.csv\"".parse().unwrap(),
+    );
+    Ok(response)
+}
+
+/// The CSV body: the header, then one snapshot transaction per page of `source.page` rows.
+fn export_stream(
+    source: ExportSource,
+) -> impl futures_util::Stream<Item = Result<Bytes, io::Error>> {
+    stream::unfold((source, Export::Header), |(source, phase)| async move {
         match phase {
             Export::Header => Some((
                 Ok(Bytes::from_static(EXPORT_HEADER.as_bytes())),
@@ -631,7 +652,7 @@ pub(crate) async fn export(
                 if remaining == 0 {
                     return Some((Ok(source.tail()), (source, Export::Done)));
                 }
-                let size = u32::try_from(remaining.min(u64::from(EXPORT_PAGE))).unwrap_or(1);
+                let size = u32::try_from(remaining.min(u64::from(source.page))).unwrap_or(1);
                 let started = Instant::now();
                 // A page that finds the pool busy keeps waiting, up to one page's time limit:
                 // the export already answered 200 and cannot turn into a 503.
@@ -689,18 +710,7 @@ pub(crate) async fn export(
             }
             Export::Done => None,
         }
-    });
-    let mut response = Response::new(Body::from_stream(body));
-    let headers = response.headers_mut();
-    headers.insert(
-        header::CONTENT_TYPE,
-        "text/csv; charset=utf-8".parse().unwrap(),
-    );
-    headers.insert(
-        header::CONTENT_DISPOSITION,
-        "attachment; filename=\"events.csv\"".parse().unwrap(),
-    );
-    Ok(response)
+    })
 }
 
 struct ExportSource {
@@ -710,11 +720,13 @@ struct ExportSource {
     request: ExploreScopeRequest,
     filters: Vec<ExploreFilter>,
     limits: ExploreLimits,
+    /// Rows per page transaction.
+    page: u32,
     reveal: bool,
     /// More events matched than the row limit.
     truncated: bool,
     /// Held until the stream ends, fails or is dropped.
-    _permit: tokio::sync::OwnedSemaphorePermit,
+    _permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 impl ExportSource {
@@ -877,5 +889,107 @@ mod tests {
         assert_eq!(shape["range_days"], 7);
         let text = shape.to_string();
         assert!(!text.contains("order") && !text.contains("pro") && !text.contains("plan"));
+    }
+
+    /// The export body cut into the chunks it streams: the header, then one per page transaction.
+    async fn export_chunks(
+        pool: &PgPool,
+        workspace: WorkspaceId,
+        request: ExploreScopeRequest,
+        page: u32,
+    ) -> Vec<String> {
+        use futures_util::StreamExt;
+
+        let limits = ExploreLimits {
+            timeout: Duration::from_secs(30),
+            row_limit: 1_000_000,
+        };
+        let filters = Vec::new();
+        let (matched, prepared) =
+            zirv_flow_store::explore_start(pool, workspace, &request.scope(&filters), limits, true)
+                .await
+                .unwrap();
+        let source = ExportSource {
+            pool: pool.clone(),
+            prepared,
+            workspace,
+            request,
+            filters,
+            limits,
+            page,
+            reveal: true,
+            truncated: u64::try_from(matched).unwrap_or(0) > u64::from(limits.row_limit),
+            _permit: None,
+        };
+        export_stream(source)
+            .map(|chunk| String::from_utf8(chunk.unwrap().to_vec()).unwrap())
+            .collect()
+            .await
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_25000_row_export_is_the_same_csv_in_three_page_transactions(pool: PgPool) {
+        use zirv_flow_core::{
+            Cause, HmacPurpose, HmacRoot, MasterKey, Slug, TraceContext, WorkspaceName,
+        };
+        use zirv_flow_store::EventRecord;
+
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let workspace = zirv_flow_store::create_workspace(
+            &pool,
+            &WorkspaceName::parse("bulk").unwrap(),
+            &Slug::parse("bulk").unwrap(),
+        )
+        .await
+        .unwrap()
+        .id;
+        let now = OffsetDateTime::now_utc();
+        let key = HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction);
+        let seed = EventRecord {
+            source_record_id: None,
+            source: "web".into(),
+            identifiers: vec![("email".into(), "a@example.com".into())],
+            name: "bulk".into(),
+            properties: Map::new(),
+            timestamp: Some(now),
+            received_at: now,
+            message_id: None,
+            trace: TraceContext::root(Cause::api("test")),
+        };
+        zirv_flow_store::apply_event_batch(&pool, workspace, &key, &[seed])
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO events (id, workspace_id, person_id, name, occurred_at, received_at, \
+                                 properties, source, trace_id, validation_state) \
+             SELECT gen_random_uuid(), workspace_id, person_id, name, \
+                    occurred_at - make_interval(secs => g), received_at, \
+                    jsonb_build_object('n', g), source, gen_random_uuid(), validation_state \
+             FROM events, generate_series(1, 24999) g WHERE name = 'bulk'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let request = || ExploreScopeRequest {
+            name: Some("bulk".into()),
+            filters: Vec::new(),
+            from: now - time::Duration::days(1),
+            to: now + time::Duration::hours(1),
+            person_id: None,
+        };
+
+        let small = export_chunks(&pool, workspace, request(), 1_000).await;
+        let large = export_chunks(&pool, workspace, request(), EXPORT_PAGE).await;
+
+        assert_eq!(EXPORT_PAGE, 10_000);
+        assert_eq!(small.len(), 1 + 25, "the header and 25 pages of 1,000");
+        assert_eq!(
+            large.len(),
+            1 + 3,
+            "the header and 3 pages: 10,000, 10,000, 5,000"
+        );
+        assert_eq!(small.concat(), large.concat());
+        assert_eq!(large.concat().lines().count(), 1 + 25_000);
     }
 }
