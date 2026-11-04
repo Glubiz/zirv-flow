@@ -2665,7 +2665,7 @@ export interface paths {
          *     another reads as the survivor, with the merged people's entries included. Event properties
          *     the schema flags as PII are masked for callers who may not see values.
          * @description `event.accepted` decisions duplicate the event entry and are left out unless
-         *     `all_decisions=true`.
+         *     `all_decisions=true`. Only events accepted before 0.231.0 have one.
          */
         get: operations["get_person_timeline"];
         put?: never;
@@ -22253,7 +22253,7 @@ export interface operations {
                 cursor?: string;
                 /** @description `event`, `decision` or both separated by a comma; default both */
                 kinds?: string;
-                /** @description Include the `event.accepted` decisions; default false */
+                /** @description Include the `event.accepted` decisions that versions before 0.231.0 wrote; default false */
                 all_decisions?: boolean;
             };
             header?: never;
