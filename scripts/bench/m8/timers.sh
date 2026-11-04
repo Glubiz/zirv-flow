@@ -18,13 +18,14 @@ require_job_sampler
 wake_pending="SELECT EXISTS (SELECT 1 FROM jobs WHERE kind = 'flow.step' AND state = 'ready') OR EXISTS (SELECT 1 FROM jobs WHERE kind = 'flow.step' AND state = 'running')"
 sampler_pid=''; load_pid=''; worker_stopped=''
 cleanup() {
-  local pid
-  for pid in "$load_pid" "$sampler_pid"; do
-    if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
-  done
+  if [ -n "$load_pid" ]; then kill "$load_pid" 2>/dev/null || true; wait "$load_pid" 2>/dev/null || true; fi
+  stop_sampler jobkinds "$sampler_pid"
+  terminate_pg_samplers
   if [ -n "$worker_stopped" ]; then compose start zirv-flow-worker; fi
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 for mode in noload loaded; do
   dest="$raw/$mode"

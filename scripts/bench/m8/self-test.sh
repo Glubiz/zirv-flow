@@ -330,4 +330,46 @@ assert '-d zirv_flow_m8 ' in lines[1]
 assert 'compose.tiers.yaml' in lines[2] and 'compose.m4.yaml' in lines[2]
 assert '-d zirv_flow ' in lines[3]
 PY
+# Samplers: a registered live sampler blocks the next run; stopping it clears the registry.
+leftover() ( assert_no_samplers </dev/null )
+(
+  command sleep 60 &
+  pid=$!
+  register_sampler waits "$pid"
+  expect_failure 'sampler of an earlier run is still alive' leftover
+  stop_sampler waits "$pid"
+  leftover
+  ! kill -0 "$pid" 2>/dev/null
+  [ -z "$(ls -A "$(sampler_dir)")" ]
+)
+# docker stats is keyed by container name, one JSON line per container, and a missing container costs only its own line.
+(
+  docker() { printf '%s\n' "$*"; }
+  docker_stats_sample zirv-flow-m8-postgres-1 zirv-flow-m8-zirv-flow-1 >"$work/stats-one"
+  [ "$(wc -l <"$work/stats-one")" = 1 ]
+  grep -Fq '"name":"{{.Name}}"' "$work/stats-one"
+  grep -Fq 'zirv-flow-m8-postgres-1 zirv-flow-m8-zirv-flow-1' "$work/stats-one"
+  docker() { if [ "$#" -gt 5 ]; then return 1; fi; printf '%s\n' "$5"; }
+  docker_stats_sample zirv-flow-m8-postgres-1 zirv-flow-m8-zirv-flow-1 >"$work/stats-two"
+  [ "$(cat "$work/stats-two")" = "$(printf 'zirv-flow-m8-postgres-1\nzirv-flow-m8-zirv-flow-1')" ]
+  [ "$(M4_PROJECT=p stack_container_names | head -n 1)" = p-postgres-1 ]
+)
+# An image switch during a run is followed and recorded; the check itself stays (capture_topology takes the tag).
+[ "$(image_tag_of ghcr.io/glubiz/zirv-flow:0.225.0)" = 0.225.0 ]
+expect_failure 'is not a versioned tag' bash -c '. "$1/common.sh"; image_tag_of ghcr.io/glubiz/zirv-flow:latest' _ "$here"
+(
+  running_image_tag() { echo 0.225.0; }
+  capture_topology() { [ "$2" = 0.225.0 ]; }
+  BENCH_IMAGE_TAG=0.224.0
+  : >"$work/switch-topology"
+  finish_topology "$work/switch-topology"
+  [ "$BENCH_IMAGE_TAG" = 0.225.0 ]
+  grep -Fq '{"image_switch":{"from":"0.224.0","to":"0.225.0"}}' "$work/switch-topology"
+  : >"$work/same-topology"
+  finish_topology "$work/same-topology"
+  [ ! -s "$work/same-topology" ]
+)
+# The send audience is bounded by the first workspace's people.
+expect_failure 'exceeds the first workspace' bash -c '. "$1/run.sh"; configure; raw=/nonexistent; pool=1000; PEOPLE=2000; prepare_send' _ "$here"
+
 echo 'm8 self-test: parsing, registration, cpusets, disk/memory guards, metadata and prebuilt render passed'

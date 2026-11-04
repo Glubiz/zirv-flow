@@ -18,7 +18,8 @@ for name in busy lead timeout concurrency; do positive_integer "$name" "${!name}
 require_job_sampler
 sampler_pid=''; restore_worker=''; probe=''; trace=''
 cleanup() {
-  if [ -n "$sampler_pid" ]; then kill "$sampler_pid" 2>/dev/null || true; wait "$sampler_pid" 2>/dev/null || true; fi
+  stop_sampler jobkinds "$sampler_pid"
+  terminate_pg_samplers
   if [ -n "$probe" ]; then
     host_pg -c 'DROP TRIGGER IF EXISTS m8_quiet_claim ON jobs; DROP FUNCTION IF EXISTS m8bench.record_quiet_claim()' || log 'failed to remove quiet-claim probe'
   fi
@@ -30,6 +31,8 @@ SQL
   if [ -n "$restore_worker" ]; then compose up -d --no-build --no-deps --force-recreate zirv-flow-worker; fi
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 caps=(unset)
 [ "$cap" = unset ] || caps+=("$cap")
 for setting in "${caps[@]}"; do

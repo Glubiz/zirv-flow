@@ -40,6 +40,8 @@ fi
 watcher=''
 trap 'if [ -n "$watcher" ]; then kill "$watcher" 2>/dev/null || true; wait "$watcher" 2>/dev/null || true; fi
   if [ -n "$container" ]; then docker rm -f "$cname" >/dev/null 2>&1 || true; fi' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 client_count() {
   curl -fsS --connect-timeout 5 --max-time 10 http://127.0.0.1:8080/metrics \
     | awk '$1 == "zirv_flow_debugger_clients" {n = $2} END {print n+0}'

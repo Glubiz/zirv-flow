@@ -96,8 +96,9 @@ require_job_sampler() {
 }
 
 start_job_sampler() {
-  bash "$m8_dir/sample-job-kinds.sh" >"$1/job-kinds.csv" 2>"$1/job-kinds.err" &
+  (export PGAPPNAME=m8-sampler-jobkinds; exec bash "$m8_dir/sample-job-kinds.sh") >"$1/job-kinds.csv" 2>"$1/job-kinds.err" &
   sampler_pid=$!
+  register_sampler jobkinds "$sampler_pid"
 }
 
 wait_worker_metrics() {
@@ -121,7 +122,9 @@ stop_job_sampler() {
   done
   kill "$sampler_pid"
   wait "$sampler_pid" || rc=$?
+  unregister_sampler jobkinds "$sampler_pid"
   sampler_pid=''
+  terminate_pg_samplers
   [ "$rc" = 143 ] || [ "$rc" = 0 ] || die "per-kind sampler failed ($rc); see $1/job-kinds.err"
   python3 -I - "$1" <<'PY'
 import csv, json, pathlib, sys
@@ -152,33 +155,98 @@ quiet_start() {
   pg -c CHECKPOINT
 }
 
+# Background samplers. Every sampler a bench starts is registered in $M8_STATE/samplers (one file per
+# pid) and its database sessions carry a PGAPPNAME starting with m8-sampler, so a leftover is found both
+# on the host (a live pid) and in PostgreSQL (a session). A run stops its samplers on every exit path and
+# refuses to start while one from an earlier run is still alive.
+sampler_dir() { echo "$M8_STATE/samplers"; }
+register_sampler() { mkdir -p "$(sampler_dir)" && : >"$(sampler_dir)/$1.$2"; }
+unregister_sampler() { rm -f "$(sampler_dir)/$1.$2"; }
+stop_sampler() { # name pid
+  [ -z "${2:-}" ] || { kill "$2" 2>/dev/null || true; wait "$2" 2>/dev/null || true; }
+  [ -z "${2:-}" ] || unregister_sampler "$1" "$2"
+}
+# Ends the sessions of every database sampler, whatever their host process did.
+terminate_pg_samplers() {
+  pg -At -c "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity WHERE application_name LIKE 'm8-sampler%' AND pid <> pg_backend_pid()" >/dev/null 2>&1 ||
+    log 'could not end the database sampler sessions'
+}
+# Stops what this run registered that is still alive (a child that was killed hard leaves its sampler behind).
+stop_registered_samplers() {
+  local f pid
+  for f in "$(sampler_dir)"/*.*; do
+    [ -e "$f" ] || continue
+    pid="${f##*.}"
+    kill "$pid" 2>/dev/null || true
+    rm -f "$f"
+  done
+  terminate_pg_samplers
+}
+# Refuses to start while a sampler of an earlier run is alive; clears registrations of dead pids.
+assert_no_samplers() {
+  local f pid live=() sessions
+  for f in "$(sampler_dir)"/*.*; do
+    [ -e "$f" ] || continue
+    pid="${f##*.}"
+    if kill -0 "$pid" 2>/dev/null; then live+=("${f##*/}"); else rm -f "$f"; fi
+  done
+  [ "${#live[@]}" = 0 ] || die "a sampler of an earlier run is still alive (${live[*]}); stop those processes and remove their files in $(sampler_dir)"
+  sessions="$(pg -At -c "SELECT count(*) FROM pg_stat_activity WHERE application_name LIKE 'm8-sampler%'")"
+  [ "$sessions" = 0 ] || die "$sessions database sampler session(s) from an earlier run are alive; end them with: SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name LIKE 'm8-sampler%'"
+}
+
+# The wait-event sampler (pg-waits.sql, once per second) of an arm.
+waits_pid=''
+start_waits_sampler() {
+  (export PGAPPNAME=m8-sampler-waits; exec psql -X -q -v ON_ERROR_STOP=1 -At -f "$m8_dir/pg-waits.sql") >"$1/waits.ndjson" 2>"$1/waits.err" &
+  waits_pid=$!
+  register_sampler waits "$waits_pid"
+}
+stop_waits_sampler() {
+  stop_sampler waits "$waits_pid"
+  waits_pid=''
+  terminate_pg_samplers
+}
+
 # Per-arm instrumentation, shared by every arm (called around the arm's command by run_bench).
 # Everything lands in $1/instrument: serve metrics, PostgreSQL WAL/I/O/checkpoint snapshots,
-# the top statements by execution time, and docker stats of the stack every 10 s.
+# the top statements by execution time, the wait-event sampler and docker stats of the stack.
+# docker stats: one JSON line per container per sample, keyed by container name (a name survives
+# the recreate of a service; an ID does not), every M8_DOCKER_STATS_TICK_S (1) seconds after the previous sample.
 stats_pid=''
 stop_docker_stats() {
-  if [ -n "$stats_pid" ]; then
-    kill "$stats_pid" 2>/dev/null || true
-    wait "$stats_pid" 2>/dev/null || true
-    stats_pid=''
-  fi
+  stop_sampler docker-stats "$stats_pid"
+  stats_pid=''
+}
+stack_container_names() {
+  local service
+  for service in postgres zirv-flow zirv-flow-worker zirv-flow-scheduler; do echo "${M4_PROJECT}-${service}-1"; done
+}
+docker_stats_sample() { # one tick for the container names in "$@"; a missing container (mid-recreate) costs only its own line
+  local now format
+  now="$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
+  format='{"t":"'"$now"'","name":"{{.Name}}","cpu":"{{.CPUPerc}}","mem":"{{.MemUsage}}","mem_pct":"{{.MemPerc}}","net":"{{.NetIO}}","block":"{{.BlockIO}}","pids":"{{.PIDs}}"}'
+  docker stats --no-stream --format "$format" "$@" 2>/dev/null && return 0
+  local name
+  for name in "$@"; do docker stats --no-stream --format "$format" "$name" 2>/dev/null || true; done
 }
 start_docker_stats() {
-  local ids service cid
-  ids=()
-  for service in postgres zirv-flow zirv-flow-worker zirv-flow-scheduler; do
-    cid="$(compose ps -q "$service")"
-    [ -n "$cid" ] && ids+=("$cid")
-  done
+  local names=()
+  mapfile -t names < <(stack_container_names)
   (
     while :; do
-      docker stats --no-stream --format '{{json .}}' "${ids[@]}" | while IFS= read -r line; do
-        printf '%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$line"
-      done
-      sleep "${M8_DOCKER_STATS_TICK_S:-10}"
+      docker_stats_sample "${names[@]}"
+      sleep "${M8_DOCKER_STATS_TICK_S:-1}"
     done
-  ) >"$1/docker-stats.tsv" 2>"$1/docker-stats.err" &
+  ) >"$1/docker-stats.ndjson" 2>"$1/docker-stats.err" &
   stats_pid=$!
+  register_sampler docker-stats "$stats_pid"
+}
+# Ends every sampler of the run; the exit, INT and TERM trap of an arm.
+stop_samplers() {
+  stop_docker_stats
+  stop_waits_sampler
+  stop_registered_samplers
 }
 
 pg_snapshot() { pg -At -f /bench/m8/pg-stats.sql >"$1.tmp" && mv "$1.tmp" "$1"; }
@@ -193,15 +261,19 @@ instrument_begin() {
     die 'pg_stat_statements is not preloaded; recreate PostgreSQL with run.sh up (shared_preload_libraries)'
   pg_snapshot "$dir/pg-stats-before.json"
   start_docker_stats "$dir"
+  start_waits_sampler "$dir"
 }
 
 instrument_end() {
-  local dir="$1/instrument"
+  local dir="$1/instrument" rc=0
+  kill -0 "$waits_pid" 2>/dev/null || { log "wait-event sampler exited early; see $dir/waits.err"; rc=1; }
   stop_docker_stats
+  stop_waits_sampler
   curl -fsS --connect-timeout 5 --max-time 10 http://127.0.0.1:8080/metrics >"$dir/serve-metrics-after.prom" &&
     pg_snapshot "$dir/pg-stats-after.json" &&
     pg -At -f /bench/m8/pg-statements.sql >"$dir/pg-statements.json.tmp" &&
-    mv "$dir/pg-statements.json.tmp" "$dir/pg-statements.json"
+    mv "$dir/pg-statements.json.tmp" "$dir/pg-statements.json" || rc=1
+  return "$rc"
 }
 
 validate_cpus() {
@@ -274,9 +346,25 @@ SQL
   fi
 }
 
+# The version tag the serve container runs now (an image switch during a run is followed, not refused).
+running_image_tag() {
+  local cid ref
+  cid="$(compose ps -q zirv-flow)"
+  [ -n "$cid" ] || die 'no running zirv-flow; run up first'
+  ref="$(docker inspect --format '{{.Config.Image}}' "$cid")"
+  image_tag_of "$ref"
+}
+image_tag_of() {
+  local tag="${1##*:}"
+  [[ "$1" == *:* && "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][a-zA-Z0-9.-]+)?$ ]] || die "image $1 is not a versioned tag"
+  echo "$tag"
+}
+
 # Capture running containers, not just requested environment: old/recreated stacks are visible.
+# $2 is the app image tag the containers must run (default BENCH_IMAGE_TAG); the final capture of a run
+# passes the tag the containers run then, so a switch recorded by the run does not fail the check.
 capture_topology() {
-  local dest="$1" service cid
+  local dest="$1" tag="${2:-$BENCH_IMAGE_TAG}" service cid
   : >"$dest"
   for service in postgres zirv-flow zirv-flow-worker zirv-flow-scheduler; do
     cid="$(compose ps -q "$service")"
@@ -284,17 +372,18 @@ capture_topology() {
     docker inspect --format '{"service":"{{index .Config.Labels "com.docker.compose.service"}}","image":"{{.Config.Image}}","image_id":"{{.Image}}","cpuset":"{{.HostConfig.CpusetCpus}}","memory_bytes":{{.HostConfig.Memory}},"shm_bytes":{{.HostConfig.ShmSize}}}' "$cid" >>"$dest"
   done
   pg -At -c "SELECT json_build_object('postgres_settings', json_object_agg(name, current_setting(name))) FROM unnest(ARRAY['shared_buffers','effective_cache_size','maintenance_work_mem','max_wal_size','checkpoint_timeout','wal_compression','shared_preload_libraries','max_connections']) name" >>"$dest"
-  python3 -I - "$dest" "$(mem_bytes "$M8_PG_MEMORY")" "$(mem_bytes "$M8_SERVE_MEMORY")" \
+  python3 -I - "$dest" "$tag" "$(mem_bytes "$M8_PG_MEMORY")" "$(mem_bytes "$M8_SERVE_MEMORY")" \
     "$(mem_bytes "$M8_WORKER_MEMORY")" "$(mem_bytes "$M8_SCHEDULER_MEMORY")" <<'PY'
 import json, os, sys
 expected = {'postgres': 'M8_PG_CPUSET', 'zirv-flow': 'M8_SERVE_CPUSET',
             'zirv-flow-worker': 'M8_WORKER_CPUSET', 'zirv-flow-scheduler': 'M8_WORKER_CPUSET'}
-memory = dict(zip(['postgres', 'zirv-flow', 'zirv-flow-worker', 'zirv-flow-scheduler'], map(int, sys.argv[2:])))
+tag = sys.argv[2]
+memory = dict(zip(['postgres', 'zirv-flow', 'zirv-flow-worker', 'zirv-flow-scheduler'], map(int, sys.argv[3:])))
 for line in open(sys.argv[1]):
     row = json.loads(line)
     if 'postgres_settings' in row:
         continue
-    image = os.environ['M8_PG_IMAGE'] if row['service'] == 'postgres' else 'ghcr.io/glubiz/zirv-flow:' + os.environ['BENCH_IMAGE_TAG']
+    image = os.environ['M8_PG_IMAGE'] if row['service'] == 'postgres' else 'ghcr.io/glubiz/zirv-flow:' + tag
     if row['cpuset'] != os.environ[expected[row['service']]] or row['image'] != image:
         raise SystemExit(f"{row['service']} differs from requested image/cpuset; run up first")
     requested = memory[row['service']]
@@ -315,6 +404,7 @@ cut = args.index('--')
 rows = [json.loads(line) for line in pathlib.Path(topology).read_text().splitlines()]
 containers = [row for row in rows if 'service' in row]
 postgres_settings = next((row['postgres_settings'] for row in rows if 'postgres_settings' in row), None)
+image_switch = next((row['image_switch'] for row in rows if 'image_switch' in row), None)
 for row in containers:
     cpus = set()
     for part in row['cpuset'].split(','):
@@ -348,7 +438,7 @@ report = dict(benchmark=bench, label=label, ruling='ef99d178',
     measurement_scope='native host tool; Docker limits do not constrain renderbench' if bench == 'render' else 'Docker app stack',
     recorded_at=datetime.datetime.now(datetime.timezone.utc).isoformat(), smoke=bool(smoke),
     command_line=args[:cut], benchmark_command=args[cut+1:], exit_code=int(rc),
-    topology=dict(containers=containers, postgres_settings=postgres_settings, host=dict(os=platform.system(), logical_cpus=os.cpu_count(), memory_bytes=host_memory),
+    topology=dict(containers=containers, postgres_settings=postgres_settings, image_switch=image_switch, host=dict(os=platform.system(), logical_cpus=os.cpu_count(), memory_bytes=host_memory),
         docker_vm=dict(cpus=vm.get('NCPU'), memory_bytes=vm.get('MemTotal'), operating_system=vm.get('OperatingSystem'))),
     seeds=seeds, results=results)
 target = pathlib.Path(path)
