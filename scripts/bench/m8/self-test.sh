@@ -490,6 +490,11 @@ mkdir -p "$work/burst-short"; : >"$M8_TEST_LOADGEN_ARGS"; printf '0\n' >"$M8_TES
 M8_BURST_SECONDS=20 bash "$here/burst.sh" "$work/burst-short" 1000 >/dev/null 2>&1
 grep -Fq -- '--burst-duration 20 ' "$M8_TEST_LOADGEN_ARGS"
 json_of "$work/burst-short/burst.json" "assert r['shortened'] and r['burst_seconds']==20"
+# Under M8_SMOKE (the child arm does not see run.sh's smoke variable) the burst defaults to 10 seconds.
+mkdir -p "$work/burst-smoke"; : >"$M8_TEST_LOADGEN_ARGS"; printf '0\n' >"$M8_TEST_INBOX_SEQ"
+(unset M8_BURST_SECONDS; M8_SMOKE=1 bash "$here/burst.sh" "$work/burst-smoke" 1000 >/dev/null 2>&1)
+grep -Fq -- '--burst-duration 10 ' "$M8_TEST_LOADGEN_ARGS"
+json_of "$work/burst-smoke/burst.json" "assert r['shortened'] and r['burst_seconds']==10"
 # The arm refuses a serve container that still has the default limits, and a failing loadgen fails the arm.
 mkdir -p "$work/burst-limits"; : >"$M8_TEST_LOADGEN_ARGS"
 (export M8_TEST_SERVE_ENV='["ZIRV_FLOW_INGEST__RATE_PER_KEY=10000","ZIRV_FLOW_INGEST__BURST_PER_KEY=20000"]'

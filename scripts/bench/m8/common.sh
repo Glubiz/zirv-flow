@@ -515,7 +515,7 @@ PY
 # BENCH_BURST_PER_KEY, read by compose.bench.yaml) and restores the stack's own limits afterwards.
 burst_seconds() {
   local s="${M8_BURST_SECONDS:-600}"
-  [ -n "${M8_BURST_SECONDS:-}" ] || [ -z "${smoke:-}" ] || s=10
+  [ -n "${M8_BURST_SECONDS:-}" ] || [ -z "${smoke:-${M8_SMOKE:-}}" ] || s=10
   positive_integer M8_BURST_SECONDS "$s"
   echo "$s"
 }
