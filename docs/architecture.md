@@ -2660,29 +2660,38 @@ zone is still read after the person lock (ruling 699e7ad5), and a read made befo
 checked again under it, so a merge or an erasure that came first is seen. The wakes run in lock
 order: by the lowest person id of the wake's lock group (its person, and the survivor that person
 was merged into), then by person id, a wake whose enrollment is gone first. Each runs behind a
-savepoint of its own: its lease check, the step and its decisions, and its fenced completion, with
-its heartbeat running until the completion. A wake whose handler fails, or whose lease check,
-heartbeat or completion finds the lease gone, rolls back to its savepoint, which drops its writes
-and the row locks it took, and the others go on. A failure is then written in the batch
+savepoint of its own, its lease check and its step, with its heartbeat running until the batch
+completes it. A wake whose handler fails, or whose lease check or heartbeat finds the lease gone,
+rolls back to its savepoint, which drops its writes, its decisions and the row locks it took, and
+the others go on. A failure is then written in the batch
 transaction, outside the wake's savepoint and in a savepoint of its own (ruling 4e9d24be), with
 the statement that settles a job alone's: the attempt and its error, the backoff, the cleared
 lease and the `job_error` decision (on the last attempt the enrollment fails). Its job row is
 `ready` once the batch commits, so a reaper that waited for the batch finds it settled, not a
 running job whose lease ran out while the later wakes ran. A failure that cannot be written there
 (a deadlock with a reaper that holds the row, say) is rolled back to that savepoint and settled
-after the transaction, and a lost lease leaves the job to its new owner. One commit ends the batch,
-so 32 steps make one handler commit instead of 32. When the commit fails, or an error leaves
-the transaction unusable, it is rolled back: every wake that completed in it fails with `could not
-commit the job transaction`, as a job alone whose commit fails (its attempt counts and it retries),
-and every failure written in it is settled again after it, on a lease the rollback left as it was.
-A completed wake's fenced delete and a failed wake's written failure hold its job row until the
-commit, so the reaper waits for the batch instead of returning the job meanwhile. The slot begins
-no wake past the hold limit and gives the rest back as for any claim, so a wake starts with five
-sixths of its lease, and a batch holds at most 32. The decisions of one batch share their
-`recorded_at` (the column's default, the transaction's start) and keep their order by id; a
-failure written in the batch shares it too, under a random id, so in a trace it sorts after the
-enrollment's earlier steps, as before, but by its id among the rows another wake of the same
-trace wrote in the batch, and before the rows of transactions that began while the batch ran.
+after the transaction, and a lost lease leaves the job to its new owner. The batch ends with one
+fenced delete of the jobs of every wake that completed, `DELETE ... WHERE (id, lease_token) IN
+(...) RETURNING id` with the rows taken `FOR UPDATE` in id order, one append of the decisions of
+the wakes it kept, and one commit, so 32 steps make one handler commit instead of 32; it reads
+the clock once, before it plans the wakes, and every wake steps at that time. A wake the delete
+does not return lost its lease after its step ran, and the batch is rolled back, as a job alone
+is when its fenced delete finds no row: that job is left to its new owner or the reaper. When the
+commit fails, or an error leaves the transaction unusable, it is rolled back too: every other
+wake that completed in it fails with `could not commit the job transaction`, as a job alone whose
+commit fails (its attempt counts and it retries), and every failure written in it is settled again
+after it, on a lease the rollback left as it was. A completed wake's heartbeat beats on until the
+delete, so its lease does not run out while the later wakes run, and a failed wake's written
+failure holds its job row until the commit, so the reaper waits for the batch instead of returning
+that job meanwhile. On 0.231.0, with a completion, a decision append and a clock read per wake, a
+batch of 32 timer wakes made 490 round trips; it makes 397 (12.4 a wake). The slot begins no wake
+past the hold limit and gives the rest back as for any claim, so a wake starts with five sixths of
+its lease, and a batch holds at most 32. The decisions of one batch share their `recorded_at`
+(the column's default, the transaction's start) and keep their order by id, minted as each is
+made, and a wake that rolls back to its savepoint drops its own; a failure written in the batch
+shares it too, under a random id, so in a trace it sorts after the enrollment's earlier steps, as
+before, but by its id among the rows another wake of the same trace wrote in the batch, and before
+the rows of transactions that began while the batch ran.
 `zirv_flow_job_transactions_total{kind}` counts handler transactions, so jobs per
 transaction is `zirv_flow_jobs_total` over it; a batched job's duration is its own wake plus an
 equal share of the batch's setup and commit.
@@ -2697,10 +2706,10 @@ A deadlock among those is found after `deadlock_timeout` (1 s by default) and Po
 statement of one side; in a batch that is one wake, which rolls back to its savepoint and retries
 alone, while the wait has used the hold limit, so the batch gives its unbegun wakes back.
 
-The engine invariants (section 18) hold per wake as for a job alone. A wake's writes, step rows,
-next wake and completion sit inside its savepoint and commit or roll back together, with the batch,
-so a completion that commits still means that its step committed once, and a wake that rolls back
-leaves nothing. A later wake of the batch reads what the earlier ones wrote, as it would after
+The engine invariants (section 18) hold per wake as for a job alone. A wake's writes, step rows
+and next wake sit inside its savepoint, and its completion and decisions in the batch, so they
+commit or roll back together, with the batch: a completion that commits still means that its step
+committed once, and a wake that rolls back leaves nothing. A later wake of the batch reads what the earlier ones wrote, as it would after
 their commit, and the `state_version` compare-and-set, the step and effect keys and the wake keys
 are unchanged. Both simulation layers run batches (section 18).
 
