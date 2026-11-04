@@ -96,7 +96,7 @@ person's events and the decisions the system made about them, newest first, as e
 cover trait changes, merges, consent changes, list membership and identity conflicts. The
 people merged into this one are included. `kinds` is `event`, `decision` or both separated by
 a comma. The `event.accepted` decision repeats the event entry, so it is left out unless you
-pass `all_decisions=true`. Every entry has a `trace_id` that opens in **Traces**
+pass `all_decisions=true`; only events accepted before version 0.231.0 have one. Every entry has a `trace_id` that opens in **Traces**
 (`GET .../traces/{trace_id}`), where the decisions hold ids and reason codes only.
 
 **Masking.** Identifier values, PII-flagged field values and the PII properties of events

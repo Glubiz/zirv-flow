@@ -15874,7 +15874,7 @@
           "people"
         ],
         "summary": "A person's timeline, newest first: their events, and the decisions the system made about\nthem (trait changes, merges, consent changes, list membership, identity conflicts). Each\nentry has a `trace_id` that opens the decisions behind it. A person that was merged into\nanother reads as the survivor, with the merged people's entries included. Event properties\nthe schema flags as PII are masked for callers who may not see values.",
-        "description": "`event.accepted` decisions duplicate the event entry and are left out unless\n`all_decisions=true`.",
+        "description": "`event.accepted` decisions duplicate the event entry and are left out unless\n`all_decisions=true`. Only events accepted before 0.231.0 have one.",
         "operationId": "get_person_timeline",
         "parameters": [
           {
@@ -15929,7 +15929,7 @@
           {
             "name": "all_decisions",
             "in": "query",
-            "description": "Include the `event.accepted` decisions; default false",
+            "description": "Include the `event.accepted` decisions that versions before 0.231.0 wrote; default false",
             "required": false,
             "schema": {
               "type": "boolean"

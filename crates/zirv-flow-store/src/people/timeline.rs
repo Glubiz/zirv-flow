@@ -19,7 +19,8 @@ use zirv_flow_core::events::SchemaProperty;
 use crate::StoreError;
 use crate::bounded::begin_bounded;
 
-/// The action of the decision that duplicates an event entry.
+/// The action of the decision that duplicates an event entry. Versions before 0.231.0 wrote one
+/// per accepted event; later ones write none, so only older rows match.
 const EVENT_ACCEPTED: &str = "event.accepted";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -70,7 +71,8 @@ pub struct TimelineCursor {
 pub struct TimelineFilter {
     pub events: bool,
     pub decisions: bool,
-    /// Include `event.accepted`, which duplicates the event entry.
+    /// Include `event.accepted`, which duplicates the event entry. Only events accepted by
+    /// versions before 0.231.0 have one.
     pub all_decisions: bool,
 }
 
@@ -411,6 +413,23 @@ mod tests {
         }
     }
 
+    /// A decision as versions before 0.231.0 wrote it for an accepted event, which no code writes
+    /// now.
+    async fn insert_legacy_accepted(pool: &PgPool, ws: WorkspaceId, event: Uuid) {
+        sqlx::query(
+            "INSERT INTO decision_records \
+                (id, workspace_id, trace_id, action, outcome, cause_kind, cause_id, subject_ids) \
+             SELECT gen_random_uuid(), workspace_id, trace_id, 'event.accepted', 'unplanned', \
+                    'api', 'test', jsonb_build_object('event', id, 'person', person_id) \
+             FROM events WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(event)
+        .bind(ws.as_uuid())
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     async fn set_decision_time(pool: &PgPool, action: &str, at: OffsetDateTime) {
         sqlx::query("UPDATE decision_records SET recorded_at = $2 WHERE action = $1")
             .bind(action)
@@ -447,6 +466,7 @@ mod tests {
         .await;
         assert_ne!(survivor, merged);
         let event = track(pool, ws, SECRET_EVENT, SECRET_EMAIL).await;
+        insert_legacy_accepted(pool, ws, event).await;
         let mut tx = begin(pool).await.unwrap();
         set_consent(
             &mut tx,
@@ -638,7 +658,10 @@ mod tests {
         .await;
 
         assert!(!default.contains(&"event.accepted".to_owned()));
-        assert!(all.contains(&"event.accepted".to_owned()));
+        assert!(
+            all.contains(&"event.accepted".to_owned()),
+            "an old row still reads"
+        );
         assert_eq!(events_only, ["event"]);
         assert!(!decisions_only.contains(&"event".to_owned()));
         assert!(decisions_only.contains(&"person.merge".to_owned()));

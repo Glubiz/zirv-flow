@@ -1378,6 +1378,47 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_trace_endpoint_still_returns_an_event_accepted_decision_an_older_version_wrote(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let trace = zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("req-1"));
+        zirv_flow_store::append_decision(
+            &pool,
+            &zirv_flow_store::NewDecision {
+                graph: None,
+                workspace_id: ws.parse().unwrap(),
+                trace: trace.clone(),
+                spec: &zirv_flow_core::decision_actions::EVENT_ACCEPTED_UNPLANNED,
+                detail: None,
+                subject_ids: vec![
+                    ("event", uuid::Uuid::new_v4()),
+                    ("person", uuid::Uuid::new_v4()),
+                ],
+                job: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let found = call(
+            &router,
+            "GET",
+            &format!("/api/v1/workspaces/{ws}/traces/{}", trace.trace_id),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(found.status, StatusCode::OK, "{:?}", found.body);
+        assert_eq!(found.body["records"][0]["action"], "event.accepted");
+        assert_eq!(found.body["records"][0]["outcome"], "unplanned");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_malformed_trace_id_is_a_400_problem(pool: PgPool) {
         let router = app(&pool).await;
         let owner = owner(&pool, &router).await;
@@ -6481,6 +6522,14 @@ email,b@example.com,
         zirv_flow_store::apply_event_batch(pool, workspace, &key, &[event])
             .await
             .unwrap();
+        // Versions before 0.231.0 wrote a decision for each accepted event; this one is such a row.
+        sqlx::query(
+            "INSERT INTO decision_records                 (id, workspace_id, trace_id, action, outcome, cause_kind, cause_id, subject_ids)              SELECT gen_random_uuid(), workspace_id, trace_id, 'event.accepted', 'unplanned',                     'api', 'seed', jsonb_build_object('event', id, 'person', person_id)              FROM events WHERE workspace_id = $1",
+        )
+        .bind(workspace.as_uuid())
+        .execute(pool)
+        .await
+        .unwrap();
         let both = apply(
             &[("email", "ada@example.com"), ("anonymous_id", "anon-1")],
             "3",

@@ -194,7 +194,7 @@ fn parse_page(query: &str) -> Result<Page, ApiError> {
 /// the schema flags as PII are masked for callers who may not see values.
 ///
 /// `event.accepted` decisions duplicate the event entry and are left out unless
-/// `all_decisions=true`.
+/// `all_decisions=true`. Only events accepted before 0.231.0 have one.
 #[utoipa::path(
     get,
     operation_id = "get_person_timeline",
@@ -206,7 +206,7 @@ fn parse_page(query: &str) -> Result<Page, ApiError> {
         ("limit" = Option<u32>, Query, description = "Entries per page, 1 to 200; default 50"),
         ("cursor" = Option<String>, Query, description = "The next_cursor of the previous page"),
         ("kinds" = Option<String>, Query, description = "`event`, `decision` or both separated by a comma; default both"),
-        ("all_decisions" = Option<bool>, Query, description = "Include the `event.accepted` decisions; default false")
+        ("all_decisions" = Option<bool>, Query, description = "Include the `event.accepted` decisions that versions before 0.231.0 wrote; default false")
     ),
     responses(
         (status = 200, description = "A page of entries", body = TimelineBody),

@@ -9,9 +9,11 @@
 --
 --   PGOPTIONS="-c bench.since=2026-01-01T10:00:00Z" psql "$DATABASE_URL" -f scripts/bench/applied-latency.sql
 --
--- track:    decision_records.recorded_at of the `event.accepted` decision minus
---           events.received_at. The decision names its event in subject_ids->>'event';
---           received_at is the inbox row's arrival time, copied when the event is stored.
+-- track:    the apply time of the event minus events.received_at. The apply time is the
+--           millisecond timestamp in the first 48 bits of the event's v7 id, which the drain
+--           takes when it applies the event (no decision is written for an accepted event, and
+--           the timestamp is read in SQL so this works before PostgreSQL 17); received_at is
+--           the inbox row's arrival time, copied when the event is stored.
 -- identify: decision_records.recorded_at of the LATEST `trait.change` decision of a
 --           source record (subject_ids->>'source_record') minus the observation time the
 --           record keeps for its traits ("at" in source_records.traits). The inbox row is
@@ -19,9 +21,10 @@
 --           arrival, so the loadgen sends none. Only the latest change per record is
 --           comparable, because "at" is overwritten by every later change.
 --
--- recorded_at defaults to now(), which is the START of the draining transaction, so the
--- figure leaves out the time a row waits inside its own drain batch (bounded by
--- ingest.drain_batch_size rows); it is a slight under-estimate.
+-- For identify, recorded_at defaults to now(), which is the START of the draining transaction, so
+-- that figure leaves out the time a row waits inside its own drain batch (bounded by
+-- ingest.drain_batch_size rows); it is a slight under-estimate. The track figure is taken when the
+-- event is applied, so it includes part of that wait, to the millisecond.
 --
 -- Output, one row per kind (zero items give NULL percentiles): items, p50_ms, p95_ms,
 -- p99_ms, max_ms.
@@ -31,12 +34,12 @@ WITH bounds AS (
 ),
 track AS (
     SELECT 'track'::text AS kind,
-           extract(epoch FROM d.recorded_at - e.received_at) AS seconds
-    FROM decision_records d
-    JOIN events e
-      ON e.id = (d.subject_ids ->> 'event')::uuid AND e.workspace_id = d.workspace_id
+           extract(epoch FROM
+               to_timestamp(('x' || substr(replace(e.id::text, '-', ''), 1, 12))::bit(48)::bigint / 1000.0)
+               - e.received_at) AS seconds
+    FROM events e
     CROSS JOIN bounds
-    WHERE d.action = 'event.accepted' AND e.source = 'api' AND e.received_at >= bounds.since
+    WHERE e.source = 'api' AND e.received_at >= bounds.since
 ),
 latest_change AS (
     SELECT DISTINCT ON (d.subject_ids ->> 'source_record')

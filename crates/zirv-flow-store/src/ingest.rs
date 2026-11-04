@@ -1320,7 +1320,7 @@ mod tests {
             let (decisions, _) = list_trace(&pool, ws, trace.trace_id, 50).await.unwrap();
             let actions: Vec<&str> = decisions.iter().map(|d| d.action.as_str()).collect();
             assert!(actions.contains(&"person.created"), "{actions:?}");
-            assert!(actions.contains(&"event.accepted"), "{actions:?}");
+            assert!(!actions.contains(&"event.accepted"), "{actions:?}");
             assert!(decisions.iter().all(|d| d.cause.kind == CauseKind::Api));
             let events: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE trace_id = $1")
                 .bind(trace.trace_id.as_uuid())
@@ -1700,12 +1700,9 @@ mod tests {
                 made,
                 [
                     ("person.created", "created"),
-                    ("event.accepted", "unplanned"),
                     ("person.created", "created"),
                     ("trait.change", "changed"),
-                    ("event.accepted", "unplanned"),
                     ("person.created", "created"),
-                    ("event.accepted", "unplanned"),
                 ]
             );
             let keys: Vec<Vec<String>> = decisions
@@ -1718,9 +1715,9 @@ mod tests {
                 })
                 .collect();
             assert_eq!(keys[0], ["person"]);
-            assert_eq!(keys[1], ["event", "person"]);
+            assert_eq!(keys[1], ["person", "source_record"]);
             assert_eq!(keys[2], ["person", "source_record"]);
-            assert_eq!(keys[3], ["person", "source_record"]);
+            assert_eq!(keys[3], ["person"]);
             assert!(decisions.iter().all(|d| d.cause.kind == CauseKind::Api));
             assert!(
                 decisions
@@ -1736,6 +1733,143 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(statements, 1);
+        })
+        .await;
+    }
+
+    /// 100 known people, then 500 track items: 190 for known people, 300 for new ones and 10 with
+    /// a reserved event name. Returns the workspace and the decision counts the drain added, as
+    /// `(action, count)`, and the WAL bytes it wrote.
+    async fn drain_five_hundred_track_items(
+        pool: &PgPool,
+    ) -> (WorkspaceId, Vec<(String, i64)>, i64) {
+        let ws = workspace(pool, "ours").await;
+        let trace = TraceContext::root(Cause::api("req"));
+        let known: Vec<IngestItem> = (0..100)
+            .map(|n| identify(&format!("k{n}"), &format!("i-{n}"), json!({"plan": "free"})))
+            .collect();
+        append(pool, ws, &trace, &known).await;
+        drain_batch(pool, ws, Shard::ALL, &key(), 500)
+            .await
+            .unwrap();
+
+        let items: Vec<IngestItem> = (0..500)
+            .map(|n| match n {
+                0..190 => track(
+                    &format!("k{}", n % 100),
+                    &format!("t-{n}"),
+                    "seen",
+                    json!({}),
+                ),
+                190..490 => track(&format!("n{n}"), &format!("t-{n}"), "seen", json!({})),
+                _ => track(
+                    &format!("bad{n}"),
+                    &format!("t-{n}"),
+                    "segment.entered",
+                    json!({}),
+                ),
+            })
+            .collect();
+        append(pool, ws, &trace, &items).await;
+        let before: i64 =
+            sqlx::query_scalar("SELECT (pg_current_wal_lsn() - '0/0'::pg_lsn)::bigint")
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        let counted = |pool: &PgPool| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_as::<_, (String, i64)>(
+                    "SELECT action, count(*) FROM decision_records GROUP BY action ORDER BY action",
+                )
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        let earlier = counted(pool).await;
+
+        let outcome = drain_batch(pool, ws, Shard::ALL, &key(), 500)
+            .await
+            .unwrap();
+        let after: i64 =
+            sqlx::query_scalar("SELECT (pg_current_wal_lsn() - '0/0'::pg_lsn)::bigint")
+                .fetch_one(pool)
+                .await
+                .unwrap();
+
+        assert_eq!(outcome.rows, 500);
+        let mut added = counted(pool).await;
+        for (action, count) in &mut added {
+            *count -= earlier
+                .iter()
+                .find(|(name, _)| name == action)
+                .map_or(0, |(_, count)| *count);
+        }
+        added.retain(|(_, count)| *count > 0);
+        (ws, added, after - before)
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_drain_of_track_items_writes_no_accepted_decision_only_new_people_and_rejects(
+        pool: PgPool,
+    ) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let (ws, added, wal_bytes) = drain_five_hundred_track_items(&pool).await;
+
+            eprintln!("drain of 500 track items: {wal_bytes} WAL bytes, decisions {added:?}");
+            assert_eq!(
+                added,
+                [
+                    ("event.rejected".to_owned(), 10),
+                    ("person.created".to_owned(), 300)
+                ]
+            );
+            let events: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM events WHERE workspace_id = $1")
+                    .bind(ws.as_uuid())
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(events, 490, "every valid item is stored");
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_drain_of_track_items_writes_fewer_decision_rows_and_wal_than_one_accepted_decision_per_event(
+        pool: PgPool,
+    ) {
+        crate::decision_testing::checked(pool, |pool| async move {
+        let (ws, added, wal_bytes) = drain_five_hundred_track_items(&pool).await;
+        let rows: i64 = added.iter().map(|(_, count)| count).sum();
+
+        // What the removed decisions would have cost: 490 rows of the shape earlier versions
+        // wrote, inserted in one statement and rolled back.
+        let mut tx = pool.begin().await.unwrap();
+        let plan: serde_json::Value = sqlx::query_scalar(
+            "EXPLAIN (ANALYZE, WAL, FORMAT JSON)              INSERT INTO decision_records                 (id, workspace_id, trace_id, action, outcome, cause_kind, cause_id, subject_ids)              SELECT gen_random_uuid(), $1, gen_random_uuid(), 'event.accepted', 'unplanned', 'api',                     'x', jsonb_build_object('event', gen_random_uuid(), 'person', gen_random_uuid())              FROM generate_series(1, 490)",
+        )
+        .bind(ws.as_uuid())
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        tx.rollback().await.unwrap();
+        let removed_bytes = plan[0]["Plan"]["WAL Bytes"].as_i64().unwrap();
+
+        eprintln!(
+            "drain WAL {wal_bytes} bytes in {rows} decision rows; 490 accepted rows: {removed_bytes} bytes"
+        );
+        assert_eq!(
+            rows, 310,
+            "the new people and the rejects, 490 fewer than before"
+        );
+        assert!(
+            removed_bytes > 0,
+            "the dropped decisions were a real share of the log"
+        );
         })
         .await;
     }
