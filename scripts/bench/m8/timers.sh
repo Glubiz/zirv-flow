@@ -20,7 +20,7 @@ sampler_pid=''; load_pid=''; worker_stopped=''
 cleanup() {
   if [ -n "$load_pid" ]; then kill "$load_pid" 2>/dev/null || true; wait "$load_pid" 2>/dev/null || true; fi
   stop_sampler jobkinds "$sampler_pid"
-  terminate_pg_samplers
+  terminate_pg_samplers m8-sampler-jobkinds
   if [ -n "$worker_stopped" ]; then compose start zirv-flow-worker; fi
 }
 trap cleanup EXIT

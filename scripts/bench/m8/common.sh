@@ -124,7 +124,7 @@ stop_job_sampler() {
   wait "$sampler_pid" || rc=$?
   unregister_sampler jobkinds "$sampler_pid"
   sampler_pid=''
-  terminate_pg_samplers
+  terminate_pg_samplers m8-sampler-jobkinds
   [ "$rc" = 143 ] || [ "$rc" = 0 ] || die "per-kind sampler failed ($rc); see $1/job-kinds.err"
   python3 -I - "$1" <<'PY'
 import csv, json, pathlib, sys
@@ -167,8 +167,8 @@ stop_sampler() { # name pid
   [ -z "${2:-}" ] || unregister_sampler "$1" "$2"
 }
 # Ends the sessions of every database sampler, whatever their host process did.
-terminate_pg_samplers() {
-  pg -At -c "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity WHERE application_name LIKE 'm8-sampler%' AND pid <> pg_backend_pid()" >/dev/null 2>&1 ||
+terminate_pg_samplers() { # optional $1: application_name to end (default every sampler)
+  pg -At -c "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity WHERE application_name LIKE '${1:-m8-sampler%}' AND pid <> pg_backend_pid()" >/dev/null 2>&1 ||
     log 'could not end the database sampler sessions'
 }
 # Stops what this run registered that is still alive (a child that was killed hard leaves its sampler behind).

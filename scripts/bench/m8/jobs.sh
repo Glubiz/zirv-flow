@@ -19,7 +19,7 @@ require_job_sampler
 sampler_pid=''; restore_worker=''; probe=''; trace=''
 cleanup() {
   stop_sampler jobkinds "$sampler_pid"
-  terminate_pg_samplers
+  terminate_pg_samplers m8-sampler-jobkinds
   if [ -n "$probe" ]; then
     host_pg -c 'DROP TRIGGER IF EXISTS m8_quiet_claim ON jobs; DROP FUNCTION IF EXISTS m8bench.record_quiet_claim()' || log 'failed to remove quiet-claim probe'
   fi
