@@ -33856,7 +33856,8 @@
           "flags",
           "properties",
           "masked",
-          "trace_id"
+          "trace_id",
+          "has_decisions"
         ],
         "properties": {
           "flags": {
@@ -33865,6 +33866,10 @@
               "type": "string"
             },
             "description": "Timing flags such as `late`, and `replayed` and `no_triggers` for a replayed event."
+          },
+          "has_decisions": {
+            "type": "boolean",
+            "description": "Whether the trace holds any decision. An accepted event writes no decision of its own, so\nthe trace of an event that changed nothing answers 404."
           },
           "id": {
             "type": "string",

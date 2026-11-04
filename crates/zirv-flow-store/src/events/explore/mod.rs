@@ -16,7 +16,7 @@
 
 mod filter;
 
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
@@ -190,6 +190,9 @@ pub struct ExploreRow {
     pub validation_state: String,
     pub flags: Vec<String>,
     pub trace_id: Uuid,
+    /// Whether the trace holds any decision. An accepted event writes none of its own, so the
+    /// trace of an event that changed nothing is empty and the trace API answers 404.
+    pub has_decisions: bool,
     pub properties: Map<String, Value>,
     /// The published schema version the event was validated against; absent for an event
     /// without one.
@@ -556,6 +559,11 @@ pub async fn explore_breakdown(
     })
 }
 
+/// Which of the page's traces (`$2`) hold a decision: one probe per trace on the decision trace
+/// index, with the workspace and trace filter of `list_trace`. It runs in the page's snapshot and
+/// under its statement timeout.
+const TRACES_WITH_DECISIONS: &str = "SELECT t.trace_id FROM unnest($2::uuid[]) AS t(trace_id)      WHERE EXISTS (SELECT 1 FROM decision_records d                    WHERE d.workspace_id = $1 AND d.trace_id = t.trace_id)";
+
 #[derive(FromRow)]
 struct EventRow {
     id: Uuid,
@@ -656,6 +664,15 @@ async fn rows_page(
             schemas.insert((name, version), Arc::new(properties.0));
         }
     }
+    let traces: Vec<Uuid> = rows.iter().map(|row| row.trace_id).collect();
+    let traced: HashSet<Uuid> = sqlx::query_scalar(TRACES_WITH_DECISIONS)
+        .bind(workspace.as_uuid())
+        .bind(&traces)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(bounded)?
+        .into_iter()
+        .collect();
     drop(tx);
 
     let next = if more {
@@ -680,6 +697,7 @@ async fn rows_page(
             validation_state: row.validation_state,
             flags: row.flags,
             trace_id: row.trace_id,
+            has_decisions: traced.contains(&row.trace_id),
             properties: match row.properties {
                 Value::Object(map) => map,
                 _ => Map::new(),
@@ -739,6 +757,90 @@ mod tests {
         let name = WorkspaceName::parse(slug).unwrap();
         let slug = Slug::parse(slug).unwrap();
         create_workspace(pool, &name, &slug).await.unwrap().id
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_row_says_whether_its_trace_holds_a_decision_and_the_probe_is_an_index_scan(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let key = HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction);
+        let at = OffsetDateTime::now_utc();
+        for name in ["first_seen", "seen_again"] {
+            let record = EventRecord {
+                source_record_id: None,
+                source: "web".into(),
+                identifiers: vec![("email".into(), "known@example.com".into())],
+                name: name.into(),
+                properties: Default::default(),
+                timestamp: Some(at),
+                received_at: at,
+                message_id: None,
+                trace: TraceContext::root(Cause::api(name)),
+            };
+            apply_event_batch(&pool, ws, &key, &[record]).await.unwrap();
+        }
+        let scope = ExploreScope {
+            name: None,
+            filters: &[],
+            from: at - TimeDuration::days(1),
+            to: at + TimeDuration::days(1),
+            person: None,
+        };
+
+        let page = explore_rows(&pool, ws, &scope, None, 100, LIMITS, true)
+            .await
+            .unwrap();
+
+        let flag = |name: &str| {
+            page.rows
+                .iter()
+                .find(|row| row.name == name)
+                .unwrap()
+                .has_decisions
+        };
+        assert!(flag("first_seen"), "it created the person");
+        assert!(!flag("seen_again"), "it changed nothing");
+
+        sqlx::query(
+            "INSERT INTO decision_records              (id, workspace_id, trace_id, action, outcome, cause_kind, cause_id)              SELECT gen_random_uuid(), $1, gen_random_uuid(), 'step', 'done', 'api', 'x'              FROM generate_series(1, 50000)",
+        )
+        .bind(ws.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("VACUUM (ANALYZE) decision_records")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let plan: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN (COSTS OFF) {}",
+            TRACES_WITH_DECISIONS
+                .replace("$2", "ARRAY[gen_random_uuid()]")
+                .replace("$1", &format!("'{}'", ws.as_uuid()))
+        )))
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let plan = plan.join(
+            "
+",
+        );
+        eprintln!("{plan}");
+        let month: String = sqlx::query_scalar(
+            "SELECT 'decision_records_y' || to_char(now(), 'YYYY') || 'm' || to_char(now(), 'MM')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            plan.contains(&format!(
+                "Index Only Scan using {month}_workspace_id_trace_id"
+            )),
+            "{plan}"
+        );
+        assert!(!plan.contains(&format!("Seq Scan on {month}")), "{plan}");
     }
 
     fn property(name: &str, property_type: PropertyType, pii: bool) -> SchemaProperty {
@@ -872,6 +974,7 @@ mod tests {
             validation_state: "valid".into(),
             flags: Vec::new(),
             trace_id: Uuid::nil(),
+            has_decisions: false,
             properties: json!({"email": "a@example.com"})
                 .as_object()
                 .cloned()

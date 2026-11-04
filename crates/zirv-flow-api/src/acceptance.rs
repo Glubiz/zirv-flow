@@ -9486,6 +9486,74 @@ email,b@example.com,
         })
     }
 
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_explored_event_says_whether_its_trace_holds_any_decision(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let workspace_id: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
+        let key = zirv_flow_core::HmacRoot::bootstrap_from(&zirv_flow_core::MasterKey::generate())
+            .hmac_key(zirv_flow_core::HmacPurpose::Redaction);
+        for name in ["first_seen", "seen_again"] {
+            let record = zirv_flow_store::EventRecord {
+                source_record_id: None,
+                source: "web".into(),
+                identifiers: vec![("email".into(), "known@example.com".into())],
+                name: name.into(),
+                properties: Default::default(),
+                timestamp: None,
+                received_at: time::OffsetDateTime::now_utc(),
+                message_id: None,
+                trace: zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api(name)),
+            };
+            zirv_flow_store::apply_event_batch(&pool, workspace_id, &key, &[record])
+                .await
+                .unwrap();
+        }
+
+        let reply = call(
+            &router,
+            "POST",
+            &explore_uri(&ws, "list"),
+            Some(with_range(json!({}))),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+        let flag = |name: &str| {
+            reply.body["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["name"] == name)
+                .unwrap()["has_decisions"]
+                .clone()
+        };
+        assert_eq!(flag("first_seen"), json!(true), "it created the person");
+        assert_eq!(flag("seen_again"), json!(false), "it changed nothing");
+        for event in reply.body["events"].as_array().unwrap() {
+            let opened = call(
+                &router,
+                "GET",
+                &format!(
+                    "/api/v1/workspaces/{ws}/traces/{}",
+                    event["trace_id"].as_str().unwrap()
+                ),
+                None,
+                Auth::Session(&owner),
+            )
+            .await;
+            let expected = if event["has_decisions"] == json!(false) {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::OK
+            };
+            assert_eq!(opened.status, expected, "{event}");
+        }
+    }
+
     fn with_range(mut body: Value) -> Value {
         let range = explore_range();
         body["from"] = range["from"].clone();

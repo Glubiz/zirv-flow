@@ -1992,7 +1992,11 @@ before M5, so nothing consumes the flag yet (`EventFlag::NoTriggers` documents t
   displays counts over time and property breakdowns; exports the filtered set
   as CSV. Interactive and export queries have separate statement timeouts and
   row limits, always use workspace and partition predicates, and report a
-  timeout rather than running without a bound.
+  timeout rather than running without a bound. Each listed event carries
+  `has_decisions`, probed on the decision trace index in the page's own snapshot
+  and timeout; the event's detail sheet links to its trace only when it is true,
+  because an accepted event writes no decision of its own and an empty trace
+  answers 404.
 - **Person timeline:** interleaves customer events with relevant decision
   records, including merges, consent and trait changes, segment changes,
   enrollments, steps, sends and skips. Each system record links to its trace

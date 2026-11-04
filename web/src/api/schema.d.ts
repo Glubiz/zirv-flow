@@ -6974,6 +6974,11 @@ export interface components {
         ExploredEventBody: {
             /** @description Timing flags such as `late`, and `replayed` and `no_triggers` for a replayed event. */
             flags: string[];
+            /**
+             * @description Whether the trace holds any decision. An accepted event writes no decision of its own, so
+             *     the trace of an event that changed nothing answers 404.
+             */
+            has_decisions: boolean;
             /** Format: uuid */
             id: string;
             /** @description The names whose values were replaced by null. */

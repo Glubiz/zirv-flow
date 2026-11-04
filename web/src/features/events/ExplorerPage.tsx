@@ -409,8 +409,12 @@ function Rows({
                           <PropertyFacts properties={event.properties} masked={event.masked} />
                           <p>
                             <Link to={`/w/${workspaceId}/people/${event.person_id}`}>Open the person</Link>
-                            {" · "}
-                            <Link to={`/w/${workspaceId}/traces/${event.trace_id}`}>Open the trace</Link>
+                            {event.has_decisions ? (
+                              <>
+                                {" · "}
+                                <Link to={`/w/${workspaceId}/traces/${event.trace_id}`}>Open the trace</Link>
+                              </>
+                            ) : null}
                           </p>
                         </details>
                       </td>
