@@ -1682,7 +1682,7 @@ mod tests {
         }
         let actions: std::collections::BTreeSet<_> =
             decisions.iter().map(|d| d.2.as_str()).collect();
-        assert!(actions.contains("event.accepted") && actions.contains("list.membership"));
+        assert!(!actions.contains("event.accepted") && actions.contains("list.membership"));
         assert!(actions.contains("sync.record"));
         let shown = format!("{decisions:?}");
         assert!(!shown.contains("example.com") && !shown.contains("order_placed"));

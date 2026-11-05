@@ -139,6 +139,8 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `explorer.export_timeout_ms` | u64 | 60000 | at least 1; the same for each page query of a CSV export |
 | `explorer.interactive_row_limit` | u32 | 10000 | at least 1; the most buckets or rows an interactive explorer query returns (`truncated` is set when more matched) |
 | `explorer.export_row_limit` | u32 | 1000000 | at least 1; the most rows an export writes; a final `#` comment line says when it stopped there |
+| `explorer.max_connections` | u32 | 4 | at least 1; connections of the explorer's own pool in each `serve` process, apart from `database.max_connections`; a query that finds all busy for one second answers `503`, code `explorer_busy`, with `Retry-After` |
+| `explorer.max_exports` | u32 | 1 | at least 1; CSV exports that may stream at once in each `serve` process; another answers `503`, code `explorer_busy`, with `Retry-After`, until one ends |
 | `render.pool_size` | u32 | 2 | 1 to 32; render-host child processes, and so renders at once, in each `serve` and `worker` process; see [Render host](docs/operations/runtime.md#render-host) |
 | `render.deadline_ms` | u64 | 5000 | 1 to 600000; how long one render may take before its child is killed and replaced |
 | `render.memory_limit_mib` | u64 | 512 | 64 to 1048576; address space a child may use (`RLIMIT_AS`); applied on Linux only |

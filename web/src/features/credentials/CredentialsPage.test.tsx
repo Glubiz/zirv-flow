@@ -1,4 +1,4 @@
-import { screen, within } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
@@ -350,12 +350,18 @@ describe("credentials", () => {
   });
 
   it("shows a loading state, and an error with a retry", async () => {
+    let requested = false;
     mockApi({
       ...ADMIN,
-      "GET /api/v1/workspaces/ws1/credentials": () => new Promise<Response>(() => undefined),
+      "GET /api/v1/workspaces/ws1/credentials": () => {
+        requested = true;
+        return new Promise<Response>(() => undefined);
+      },
     });
     const loading = mount();
     expect(await screen.findByText("Loading credentials")).toBeInTheDocument();
+    // The request is sent a few ticks after the loading state renders; unmounted earlier, it would reach the next mockApi.
+    await waitFor(() => expect(requested).toBe(true));
     loading.unmount();
 
     let attempts = 0;

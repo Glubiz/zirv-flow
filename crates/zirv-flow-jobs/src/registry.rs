@@ -18,6 +18,16 @@ pub trait JobKind: Send + Sync + 'static {
     /// transactions acquire the guard there instead, never across those transactions.
     const NEEDS_CHANGE_READERS: bool = false;
 
+    /// The worker confirms the lease by locking the job row `FOR KEY SHARE` in the job's
+    /// transaction, which holds it while the handler runs: no other worker can claim the job
+    /// again until this attempt's transaction ends, even once the lease has run out and the
+    /// reaper has put it back. A row lock gives the transaction an id, which holds the xmin
+    /// horizon back for as long as the handler runs. A kind that commits all of its work on
+    /// transactions of its own, and is safe to overlap with a late attempt of itself, sets this
+    /// false: its lease is confirmed with a plain read, and its job transaction takes no id until
+    /// the fenced completion (#397).
+    const LOCKS_LEASE: bool = true;
+
     /// Runs one attempt. Writes go through `ctx` so they commit atomically with the job's
     /// completion; the work must be idempotent, since a lost lease runs the job again.
     fn run(
@@ -33,6 +43,8 @@ pub trait ErasedKind: Send + Sync {
 
     fn needs_change_readers(&self) -> bool;
 
+    fn locks_lease(&self) -> bool;
+
     fn run<'a>(
         &'a self,
         ctx: &'a mut JobContext<'_>,
@@ -47,6 +59,10 @@ impl<K: JobKind> ErasedKind for K {
 
     fn needs_change_readers(&self) -> bool {
         K::NEEDS_CHANGE_READERS
+    }
+
+    fn locks_lease(&self) -> bool {
+        K::LOCKS_LEASE
     }
 
     fn run<'a>(
@@ -157,6 +173,22 @@ mod tests {
         assert!(registry.get("sync.run").is_some());
         assert!(registry.get("kafka.consume").is_some());
         assert!(registry.get("sync.nope").is_none());
+    }
+
+    #[test]
+    fn only_the_ingest_drain_confirms_its_lease_without_locking_the_job() {
+        let unlocked: Vec<&str> = Registry::built_in()
+            .kinds
+            .iter()
+            .filter(|kind| !kind.locks_lease())
+            .map(|kind| kind.kind())
+            .collect();
+
+        assert_eq!(unlocked, ["ingest.drain"]);
+        assert!(
+            First.locks_lease(),
+            "a kind locks its lease unless it says otherwise"
+        );
     }
 
     #[test]

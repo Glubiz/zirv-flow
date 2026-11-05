@@ -111,9 +111,10 @@ pub use contacts::{
 #[cfg(any(test, feature = "test-support"))]
 pub use decisions::testing as decision_testing;
 pub use decisions::{
-    Decision, DecisionLogSize, DecisionRetention, DecisionRetentionReport, GraphPoint, NewDecision,
-    append_decision, append_decisions, apply_decision_retention, apply_decision_retention_for,
-    apply_decision_retention_progress, decision_log_size, ensure_decision_partitions, list_trace,
+    Decision, DecisionBuffer, DecisionLogSize, DecisionRetention, DecisionRetentionReport,
+    GraphPoint, NewDecision, append_decision, append_decisions, apply_decision_retention,
+    apply_decision_retention_for, apply_decision_retention_progress, decision_log_size,
+    ensure_decision_partitions, list_trace,
 };
 pub use destinations::{
     Admission, AttemptOutcome, AttemptStats, BucketState, DEFAULT_RETRY_AFTER, DeliveryAttempt,
@@ -129,17 +130,18 @@ pub use events::{
     EventOutcome, EventPolicy, EventRecord, EventRetention, EventSchema, EventSchemaUpdate,
     ExploreError, ExploreFilter, ExploreLimits, ExploreRow, ExploreScope, FEED_RETENTION_MINUTES,
     FeedBatch, FeedFilter, FeedItem, FilterOp, IngestReject, MAX_FILTERS, MAX_RANGE_DAYS,
-    MAX_REPLAY, NewEventSchema, PublishOutcome, REPLAY_JOB_KIND, RETENTION_BATCH, RejectCursor,
-    RejectFilter, ReplayPrediction, ReplaySelection, ReplayTotals, RetentionReport, RowCursor,
-    RowsPage, SchemaVersion, WATCH_SECONDS, apply_event_batch, apply_event_retention,
+    MAX_REPLAY, NewEventSchema, PreparedScope, PublishOutcome, REPLAY_JOB_KIND, RETENTION_BATCH,
+    RejectCursor, RejectFilter, ReplayPrediction, ReplaySelection, ReplayTotals, RetentionReport,
+    RowCursor, RowsPage, SchemaVersion, WATCH_SECONDS, apply_event_batch, apply_event_retention,
     apply_event_retention_progress, create_event_schema, debugger_epoch, debugger_epoch_peek,
     debugger_feed_head, debugger_feed_missing, debugger_feed_position, debugger_feed_start,
     enqueue_replay, ensure_event_partitions, erase_unattributed_rejects, explore_breakdown,
-    explore_count, explore_rows, explore_total, find_event_schema, get_event_policy,
-    list_event_schemas, list_ingest_rejects, list_schema_versions, listen_for_debugger,
-    preview_replay, prune_debugger_feed, publish_schema_draft, read_debugger_batch,
-    read_debugger_feed, read_debugger_feed_at, replay_rejects, save_schema_draft, select_rejects,
-    set_event_policy, touch_debugger_watch, update_event_schema,
+    explore_count, explore_rows, explore_rows_prepared, explore_start, explore_total,
+    find_event_schema, get_event_policy, list_event_schemas, list_ingest_rejects,
+    list_schema_versions, listen_for_debugger, preview_replay, prune_debugger_feed,
+    publish_schema_draft, read_debugger_batch, read_debugger_feed, read_debugger_feed_at,
+    replay_rejects, save_schema_draft, select_rejects, set_event_policy, touch_debugger_watch,
+    update_event_schema,
 };
 pub use feedback::{
     FeedbackEvent, FeedbackOutcome, ProviderFeedback, SuppressionMade, record_provider_feedback,
@@ -148,30 +150,32 @@ pub use flows::{
     AudienceSource, ControlError, DEFAULT_WARMUP_SECONDS, DELIVERY_UNCONFIRMED, ENROLL_JOB_KIND,
     EffectError, EndedOrphan, EnrollEntries, EnrollEntry, EnrollError, EnrollJobPayload,
     EnrollOutcome, EnrollRequest, EnrollWork, Enrolled, Enrollment, EnrollmentCursor,
-    EnrollmentFilter, EnrollmentPage, EnrollmentPath, EnrollmentSample, EnrollmentStatus,
-    EnrollmentSummary, EnrollmentUpdate, EntriesPerDay, ExitBatch, Flow, FlowAction, FlowError,
-    FlowPatch, FlowState, FlowTraitWrite, FlowVersion, HARD_BOUNCE, INTERNAL_ERROR, JOB_DEAD,
-    LIFECYCLE_BATCH, LIFECYCLE_JOB_KIND, LifecycleAction, LifecycleBatch, LifecyclePayload,
-    LockedFlow, MAX_ENROLL_PEOPLE, MAX_ENTRY_DAYS, MAX_PATH_DECISIONS, MAX_WARMUP_SECONDS,
-    MIN_WARMUP_SECONDS, NewFlow, NewStepExecution, NewWait, NodeCount, Occurrence, PathEventWait,
-    PathStep, Rotation, SEND_JOB_KIND, SETTINGS_GOAL_NODE, SETTLE_JOB_KIND, SOFT_BOUNCE,
-    STEP_JOB_KIND, SYNC_JOB_KIND, SendOutcome, SettleItem, SettlePayload, Signal, SigningKey,
-    SigningKeys, StepJobInput, StepJobPayload, StepOutcome, StepRecord, StoredEvent, SyncDetail,
-    TriggerEvent, TriggerKind, TriggeredFlow, UnhealthyInput, WEBHOOK_JOB_KIND, Warmup,
-    WarmupCounts, WebhookOutcome, WebhookPerson, WebhookResult, WebhookSubject, apply_flow_list,
-    apply_flow_trait, archive_flow, audience_page, clear_waits, count_in_flight_enrollments,
-    create_flow, create_signing_key, end_orphaned_messages, enqueue_lifecycle, enroll,
-    enroll_entries, enroll_page_key, exit_batch, find_enrollment, find_event_of_person,
-    find_events, find_flow, find_flow_version, flow_entries_per_day, flow_source,
-    flow_state_for_step, has_webhook_signing_secret, hold_enrollment, list_flow_enrollments,
-    list_flow_versions, list_flows, live_signing_keys, load_enrollment_path, lock_audience_page,
-    lock_enrollment, lock_flow, lock_sync_person, lock_webhook_person, occurrence_of, open_warmup,
-    pause_flow, publish_flow, read_webhook_subject, reconcile_flow_schedules, record_send_outcome,
-    record_steps, record_sync_evidence, record_webhook_outcome, register_wait, release_enrollment,
-    reopen_failed_step, resolve_survivors, resume_batch, resume_failed, resume_flow,
-    rotate_signing_key, sample_enrollments, save_enrollment, segment_is_watched,
-    segment_trigger_flows, set_warmup, settle_wait_step, step_zones, unhealthy_inputs,
-    update_flow_draft, version_node_counts, wait_filters, warmup_counts,
+    EnrollmentFilter, EnrollmentPage, EnrollmentPath, EnrollmentRead, EnrollmentSample,
+    EnrollmentStatus, EnrollmentSummary, EnrollmentUpdate, EntriesPerDay, ExitBatch, Flow,
+    FlowAction, FlowError, FlowPatch, FlowState, FlowTraitWrite, FlowVersion, HARD_BOUNCE,
+    INTERNAL_ERROR, JOB_DEAD, LIFECYCLE_BATCH, LIFECYCLE_JOB_KIND, LifecycleAction, LifecycleBatch,
+    LifecyclePayload, LockedFlow, MAX_ENROLL_PEOPLE, MAX_ENTRY_DAYS, MAX_PATH_DECISIONS,
+    MAX_WARMUP_SECONDS, MIN_WARMUP_SECONDS, NewFlow, NewStepExecution, NewWait, NodeCount,
+    Occurrence, PathEventWait, PathStep, Rotation, SEND_JOB_KIND, SETTINGS_GOAL_NODE,
+    SETTLE_JOB_KIND, SOFT_BOUNCE, STEP_JOB_KIND, SYNC_JOB_KIND, SendOutcome, SettleItem,
+    SettlePayload, Signal, SigningKey, SigningKeys, StepEnrollment, StepJobInput, StepJobPayload,
+    StepOutcome, StepRecord, StoredEvent, SyncDetail, TriggerEvent, TriggerKind, TriggeredFlow,
+    UnhealthyInput, WEBHOOK_JOB_KIND, Warmup, WarmupCounts, WebhookOutcome, WebhookPerson,
+    WebhookResult, WebhookSubject, apply_flow_list, apply_flow_trait, archive_flow, audience_page,
+    clear_waits, count_in_flight_enrollments, create_flow, create_signing_key,
+    end_orphaned_messages, enqueue_lifecycle, enroll, enroll_entries, enroll_page_key, exit_batch,
+    find_enrollment, find_event_of_person, find_events, find_flow, find_flow_version,
+    flow_entries_per_day, flow_source, flow_state_for_step, flow_states_for_steps,
+    has_webhook_signing_secret, hold_enrollment, list_flow_enrollments, list_flow_versions,
+    list_flows, live_signing_keys, load_enrollment_path, lock_audience_page, lock_enrollment,
+    lock_flow, lock_read_enrollment, lock_sync_person, lock_webhook_person, occurrence_of,
+    open_warmup, pause_flow, publish_flow, read_enrollment, read_enrollments, read_webhook_subject,
+    reconcile_flow_schedules, record_send_outcome, record_steps, record_sync_evidence,
+    record_webhook_outcome, register_wait, release_enrollment, reopen_failed_step,
+    resolve_survivors, resume_batch, resume_failed, resume_flow, rotate_signing_key,
+    sample_enrollments, save_enrollment, segment_is_watched, segment_trigger_flows, set_warmup,
+    settle_wait_step, step_zones, unhealthy_inputs, update_flow_draft, version_node_counts,
+    wait_filters, warmup_counts,
 };
 pub use forwarding::{
     ClaimedRow, DELIVERED_RETENTION, DeadLetter, FORWARD_JOB_KIND, ForwardRef, ForwardingRule,
@@ -203,10 +207,11 @@ pub use ingest::{
 pub use jobs::{
     ClaimedJob, DEFAULT_MAX_ATTEMPTS, DeadCursor, FailOutcome, Job, JobListener, JobSummary,
     KindDepth, Leadership, NOTIFY_CHANNEL, NewJob, NewSchedule, QueueCounts, QueueDepth, Reaped,
-    Schedule, advance_schedule, claim_job, complete_job, create_schedule, database_now,
-    disable_schedule, due_schedules, enqueue, enqueue_many, fail_job, find_job, heartbeat_job,
-    kind_depths, list_dead_jobs, listen_for_jobs, lock_lease, purge_dead_jobs, queue_counts,
-    queue_depths, reap_expired, retry_dead_job, try_lead,
+    Schedule, advance_schedule, claim_job, claim_jobs, complete_job, complete_jobs, confirm_lease,
+    create_schedule, database_now, disable_schedule, due_schedules, enqueue, enqueue_many,
+    fail_job, find_job, heartbeat_job, kind_depths, list_dead_jobs, listen_for_jobs, lock_lease,
+    purge_dead_jobs, queue_counts, queue_depths, reap_expired, release_jobs, retry_dead_job,
+    sample_queue_depths, try_lead,
 };
 pub use lists::{
     List, ListMember, ListSource, MAX_PEOPLE_PER_CALL, MemberIdentifier, MembershipChange,
@@ -434,6 +439,7 @@ enum StoreErrorKind {
     Conflict,
     Retryable,
     Timeout,
+    PoolTimeout,
     RunActive,
     Erased,
     AuditSummary,
@@ -469,6 +475,9 @@ impl StoreError {
 
     /// A failed query. A unique-constraint violation becomes a conflict.
     pub(crate) fn query(source: sqlx::Error) -> Self {
+        if matches!(source, sqlx::Error::PoolTimedOut) {
+            return Self::with_source(StoreErrorKind::PoolTimeout, source);
+        }
         let conflict = source
             .as_database_error()
             .is_some_and(|error| error.is_unique_violation());
@@ -577,6 +586,11 @@ impl StoreError {
         matches!(self.kind, StoreErrorKind::Timeout)
     }
 
+    /// Whether no connection came free within the pool's acquire timeout.
+    pub fn is_pool_timeout(&self) -> bool {
+        matches!(self.kind, StoreErrorKind::PoolTimeout)
+    }
+
     /// Whether the write was refused because the value already exists.
     pub fn is_conflict(&self) -> bool {
         matches!(self.kind, StoreErrorKind::Conflict)
@@ -636,6 +650,9 @@ impl fmt::Display for StoreError {
             }
             StoreErrorKind::Conflict => formatter.write_str("the value already exists"),
             StoreErrorKind::Timeout => formatter.write_str("the query ran past its time limit"),
+            StoreErrorKind::PoolTimeout => {
+                formatter.write_str("no database connection came free in time")
+            }
             StoreErrorKind::RunActive => formatter.write_str("a sync run is queued or running"),
             StoreErrorKind::AuditSummary => {
                 formatter.write_str("the audit summary was refused")?;

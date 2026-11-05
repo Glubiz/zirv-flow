@@ -8478,7 +8478,17 @@
             }
           },
           "503": {
-            "description": "The query ran past its time limit (`code` is `query_timeout`)",
+            "description": "The query ran past its time limit (`code` is `query_timeout`), or every explorer connection stayed busy for a second (`code` is `explorer_busy`; see `Retry-After`)",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 0
+                },
+                "description": "Whole seconds to wait before retrying `explorer_busy`"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -8580,7 +8590,17 @@
             }
           },
           "503": {
-            "description": "The query ran past its time limit (`code` is `query_timeout`)",
+            "description": "The query ran past its time limit (`code` is `query_timeout`), or every explorer connection stayed busy for a second (`code` is `explorer_busy`; see `Retry-After`)",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 0
+                },
+                "description": "Whole seconds to wait before retrying `explorer_busy`"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -8682,7 +8702,17 @@
             }
           },
           "503": {
-            "description": "The query ran past its time limit (`code` is `query_timeout`)",
+            "description": "The query ran past its time limit (`code` is `query_timeout`), or every explorer connection stayed busy for a second, or `explorer.max_exports` exports are already streaming (`code` is `explorer_busy`; see `Retry-After`)",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 0
+                },
+                "description": "Whole seconds to wait before retrying `explorer_busy`"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -8794,7 +8824,17 @@
             }
           },
           "503": {
-            "description": "The query ran past its time limit (`code` is `query_timeout`)",
+            "description": "The query ran past its time limit (`code` is `query_timeout`), or every explorer connection stayed busy for a second (`code` is `explorer_busy`; see `Retry-After`)",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 0
+                },
+                "description": "Whole seconds to wait before retrying `explorer_busy`"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -15833,8 +15873,8 @@
         "tags": [
           "people"
         ],
-        "summary": "A person's timeline, newest first: their events, and the decisions the system made about\nthem (trait changes, merges, consent changes, list membership, identity conflicts). Each\nentry has a `trace_id` that opens the decisions behind it. A person that was merged into\nanother reads as the survivor, with the merged people's entries included. Event properties\nthe schema flags as PII are masked for callers who may not see values.",
-        "description": "`event.accepted` decisions duplicate the event entry and are left out unless\n`all_decisions=true`.",
+        "summary": "A person's timeline, newest first: their events, and the decisions the system made about\nthem (trait changes, merges, consent changes, list membership, identity conflicts). Each\nentry has a `trace_id` that opens the decisions behind it; an event entry whose\n`has_decisions` is false has none, and its trace answers 404. A person that was merged into\nanother reads as the survivor, with the merged people's entries included. Event properties\nthe schema flags as PII are masked for callers who may not see values.",
+        "description": "`event.accepted` decisions duplicate the event entry and are left out unless\n`all_decisions=true`. Only events accepted before 0.231.0 have one.",
         "operationId": "get_person_timeline",
         "parameters": [
           {
@@ -15889,7 +15929,7 @@
           {
             "name": "all_decisions",
             "in": "query",
-            "description": "Include the `event.accepted` decisions; default false",
+            "description": "Include the `event.accepted` decisions that versions before 0.231.0 wrote; default false",
             "required": false,
             "schema": {
               "type": "boolean"
@@ -33270,7 +33310,8 @@
           "masked",
           "validation_state",
           "flags",
-          "trace_id"
+          "trace_id",
+          "has_decisions"
         ],
         "properties": {
           "at": {
@@ -33284,6 +33325,10 @@
               "type": "string"
             },
             "description": "Timing flags such as `late` or `future`."
+          },
+          "has_decisions": {
+            "type": "boolean",
+            "description": "Whether the trace holds any decision. An accepted event writes no decision of its own, so\nthe trace of an event that created a person, changed a trait or started something has\nrecords and any other event's trace answers 404."
           },
           "id": {
             "type": "string",
@@ -33811,7 +33856,8 @@
           "flags",
           "properties",
           "masked",
-          "trace_id"
+          "trace_id",
+          "has_decisions"
         ],
         "properties": {
           "flags": {
@@ -33820,6 +33866,10 @@
               "type": "string"
             },
             "description": "Timing flags such as `late`, and `replayed` and `no_triggers` for a replayed event."
+          },
+          "has_decisions": {
+            "type": "boolean",
+            "description": "Whether the trace holds any decision. An accepted event writes no decision of its own, so\nthe trace of an event that changed nothing answers 404."
           },
           "id": {
             "type": "string",

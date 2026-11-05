@@ -312,6 +312,7 @@ A test reads the sources and fails when a code used there is missing from this l
 | `segment_preview_timeout` | A segment preview ran over its time limit |
 | `search_timeout` | A search ran over its time limit |
 | `query_timeout` | An explorer query ran over its time limit |
+| `explorer_busy` | Every connection of the explorer pool stayed busy for a second; see `Retry-After` |
 | `pii_trait_not_searchable` | The trait holds personal data and cannot be searched |
 | `pii_property_not_explorable` | The event property holds personal data and cannot be explored |
 | `debugger_streams_busy` | The workspace has the most debugger streams open on this server |

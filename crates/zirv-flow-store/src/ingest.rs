@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::Connection;
+use sqlx::Row;
 use sqlx::prelude::FromRow;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -25,6 +26,7 @@ use crate::events::{
     EventBatch, EventOutcome, EventRecord, FailedItem, apply_event_record, reject_apply_failed,
 };
 use crate::events::{Refusal, insert_record_rejects};
+use crate::jobs::{bind_job, enqueue_ctes};
 use crate::people::{
     ProfileOutcome, ProfileRecord, apply_profile_record, apply_profile_record_into,
 };
@@ -231,8 +233,9 @@ impl StoredItem {
     }
 }
 
-/// Appends `items` as one multi-row insert in one transaction and enqueues the workspace's
-/// drain in it, so the wake-up commits with the rows. Returns once the rows are durable.
+/// Appends `items` as one multi-row insert and enqueues the workspace's drain, both in one
+/// statement, so the wake-up commits with the rows and the request pays a single round trip
+/// and commit. Returns once the rows are durable.
 /// The rows are stamped `received_at` with the database's clock, the one the scheduler's safety
 /// net and the inbox-age gauge compare it with.
 pub async fn append_inbox(
@@ -255,14 +258,23 @@ pub async fn append_inbox(
 
     let affinities: Vec<i16> = items.iter().map(item_bucket).collect();
 
-    let mut tx = begin(pool).await?;
-    let inserted = sqlx::query(
-        "INSERT INTO ingest_inbox \
-            (workspace_id, api_key_id, kind, item, message_id, received_at, trace_id, affinity) \
-         SELECT $1, $2, i.kind, i.item, i.message_id, now(), $3, i.affinity \
-         FROM unnest($4::text[], $5::jsonb[], $6::text[], $7::smallint[]) WITH ORDINALITY \
-            AS i(kind, item, message_id, affinity, n) \
-         ORDER BY i.n",
+    let job = drain_job(workspace, trace);
+    let row = bind_job(
+        sqlx::query(concat!(
+            "WITH ",
+            enqueue_ctes!(),
+            ", appended AS ( \
+                 INSERT INTO ingest_inbox \
+                    (workspace_id, api_key_id, kind, item, message_id, received_at, trace_id, \
+                     affinity) \
+                 SELECT $13, $14, i.kind, i.item, i.message_id, now(), $15, i.affinity \
+                 FROM unnest($16::text[], $17::jsonb[], $18::text[], $19::smallint[]) \
+                    WITH ORDINALITY AS i(kind, item, message_id, affinity, n) \
+                 ORDER BY i.n \
+                 RETURNING 1) \
+             SELECT (SELECT count(*) FROM appended), (SELECT count(*) FROM notified)"
+        )),
+        &job,
     )
     .bind(workspace.as_uuid())
     .bind(api_key_id)
@@ -271,12 +283,11 @@ pub async fn append_inbox(
     .bind(&stored)
     .bind(&message_ids)
     .bind(&affinities)
-    .execute(&mut *tx)
+    .fetch_one(pool)
     .await
     .map_err(StoreError::query)?;
-    enqueue_drain(&mut *tx, workspace, trace).await?;
-    commit(tx).await?;
-    Ok(usize::try_from(inserted.rows_affected()).unwrap_or(usize::MAX))
+    let inserted: i64 = row.try_get(0).map_err(StoreError::query)?;
+    Ok(usize::try_from(inserted).unwrap_or(usize::MAX))
 }
 
 /// Enqueues the workspace's drain. A no-op while one is ready or running.
@@ -285,12 +296,25 @@ pub async fn enqueue_drain<'e>(
     workspace: WorkspaceId,
     trace: &TraceContext,
 ) -> Result<bool, StoreError> {
+    enqueue(executor, &drain_job(workspace, trace)).await
+}
+
+fn drain_job(workspace: WorkspaceId, trace: &TraceContext) -> NewJob {
     let mut job = NewJob::new(DRAIN_JOB_KIND, trace.clone());
     job.workspace_id = Some(workspace);
     job.payload = json!({ "workspace_id": workspace.as_uuid() });
     job.unique_key = Some(format!("{DRAIN_JOB_KIND}:{}", workspace.as_uuid()));
-    enqueue(executor, &job).await
+    job
 }
+
+/// Every workspace's oldest inbox row, `$1` and `$2` being the lowest and highest ids.
+const INBOX_HEADS: &str = "SELECT w.id, EXTRACT(EPOCH FROM now() - head.received_at)::float8 \
+    FROM workspaces w \
+    CROSS JOIN LATERAL ( \
+        SELECT i.received_at FROM ingest_inbox i \
+        WHERE ROW(i.workspace_id, i.id) >= ROW(w.id, $1::bigint) \
+          AND ROW(i.workspace_id, i.id) <= ROW(w.id, $2::bigint) \
+        ORDER BY i.workspace_id, i.id LIMIT 1) head";
 
 /// A workspace's oldest inbox row.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -300,19 +324,27 @@ pub struct InboxHead {
     pub age_seconds: f64,
 }
 
-/// The oldest row (the lowest id) of every workspace that has any: one index probe per
-/// workspace on `(workspace_id, id)`, never a scan of the inbox.
+/// How long [`inbox_heads`] may run before PostgreSQL cancels it.
+const HEADS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The oldest row (the lowest id) of every workspace that has any: one probe per workspace of
+/// `ingest_inbox_workspace_idx`, never a scan of the inbox. Each probe is a row comparison led by
+/// `workspace_id` and ordered by `(workspace_id, id)`, which no other index can answer: the
+/// primary key's order by `id`, filtered to the workspace, would walk every other workspace's
+/// rows to find that an empty one has none (#397).
+///
+/// The leader reads the heads every tick, so the read runs under a statement timeout of
+/// [`HEADS_TIMEOUT`], like the queue depths and the enrollment sample: a slow database or a lock
+/// on the inbox fails the read instead of holding the tick.
 pub async fn inbox_heads(pool: &PgPool) -> Result<Vec<InboxHead>, StoreError> {
-    let rows: Vec<(Uuid, f64)> = sqlx::query_as(
-        "SELECT w.id, EXTRACT(EPOCH FROM now() - head.received_at)::float8 \
-         FROM workspaces w \
-         CROSS JOIN LATERAL ( \
-             SELECT received_at FROM ingest_inbox WHERE workspace_id = w.id \
-             ORDER BY id LIMIT 1) head",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(StoreError::query)?;
+    let mut tx = crate::bounded::begin_bounded_for(pool, HEADS_TIMEOUT).await?;
+    let rows: Vec<(Uuid, f64)> = sqlx::query_as(INBOX_HEADS)
+        .bind(i64::MIN)
+        .bind(i64::MAX)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(StoreError::query)?;
+    tx.commit().await.map_err(StoreError::query)?;
     Ok(rows
         .into_iter()
         .map(|(workspace, age_seconds)| InboxHead {
@@ -1179,6 +1211,59 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_append_and_its_drain_wake_up_are_one_client_statement(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            sqlx::raw_sql(
+                "CREATE TABLE statement_log (client_query text NOT NULL); \
+                 CREATE FUNCTION log_statement() RETURNS trigger LANGUAGE plpgsql AS \
+                   $$ BEGIN INSERT INTO statement_log VALUES (current_query()); RETURN NULL; END $$; \
+                 CREATE TRIGGER log_inbox AFTER INSERT ON ingest_inbox \
+                   FOR EACH STATEMENT EXECUTE FUNCTION log_statement(); \
+                 CREATE TRIGGER log_jobs AFTER INSERT ON jobs \
+                   FOR EACH STATEMENT EXECUTE FUNCTION log_statement();",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            let trace = TraceContext::root(Cause::api("req-1"));
+            append(&pool, ws, &trace, &[identify("u1", "m-1", json!({}))]).await;
+
+            let (writes, distinct): (i64, i64) =
+                sqlx::query_as("SELECT count(*), count(DISTINCT client_query) FROM statement_log")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                (writes, distinct),
+                (2, 1),
+                "the inbox and the job in one statement"
+            );
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_empty_append_still_wakes_the_drain(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            let trace = TraceContext::root(Cause::api("req-1"));
+            append(&pool, ws, &trace, &[]).await;
+            assert_eq!(inbox_count(&pool).await, 0);
+            let jobs: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = $1")
+                .bind(DRAIN_JOB_KIND)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(jobs, 1);
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_append_writes_every_row_with_the_trace_and_enqueues_one_drain(pool: PgPool) {
         crate::decision_testing::checked(pool, |pool| async move {
             let ws = workspace(&pool, "ours").await;
@@ -1221,6 +1306,57 @@ mod tests {
         .await;
     }
 
+    /// A drain is queued at the default priority, in age order with every other job, so it waits
+    /// behind older due wakes like any job (supervisor ruling 98e6546e): a band of its own ahead of
+    /// the wakes let more backlogged workspaces than slots, each draining for up to 20 s, starve
+    /// every other kind.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_drain_enqueued_behind_due_wakes_waits_its_turn(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            const STEP: &str = "flow.step";
+            let lease = std::time::Duration::from_secs(60);
+            let ws = workspace(&pool, "ours").await;
+            sqlx::query(
+                "INSERT INTO jobs (id, workspace_id, kind, payload, run_at, unique_key, trace_id, \
+                               cause_kind, cause_id) \
+             SELECT gen_random_uuid(), $1, $2, jsonb_build_object('n', g), \
+                    now() - interval '1 hour' + make_interval(secs => g), \
+                    'wake:' || g, gen_random_uuid(), 'api', 'x' \
+             FROM generate_series(1, 1000) g",
+            )
+            .bind(ws.as_uuid())
+            .bind(STEP)
+            .execute(&pool)
+            .await
+            .unwrap();
+            assert!(
+                enqueue_drain(&pool, ws, &TraceContext::root(Cause::api("req-1")))
+                    .await
+                    .unwrap()
+            );
+            let priority: i16 = sqlx::query_scalar("SELECT priority FROM jobs WHERE kind = $1")
+                .bind(DRAIN_JOB_KIND)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(priority, 0);
+
+            let batch = crate::claim_jobs(&pool, "w", &[STEP, DRAIN_JOB_KIND], lease, None, 32)
+                .await
+                .unwrap();
+            assert_eq!(
+                batch
+                    .iter()
+                    .map(|job| job.payload["n"].as_i64())
+                    .collect::<Vec<_>>(),
+                (1..=32).map(Some).collect::<Vec<_>>(),
+                "the oldest wakes, not the younger drain"
+            );
+        })
+        .await;
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_drain_applies_in_order_deletes_the_rows_and_records_the_request_trace(pool: PgPool) {
@@ -1252,7 +1388,7 @@ mod tests {
             let (decisions, _) = list_trace(&pool, ws, trace.trace_id, 50).await.unwrap();
             let actions: Vec<&str> = decisions.iter().map(|d| d.action.as_str()).collect();
             assert!(actions.contains(&"person.created"), "{actions:?}");
-            assert!(actions.contains(&"event.accepted"), "{actions:?}");
+            assert!(!actions.contains(&"event.accepted"), "{actions:?}");
             assert!(decisions.iter().all(|d| d.cause.kind == CauseKind::Api));
             let events: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE trace_id = $1")
                 .bind(trace.trace_id.as_uuid())
@@ -1632,12 +1768,9 @@ mod tests {
                 made,
                 [
                     ("person.created", "created"),
-                    ("event.accepted", "unplanned"),
                     ("person.created", "created"),
                     ("trait.change", "changed"),
-                    ("event.accepted", "unplanned"),
                     ("person.created", "created"),
-                    ("event.accepted", "unplanned"),
                 ]
             );
             let keys: Vec<Vec<String>> = decisions
@@ -1650,9 +1783,9 @@ mod tests {
                 })
                 .collect();
             assert_eq!(keys[0], ["person"]);
-            assert_eq!(keys[1], ["event", "person"]);
+            assert_eq!(keys[1], ["person", "source_record"]);
             assert_eq!(keys[2], ["person", "source_record"]);
-            assert_eq!(keys[3], ["person", "source_record"]);
+            assert_eq!(keys[3], ["person"]);
             assert!(decisions.iter().all(|d| d.cause.kind == CauseKind::Api));
             assert!(
                 decisions
@@ -1668,6 +1801,150 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(statements, 1);
+        })
+        .await;
+    }
+
+    /// 100 known people, then 500 track items: 190 for known people, 300 for new ones and 10 with
+    /// a reserved event name. Returns the workspace and the decision counts the drain added, as
+    /// `(action, count)`, and the WAL bytes it wrote.
+    async fn drain_five_hundred_track_items(
+        pool: &PgPool,
+    ) -> (WorkspaceId, Vec<(String, i64)>, i64) {
+        let ws = workspace(pool, "ours").await;
+        let trace = TraceContext::root(Cause::api("req"));
+        let known: Vec<IngestItem> = (0..100)
+            .map(|n| identify(&format!("k{n}"), &format!("i-{n}"), json!({"plan": "free"})))
+            .collect();
+        append(pool, ws, &trace, &known).await;
+        drain_batch(pool, ws, Shard::ALL, &key(), 500)
+            .await
+            .unwrap();
+
+        let items: Vec<IngestItem> = (0..500)
+            .map(|n| match n {
+                0..190 => track(
+                    &format!("k{}", n % 100),
+                    &format!("t-{n}"),
+                    "seen",
+                    json!({}),
+                ),
+                190..490 => track(&format!("n{n}"), &format!("t-{n}"), "seen", json!({})),
+                _ => track(
+                    &format!("bad{n}"),
+                    &format!("t-{n}"),
+                    "segment.entered",
+                    json!({}),
+                ),
+            })
+            .collect();
+        append(pool, ws, &trace, &items).await;
+        let before: i64 =
+            sqlx::query_scalar("SELECT (pg_current_wal_lsn() - '0/0'::pg_lsn)::bigint")
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        let counted = |pool: &PgPool| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_as::<_, (String, i64)>(
+                    "SELECT action, count(*) FROM decision_records GROUP BY action ORDER BY action",
+                )
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        let earlier = counted(pool).await;
+
+        let outcome = drain_batch(pool, ws, Shard::ALL, &key(), 500)
+            .await
+            .unwrap();
+        let after: i64 =
+            sqlx::query_scalar("SELECT (pg_current_wal_lsn() - '0/0'::pg_lsn)::bigint")
+                .fetch_one(pool)
+                .await
+                .unwrap();
+
+        assert_eq!(outcome.rows, 500);
+        let mut added = counted(pool).await;
+        for (action, count) in &mut added {
+            *count -= earlier
+                .iter()
+                .find(|(name, _)| name == action)
+                .map_or(0, |(_, count)| *count);
+        }
+        added.retain(|(_, count)| *count > 0);
+        (ws, added, after - before)
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_drain_of_track_items_writes_no_accepted_decision_only_new_people_and_rejects(
+        pool: PgPool,
+    ) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let (ws, added, wal_bytes) = drain_five_hundred_track_items(&pool).await;
+
+            eprintln!("drain of 500 track items: {wal_bytes} WAL bytes, decisions {added:?}");
+            assert_eq!(
+                added,
+                [
+                    ("event.rejected".to_owned(), 10),
+                    ("person.created".to_owned(), 300)
+                ]
+            );
+            let events: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM events WHERE workspace_id = $1")
+                    .bind(ws.as_uuid())
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(events, 490, "every valid item is stored");
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_track_drain_writes_decision_rows_only_for_new_people_and_rejects_and_the_dropped_rows_cost_wal(
+        pool: PgPool,
+    ) {
+        crate::decision_testing::checked(pool, |pool| async move {
+        let (ws, added, wal_bytes) = drain_five_hundred_track_items(&pool).await;
+        let rows: i64 = added.iter().map(|(_, count)| count).sum();
+
+        // What the removed decisions would have cost: 490 rows of the shape earlier versions
+        // wrote, inserted in one statement and rolled back. This is a measured price of the
+        // dropped rows, not a before and after run; the drain's own WAL is only printed, because
+        // the log position is shared with every other test on the server.
+        let mut tx = pool.begin().await.unwrap();
+        let plan: serde_json::Value = sqlx::query_scalar(
+            "EXPLAIN (ANALYZE, WAL, FORMAT JSON) \
+             INSERT INTO decision_records \
+                (id, workspace_id, trace_id, action, outcome, cause_kind, cause_id, subject_ids) \
+             SELECT gen_random_uuid(), $1, gen_random_uuid(), 'event.accepted', 'unplanned', 'api', \
+                    'x', jsonb_build_object('event', gen_random_uuid(), 'person', gen_random_uuid()) \
+             FROM generate_series(1, 490)",
+        )
+        .bind(ws.as_uuid())
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        tx.rollback().await.unwrap();
+        let removed_bytes = plan[0]["Plan"]["WAL Bytes"].as_i64().unwrap();
+
+        eprintln!(
+            "drain WAL {wal_bytes} bytes in {rows} decision rows; 490 accepted rows: {removed_bytes} bytes"
+        );
+        assert_eq!(
+            rows, 310,
+            "the new people and the rejects, 490 fewer than before"
+        );
+        assert!(
+            removed_bytes > 0,
+            "the dropped decisions were a real share of the log"
+        );
         })
         .await;
     }
@@ -2095,6 +2372,103 @@ mod tests {
             assert_eq!(heads[0].workspace_id, one);
             assert!((29.0..60.0).contains(&heads[0].age_seconds), "{heads:?}");
             assert!(heads.iter().all(|head| head.workspace_id != two));
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_heads_probe_the_workspace_index_beside_a_large_inbox_and_an_empty_one(
+        pool: PgPool,
+    ) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let one = workspace(&pool, "one").await;
+            let name = WorkspaceName::parse("two").unwrap();
+            let slug = Slug::parse("two").unwrap();
+            let two = create_workspace(&pool, &name, &slug).await.unwrap().id;
+            sqlx::query(
+            "INSERT INTO ingest_inbox (workspace_id, api_key_id, kind, item, message_id, trace_id) \
+             SELECT $1, gen_random_uuid(), 'track', '{}', 'm-' || g, gen_random_uuid() \
+             FROM generate_series(1, 20000) g",
+        )
+        .bind(one.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+            sqlx::query("ANALYZE ingest_inbox")
+                .execute(&pool)
+                .await
+                .unwrap();
+
+            let plan: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {INBOX_HEADS}"
+            )))
+            .bind(i64::MIN)
+            .bind(i64::MAX)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let heads = inbox_heads(&pool).await.unwrap();
+
+            let mut stack = vec![&plan[0]["Plan"]];
+            let mut inbox_scans = Vec::new();
+            while let Some(node) = stack.pop() {
+                if node["Relation Name"] == "ingest_inbox" {
+                    inbox_scans.push((
+                        node["Node Type"].as_str().unwrap_or_default(),
+                        node["Index Name"].as_str().unwrap_or_default(),
+                    ));
+                }
+                if let Some(children) = node["Plans"].as_array() {
+                    stack.extend(children);
+                }
+            }
+            assert_eq!(
+                inbox_scans,
+                [("Index Scan", "ingest_inbox_workspace_idx")],
+                "{plan}"
+            );
+            let top = &plan[0]["Plan"];
+            let buffers = top["Shared Hit Blocks"].as_i64().unwrap()
+                + top["Shared Read Blocks"].as_i64().unwrap();
+            assert!(buffers < 50, "{buffers} buffers\n{plan}");
+            assert_eq!(
+                heads
+                    .iter()
+                    .map(|head| head.workspace_id)
+                    .collect::<Vec<_>>(),
+                [one]
+            );
+            assert!(heads.iter().all(|head| head.workspace_id != two));
+        })
+        .await;
+    }
+
+    /// The leader reads the heads every tick, so a slow inbox must not hold the tick: the read
+    /// gives up after a second. The outer timeout only keeps an unbounded read from hanging the
+    /// test on its own blocker.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_heads_give_up_after_a_second(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let mut blocker = pool.begin().await.unwrap();
+            sqlx::query("LOCK TABLE ingest_inbox IN ACCESS EXCLUSIVE MODE")
+                .execute(&mut *blocker)
+                .await
+                .unwrap();
+            let started = std::time::Instant::now();
+
+            let blocked =
+                tokio::time::timeout(std::time::Duration::from_secs(10), inbox_heads(&pool)).await;
+
+            let waited = started.elapsed();
+            blocker.rollback().await.unwrap();
+            assert!(matches!(blocked, Ok(Err(_))), "{blocked:?}");
+            assert!(
+                waited >= std::time::Duration::from_millis(900)
+                    && waited < std::time::Duration::from_secs(4),
+                "{waited:?}"
+            );
         })
         .await;
     }

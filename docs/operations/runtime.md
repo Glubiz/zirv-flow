@@ -42,9 +42,13 @@ spans are exported, so a filter such as `warn` exports none.
 closed sets (a route template, a kind, an outcome, a feature) or are ids; no email, phone, name,
 property value, key, prompt or model output is ever a label. The queue, enrollment, freshness,
 destination and dirty-set gauges are sampled by the scheduler leader, so they appear where the
-leader runs. The enrollment gauges read the live rows through `enrollments_live_idx` under a 5 second
-statement timeout; at 11 million live rows the count takes about half a second and the overdue-timer
-lookup well under a millisecond. A test fails when a `zirv_flow_` series is emitted in `crates/` and missing from this
+leader runs. The enrollment gauges read the live rows through `enrollments_live_idx` under a 1 second
+statement timeout: each state is counted up to 10,000 rows, and above that the gauge is the
+planner's estimate from the table statistics (as current as the last `ANALYZE`, and never below
+10,001), so the sample costs the same at 10,000 live rows and at 11 million. The overdue-timer
+lookup is the first entry of the `waiting` range, well under a millisecond. The queue-depth gauge
+works the same way: each kind's `ready` count is exact up to 10,000 and estimated above, while the
+`running` and `dead` counts are exact, under a 1 second timeout. A test fails when a `zirv_flow_` series is emitted in `crates/` and missing from this
 table.
 
 Example Prometheus alert rules are in [`docs/operations/alerts.rules.yml`](alerts.rules.yml),
@@ -57,12 +61,14 @@ does not exist.
 |--------|------|--------|------------------|
 | `zirv_flow_http_requests_total` | counter | `method`, `route`, `status` | HTTP requests by matched route template |
 | `zirv_flow_http_request_duration_seconds` | histogram | `method`, `route` | HTTP request latency |
-| `zirv_flow_db_pool_connections` | gauge | `pool`, `state` | Pool connections by state |
+| `zirv_flow_db_pool_connections` | gauge | `pool`, `state` | Pool connections by state; `pool` is `main`, `explorer` (a `serve` process), `jobs` or `heartbeat` |
 | `zirv_flow_db_pool_max_connections` | gauge | `pool` | Pool size limit |
-| `zirv_flow_jobs` | gauge | `kind`, `state` | Queue depth for `ready`, `running` and `dead` |
+| `zirv_flow_jobs` | gauge | `kind`, `state` | Queue depth for `ready`, `running` and `dead`; refreshed at most every 15 s; a kind's `ready` count is exact up to 10,000 and the planner's estimate above |
 | `zirv_flow_jobs_total` | counter | `kind`, `outcome` | Job attempts by how they ended |
-| `zirv_flow_job_duration_seconds` | histogram | `kind` | Handler duration |
-| `zirv_flow_job_claim_lag_seconds` | histogram | `kind` | Time from `run_at` to the claim |
+| `zirv_flow_job_duration_seconds` | histogram | `kind` | Handler duration; a flow step run in a shared transaction counts its own run plus an equal share of the transaction's setup and commit |
+| `zirv_flow_job_claim_lag_seconds` | histogram | `kind` | Time from `run_at` until a worker starts the job: its claim, plus its wait behind the jobs claimed with it |
+| `zirv_flow_job_transactions_total` | counter | `kind` | Handler transactions; `zirv_flow_jobs_total` over this is jobs per transaction, above 1 when flow steps share one |
+| `zirv_flow_job_idle_waits_total` | counter | `ended` | Waits of a worker slot whose claim found nothing, by what ended them: `enqueued` (a job was enqueued), `freed` (a job of the same worker left running under `worker.max_running_per_workspace`) or `poll` (the one-second poll ran out). A rising `poll` count while jobs are due means slots sleep through work |
 | `zirv_flow_retention_deleted_total` | counter | `table` | Rows a retention job removed; `table` is `messages`, `decision_records`, `jobs` or `audit_log` |
 | `zirv_flow_retention_last_run_timestamp_seconds` | gauge | `table` | Unix time of the last retention run of `table` |
 | `zirv_flow_egress_denied_total` | counter | `class` | Outbound requests refused by the egress policy |
@@ -102,7 +108,7 @@ does not exist.
 | `zirv_flow_segment_dirty_age_seconds` | gauge | none | Age of the oldest dirty mark |
 | `zirv_flow_flow_enrollments_total` | counter | `trigger`, `outcome` | People a `flow.enroll` enrolled or found enrolled |
 | `zirv_flow_flow_enroll_skips_total` | counter | `trigger`, `reason` | Enrollments refused, by reason |
-| `zirv_flow_enrollments` | gauge | `state` | Enrollments that are `active` or `waiting` |
+| `zirv_flow_enrollments` | gauge | `state` | Enrollments that are `active` or `waiting`; sampled every 60 s; exact up to 10,000 per state and the planner's estimate above |
 | `zirv_flow_enrollments_last_sample_timestamp_seconds` | gauge | none | Unix time of the last successful enrollment sample; alert on it going stale, since a failed sample leaves the gauges at their last values |
 | `zirv_flow_timer_lateness_seconds` | gauge | none | Age of the oldest `waiting` enrollment whose `wake_at` has passed; 0 with none |
 | `zirv_flow_timer_wake_lateness_seconds` | histogram | none | Time between a timer's `wake_at` and its `flow.step` running |
@@ -164,24 +170,47 @@ use it:
 | `zirv-flow scheduler` | Elected leader (an advisory lock; the others stand by and take over within seconds): enqueues due cron schedules, returns jobs with expired leases to the queue, keeps the decision log and event partitions for this and next month, expires person exports hourly, deletes import files and rejects past their retention (see [CSV import](../guide/sources.md#csv-import)), and exports queue gauges. |
 | `zirv-flow all` | `serve`, `worker` and `scheduler` in one process (the default). |
 
-A running job holds a lease of `worker.lease_seconds`, which its worker extends
-every third of that while the handler runs. A worker that dies leaves its job to
-the scheduler, which makes it runnable again once the lease has expired; a job
+Each of a worker's `worker.concurrency` slots claims up to 32 due jobs at once
+and runs them one after another. A batch holds at most one inbox drain, which
+can run for up to 20 seconds, so due drains spread over the slots. A running job holds a lease of
+`worker.lease_seconds`, which its worker extends every third of that while the
+handler runs. A claimed job waits for its turn on the lease from its claim: the
+slot gives the jobs it has not started back to the queue a sixth of the lease (at
+most four seconds) after the claim returns, so they never wait long behind a slow job, and at
+once when the worker stops. The flow steps of one workspace among them run in
+one transaction with one commit, each behind a savepoint of its own: a step that
+fails is rolled back alone and its retry, with the attempt and its error, commits
+with the others; a step that loses its lease while it runs is rolled back alone and left to its
+new owner; and when a step that ran is found to have lost its lease as the transaction completes
+its steps, or the shared commit fails, nothing of it commits: that step is left to its new owner
+and every other step in it is retried. A worker that dies leaves its jobs to the scheduler,
+which makes them runnable again once their leases have expired; a job
 that fails is retried with exponential backoff and jitter, and is kept as
 `dead` after its last attempt. A job's database writes commit together with its
 completion, so a job never completes twice. Work that reaches outside the
 database must be idempotent: a crash can run a job again. A workspace is limited
 to `worker.max_running_per_workspace` running jobs when that is set, so one busy
-workspace cannot take every worker.
+workspace cannot take every worker. A slot whose claim finds nothing waits for
+a job to be enqueued, or for the next poll a second later; while the limit is
+set, each job of the same worker that leaves running (completed, failed, lost
+or given back) also wakes one waiting slot, which claims the room it freed at
+once. Room that another worker frees is found by the next poll. A claimed job
+counts as running from its claim, for that limit and in the `running` queue
+depth, so the depth can exceed
+the number of slots.
 
 For pool sizes and the deployment connection budget, see [connection arithmetic](sizing.md#connection-arithmetic).
 
-On `SIGTERM` or Ctrl-C a worker stops claiming and has 30 seconds to finish
-running jobs; any still running are left to lease expiry. The
+On `SIGTERM` or Ctrl-C a worker stops claiming, gives back the jobs it claimed
+but has not started, and has 30 seconds to finish running jobs; any still
+running are left to lease expiry. The
 `ingest.drain` kind (one per workspace) applies that workspace's ingestion inbox; see
-[Ingestion](../people.md#ingestion). `/metrics` carries
+[Ingestion](../people.md#ingestion). Its
+job transaction confirms the lease without a row lock, so a drain that runs for its whole
+20 second budget does not hold back the cleanup that keeps the claims cheap; see
+[architecture section 14](../architecture.md#14-queue-and-scheduler). `/metrics` carries
 `zirv_flow_jobs_total{kind,outcome}`, `zirv_flow_job_duration_seconds{kind}`,
-`zirv_flow_job_claim_lag_seconds{kind}` and the queue depth
+`zirv_flow_job_claim_lag_seconds{kind}`, `zirv_flow_job_transactions_total{kind}` and the queue depth
 `zirv_flow_jobs{kind,state}` (`ready`, `running`, `dead`), set by the scheduler
 leader. A `worker` or `scheduler` process has no HTTP server, so set `ops.bind` (for
 example `ZIRV_FLOW_OPS__BIND=0.0.0.0:9100`) to serve `/metrics`, `/healthz` and

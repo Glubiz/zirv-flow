@@ -138,8 +138,11 @@ $c exec -T -e PGOPTIONS="-c bench.since=2026-10-11T18:00:00Z" postgres \
 ```
 
 It prints one row per kind with `items`, `p50_ms`, `p95_ms`, `p99_ms` and `max_ms`. Caveats, stated
-in the script: the decision timestamp is the drain transaction's start, so the figure slightly
-under-estimates; and identify is measured per source record (its latest change), so use `--people`
+in the script: identify uses the decision timestamp, the drain transaction's start; since 0.231.0 track
+uses the timestamp of the event's v7 id, minted by the drain before person resolution, the events insert
+and the commit. Both slightly under-estimate (track by at most the rest of that drain batch's transaction;
+no metric records one batch's duration, and `zirv_flow_job_duration_seconds` is per `ingest.drain` job),
+and track figures taken before 0.231.0 are not comparable with later ones. Also, identify is measured per source record (its latest change), so use `--people`
 at least as large as the items sent, or the count is the number of distinct people.
 
 Backlog drain time (run 4): note the time `loadgen` stops, then poll until the inbox is empty; the

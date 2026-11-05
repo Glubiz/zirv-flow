@@ -78,9 +78,44 @@ pub(crate) fn record_enroll_skips(trigger: &'static str, reason: &'static str, c
     .increment(count);
 }
 
+/// Counts a job transaction the worker began: `zirv_flow_job_transactions_total{kind}`. A job
+/// runs in a transaction of its own, except the `flow.step` jobs of one workspace that a slot
+/// claimed together, which share one (#397); `zirv_flow_jobs_total` over this is the jobs per
+/// transaction.
+pub(crate) fn record_transaction(kind: &str) {
+    metrics::counter!("zirv_flow_job_transactions_total", "kind" => kind.to_owned()).increment(1);
+}
+
 pub(crate) fn record_claim_lag(kind: &str, seconds: f64) {
     metrics::histogram!("zirv_flow_job_claim_lag_seconds", "kind" => kind.to_owned())
         .record(seconds);
+}
+
+/// What ended the wait of a worker slot whose claim found nothing to run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IdleEnd {
+    /// A job was enqueued, or the listener reconnected and may have missed one.
+    Enqueued,
+    /// A job of the same worker left running under a per-workspace cap (#397).
+    Freed,
+    /// The poll interval ran out.
+    Polled,
+}
+
+impl IdleEnd {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Enqueued => "enqueued",
+            Self::Freed => "freed",
+            Self::Polled => "poll",
+        }
+    }
+}
+
+/// Counts an idle slot's wait by what ended it: `zirv_flow_job_idle_waits_total{ended}`. A wait
+/// the poll interval ended while jobs were due is a slot that slept through work.
+pub(crate) fn record_idle_wait(ended: IdleEnd) {
+    metrics::counter!("zirv_flow_job_idle_waits_total", "ended" => ended.as_str()).increment(1);
 }
 
 /// Counts what a drained batch did: `zirv_flow_ingest_applied_total{kind,outcome}` and
@@ -648,6 +683,28 @@ mod tests {
     }
 
     #[test]
+    fn a_transaction_is_counted_once_per_kind_however_many_jobs_it_runs() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+
+        metrics::with_local_recorder(&recorder, || {
+            record_transaction("flow.step");
+            record_transaction("flow.step");
+            record_transaction("maintenance.noop");
+        });
+
+        let output = handle.render();
+        assert!(
+            output.contains("zirv_flow_job_transactions_total{kind=\"flow.step\"} 2"),
+            "{output}"
+        );
+        assert!(
+            output.contains("zirv_flow_job_transactions_total{kind=\"maintenance.noop\"} 1"),
+            "{output}"
+        );
+    }
+
+    #[test]
     fn claim_lag_is_recorded_per_kind() {
         let recorder = PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
@@ -660,6 +717,29 @@ mod tests {
             "{output}"
         );
         assert!(output.contains("kind=\"a.kind\""), "{output}");
+    }
+
+    #[test]
+    fn an_idle_wait_is_counted_by_what_ended_it() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+
+        metrics::with_local_recorder(&recorder, || {
+            record_idle_wait(IdleEnd::Polled);
+            record_idle_wait(IdleEnd::Polled);
+            record_idle_wait(IdleEnd::Freed);
+            record_idle_wait(IdleEnd::Enqueued);
+        });
+
+        let output = handle.render();
+        for (ended, count) in [("poll", 2), ("freed", 1), ("enqueued", 1)] {
+            assert!(
+                output.contains(&format!(
+                    "zirv_flow_job_idle_waits_total{{ended=\"{ended}\"}} {count}"
+                )),
+                "{output}"
+            );
+        }
     }
 
     #[test]

@@ -28,7 +28,7 @@ use zirv_flow_core::events::mask_event;
 use zirv_flow_core::{TraceId, WorkspaceId};
 use zirv_flow_store::{
     Bucket, ExploreError, ExploreFilter, ExploreLimits, ExploreRow, ExploreScope, FilterOp, PgPool,
-    RowCursor,
+    PreparedScope, RowCursor,
 };
 
 use crate::admin;
@@ -191,7 +191,7 @@ pub(crate) struct ExploreCountBody {
         (status = 403, description = "A key without the read scope, a missing CSRF token, or a probe of a PII property by a caller who may not see values (`code` is `pii_property_not_explorable`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "A malformed range, filter or bucket", body = Problem, content_type = "application/problem+json"),
-        (status = 503, description = "The query ran past its time limit (`code` is `query_timeout`)", body = Problem, content_type = "application/problem+json")
+        (status = 503, description = "The query ran past its time limit (`code` is `query_timeout`), or every explorer connection stayed busy for a second (`code` is `explorer_busy`; see `Retry-After`)", body = Problem, content_type = "application/problem+json", headers(("Retry-After" = u64, description = "Whole seconds to wait before retrying `explorer_busy`")))
     ),
     security(("session" = []), ("api_key" = []))
 )]
@@ -210,7 +210,7 @@ pub(crate) async fn count(
     let reveal = may_view_pii(&state, &principal, workspace.id).await;
     let started = Instant::now();
     let result = zirv_flow_store::explore_count(
-        &state.pool,
+        state.explorer_pool(),
         workspace.id,
         &request.scope.scope(&filters),
         bucket,
@@ -277,7 +277,7 @@ pub(crate) struct ExploreBreakdownBody {
         (status = 403, description = "A key without the read scope, a missing CSRF token, or a PII property for a caller who may not see values (`code` is `pii_property_not_explorable`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "A malformed range, filter or property", body = Problem, content_type = "application/problem+json"),
-        (status = 503, description = "The query ran past its time limit (`code` is `query_timeout`)", body = Problem, content_type = "application/problem+json")
+        (status = 503, description = "The query ran past its time limit (`code` is `query_timeout`), or every explorer connection stayed busy for a second (`code` is `explorer_busy`; see `Retry-After`)", body = Problem, content_type = "application/problem+json", headers(("Retry-After" = u64, description = "Whole seconds to wait before retrying `explorer_busy`")))
     ),
     security(("session" = []), ("api_key" = []))
 )]
@@ -292,7 +292,7 @@ pub(crate) async fn breakdown(
     let reveal = may_view_pii(&state, &principal, workspace.id).await;
     let started = Instant::now();
     let result = zirv_flow_store::explore_breakdown(
-        &state.pool,
+        state.explorer_pool(),
         workspace.id,
         &request.scope.scope(&filters),
         &request.property,
@@ -350,6 +350,9 @@ pub(crate) struct ExploredEventBody {
     masked: Vec<String>,
     /// 32 lowercase hex characters.
     trace_id: String,
+    /// Whether the trace holds any decision. An accepted event writes no decision of its own, so
+    /// the trace of an event that changed nothing answers 404.
+    has_decisions: bool,
 }
 
 fn event_body(row: ExploreRow, reveal: bool) -> ExploredEventBody {
@@ -369,6 +372,7 @@ fn event_body(row: ExploreRow, reveal: bool) -> ExploredEventBody {
         properties: masked.properties,
         masked: masked.masked,
         trace_id: TraceId::from_uuid(row.trace_id).to_string(),
+        has_decisions: row.has_decisions,
     }
 }
 
@@ -412,7 +416,7 @@ fn decode_cursor(text: &str) -> Option<RowCursor> {
         (status = 403, description = "A key without the read scope, a missing CSRF token, or a probe of a PII property by a caller who may not see values (`code` is `pii_property_not_explorable`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "A malformed range or filter", body = Problem, content_type = "application/problem+json"),
-        (status = 503, description = "The query ran past its time limit (`code` is `query_timeout`)", body = Problem, content_type = "application/problem+json")
+        (status = 503, description = "The query ran past its time limit (`code` is `query_timeout`), or every explorer connection stayed busy for a second (`code` is `explorer_busy`; see `Retry-After`)", body = Problem, content_type = "application/problem+json", headers(("Retry-After" = u64, description = "Whole seconds to wait before retrying `explorer_busy`")))
     ),
     security(("session" = []), ("api_key" = []))
 )]
@@ -445,7 +449,7 @@ pub(crate) async fn list(
     let reveal = may_view_pii(&state, &principal, workspace.id).await;
     let started = Instant::now();
     let page = zirv_flow_store::explore_rows(
-        &state.pool,
+        state.explorer_pool(),
         workspace.id,
         &request.scope.scope(&filters),
         after,
@@ -480,7 +484,9 @@ fn observe_query<T>(kind: &'static str, started: Instant, result: &Result<T, Exp
 
 const EXPORT_HEADER: &str =
     "id,occurred_at,name,source,person_id,validation_state,flags,trace_id,properties,masked\n";
-const EXPORT_PAGE: u32 = 1_000;
+/// Rows per page transaction. A page is one pool acquisition and one snapshot, so a larger page
+/// means fewer queue waits behind interactive queries, at about 10 times the memory per stream.
+const EXPORT_PAGE: u32 = 10_000;
 
 /// A cell that a spreadsheet would run as a formula is made text.
 fn cell(value: &str) -> String {
@@ -552,7 +558,7 @@ enum Export {
         (status = 403, description = "A key without the read scope, a missing CSRF token, or a probe of a PII property by a caller who may not see values (`code` is `pii_property_not_explorable`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "A malformed range or filter", body = Problem, content_type = "application/problem+json"),
-        (status = 503, description = "The query ran past its time limit (`code` is `query_timeout`)", body = Problem, content_type = "application/problem+json")
+        (status = 503, description = "The query ran past its time limit (`code` is `query_timeout`), or every explorer connection stayed busy for a second, or `explorer.max_exports` exports are already streaming (`code` is `explorer_busy`; see `Retry-After`)", body = Problem, content_type = "application/problem+json", headers(("Retry-After" = u64, description = "Whole seconds to wait before retrying `explorer_busy`")))
     ),
     security(("session" = []), ("api_key" = []))
 )]
@@ -566,20 +572,24 @@ pub(crate) async fn export(
     let filters = request.filters()?;
     let reveal = may_view_pii(&state, &principal, workspace.id).await;
     let limits = state.explorer.export();
+    // Exports streaming at once are bounded: several of them starve ingest of connections.
+    let permit = state
+        .try_export_permit()
+        .ok_or_else(ApiError::explorer_busy)?;
 
     // Count first: a bad filter or a timeout is an error response, not a broken stream, and
     // the audit entry exists whether or not the client reads to the end.
     let started = Instant::now();
-    let matched = zirv_flow_store::explore_total(
-        &state.pool,
+    let start = zirv_flow_store::explore_start(
+        state.explorer_pool(),
         workspace.id,
         &request.scope(&filters),
         limits,
         reveal,
     )
     .await;
-    observe_query("export", started, &matched);
-    let matched = matched.map_err(ApiError::from)?;
+    observe_query("export", started, &start);
+    let (matched, prepared) = start.map_err(ApiError::from)?;
     let rows = u64::try_from(matched)
         .unwrap_or(0)
         .min(u64::from(limits.row_limit));
@@ -600,15 +610,36 @@ pub(crate) async fn export(
     metrics::counter!("zirv_flow_explorer_exports_total").increment(1);
 
     let source = ExportSource {
-        pool: state.pool.clone(),
+        pool: state.explorer_pool().clone(),
+        prepared,
         workspace: workspace.id,
         request,
         filters,
         limits,
         reveal,
         truncated: u64::try_from(matched).unwrap_or(0) > rows,
+        page: EXPORT_PAGE,
+        _permit: Some(permit),
     };
-    let body = stream::unfold((source, Export::Header), |(source, phase)| async move {
+    let body = export_stream(source);
+    let mut response = Response::new(Body::from_stream(body));
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        "text/csv; charset=utf-8".parse().unwrap(),
+    );
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        "attachment; filename=\"events.csv\"".parse().unwrap(),
+    );
+    Ok(response)
+}
+
+/// The CSV body: the header, then one snapshot transaction per page of `source.page` rows.
+fn export_stream(
+    source: ExportSource,
+) -> impl futures_util::Stream<Item = Result<Bytes, io::Error>> {
+    stream::unfold((source, Export::Header), |(source, phase)| async move {
         match phase {
             Export::Header => Some((
                 Ok(Bytes::from_static(EXPORT_HEADER.as_bytes())),
@@ -625,18 +656,31 @@ pub(crate) async fn export(
                 if remaining == 0 {
                     return Some((Ok(source.tail()), (source, Export::Done)));
                 }
-                let size = u32::try_from(remaining.min(u64::from(EXPORT_PAGE))).unwrap_or(1);
+                let size = u32::try_from(remaining.min(u64::from(source.page))).unwrap_or(1);
                 let started = Instant::now();
-                let page = zirv_flow_store::explore_rows(
-                    &source.pool,
-                    source.workspace,
-                    &source.request.scope(&source.filters),
-                    after,
-                    size,
-                    source.limits,
-                    source.reveal,
-                )
-                .await;
+                // A page that finds the pool busy keeps waiting, up to one page's time limit:
+                // the export already answered 200 and cannot turn into a 503.
+                let page = loop {
+                    let page = zirv_flow_store::explore_rows_prepared(
+                        &source.pool,
+                        source.workspace,
+                        &source.request.scope(&source.filters),
+                        &source.prepared,
+                        after,
+                        size,
+                        source.limits,
+                    )
+                    .await;
+                    match &page {
+                        Err(ExploreError::Store(error))
+                            if error.is_pool_timeout()
+                                && started.elapsed() < source.limits.timeout =>
+                        {
+                            continue;
+                        }
+                        _ => break page,
+                    }
+                };
                 observe_query("export", started, &page);
                 match page {
                     Ok(page) => {
@@ -670,29 +714,23 @@ pub(crate) async fn export(
             }
             Export::Done => None,
         }
-    });
-    let mut response = Response::new(Body::from_stream(body));
-    let headers = response.headers_mut();
-    headers.insert(
-        header::CONTENT_TYPE,
-        "text/csv; charset=utf-8".parse().unwrap(),
-    );
-    headers.insert(
-        header::CONTENT_DISPOSITION,
-        "attachment; filename=\"events.csv\"".parse().unwrap(),
-    );
-    Ok(response)
+    })
 }
 
 struct ExportSource {
+    prepared: PreparedScope,
     pool: PgPool,
     workspace: WorkspaceId,
     request: ExploreScopeRequest,
     filters: Vec<ExploreFilter>,
     limits: ExploreLimits,
+    /// Rows per page transaction.
+    page: u32,
     reveal: bool,
     /// More events matched than the row limit.
     truncated: bool,
+    /// Held until the stream ends, fails or is dropped.
+    _permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 impl ExportSource {
@@ -748,6 +786,7 @@ mod tests {
             validation_state: "valid".into(),
             flags: vec!["late".into(), "replayed".into()],
             trace_id: Uuid::nil(),
+            has_decisions: true,
             properties: properties.as_object().cloned().unwrap(),
             schema: schema.map(std::sync::Arc::new),
         }
@@ -855,5 +894,107 @@ mod tests {
         assert_eq!(shape["range_days"], 7);
         let text = shape.to_string();
         assert!(!text.contains("order") && !text.contains("pro") && !text.contains("plan"));
+    }
+
+    /// The export body cut into the chunks it streams: the header, then one per page transaction.
+    async fn export_chunks(
+        pool: &PgPool,
+        workspace: WorkspaceId,
+        request: ExploreScopeRequest,
+        page: u32,
+    ) -> Vec<String> {
+        use futures_util::StreamExt;
+
+        let limits = ExploreLimits {
+            timeout: Duration::from_secs(30),
+            row_limit: 1_000_000,
+        };
+        let filters = Vec::new();
+        let (matched, prepared) =
+            zirv_flow_store::explore_start(pool, workspace, &request.scope(&filters), limits, true)
+                .await
+                .unwrap();
+        let source = ExportSource {
+            pool: pool.clone(),
+            prepared,
+            workspace,
+            request,
+            filters,
+            limits,
+            page,
+            reveal: true,
+            truncated: u64::try_from(matched).unwrap_or(0) > u64::from(limits.row_limit),
+            _permit: None,
+        };
+        export_stream(source)
+            .map(|chunk| String::from_utf8(chunk.unwrap().to_vec()).unwrap())
+            .collect()
+            .await
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_25000_row_export_is_the_same_csv_in_three_page_transactions(pool: PgPool) {
+        use zirv_flow_core::{
+            Cause, HmacPurpose, HmacRoot, MasterKey, Slug, TraceContext, WorkspaceName,
+        };
+        use zirv_flow_store::EventRecord;
+
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let workspace = zirv_flow_store::create_workspace(
+            &pool,
+            &WorkspaceName::parse("bulk").unwrap(),
+            &Slug::parse("bulk").unwrap(),
+        )
+        .await
+        .unwrap()
+        .id;
+        let now = OffsetDateTime::now_utc();
+        let key = HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction);
+        let seed = EventRecord {
+            source_record_id: None,
+            source: "web".into(),
+            identifiers: vec![("email".into(), "a@example.com".into())],
+            name: "bulk".into(),
+            properties: Map::new(),
+            timestamp: Some(now),
+            received_at: now,
+            message_id: None,
+            trace: TraceContext::root(Cause::api("test")),
+        };
+        zirv_flow_store::apply_event_batch(&pool, workspace, &key, &[seed])
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO events (id, workspace_id, person_id, name, occurred_at, received_at, \
+                                 properties, source, trace_id, validation_state) \
+             SELECT gen_random_uuid(), workspace_id, person_id, name, \
+                    occurred_at - make_interval(secs => g), received_at, \
+                    jsonb_build_object('n', g), source, gen_random_uuid(), validation_state \
+             FROM events, generate_series(1, 24999) g WHERE name = 'bulk'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let request = || ExploreScopeRequest {
+            name: Some("bulk".into()),
+            filters: Vec::new(),
+            from: now - time::Duration::days(1),
+            to: now + time::Duration::hours(1),
+            person_id: None,
+        };
+
+        let small = export_chunks(&pool, workspace, request(), 1_000).await;
+        let large = export_chunks(&pool, workspace, request(), EXPORT_PAGE).await;
+
+        assert_eq!(EXPORT_PAGE, 10_000);
+        assert_eq!(small.len(), 1 + 25, "the header and 25 pages of 1,000");
+        assert_eq!(
+            large.len(),
+            1 + 3,
+            "the header and 3 pages: 10,000, 10,000, 5,000"
+        );
+        assert_eq!(small.concat(), large.concat());
+        assert_eq!(large.concat().lines().count(), 1 + 25_000);
     }
 }

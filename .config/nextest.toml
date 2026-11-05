@@ -12,6 +12,12 @@ filter = 'package(zirv-flow-store) & test(a_drain_batch_reports_wal_by_relation_
 success-output = "immediate"
 threads-required = "num-test-threads"
 
+# Snapshot xmins count every running xid in the cluster, so a write in another test's database
+# keeps the finished jobs from turning dead once the held snapshot ends.
+[[profile.default.overrides]]
+filter = 'package(zirv-flow-store) & test(claims_behind_a_held_snapshot_walk_the_finished_jobs_and_stop_once_it_ends)'
+threads-required = "num-test-threads"
+
 # The throughput tests drain thousands of jobs or people through one PostgreSQL server and run
 # close to their 60 s wait on a busy CI runner, where they time out together when they also
 # share it with each other. Running these one at a time keeps them from competing.

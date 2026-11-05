@@ -50,6 +50,12 @@ impl PersonLock {
     }
 }
 
+/// [`PersonLock::Update`] that also returns the `timezone` trait as written of each locked row.
+const UPDATE_WITH_ZONE: &str = "WITH locked AS MATERIALIZED ( \
+         SELECT id, workspace_id, merged_into, traits ->> 'timezone' AS zone FROM people \
+         WHERE id = ANY($2) ORDER BY id FOR UPDATE) \
+     SELECT id, merged_into, zone FROM locked WHERE workspace_id = $1 ORDER BY id";
+
 /// Locks the people of `workspace` among `ids` in id order, and returns each with the person it
 /// was merged into. A missing person, and one of another workspace, is absent.
 pub(crate) async fn lock_people_in_order(
@@ -59,6 +65,21 @@ pub(crate) async fn lock_people_in_order(
     lock: PersonLock,
 ) -> Result<Vec<(Uuid, Option<Uuid>)>, StoreError> {
     sqlx::query_as(lock.sql())
+        .bind(workspace.as_uuid())
+        .bind(ids)
+        .fetch_all(connection)
+        .await
+        .map_err(StoreError::query)
+}
+
+/// [`lock_people_in_order`] with [`PersonLock::Update`], and each person's `timezone` trait as
+/// written: read from the locked row, it stays what it is until the caller commits.
+pub(crate) async fn lock_people_with_zones(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    ids: &[Uuid],
+) -> Result<Vec<(Uuid, Option<Uuid>, Option<String>)>, StoreError> {
+    sqlx::query_as(UPDATE_WITH_ZONE)
         .bind(workspace.as_uuid())
         .bind(ids)
         .fetch_all(connection)
@@ -121,8 +142,12 @@ mod tests {
         .await
         .unwrap();
         assert!(analysed.is_none(), "the table must have no statistics");
-        for lock in [PersonLock::KeyShare, PersonLock::Share, PersonLock::Update] {
-            let sql = format!("EXPLAIN (FORMAT JSON) {}", lock.sql());
+        let statements = [PersonLock::KeyShare, PersonLock::Share, PersonLock::Update]
+            .map(|lock| (format!("{lock:?}"), lock.sql()))
+            .into_iter()
+            .chain([("UpdateWithZone".to_owned(), UPDATE_WITH_ZONE)]);
+        for (lock, sql) in statements {
+            let sql = format!("EXPLAIN (FORMAT JSON) {sql}");
             let plan: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
                 .bind(ws.as_uuid())
                 .bind(&ids[..2])
@@ -135,12 +160,46 @@ mod tests {
                 .iter()
                 .filter_map(|(_, index)| index.as_deref())
                 .collect();
-            assert_eq!(indexes, ["people_pkey"], "{lock:?}: {plan}");
+            assert_eq!(indexes, ["people_pkey"], "{lock}: {plan}");
             assert!(
                 nodes.iter().all(|(kind, _)| !kind.contains("Seq Scan")),
-                "{lock:?}: {plan}"
+                "{lock}: {plan}"
             );
         }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_zone_lock_returns_each_persons_timezone_trait_as_written(pool: PgPool) {
+        let ws = workspace(&pool, "zones").await;
+        let other = workspace(&pool, "elsewhere").await;
+        let mut ids: Vec<Uuid> = (0..2).map(|_| Uuid::now_v7()).collect();
+        ids.sort_unstable();
+        let foreign = Uuid::now_v7();
+        insert_people(&pool, ws, &ids).await;
+        insert_people(&pool, other, &[foreign]).await;
+        sqlx::query(
+            "UPDATE people SET traits = '{\"timezone\": \"Not/AZone\"}', merged_into = $2 \
+             WHERE id = $1",
+        )
+        .bind(ids[0])
+        .bind(ids[1])
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+
+        let locked = lock_people_with_zones(&mut connection, ws, &[ids[1], foreign, ids[0]])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            locked,
+            [
+                (ids[0], Some(ids[1]), Some("Not/AZone".to_owned())),
+                (ids[1], None, None)
+            ]
+        );
     }
 
     #[sqlx::test]

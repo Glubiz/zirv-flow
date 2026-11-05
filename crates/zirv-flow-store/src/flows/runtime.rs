@@ -13,7 +13,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::{Cause, CauseKind, TraceContext, TraceId, WorkspaceId};
 
-use crate::people::{PersonLock, lock_people_in_order};
+use crate::people::lock_people_with_zones;
 use crate::{NewJob, StoreError};
 
 /// The kind of the job that advances an enrollment.
@@ -126,6 +126,14 @@ struct EnrollmentRow {
     ended_at: Option<OffsetDateTime>,
 }
 
+/// An enrollment as its lock reads it, with the workspace's time zone.
+#[derive(FromRow)]
+struct LockedRow {
+    #[sqlx(flatten)]
+    enrollment: EnrollmentRow,
+    workspace_zone: String,
+}
+
 impl EnrollmentRow {
     fn into_enrollment(self) -> Result<Enrollment, StoreError> {
         let decode = |what: &'static str| StoreError::query(sqlx::Error::Decode(what.into()));
@@ -166,9 +174,147 @@ const ENROLLMENT_COLUMNS: &str = "e.id, e.flow_id, e.flow_version, e.person_id, 
          AS awaiting, \
      e.exit_reason, e.error, e.failed_node, e.failure_placed, e.resume_input, e.trace_id, e.cause_kind, e.cause_id, e.created_at, e.ended_at";
 
+/// The stored columns [`ENROLLMENT_COLUMNS`] reads, and the workspace.
+const ENROLLMENT_ROW: &str = "id, workspace_id, flow_id, flow_version, person_id, state, node, \
+     context, wake_at, state_version, exit_reason, error, failed_node, failure_placed, \
+     resume_input, trace_id, cause_kind, cause_id, created_at, ended_at";
+
+/// The read before an enrollment's lock: `$1` is the workspace, `$2` the enrollment. The
+/// enrollment and its person are found by primary key and the workspace is checked on the rows
+/// found, so the plan never walks `enrollments_person_id_idx` or `people_workspace_idx` (the
+/// person of another workspace reads as not merged; its lock then finds nobody).
+const ENROLLMENT_READ: &str = "WITH found AS MATERIALIZED ( \
+         SELECT workspace_id, flow_id, person_id FROM enrollments WHERE id = $2) \
+     SELECT f.flow_id, f.person_id, \
+         CASE WHEN p.workspace_id = f.workspace_id THEN p.merged_into END \
+     FROM found f LEFT JOIN people p ON p.id = f.person_id \
+     WHERE f.workspace_id = $1";
+
+/// [`ENROLLMENT_READ`] for many enrollments at once: `$1` is the workspace, `$2` the enrollments.
+const ENROLLMENTS_READ: &str = "WITH found AS MATERIALIZED ( \
+         SELECT id, workspace_id, flow_id, person_id FROM enrollments WHERE id = ANY($2)) \
+     SELECT f.id, f.flow_id, f.person_id, \
+         CASE WHEN p.workspace_id = f.workspace_id THEN p.merged_into END \
+     FROM found f LEFT JOIN people p ON p.id = f.person_id \
+     WHERE f.workspace_id = $1";
+
+/// The enrollment's lock in a round of [`lock_enrollment`]: `$1` is the workspace, `$2` the
+/// enrollment and `$3` the person the round locked. The row is locked by primary key and checked
+/// after, so the plan never walks `enrollments_person_id_idx`. The workspace's time zone is read
+/// here, after the step's flow and person locks.
+///
+/// A wait keeps the zone it was scheduled with: changing a workspace's zone re-arms nothing.
+/// This statement's snapshot predates its own wait for the enrollment lock, so a zone change
+/// committed during that wait is not seen. The step then orders before the change: it read
+/// the old workspace row and the change reads nothing the step writes, so the outcome is the
+/// one a step committed just before the change would have had.
+fn enrollment_lock() -> String {
+    format!(
+        "WITH locked AS MATERIALIZED ( \
+             SELECT {ENROLLMENT_ROW} FROM enrollments WHERE id = $2 FOR UPDATE) \
+         SELECT {ENROLLMENT_COLUMNS}, ws.timezone AS workspace_zone \
+         FROM locked e JOIN workspaces ws ON ws.id = e.workspace_id \
+         WHERE e.workspace_id = $1 AND e.person_id = $3"
+    )
+}
+
 /// How many times [`lock_enrollment`] re-reads an enrollment whose person kept changing under it
 /// before it gives the step back as a retryable race.
 const LOCK_ROUNDS: usize = 8;
+
+/// What is read of an enrollment, without a lock, before it is locked: the flow a step locks
+/// first, and the person and the one they were merged into.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EnrollmentRead {
+    pub flow_id: Uuid,
+    person_id: Uuid,
+    merged_into: Option<Uuid>,
+}
+
+impl EnrollmentRead {
+    /// Where a step of this enrollment comes in the person lock order: the lowest id of the group
+    /// its lock takes first (the person and the one they were merged into), then the person.
+    pub fn lock_order(&self) -> (Uuid, Uuid) {
+        let survivor = self.merged_into.unwrap_or(self.person_id);
+        (self.person_id.min(survivor), self.person_id)
+    }
+}
+
+/// An enrollment a step locked, with the zones it runs in, both read after its locks.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StepEnrollment {
+    pub enrollment: Enrollment,
+    /// The workspace's time zone.
+    pub workspace_zone: String,
+    /// The person's `timezone` trait as written (it may not be a zone; the engine falls back
+    /// from an invalid one), read under the person's lock.
+    pub person_zone: Option<String>,
+}
+
+/// Reads an enrollment's flow and person without a lock, for [`lock_read_enrollment`]. An
+/// enrollment that is gone, or of another workspace, reads as missing.
+pub async fn read_enrollment(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    id: Uuid,
+) -> Result<Option<EnrollmentRead>, StoreError> {
+    let row: Option<(Uuid, Uuid, Option<Uuid>)> = sqlx::query_as(ENROLLMENT_READ)
+        .bind(workspace.as_uuid())
+        .bind(id)
+        .fetch_optional(connection)
+        .await
+        .map_err(StoreError::query)?;
+    Ok(row.map(|(flow_id, person_id, merged_into)| EnrollmentRead {
+        flow_id,
+        person_id,
+        merged_into,
+    }))
+}
+
+/// [`read_enrollment`] for many enrollments in one statement, for the steps that run in one
+/// transaction (#397), by the enrollments' and the people's primary keys as that read is. An
+/// enrollment that is gone, or of another workspace, is absent.
+pub async fn read_enrollments(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    ids: &[Uuid],
+) -> Result<Vec<(Uuid, EnrollmentRead)>, StoreError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows: Vec<(Uuid, Uuid, Uuid, Option<Uuid>)> = sqlx::query_as(ENROLLMENTS_READ)
+        .bind(workspace.as_uuid())
+        .bind(ids)
+        .fetch_all(connection)
+        .await
+        .map_err(StoreError::query)?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, flow_id, person_id, merged_into)| {
+            (
+                id,
+                EnrollmentRead {
+                    flow_id,
+                    person_id,
+                    merged_into,
+                },
+            )
+        })
+        .collect())
+}
+
+/// [`lock_enrollment`] for a step that read the enrollment with [`read_enrollment`] before it
+/// locked the enrollment's flow: the first round locks the person that read found instead of
+/// reading again. Each round checks under its locks what the read found, so a read that went
+/// stale while the flow's lock was waited for costs a round, as a merge in any round does.
+pub async fn lock_read_enrollment(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    id: Uuid,
+    read: EnrollmentRead,
+) -> Result<Option<StepEnrollment>, StoreError> {
+    lock_enrollment_within(connection, workspace, id, Some(read), LOCK_ROUNDS).await
+}
 
 /// Locks an enrollment `FOR UPDATE` and reads it. Two steps of one enrollment run one after the
 /// other: the second reads the state the first committed.
@@ -192,64 +338,66 @@ const LOCK_ROUNDS: usize = 8;
 /// read again and the new group locked from nothing, in id order, rather than the step dropped
 /// or the new group (a survivor can have a lower id) locked after the old one. An enrollment
 /// that is gone (erased) reads as missing.
+///
+/// The enrollment is locked by primary key and its workspace and person are checked on the
+/// locked row; a row that fails the check is held only until its round rolls back.
 pub async fn lock_enrollment(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     id: Uuid,
 ) -> Result<Option<Enrollment>, StoreError> {
-    lock_enrollment_within(connection, workspace, id, LOCK_ROUNDS).await
+    let locked = lock_enrollment_within(connection, workspace, id, None, LOCK_ROUNDS).await?;
+    Ok(locked.map(|locked| locked.enrollment))
 }
 
-/// [`lock_enrollment`] with its number of rounds given; a retryable race when they run out.
+/// [`lock_enrollment`] with its number of rounds given, starting from `read` when the caller
+/// has one; a retryable race when the rounds run out. Returns the zones beside the enrollment.
 async fn lock_enrollment_within(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     id: Uuid,
+    mut read: Option<EnrollmentRead>,
     rounds: usize,
-) -> Result<Option<Enrollment>, StoreError> {
+) -> Result<Option<StepEnrollment>, StoreError> {
     for _ in 0..rounds {
-        let read: Option<(Uuid, Option<Uuid>)> = sqlx::query_as(
-            "SELECT e.person_id, p.merged_into FROM enrollments e \
-             LEFT JOIN people p ON p.workspace_id = e.workspace_id AND p.id = e.person_id \
-             WHERE e.workspace_id = $1 AND e.id = $2",
-        )
-        .bind(workspace.as_uuid())
-        .bind(id)
-        .fetch_optional(&mut *connection)
-        .await
-        .map_err(StoreError::query)?;
-        let Some((person, merged_into)) = read else {
-            return Ok(None);
+        let found = match read.take() {
+            Some(read) => read,
+            None => match read_enrollment(&mut *connection, workspace, id).await? {
+                Some(read) => read,
+                None => return Ok(None),
+            },
         };
-        let survivor = merged_into.unwrap_or(person);
+        let person = found.person_id;
+        let survivor = found.merged_into.unwrap_or(person);
         let group = [person, survivor];
         // A (nested) transaction for the round: rolling it back releases the round's locks.
         let mut round = connection.begin().await.map_err(StoreError::query)?;
-        let locked =
-            lock_people_in_order(&mut round, workspace, &group[..], PersonLock::Update).await?;
-        let Some((_, now_merged)) = locked.iter().find(|(locked, _)| *locked == person) else {
+        let locked = lock_people_with_zones(&mut round, workspace, &group[..]).await?;
+        let Some((_, now_merged, zone)) = locked.into_iter().find(|(locked, ..)| *locked == person)
+        else {
             // Erased: the enrollment went with the person.
             round.commit().await.map_err(StoreError::query)?;
             return Ok(None);
         };
         let row = if now_merged.unwrap_or(person) == survivor {
-            sqlx::query_as::<_, EnrollmentRow>(sqlx::AssertSqlSafe(format!(
-                "SELECT {ENROLLMENT_COLUMNS} FROM enrollments e \
-                 WHERE e.workspace_id = $1 AND e.id = $2 AND e.person_id = $3 FOR UPDATE OF e"
-            )))
-            .bind(workspace.as_uuid())
-            .bind(id)
-            .bind(person)
-            .fetch_optional(&mut *round)
-            .await
-            .map_err(StoreError::query)?
+            sqlx::query_as::<_, LockedRow>(sqlx::AssertSqlSafe(enrollment_lock()))
+                .bind(workspace.as_uuid())
+                .bind(id)
+                .bind(person)
+                .fetch_optional(&mut *round)
+                .await
+                .map_err(StoreError::query)?
         } else {
             // Merged (or merged again) while the lock was waited for.
             None
         };
         if let Some(row) = row {
             round.commit().await.map_err(StoreError::query)?;
-            return row.into_enrollment().map(Some);
+            return Ok(Some(StepEnrollment {
+                enrollment: row.enrollment.into_enrollment()?,
+                workspace_zone: row.workspace_zone,
+                person_zone: zone,
+            }));
         }
         // The group changed, or the enrollment moved to another person, or it is gone: let go of
         // this round's locks and read which in the next.
@@ -293,8 +441,22 @@ pub async fn count_in_flight_enrollments(
     .map_err(StoreError::query)
 }
 
-/// The longest the live-enrollment sampler's queries may run.
-const SAMPLE_TIMEOUT: &str = "5s";
+/// The longest one of the live-enrollment sampler's statements may run.
+const SAMPLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Up to this many enrollments in a state are counted; above it the count is an estimate.
+const SAMPLE_EXACT: i64 = 10_000;
+
+/// The `active` and the `waiting` enrollments, each read from `enrollments_live_idx` up to `$1`
+/// of them. The states are literals, so the plan always proves the index's predicate.
+const SAMPLE_COUNTS: &str = "SELECT \
+        (SELECT count(*) FROM (SELECT 1 FROM enrollments WHERE state = 'active' \
+                               ORDER BY wake_at LIMIT $1) a), \
+        (SELECT count(*) FROM (SELECT 1 FROM enrollments WHERE state = 'waiting' \
+                               ORDER BY wake_at LIMIT $1) w)";
+
+/// The planner's estimate of the enrollments in a state, for a count above [`SAMPLE_EXACT`].
+const SAMPLE_ESTIMATE: &str = "SELECT 1 FROM enrollments WHERE state = $1";
 
 /// What the leader samples of the live enrollments, over all workspaces.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -307,22 +469,29 @@ pub struct EnrollmentSample {
 }
 
 /// Counts the `active` and `waiting` enrollments and finds the oldest overdue timer, from
-/// `enrollments_live_idx`, under a statement timeout so a table of millions of waiting rows
-/// cannot hold the leader's tick.
+/// `enrollments_live_idx`, under a statement timeout of a second. Each state is counted up to
+/// 10,000 enrollments; above that its count is the planner's estimate from the table
+/// statistics, never below 10,001, so millions of waiting rows cost no more to sample than ten
+/// thousand do (#397). The oldest overdue timer is the first entry of the `waiting` range.
 pub async fn sample_enrollments(pool: &PgPool) -> Result<EnrollmentSample, StoreError> {
-    let mut tx = pool.begin().await.map_err(StoreError::query)?;
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        "SET LOCAL statement_timeout = '{SAMPLE_TIMEOUT}'"
-    )))
-    .execute(&mut *tx)
-    .await
-    .map_err(StoreError::query)?;
-    let (active, waiting): (i64, i64) = sqlx::query_as(
-        "SELECT count(*) FILTER (WHERE state = 'active'),                 count(*) FILTER (WHERE state = 'waiting')          FROM enrollments WHERE state IN ('active', 'waiting')",
-    )
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(StoreError::query)?;
+    sample_up_to(pool, SAMPLE_EXACT).await
+}
+
+async fn sample_up_to(pool: &PgPool, exact: i64) -> Result<EnrollmentSample, StoreError> {
+    let mut tx = crate::bounded::begin_bounded_for(pool, SAMPLE_TIMEOUT).await?;
+    // Planned for the limit's value each time, never with a generic plan.
+    let (active, waiting): (i64, i64) = sqlx::query_as(SAMPLE_COUNTS)
+        .persistent(false)
+        .bind(exact + 1)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(StoreError::query)?;
+    let active =
+        crate::bounded::count_or_estimate(&mut tx, active, exact, SAMPLE_ESTIMATE, &["active"])
+            .await?;
+    let waiting =
+        crate::bounded::count_or_estimate(&mut tx, waiting, exact, SAMPLE_ESTIMATE, &["waiting"])
+            .await?;
     let late: Option<i64> = sqlx::query_scalar(
         "SELECT EXTRACT(EPOCH FROM now() - min(wake_at))::bigint FROM enrollments          WHERE state = 'waiting' AND wake_at <= now()",
     )
@@ -840,6 +1009,51 @@ mod tests {
         );
     }
 
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_state_above_the_exact_limit_is_sampled_from_the_planners_estimate(pool: PgPool) {
+        let ws = workspace(&pool, "sample-estimate").await;
+        let flow = create(&pool, ws, "Flow").await;
+        publish(&pool, ws, flow.id).await.unwrap();
+        for _ in 0..40 {
+            timed_enrollment(&pool, ws, flow.id, "waiting", Some(-60)).await;
+        }
+        timed_enrollment(&pool, ws, flow.id, "active", None).await;
+        sqlx::query("ANALYZE enrollments")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let sample = sample_up_to(&pool, 5).await.unwrap();
+
+        // ANALYZE reads every row of a table this small, so the estimate is the count; the
+        // `active` state is under the limit and counted.
+        assert_eq!((sample.active, sample.waiting), (1, 40));
+        assert!((60..70).contains(&sample.oldest_late_seconds), "{sample:?}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_sample_gives_up_after_a_second(pool: PgPool) {
+        let mut blocker = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE enrollments IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+        let started = std::time::Instant::now();
+
+        let blocked = sample_enrollments(&pool).await;
+
+        let waited = started.elapsed();
+        blocker.rollback().await.unwrap();
+        assert!(blocked.is_err());
+        assert!(
+            waited >= std::time::Duration::from_millis(900)
+                && waited < std::time::Duration::from_secs(4),
+            "{waited:?}"
+        );
+    }
+
     async fn person(pool: &PgPool, ws: WorkspaceId) -> Uuid {
         let id = Uuid::now_v7();
         sqlx::query("INSERT INTO people (id, workspace_id) VALUES ($1, $2)")
@@ -933,6 +1147,192 @@ mod tests {
         assert_eq!(first[0].id, again[0].id);
         assert_eq!(settled, Some(first[0].id));
         assert_eq!(settled_again, None);
+    }
+
+    /// No index holds `outcome` (#397), so the settle of a wait whose page has room, as this one
+    /// has, is a HOT update and writes no index entry. On a full page it is not: the table keeps
+    /// the default fillfactor, and a bench-shaped run measured 59% of settles HOT.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn settling_a_wait_step_on_a_page_with_room_is_a_hot_update(pool: PgPool) {
+        let ws = workspace(&pool, "hot-settle").await;
+        let flow = create(&pool, ws, "Flow").await;
+        publish(&pool, ws, flow.id).await.unwrap();
+        let person = person(&pool, ws).await;
+        let id = enrollment_row(&pool, ws, flow.id, person).await;
+        let mut tx = crate::begin(&pool).await.unwrap();
+        let step = NewStepExecution {
+            node_id: "w",
+            outcome: StepOutcome::Waiting,
+            error: None,
+            attempt: 1,
+        };
+        record_steps(&mut tx, ws, id, std::slice::from_ref(&step))
+            .await
+            .unwrap();
+
+        let settled = settle_wait_step(&mut tx, id, "w").await.unwrap();
+
+        // This transaction's own counts, so no other test's writes are in them.
+        let (updated, hot): (i64, i64) = sqlx::query_as(
+            "SELECT pg_stat_get_xact_tuples_updated('step_executions'::regclass), \
+                    pg_stat_get_xact_tuples_hot_updated('step_executions'::regclass)",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        assert!(settled.is_some());
+        assert_eq!((updated, hot), (1, 1), "the settle wrote index entries");
+    }
+
+    /// The indexes of `step_executions` by name, and how many of them hold `outcome`.
+    async fn step_indexes(pool: &PgPool) -> (Vec<String>, i64) {
+        let names = sqlx::query_scalar(
+            "SELECT indexname::text FROM pg_indexes WHERE tablename = 'step_executions' \
+             ORDER BY indexname",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        let holding: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_index i JOIN pg_attribute a \
+               ON a.attrelid = i.indrelid AND a.attnum = ANY (i.indkey::int2[]) \
+             WHERE i.indrelid = 'step_executions'::regclass AND a.attname = 'outcome'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        (names, holding)
+    }
+
+    const STEP_INDEXES: [&str; 3] = [
+        "step_executions_id_key",
+        "step_executions_pkey",
+        "step_executions_started_idx",
+    ];
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn no_index_of_the_step_rows_holds_the_outcome(pool: PgPool) {
+        let (names, holding) = step_indexes(&pool).await;
+
+        assert_eq!(names, STEP_INDEXES);
+        assert_eq!(holding, 0);
+    }
+
+    /// The definitions of the person indexes of `enrollments`, the old and the new.
+    async fn person_indexes(pool: &PgPool) -> Vec<String> {
+        sqlx::query_scalar(
+            "SELECT indexdef FROM pg_indexes WHERE tablename = 'enrollments' \
+               AND indexname LIKE 'enrollments_person%' ORDER BY indexname",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    const PERSON_INDEXES: [&str; 1] =
+        ["CREATE INDEX enrollments_person_id_idx ON public.enrollments USING btree (person_id)"];
+
+    #[sqlx::test(migrations = false)]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn migration_0090_accepts_the_indexes_changed_by_hand(pool: PgPool) {
+        let mut before = sqlx::migrate!("./migrations");
+        before.migrations = before
+            .migrations
+            .iter()
+            .filter(|migration| migration.version < 90)
+            .cloned()
+            .collect();
+        before.run(&pool).await.unwrap();
+        for statement in [
+            "CREATE INDEX step_executions_started_idx \
+                 ON step_executions (workspace_id, node_id, started_at) INCLUDE (enrollment_id)",
+            "DROP INDEX step_executions_workspace_node_started_idx",
+            "DROP INDEX step_executions_workspace_idx",
+            "CREATE INDEX enrollments_person_id_idx ON enrollments (person_id)",
+            "DROP INDEX enrollments_person_idx",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+
+        crate::migrate(&pool).await.unwrap();
+
+        let (names, holding) = step_indexes(&pool).await;
+        assert_eq!(names, STEP_INDEXES);
+        assert_eq!(holding, 0);
+        assert_eq!(person_indexes(&pool).await, PERSON_INDEXES);
+    }
+
+    /// The blocks of `enrollments` and of its indexes this transaction has read.
+    async fn enrollment_blocks(connection: &mut PgConnection) -> i64 {
+        sqlx::query_scalar(
+            "SELECT sum(pg_stat_get_xact_blocks_fetched(oid))::bigint FROM pg_class \
+             WHERE oid = 'enrollments'::regclass \
+                OR oid IN (SELECT indexrelid FROM pg_index WHERE indrelid = 'enrollments'::regclass)",
+        )
+        .fetch_one(&mut *connection)
+        .await
+        .unwrap()
+    }
+
+    /// A person's delete finds the enrollments it cascades to by `person_id` (#510), so a person
+    /// with none reads a few index blocks and not the table or a whole index.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_person_delete_finds_the_enrollments_it_cascades_to_by_index(pool: PgPool) {
+        let ws = workspace(&pool, "person-delete").await;
+        let flow = create(&pool, ws, "Flow").await;
+        publish(&pool, ws, flow.id).await.unwrap();
+        sqlx::query(
+            "INSERT INTO people (id, workspace_id) \
+             SELECT gen_random_uuid(), $1 FROM generate_series(1, 20000)",
+        )
+        .bind(ws.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO enrollments \
+                (id, workspace_id, flow_id, flow_version, person_id, state, node, occurrence_id, \
+                 trace_id, cause_kind, cause_id) \
+             SELECT gen_random_uuid(), $1, $2, 1, id, 'waiting', 'w', gen_random_uuid(), \
+                 gen_random_uuid(), 'api', 't' \
+             FROM people WHERE workspace_id = $1",
+        )
+        .bind(ws.as_uuid())
+        .bind(flow.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("ANALYZE people, enrollments")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (first, lonely) = (person(&pool, ws).await, person(&pool, ws).await);
+        let delete = "DELETE FROM people WHERE workspace_id = $1 AND id = $2";
+        let mut tx = crate::begin(&pool).await.unwrap();
+        // The first delete plans the cascade, which reads the metapage of every index once.
+        sqlx::query(delete)
+            .bind(ws.as_uuid())
+            .bind(first)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        // This transaction's own counts, so no other test's reads are in them.
+        let before = enrollment_blocks(&mut tx).await;
+
+        let deleted = sqlx::query(delete)
+            .bind(ws.as_uuid())
+            .bind(lonely)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+
+        let read = enrollment_blocks(&mut tx).await - before;
+        assert_eq!(deleted.rows_affected(), 1);
+        assert!(read < 10, "the delete read {read} blocks of enrollments");
+        assert_eq!(person_indexes(&pool).await, PERSON_INDEXES);
     }
 
     #[sqlx::test]
@@ -1364,7 +1764,9 @@ mod tests {
             .unwrap();
         // One round only: the merge that lands while the step waits uses it up.
         let step =
-            tokio::spawn(async move { lock_enrollment_within(&mut tx, ws, enrollment, 1).await });
+            tokio::spawn(
+                async move { lock_enrollment_within(&mut tx, ws, enrollment, None, 1).await },
+            );
         wait_until_blocked_by(&pool, step_pid, merge_pid).await;
         sqlx::query("UPDATE people SET merged_into = $2 WHERE id = $1")
             .bind(loser)
@@ -1376,5 +1778,320 @@ mod tests {
 
         let error = step.await.unwrap().expect_err("the rounds ran out");
         assert!(error.is_retryable());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_step_lock_returns_the_zones_and_an_enrollment_of_another_workspace_reads_as_missing(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "step-lock").await;
+        let other = workspace(&pool, "foreign").await;
+        let flow = create(&pool, ws, "Flow").await;
+        publish(&pool, ws, flow.id).await.unwrap();
+        let person = person(&pool, ws).await;
+        let id = enrollment_row(&pool, ws, flow.id, person).await;
+        sqlx::query("UPDATE workspaces SET timezone = 'Europe/Copenhagen' WHERE id = $1")
+            .bind(ws.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE people SET traits = '{\"timezone\": \"Not/AZone\"}' WHERE id = $1")
+            .bind(person)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut tx = pool.begin().await.unwrap();
+
+        let foreign = read_enrollment(&mut tx, other, id).await.unwrap();
+        let read = read_enrollment(&mut tx, ws, id).await.unwrap().unwrap();
+        let read_flow = read.flow_id;
+        let locked = lock_read_enrollment(&mut tx, ws, id, read)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(foreign, None);
+        assert_eq!(read_flow, flow.id);
+        assert_eq!(
+            (locked.enrollment.id, locked.enrollment.person_id),
+            (id, person)
+        );
+        assert_eq!(locked.workspace_zone, "Europe/Copenhagen");
+        assert_eq!(locked.person_zone.as_deref(), Some("Not/AZone"));
+        for (table, row) in [("people", person), ("enrollments", id)] {
+            let free = sqlx::query(sqlx::AssertSqlSafe(format!(
+                "SELECT id FROM {table} WHERE id = $1 FOR UPDATE NOWAIT"
+            )))
+            .bind(row)
+            .fetch_one(&pool)
+            .await;
+            assert!(free.is_err(), "the step does not hold its {table} row");
+        }
+    }
+
+    #[test]
+    fn a_step_locks_at_the_lowest_id_of_its_group_then_at_its_person() {
+        let (low, high) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let read = |person_id, merged_into| EnrollmentRead {
+            flow_id: Uuid::nil(),
+            person_id,
+            merged_into,
+        };
+
+        assert_eq!(read(high, None).lock_order(), (high, high));
+        assert_eq!(read(high, Some(low)).lock_order(), (low, high));
+        assert_eq!(read(low, Some(high)).lock_order(), (low, low));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_read_of_many_enrollments_finds_what_the_read_of_each_finds(pool: PgPool) {
+        let ws = workspace(&pool, "batch-read").await;
+        let other = workspace(&pool, "batch-foreign").await;
+        let flow = create(&pool, ws, "Flow").await;
+        publish(&pool, ws, flow.id).await.unwrap();
+        let foreign_flow = create(&pool, other, "Foreign").await;
+        publish(&pool, other, foreign_flow.id).await.unwrap();
+        let survivor = person(&pool, ws).await;
+        let loser = person(&pool, ws).await;
+        sqlx::query("UPDATE people SET merged_into = $2 WHERE id = $1")
+            .bind(loser)
+            .bind(survivor)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let plain = enrollment_row(&pool, ws, flow.id, survivor).await;
+        let merged = enrollment_row(&pool, ws, flow.id, loser).await;
+        let foreign_person = person(&pool, other).await;
+        let foreign = enrollment_row(&pool, other, foreign_flow.id, foreign_person).await;
+        let mut tx = pool.begin().await.unwrap();
+
+        let mut found = read_enrollments(&mut tx, ws, &[merged, foreign, plain, Uuid::now_v7()])
+            .await
+            .unwrap();
+
+        found.sort_by_key(|(id, _)| *id);
+        let mut each = Vec::new();
+        for id in [plain, merged] {
+            each.push((id, read_enrollment(&mut tx, ws, id).await.unwrap().unwrap()));
+        }
+        each.sort_by_key(|(id, _)| *id);
+        assert_eq!(found, each);
+        assert!(read_enrollments(&mut tx, ws, &[]).await.unwrap().is_empty());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_step_lock_from_a_read_that_went_stale_locks_the_group_it_finds_under_the_lock(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "stale-read").await;
+        let flow = create(&pool, ws, "Flow").await;
+        publish(&pool, ws, flow.id).await.unwrap();
+        let survivor = person(&pool, ws).await;
+        let loser = person(&pool, ws).await;
+        let id = enrollment_row(&pool, ws, flow.id, loser).await;
+        let mut tx = pool.begin().await.unwrap();
+        let read = read_enrollment(&mut tx, ws, id).await.unwrap().unwrap();
+        // A merge commits between the step's read and its lock.
+        sqlx::query("UPDATE people SET merged_into = $2 WHERE id = $1")
+            .bind(loser)
+            .bind(survivor)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let locked = lock_read_enrollment(&mut tx, ws, id, read)
+            .await
+            .unwrap()
+            .expect("the step is not dropped");
+
+        assert_eq!(
+            (locked.enrollment.id, locked.enrollment.person_id),
+            (id, loser)
+        );
+        let free = sqlx::query("SELECT id FROM people WHERE id = $1 FOR UPDATE NOWAIT")
+            .bind(survivor)
+            .fetch_one(&pool)
+            .await;
+        assert!(free.is_err(), "the step does not hold the survivor");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_step_lock_reads_the_workspace_zone_committed_after_the_steps_read(pool: PgPool) {
+        let ws = workspace(&pool, "zone-race").await;
+        let flow = create(&pool, ws, "Flow").await;
+        publish(&pool, ws, flow.id).await.unwrap();
+        let person = person(&pool, ws).await;
+        let id = enrollment_row(&pool, ws, flow.id, person).await;
+        let mut tx = pool.begin().await.unwrap();
+        let read = read_enrollment(&mut tx, ws, id).await.unwrap().unwrap();
+        // An Admin's new zone commits between the step's read and its locks.
+        sqlx::query("UPDATE workspaces SET timezone = 'Europe/Copenhagen' WHERE id = $1")
+            .bind(ws.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let locked = lock_read_enrollment(&mut tx, ws, id, read)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(locked.workspace_zone, "Europe/Copenhagen");
+    }
+
+    /// The plans of `sql` for `binds`: the one planned for the values, and the generic one a
+    /// prepared statement settles on after its fifth execution.
+    async fn plans_of(pool: &PgPool, sql: &str, binds: &[Uuid]) -> String {
+        let binds: Vec<Vec<Uuid>> = binds.iter().map(|bind| vec![*bind]).collect();
+        plans_with(pool, sql, &binds, false).await
+    }
+
+    /// [`plans_of`] for a statement whose last parameter is an array of `ids`, after `ws`.
+    async fn plans_of_many(pool: &PgPool, sql: &str, ws: Uuid, ids: &[Uuid]) -> String {
+        plans_with(pool, sql, &[vec![ws], ids.to_vec()], true).await
+    }
+
+    /// The plans of `sql`, each bind one value, or an array when `last_is_array` says so of the last.
+    async fn plans_with(
+        pool: &PgPool,
+        sql: &str,
+        binds: &[Vec<Uuid>],
+        last_is_array: bool,
+    ) -> String {
+        let mut connection = pool.acquire().await.unwrap();
+        let mut custom = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN (COSTS OFF) {sql}"
+        )));
+        for (index, bind) in binds.iter().enumerate() {
+            custom = if last_is_array && index + 1 == binds.len() {
+                custom.bind(bind.clone())
+            } else {
+                custom.bind(bind[0])
+            };
+        }
+        let custom = custom.fetch_all(&mut *connection).await.unwrap();
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "SET plan_cache_mode = force_generic_plan; PREPARE planned AS {sql}"
+        )))
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        let values: Vec<String> = binds
+            .iter()
+            .enumerate()
+            .map(|(index, bind)| {
+                let text: Vec<String> = bind.iter().map(Uuid::to_string).collect();
+                if last_is_array && index + 1 == binds.len() {
+                    format!("'{{{}}}'", text.join(","))
+                } else {
+                    format!("'{}'", text.join(","))
+                }
+            })
+            .collect();
+        let generic: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN (COSTS OFF) EXECUTE planned({})",
+            values.join(", ")
+        )))
+        .fetch_all(&mut *connection)
+        .await
+        .unwrap();
+        sqlx::raw_sql("DEALLOCATE planned; RESET plan_cache_mode")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        format!("{}\n--- generic\n{}", custom.join("\n"), generic.join("\n"))
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_step_reads_and_locks_its_enrollment_and_person_by_primary_key(pool: PgPool) {
+        // Tables without statistics first, as after a restore or before their first analyze.
+        sqlx::raw_sql(
+            "ALTER TABLE people SET (autovacuum_enabled = false); \
+             ALTER TABLE enrollments SET (autovacuum_enabled = false)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let ours = workspace(&pool, "ours").await;
+        let other = workspace(&pool, "other").await;
+        for ws in [ours, other] {
+            let flow = create(&pool, ws, "Flow").await;
+            publish(&pool, ws, flow.id).await.unwrap();
+            sqlx::query(
+                "INSERT INTO people (id, workspace_id) \
+                 SELECT gen_random_uuid(), $1 FROM generate_series(1, 20000)",
+            )
+            .bind(ws.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO enrollments \
+                    (id, workspace_id, flow_id, flow_version, person_id, state, node, \
+                     occurrence_id, trace_id, cause_kind, cause_id) \
+                 SELECT gen_random_uuid(), $1, $2, 1, id, 'waiting', 'w', gen_random_uuid(), \
+                     gen_random_uuid(), 'api', 't' \
+                 FROM people WHERE workspace_id = $1",
+            )
+            .bind(ws.as_uuid())
+            .bind(flow.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let (enrollment, person): (Uuid, Uuid) =
+            sqlx::query_as("SELECT id, person_id FROM enrollments WHERE workspace_id = $1 LIMIT 1")
+                .bind(ours.as_uuid())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        // A wake transaction reads the enrollments of the eight jobs a slot claims.
+        let batch: Vec<Uuid> =
+            sqlx::query_scalar("SELECT id FROM enrollments WHERE workspace_id = $1 LIMIT 8")
+                .bind(ours.as_uuid())
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let ws = ours.as_uuid();
+
+        // The bench's plans took the other indexes; at this size the planner picks either for
+        // the old statements, so only the current ones are checked, with and without statistics.
+        let mut plans = Vec::new();
+        for analysed in [false, true] {
+            if analysed {
+                sqlx::query("ANALYZE people, enrollments")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+            plans.push((
+                plans_of(&pool, ENROLLMENT_READ, &[ws, enrollment]).await,
+                plans_of(&pool, &enrollment_lock(), &[ws, enrollment, person]).await,
+                plans_of_many(&pool, ENROLLMENTS_READ, ws, &batch).await,
+            ));
+        }
+
+        for (read, lock, batch_read) in &plans {
+            assert!(read.contains("enrollments_pkey"), "{read}");
+            assert!(read.contains("people_pkey"), "{read}");
+            assert!(lock.contains("enrollments_pkey"), "{lock}");
+            assert!(batch_read.contains("enrollments_pkey"), "{batch_read}");
+            assert!(batch_read.contains("people_pkey"), "{batch_read}");
+            for plan in [read, lock, batch_read] {
+                for path in [
+                    "people_workspace_idx",
+                    "enrollments_person_id_idx",
+                    "Seq Scan on people",
+                    "Seq Scan on enrollments",
+                ] {
+                    assert!(!plan.contains(path), "{path}\n{plan}");
+                }
+            }
+        }
     }
 }

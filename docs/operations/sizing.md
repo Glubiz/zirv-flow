@@ -64,32 +64,59 @@ slow query, a lock bottleneck or provider throttling. Follow
 
 `database.max_connections` is the main pool limit **per process**, not per
 deployment. A process running a worker also opens separate jobs and heartbeat
-pools. Let D be its main pool limit, C be `worker.concurrency` and S be
+pools, and a process running `serve` opens an explorer pool. Let D be its main pool
+limit, E be `explorer.max_connections` (default 4), C be `worker.concurrency` and S be
 `ingest.drain_shards`. The maximum is:
 
-- `serve` or `scheduler`: D.
-- `worker` or `all`: D + C × (S + 1) + 1 for the jobs pool + C for heartbeats,
-  or D + (2 + S) × C + 1.
+- `scheduler`: D.
+- `serve`: D + E. The explorer pool serves every explorer query and CSV export page,
+  so a burst of them waits for its E connections and never takes one from ingest.
+  A query that waits one second for a connection answers `503` with the code
+  `explorer_busy` and `Retry-After`.
+  `explorer.max_exports` (default 1) caps the CSV exports streaming at once per process; a
+  further export answers the same `503`. Raise it only after measuring ingest with that many
+  exports open, since concurrent exports have collapsed ingest throughput.
+  An export reads 10,000 rows per page, one snapshot transaction and one explorer connection
+  per page, so a 1 M-row export takes about 100 acquisitions of the E pool. Each open stream
+  holds one page in memory: the decoded rows and their CSV text. The CSV text alone is about
+  3 to 5 MB at 300 to 500 bytes a row, and the decoded rows take a multiple of that, more for
+  large `properties`; budget it per `explorer.max_exports` (not yet measured).
+- `worker`: D + C × (S + 1) + 1 for the jobs pool + C for heartbeats,
+  or D + (2 + S) × C + 1. `all` adds E to that.
 
 This is configured pool arithmetic from the
 [worker implementation](../../crates/zirv-flow-jobs/src/worker.rs), not measured
 connection demand. The jobs pool covers each slot's transaction, its concurrent
 drain transactions and a failure connection; the heartbeat pool protects lease
-renewal. The worker's `LISTEN` connection and scheduler's leader lock each occupy
-a connection **inside** their main pool. HTTP and admin work also use the main
+renewal and gives back the claimed jobs a slot has not started. The worker's
+`LISTEN` connection and scheduler's leader lock each occupy a connection
+**inside** their main pool. HTTP and admin work also use the main
 pool. Keep capacity available there for ordinary queries.
 
 Worked example: separate `serve`, `worker` and `scheduler`, each using the current
 [configured default](../../crates/zirv-flow/src/config.rs) D = 10, with C = 4 and
 S = 8 as in [M2 §2.1](../benchmarks/m2-ingestion.md#21-stack-and-tiers). The extra
 worker budget is (2 + 8) × 4 + 1 = **41** connections; the deployment total is
-3 × 10 + 41 = **71**. Against the benchmark PostgreSQL `max_connections` of **100**
-([M stack](../benchmarks/data/M/sustained-stack.txt)), that leaves **29** before
+3 × 10 + 41 + E = 3 × 10 + 41 + 4 = **75**. Against the benchmark PostgreSQL `max_connections` of **100**
+([M stack](../benchmarks/data/M/sustained-stack.txt)), that leaves **25** before
 subtracting PostgreSQL reserved slots, monitoring clients, migrations, and the
 admin CLI's own pool. These are calculated ceilings, not a recommended spare
 capacity or observed usage. Count every additional process and concurrent admin
 command before choosing PostgreSQL's limit; preserve operational headroom instead
 of allocating the whole remainder to workers.
+
+A `serve` process that takes sustained ingest needs a larger D. Connections in
+use are about the request rate times the mean hold time, and each ingest request
+takes two pool connections (the key lookup and the append). Under database
+background load the [M8 validation run](https://github.com/Glubiz/zirv-flow/issues/397)
+had about 34 requests in flight at 2,000 events/s against D = 10, so most of the
+latency was waiting for a connection. A `serve` process taking 2,000 events/s
+needs D of about 24 to 32.
+
+Worked budget for that topology, with D = 32 on `serve` and 10 on `scheduler` and
+`worker`: 32 + 10 + 10 + 41 = **93**. That leaves 7 of PostgreSQL's default
+`max_connections` of 100, less than the reserved slots and headroom above
+require, so raise PostgreSQL's `max_connections` above 100, for example to 150.
 
 Use [ZirvFlowDbPoolSaturated](runbooks.md#zirvflowdbpoolsaturated) for the procedure.
 An idle pool need not open its full allocation, but the server must accommodate
@@ -119,9 +146,33 @@ needs its own memory budget; these runs did not measure smaller database tiers.
 | `shared_buffers` | 4 GB | PostgreSQL's shared page cache; leave RAM for backend work and the OS cache. |
 | `effective_cache_size` | 16 GB | Planner estimate of available cache, not a memory allocation. |
 | `maintenance_work_mem` | 1 GB | Budget maintenance work alongside concurrent queries and vacuum workers. |
-| `max_wal_size` | 8 GB | Checkpoint pressure setting, not a hard limit on WAL disk usage. |
+| `max_wal_size` | 8 GB | Checkpoint pressure setting, not a hard limit on WAL disk usage. Recommended: 32 GB, see below. |
+| `wal_compression` | off | Recommended: `lz4`, see below. |
 | `checkpoint_timeout` | 15 min | Timed checkpoint interval; WAL pressure can cause earlier checkpoints. |
 | `synchronous_commit` | on | The measured baseline waits for commit durability. |
+
+**Recommended change from the recorded values: `wal_compression = lz4` and `max_wal_size = 32GB`
+(keep `checkpoint_timeout = 15min`).** The M8 validation run
+([#397](https://github.com/Glubiz/zirv-flow/issues/397)) measured checkpoints triggered by WAL
+volume every 91 to 190 s at 8 GB, not by the 15 min timeout; the drain wrote about 12 KB of WAL per
+event, about 75% of the worst case from full-page images of random index leaves right after each
+checkpoint, and a timer wake about 56 KB. Compression shrinks those images, and a checkpoint
+interval of minutes instead of seconds means fewer images to write.
+
+Sizing `max_wal_size`: PostgreSQL requests a checkpoint once the WAL written since the last one
+passes about `max_wal_size / (1 + checkpoint_completion_target)`, 53% of it at the default target of
+0.9. At 8 GB that is about 4.2 GB, which the measured rates filled in 91 to 190 s. At the sustained
+2,000 events/s of [section 19](../architecture.md#19-scalability-envelope) and the measured 12 KB per
+event, the drain writes 24 MB/s: about 21 GB per 15 min before compression, and roughly half after
+`lz4` and the time-ordered trace ids (decision inserts no longer touch random index pages), about
+11 GB. At 32 GB the trigger is about 17 GB, so the compressed sustained rate checkpoints on the
+timeout; uncompressed it would still checkpoint about every 12 min. The 10,000 events/s burst drains
+at about 4,400 events/s, 53 MB/s before compression and about 26 MB/s after, so during a burst
+checkpoints still come from WAL volume, about every 11 min with compression. Budget the WAL volume for
+`max_wal_size` plus headroom (for example 40 GB); the setting does not cap disk use. A larger
+value lengthens crash recovery, which replays up to one interval of WAL. The halving is an
+estimate, not a measurement; verify it with `pg_stat_checkpointer` (`num_timed` against
+`num_requested`).
 
 The performance effect of disabling `synchronous_commit` or increasing
 `wal_buffers` is **not measured** ([#151](https://github.com/Glubiz/zirv-flow/issues/151)).

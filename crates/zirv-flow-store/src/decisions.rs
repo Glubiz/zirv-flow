@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use serde_json::{Map, Value};
 use sqlx::prelude::FromRow;
-use sqlx::{PgConnection, PgExecutor, PgPool, Postgres, QueryBuilder};
+use sqlx::{PgConnection, PgExecutor, PgPool};
 use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 use zirv_flow_core::decision_actions::{DecisionSpec, Reason};
@@ -26,9 +26,6 @@ pub use retention::{
     apply_decision_retention_for, apply_decision_retention_progress,
 };
 pub use size::{DecisionLogSize, decision_log_size};
-
-/// Records per statement of [`append_decisions`]: 11 binds each stay far below PostgreSQL's limit.
-const MAX_BATCH: usize = 1000;
 
 /// The `bench-no-decisions` feature, a benchmark-only switch that makes [`append_decision`] and
 /// [`append_decisions`] write nothing. The failed-job records written by the job queue's own SQL
@@ -251,7 +248,7 @@ fn record_append(started: Instant) {
         .record(started.elapsed().as_secs_f64());
 }
 
-/// Appends many records in one statement, at most [`MAX_BATCH`] at a time; the same rules as
+/// Appends many records in one statement; the same rules as
 /// [`append_decision`] apply to each.
 pub async fn append_decisions(
     connection: &mut PgConnection,
@@ -264,7 +261,7 @@ pub async fn append_decisions(
     insert_identified(connection, &identified).await
 }
 
-/// Inserts records under the ids they are given, at most [`MAX_BATCH`] to a statement.
+/// Inserts records under the ids they are given, in one statement.
 async fn insert_identified(
     connection: &mut PgConnection,
     decisions: &[(Uuid, &NewDecision)],
@@ -278,36 +275,70 @@ async fn insert_identified(
     written
 }
 
+/// One statement of fixed shape for any row count: each column travels as one array and
+/// `unnest` zips them back into rows, so a connection prepares it once. `ord` keeps the order of
+/// the slice. `subject_ids` is a `jsonb` column, so it travels as a `jsonb[]` of one object per
+/// row, and every nullable column as an array with NULL elements.
+const INSERT_ROWS: &str = "INSERT INTO decision_records \
+        (id, workspace_id, trace_id, action, outcome, reason, cause_kind, cause_id, \
+         subject_ids, job_id, attempt) \
+    SELECT id, workspace_id, trace_id, action, outcome, reason, cause_kind, cause_id, \
+           subject_ids, job_id, attempt \
+    FROM unnest($1::uuid[], $2::uuid[], $3::uuid[], $4::text[], $5::text[], $6::text[], \
+                $7::text[], $8::text[], $9::jsonb[], $10::uuid[], $11::int4[]) \
+        WITH ORDINALITY AS t(id, workspace_id, trace_id, action, outcome, reason, cause_kind, \
+                             cause_id, subject_ids, job_id, attempt, ord) \
+    ORDER BY ord";
+
 async fn write_chunks(
     connection: &mut PgConnection,
     decisions: &[(Uuid, &NewDecision)],
 ) -> Result<(), StoreError> {
-    for chunk in decisions.chunks(MAX_BATCH) {
-        let mut query = QueryBuilder::<Postgres>::new(
-            "INSERT INTO decision_records \
-                (id, workspace_id, trace_id, action, outcome, reason, cause_kind, cause_id, \
-                 subject_ids, job_id, attempt) ",
-        );
-        query.push_values(chunk, |mut row, (id, decision)| {
-            row.push_bind(*id)
-                .push_bind(decision.workspace_id.as_uuid())
-                .push_bind(decision.trace.trace_id.as_uuid())
-                .push_bind(decision.spec.action())
-                .push_bind(decision.spec.outcome())
-                .push_bind(decision.reason())
-                .push_bind(decision.trace.cause.kind.as_str())
-                .push_bind(decision.trace.cause.id.clone())
-                .push_bind(subjects_of(decision))
-                .push_bind(decision.job.map(|(id, _)| id))
-                .push_bind(decision.job.map(|(_, attempt)| attempt));
-        });
-        query
-            .build()
-            .execute(&mut *connection)
-            .await
-            .map_err(StoreError::query)?;
-    }
-    Ok(())
+    let ids: Vec<Uuid> = decisions.iter().map(|(id, _)| *id).collect();
+    let workspaces: Vec<Uuid> = decisions
+        .iter()
+        .map(|(_, d)| d.workspace_id.as_uuid())
+        .collect();
+    let traces: Vec<Uuid> = decisions
+        .iter()
+        .map(|(_, d)| d.trace.trace_id.as_uuid())
+        .collect();
+    let actions: Vec<&str> = decisions.iter().map(|(_, d)| d.spec.action()).collect();
+    let outcomes: Vec<&str> = decisions.iter().map(|(_, d)| d.spec.outcome()).collect();
+    let reasons: Vec<Option<&str>> = decisions.iter().map(|(_, d)| d.reason()).collect();
+    let kinds: Vec<&str> = decisions
+        .iter()
+        .map(|(_, d)| d.trace.cause.kind.as_str())
+        .collect();
+    let cause_ids: Vec<&str> = decisions
+        .iter()
+        .map(|(_, d)| d.trace.cause.id.as_str())
+        .collect();
+    let subjects: Vec<Value> = decisions.iter().map(|(_, d)| subjects_of(d)).collect();
+    let jobs: Vec<Option<Uuid>> = decisions
+        .iter()
+        .map(|(_, d)| d.job.map(|(id, _)| id))
+        .collect();
+    let attempts: Vec<Option<i32>> = decisions
+        .iter()
+        .map(|(_, d)| d.job.map(|(_, attempt)| attempt))
+        .collect();
+    sqlx::query(INSERT_ROWS)
+        .bind(ids)
+        .bind(workspaces)
+        .bind(traces)
+        .bind(actions)
+        .bind(outcomes)
+        .bind(reasons)
+        .bind(kinds)
+        .bind(cause_ids)
+        .bind(subjects)
+        .bind(jobs)
+        .bind(attempts)
+        .execute(connection)
+        .await
+        .map(|_| ())
+        .map_err(StoreError::query)
 }
 
 /// Records waiting to be appended in one statement, in the order they were made. A batch that
@@ -316,36 +347,48 @@ async fn write_chunks(
 /// pushed, so its place among the records written directly in the same transaction (which share
 /// one `recorded_at` and are ordered by id) is the order in which the decisions were made.
 #[derive(Debug, Default)]
-pub(crate) struct DecisionBuffer {
+pub struct DecisionBuffer {
     pending: Vec<(Uuid, NewDecision)>,
 }
 
 impl DecisionBuffer {
-    pub(crate) fn push(&mut self, decision: NewDecision) {
+    pub fn push(&mut self, decision: NewDecision) {
         self.pending.push((Uuid::now_v7(), decision));
     }
 
+    pub fn extend(&mut self, decisions: impl IntoIterator<Item = NewDecision>) {
+        for decision in decisions {
+            self.push(decision);
+        }
+    }
+
     /// The position to hand to [`DecisionBuffer::discard_after`], taken before a savepoint.
-    pub(crate) fn mark(&self) -> usize {
+    pub fn mark(&self) -> usize {
         self.pending.len()
     }
 
     /// Drops what was pushed after `mark`, for a savepoint that rolled back.
-    pub(crate) fn discard_after(&mut self, mark: usize) {
+    pub fn discard_after(&mut self, mark: usize) {
         self.pending.truncate(mark);
     }
 
-    /// Appends everything pushed so far, in push order, and empties the buffer.
-    pub(crate) async fn flush(&mut self, connection: &mut PgConnection) -> Result<(), StoreError> {
+    /// Appends everything pushed so far, in push order, and empties the buffer. A failed append
+    /// keeps the records, so a caller that rolls back to a savepoint taken at a [`mark`] can drop
+    /// what came after it and keep the rest.
+    ///
+    /// [`mark`]: DecisionBuffer::mark
+    pub async fn flush(&mut self, connection: &mut PgConnection) -> Result<(), StoreError> {
         if self.pending.is_empty() {
             return Ok(());
         }
-        let pending = std::mem::take(&mut self.pending);
-        let identified: Vec<(Uuid, &NewDecision)> = pending
+        let identified: Vec<(Uuid, &NewDecision)> = self
+            .pending
             .iter()
             .map(|(id, decision)| (*id, decision))
             .collect();
-        insert_identified(connection, &identified).await
+        insert_identified(connection, &identified).await?;
+        self.pending.clear();
+        Ok(())
     }
 }
 
@@ -452,6 +495,7 @@ pub(crate) async fn list_enrollment_decisions(
 
 #[cfg(test)]
 mod tests {
+    use sqlx::Connection;
     use time::macros::date;
     use zirv_flow_core::decision_actions;
     use zirv_flow_core::{Slug, WorkspaceName};
@@ -552,18 +596,10 @@ mod tests {
         );
         let ws = workspace(&pool, "bench").await;
 
-        // The shapes the drain writes (events/apply.rs, people/apply.rs): a stored event is one
-        // `event.accepted`, a changed profile one `trait.change`; a new person adds a
-        // `person.created`.
+        // The shapes the drain writes (events/apply.rs, people/apply.rs): a changed profile is one
+        // `trait.change` and a new person one `person.created`. A stored event writes none.
         type Decision = (&'static DecisionSpec, &'static [&'static str]);
-        let shapes: [(&str, &[Decision]); 3] = [
-            (
-                "track",
-                &[(
-                    &decision_actions::EVENT_ACCEPTED_VALID,
-                    &["event", "person"],
-                )],
-            ),
+        let shapes: [(&str, &[Decision]); 2] = [
             (
                 "identify",
                 &[(
@@ -573,16 +609,10 @@ mod tests {
             ),
             (
                 "track_new_person",
-                &[
-                    (
-                        &decision_actions::PERSON_CREATED,
-                        &["person", "source_record"],
-                    ),
-                    (
-                        &decision_actions::EVENT_ACCEPTED_VALID,
-                        &["event", "person"],
-                    ),
-                ],
+                &[(
+                    &decision_actions::PERSON_CREATED,
+                    &["person", "source_record"],
+                )],
             ),
         ];
         let mut report = Vec::new();
@@ -847,7 +877,7 @@ mod tests {
     async fn a_batch_appends_every_record_with_its_own_subjects(pool: PgPool) {
         let ws = workspace(&pool, "ours").await;
         let trace = TraceContext::root(Cause::api("req-1"));
-        let subjects: Vec<Uuid> = (0..MAX_BATCH + 5).map(|_| Uuid::new_v4()).collect();
+        let subjects: Vec<Uuid> = (0..1005).map(|_| Uuid::new_v4()).collect();
         let batch: Vec<NewDecision> = subjects
             .iter()
             .map(|subject| {
@@ -871,6 +901,79 @@ mod tests {
         assert_eq!(stored, i64::try_from(subjects.len()).unwrap());
     }
 
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn flushes_of_any_size_reuse_one_prepared_insert(pool: PgPool) {
+        let ws = workspace(&pool, "ours").await;
+        let trace = TraceContext::root(Cause::api("req-1"));
+        let mut connection = pool.acquire().await.unwrap();
+
+        for count in [1, 2, 50] {
+            let batch: Vec<NewDecision> =
+                (0..count).map(|_| decision(ws, &trace, "shape")).collect();
+            append_decisions(&mut connection, &batch).await.unwrap();
+        }
+
+        let prepared: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_prepared_statements WHERE statement LIKE 'INSERT INTO decision_records%'",
+        )
+        .fetch_one(&mut *connection)
+        .await
+        .unwrap();
+        assert_eq!(prepared, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_batch_round_trips_nulls_and_subjects_in_order(pool: PgPool) {
+        let ws = workspace(&pool, "ours").await;
+        let trace = TraceContext::root(Cause::api("req-1"));
+        let person = Uuid::new_v4();
+        let job = Uuid::new_v4();
+        let mut bare = decision(ws, &trace, "a-bare");
+        bare.subject_ids = Vec::new();
+        let mut with_subject = decision(ws, &trace, "b-subject");
+        with_subject.subject_ids = vec![("person", person), ("segment", person)];
+        with_subject.detail = Some("why");
+        let mut with_job = decision(ws, &trace, "c-job");
+        with_job.job = Some((job, 3));
+        let mut connection = pool.acquire().await.unwrap();
+
+        append_decisions(&mut connection, &[bare, with_subject, with_job])
+            .await
+            .unwrap();
+
+        type Row = (String, Option<String>, Value, Option<Uuid>, Option<i32>);
+        let rows: Vec<Row> = sqlx::query_as(
+            "SELECT action, reason, subject_ids, job_id, attempt FROM decision_records \
+             WHERE workspace_id = $1 ORDER BY id",
+        )
+        .bind(ws.as_uuid())
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("a-bare".to_owned(), None, serde_json::json!({}), None, None),
+                (
+                    "b-subject".to_owned(),
+                    Some("why".to_owned()),
+                    serde_json::json!({"person": person.to_string(), "segment": person.to_string()}),
+                    None,
+                    None
+                ),
+                (
+                    "c-job".to_owned(),
+                    None,
+                    serde_json::json!({}),
+                    Some(job),
+                    Some(3)
+                ),
+            ]
+        );
+    }
+
     async fn statements_that_wrote(pool: &PgPool, ws: WorkspaceId) -> i64 {
         sqlx::query_scalar(
             "SELECT count(DISTINCT cmin::text) FROM decision_records WHERE workspace_id = $1",
@@ -883,11 +986,11 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_buffer_flushes_in_push_order_and_in_chunks_beyond_the_batch_limit(pool: PgPool) {
+    async fn a_large_buffer_flushes_in_push_order_in_one_statement(pool: PgPool) {
         let ws = workspace(&pool, "ours").await;
         let trace = TraceContext::root(Cause::api("req-1"));
         let enrollment = Uuid::new_v4();
-        let actions = numbered(MAX_BATCH + 5);
+        let actions = numbered(1005);
         let mut buffer = DecisionBuffer::default();
         for action in &actions {
             buffer.push(of_enrollment(ws, &trace, enrollment, action));
@@ -901,7 +1004,7 @@ mod tests {
         let (records, _) = list_trace(&pool, ws, trace.trace_id, 5000).await.unwrap();
         let stored: Vec<&str> = records.iter().map(|r| r.action.as_str()).collect();
         assert_eq!(stored, actions);
-        assert_eq!(statements_that_wrote(&pool, ws).await, 2);
+        assert_eq!(statements_that_wrote(&pool, ws).await, 1);
     }
 
     #[sqlx::test]
@@ -927,6 +1030,33 @@ mod tests {
         let stored: Vec<&str> = records.iter().map(|r| r.action.as_str()).collect();
         assert_eq!(stored, ["kept-1", "kept-2"]);
         assert_eq!(statements_that_wrote(&pool, ws).await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_failed_flush_keeps_its_records_for_the_savepoint_that_rolls_back(pool: PgPool) {
+        let ws = workspace(&pool, "ours").await;
+        let trace = TraceContext::root(Cause::api("req-1"));
+        let enrollment = Uuid::new_v4();
+        let missing = WorkspaceId::from_uuid(Uuid::now_v7());
+        let mut buffer = DecisionBuffer::default();
+        let mut tx = crate::begin(&pool).await.unwrap();
+        buffer.push(of_enrollment(ws, &trace, enrollment, "kept"));
+        let mark = buffer.mark();
+        let mut savepoint = tx.begin().await.unwrap();
+        buffer.push(of_enrollment(missing, &trace, enrollment, "refused"));
+
+        assert!(buffer.flush(&mut savepoint).await.is_err());
+        savepoint.rollback().await.unwrap();
+        assert_eq!(buffer.mark(), 2, "the failed flush emptied the buffer");
+        buffer.discard_after(mark);
+        buffer.flush(&mut tx).await.unwrap();
+        crate::commit(tx).await.unwrap();
+
+        let (records, _) = list_trace(&pool, ws, trace.trace_id, 10).await.unwrap();
+        let stored: Vec<&str> = records.iter().map(|r| r.action.as_str()).collect();
+        assert_eq!(stored, ["kept"]);
+        assert_eq!(buffer.mark(), 0, "a flush that wrote empties the buffer");
     }
 
     #[sqlx::test]
@@ -1105,6 +1235,59 @@ mod tests {
                 today.year(),
                 u8::from(today.month())
             )
+        );
+    }
+
+    /// The `WAL FPI` of `EXPLAIN (ANALYZE, WAL)` for inserting one decision row per trace id,
+    /// rolled back, after a checkpoint so every touched page needs a fresh full-page image.
+    async fn flush_fpi(pool: &PgPool, ws: WorkspaceId, traces: &[Uuid]) -> i64 {
+        sqlx::query("CHECKPOINT").execute(pool).await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        let plan: serde_json::Value = sqlx::query_scalar(
+            "EXPLAIN (ANALYZE, WAL, FORMAT JSON) \
+             INSERT INTO decision_records \
+             (id, workspace_id, trace_id, action, outcome, cause_kind, cause_id) \
+             SELECT gen_random_uuid(), $1, t, 'step', 'done', 'api', 'x' FROM unnest($2::uuid[]) t",
+        )
+        .bind(ws.as_uuid())
+        .bind(traces)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        tx.rollback().await.unwrap();
+        plan[0]["Plan"]["WAL FPI"].as_i64().unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn time_ordered_trace_ids_write_far_fewer_full_page_images_than_random_ones(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "ours").await;
+        sqlx::query(
+            "INSERT INTO decision_records \
+             (id, workspace_id, trace_id, action, outcome, cause_kind, cause_id) \
+             SELECT gen_random_uuid(), $1, gen_random_uuid(), 'step', 'done', 'api', 'x' \
+             FROM generate_series(1, 150000)",
+        )
+        .bind(ws.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("VACUUM (ANALYZE) decision_records")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let random: Vec<Uuid> = (0..300).map(|_| Uuid::new_v4()).collect();
+        let ordered: Vec<Uuid> = (0..300).map(|_| TraceId::new().as_uuid()).collect();
+        let random_fpi = flush_fpi(&pool, ws, &random).await;
+        let ordered_fpi = flush_fpi(&pool, ws, &ordered).await;
+
+        eprintln!("full-page images: random v4 {random_fpi}, time-ordered v7 {ordered_fpi}");
+        assert!(
+            ordered_fpi * 2 < random_fpi,
+            "v7 wrote {ordered_fpi} full-page images against {random_fpi} for v4"
         );
     }
 

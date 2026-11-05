@@ -49,7 +49,7 @@ describe("the trace of the send path", () => {
   });
 
   it("holds every stage of the send path, ending in the skipped send with its gate reason", () => {
-    const stages = ["event.accepted", "segment.entered", "flow.enroll", "flow.step", "message.send", "consent.change", "message.feedback"];
+    const stages = ["segment.entered", "flow.enroll", "flow.step", "message.send", "consent.change", "message.feedback"];
     for (const stage of stages) expect(records.some((record) => record.action === stage)).toBe(true);
     const last = records[records.length - 1];
     expect(last).toMatchObject({ action: "message.send", outcome: "skipped", reason: "no_consent" });

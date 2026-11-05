@@ -435,6 +435,19 @@ async fn run_roles_reporting(
         }
         _ => None,
     };
+    // Explorer queries get connections of their own, so a burst of them cannot queue ingest.
+    let explorer_pool = roles.serve.then(|| {
+        zirv_flow_store::sized_like(
+            &pool,
+            config.explorer_max_connections(),
+            0,
+            EXPLORER_ACQUIRE_TIMEOUT,
+        )
+    });
+    let state = match (state, &explorer_pool) {
+        (Some(state), Some(explorer_pool)) => Some(state.with_explorer_pool(explorer_pool.clone())),
+        (state, _) => state,
+    };
     if let Some(state) = &state
         && let Err(code) = announce_setup(state, config).await
     {
@@ -450,6 +463,10 @@ async fn run_roles_reporting(
                 render,
                 role_readiness(stopped.clone(), Arc::clone(&liveness)),
             );
+            let state = match &explorer_pool {
+                Some(explorer_pool) => state.with_explorer_pool(explorer_pool.clone()),
+                None => state,
+            };
             match start_ops(addr, state).await {
                 Ok(ops) => {
                     if let Some(report) = ops_bound {
@@ -815,6 +832,7 @@ fn http_state(
         .with_import_limits(config.import_limits())
         .with_asset_limits(config.asset_limits())
         .with_explorer_limits(config.explorer_limits())
+        .with_max_exports(config.explorer_max_exports())
         .with_egress_policy(config.egress_policy())
         .with_public_url(config.public_url())
         .with_prefetch_user_agents(config.prefetch_user_agents())
@@ -920,6 +938,10 @@ async fn serve_http(
         }
     }
 }
+
+/// How long an explorer query waits for a connection of its own pool before the request answers
+/// `explorer_busy`.
+const EXPLORER_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(1);
 
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 

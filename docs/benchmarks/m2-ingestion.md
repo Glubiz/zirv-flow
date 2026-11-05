@@ -80,9 +80,14 @@ generator-bound and is not evidence about the server.
 **Latency.** The API figure is `latency_from_schedule`: from each request's scheduled time to its final
 response, so a stalled server and a generator that fell behind both show. `service_latency` (send to
 response) and `dispatch_lag` are reported beside it in the data. The inbox-to-applied figure is
-`scripts/bench/applied-latency.sql`: the decision's `recorded_at` minus the inbox arrival, scoped to the step
-or run by its start time. It is the start of the draining transaction, so it slightly under-reads; and for
-identify it is one value per source record (its latest change).
+`scripts/bench/applied-latency.sql`: for identify, the decision's `recorded_at` minus the inbox arrival; for track
+since 0.231.0, the timestamp of the event's v7 id (minted by the drain before person resolution, the events
+insert and the commit) minus the inbox arrival, scoped to the step or run by its start time. Both slightly
+under-read: identify ends at the start of the draining transaction, track when the id is minted, so track
+understates completion by at most the rest of that drain batch's transaction. No metric records one batch's
+duration (`zirv_flow_job_duration_seconds` is per `ingest.drain` job, many batches), so that is the only
+bound. Track figures taken before 0.231.0 used the `event.accepted` decision's `recorded_at` and are not
+comparable with later ones. For identify it is one value per source record (its latest change).
 
 ### 2.3 Environment
 
