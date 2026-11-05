@@ -1,0 +1,7 @@
+# The one image every sim fixture and generator runs in: the host has no usable Python.
+FROM python:3.12.8-slim
+RUN pip install --no-cache-dir \
+    "psycopg[binary]==3.3.8" \
+    PyMySQL==1.2.3 \
+    confluent-kafka==2.16.1
+WORKDIR /sim

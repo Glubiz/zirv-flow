@@ -1,0 +1,435 @@
+# The simulated production environment (design #513). Run it through sim.sh, which sets the
+# project name, the profile env file and the state directory.
+name: zirv-flow-sim
+
+x-image: &zirv-image ghcr.io/glubiz/zirv-flow:${SIM_IMAGE_TAG:-0.234.0}
+x-tools-image: &tools-image zirv-flow-sim-tools:local
+
+x-zirv-env: &zirv-env
+  ZIRV_FLOW_DATABASE__URL: postgres://zirv:${SIM_PG_PASSWORD:?run sim.sh init}@zf-db:5432/zirv_flow
+  ZIRV_FLOW_DATABASE__MIGRATE_ON_START: "false"
+  ZIRV_FLOW_SECRETS__MASTER_KEY_FILE: /var/lib/zirv-flow/secrets/master.key
+  ZIRV_FLOW_SERVER__COOKIE_SECURE: "false"
+  ZIRV_FLOW_SERVER__PUBLIC_URL: https://app.sim.example.com
+  ZIRV_FLOW_EGRESS__ALLOW: '["${SIM_SUBNET:-172.29.77.0/24}"]'
+  SSL_CERT_FILE: /sim/tls/ca.pem
+  ZIRV_FLOW_EVENTS__RETENTION_DAYS: "${SIM_RETENTION_DAYS:-5}"
+  ZIRV_FLOW_EVENTS__MIN_RETENTION_DAYS: "1"
+  ZIRV_FLOW_LOG__FORMAT: json
+
+x-zirv: &zirv
+  image: *zirv-image
+  pull_policy: missing
+  networks: [sim]
+  dns: ["${SIM_SUBNET_BASE:-172.29.77}.53"]
+  volumes:
+    - zf-secrets:/var/lib/zirv-flow/secrets:ro
+    - ${SIM_STATE:?run sim.sh}:/sim:ro
+  depends_on:
+    zf-migrate:
+      condition: service_completed_successfully
+    dns:
+      condition: service_healthy
+
+x-fixture: &fixture
+  image: *tools-image
+  pull_policy: never
+  networks: [sim]
+  restart: unless-stopped
+  volumes:
+    - ./fixtures:/fixtures:ro
+    - ${SIM_STATE:?run sim.sh}:/sim
+  healthcheck: &fixture-health
+    test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+    interval: 5s
+    timeout: 5s
+    retries: 12
+    start_period: 5s
+
+x-generator: &generator
+  image: *tools-image
+  pull_policy: never
+  networks: [sim]
+  restart: unless-stopped
+  volumes:
+    - ./gen:/gen:ro
+    - ${SIM_STATE:?run sim.sh}:/sim
+
+services:
+  # ---- zirv-flow ----
+  zf-db:
+    image: postgres:16
+    networks: [sim]
+    shm_size: 1g
+    mem_limit: ${SIM_MEM_ZF_DB:-8g}
+    cpus: ${SIM_CPUS_ZF_DB:-3}
+    environment:
+      POSTGRES_USER: zirv
+      POSTGRES_PASSWORD: ${SIM_PG_PASSWORD:?run sim.sh init}
+      POSTGRES_DB: zirv_flow
+    command:
+      - postgres
+      - -c
+      - shared_buffers=${SIM_PG_SHARED_BUFFERS:-3GB}
+      - -c
+      - effective_cache_size=${SIM_PG_CACHE_SIZE:-6GB}
+      - -c
+      - maintenance_work_mem=${SIM_PG_MAINTENANCE_MEM:-512MB}
+      - -c
+      - max_wal_size=${SIM_PG_MAX_WAL:-32GB}
+      - -c
+      - wal_compression=lz4
+      - -c
+      - checkpoint_timeout=15min
+      - -c
+      - max_connections=250
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - track_io_timing=on
+      - -c
+      - log_min_duration_statement=1000
+      - -c
+      - synchronous_commit=on
+    volumes:
+      - zf-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zirv -d zirv_flow"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+
+  zf-key:
+    image: *zirv-image
+    pull_policy: missing
+    networks: [sim]
+    restart: "no"
+    mem_limit: 64m
+    command: ["admin", "generate-master-key", "--out", "/var/lib/zirv-flow/secrets/master.key", "--if-missing"]
+    volumes:
+      - zf-secrets:/var/lib/zirv-flow/secrets
+
+  zf-migrate:
+    image: *zirv-image
+    pull_policy: missing
+    networks: [sim]
+    restart: "no"
+    mem_limit: 512m
+    command: ["migrate"]
+    environment: *zirv-env
+    volumes:
+      - zf-secrets:/var/lib/zirv-flow/secrets:ro
+      - ${SIM_STATE:?run sim.sh}:/sim:ro
+    depends_on:
+      zf-db:
+        condition: service_healthy
+      zf-key:
+        condition: service_completed_successfully
+
+  zf-serve-1: &serve
+    <<: *zirv
+    command: ["serve"]
+    mem_limit: ${SIM_MEM_SERVE:-1536m}
+    cpus: ${SIM_CPUS_SERVE:-0.75}
+    environment:
+      <<: *zirv-env
+      ZIRV_FLOW_DATABASE__MAX_CONNECTIONS: "24"
+
+  zf-serve-2:
+    <<: *serve
+
+  zf-worker-1: &worker
+    <<: *zirv
+    command: ["worker"]
+    mem_limit: ${SIM_MEM_WORKER:-2560m}
+    cpus: ${SIM_CPUS_WORKER:-1.25}
+    # The image probes server.bind, which a worker does not open; Prometheus `up` is its signal.
+    healthcheck:
+      disable: true
+    environment:
+      <<: *zirv-env
+      ZIRV_FLOW_WORKER__CONCURRENCY: "8"
+      ZIRV_FLOW_INGEST__DRAIN_SHARDS: "4"
+      ZIRV_FLOW_OPS__BIND: 0.0.0.0:9100
+
+  zf-worker-2:
+    <<: *worker
+
+  zf-scheduler:
+    <<: *zirv
+    command: ["scheduler"]
+    mem_limit: ${SIM_MEM_SCHEDULER:-512m}
+    cpus: ${SIM_CPUS_SCHEDULER:-0.25}
+    healthcheck:
+      disable: true
+    environment:
+      <<: *zirv-env
+      ZIRV_FLOW_OPS__BIND: 0.0.0.0:9100
+
+  lb:
+    image: nginx:1.28.0-alpine
+    networks: [sim]
+    mem_limit: 128m
+    cpus: 0.25
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./nginx/lb.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      zf-serve-1:
+        condition: service_healthy
+      zf-serve-2:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/readyz"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    networks: [sim]
+    mem_limit: ${SIM_MEM_PROMETHEUS:-1g}
+    cpus: 0.25
+    ports:
+      - "127.0.0.1:9090:9090"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../../docs/operations/alerts.rules.yml:/etc/prometheus/alerts.rules.yml:ro
+      - prom-data:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/-/healthy"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # ---- the company's own data ----
+  company-pg:
+    image: postgres:16
+    networks: [sim]
+    mem_limit: ${SIM_MEM_COMPANY_PG:-2g}
+    cpus: ${SIM_CPUS_COMPANY_PG:-1}
+    shm_size: 256m
+    environment:
+      POSTGRES_USER: shop_admin
+      POSTGRES_PASSWORD: ${SIM_COMPANY_PG_PASSWORD:?run sim.sh init}
+      POSTGRES_DB: shop
+      FLOW_READER_PASSWORD: ${SIM_FLOW_READER_PASSWORD:?run sim.sh init}
+    command:
+      - postgres
+      - -c
+      - shared_buffers=768MB
+      - -c
+      - max_connections=50
+    volumes:
+      - company-pg-data:/var/lib/postgresql/data
+      - ./initdb/company-pg.sh:/docker-entrypoint-initdb.d/10-reader.sh:ro
+      - ${SIM_STATE:?run sim.sh}/seed:/seed:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shop_admin -d shop"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+
+  company-mysql:
+    image: mysql:8.4
+    networks: [sim]
+    mem_limit: ${SIM_MEM_COMPANY_MYSQL:-1536m}
+    cpus: ${SIM_CPUS_COMPANY_MYSQL:-1}
+    environment:
+      MYSQL_ROOT_PASSWORD: ${SIM_MYSQL_ROOT_PASSWORD:?run sim.sh init}
+      FLOW_READER_PASSWORD: ${SIM_FLOW_READER_PASSWORD:?run sim.sh init}
+    command:
+      - --innodb-buffer-pool-size=${SIM_MYSQL_BUFFER_POOL:-768M}
+      - --secure-file-priv=/seed
+      - --max-connections=100
+    volumes:
+      - company-mysql-data:/var/lib/mysql
+      - ./initdb/company-mysql.sh:/docker-entrypoint-initdb.d/10-reader.sh:ro
+      - ${SIM_STATE:?run sim.sh}/seed:/seed
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 20s
+
+  kafka:
+    image: apache/kafka:4.2.0
+    networks: [sim]
+    mem_limit: ${SIM_MEM_KAFKA:-1536m}
+    cpus: ${SIM_CPUS_KAFKA:-1}
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_LOG_RETENTION_HOURS: "120"
+      KAFKA_HEAP_OPTS: ${SIM_KAFKA_HEAP:--Xmx1g}
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 15s
+      retries: 20
+      start_period: 30s
+
+  # ---- fixtures ----
+  edge:
+    image: nginx:1.28.0-alpine
+    networks:
+      sim:
+        aliases:
+          - app.sim.example.com
+          - billing-api.sim.example.com
+          - exports.sim.example.com
+          - mailer-api.sim.example.com
+          - receiver.sim.example.com
+    mem_limit: 192m
+    cpus: 0.25
+    volumes:
+      - ./nginx/edge.conf:/etc/nginx/conf.d/default.conf:ro
+      - ${SIM_STATE:?run sim.sh}:/sim:ro
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "/dev/null", "https://127.0.0.1/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  billing-api:
+    <<: *fixture
+    command: ["python", "-B", "/fixtures/billing_api.py"]
+    mem_limit: ${SIM_MEM_BILLING:-768m}
+    cpus: 0.5
+    volumes:
+      - ./fixtures:/fixtures:ro
+      - ${SIM_STATE:?run sim.sh}:/sim:ro
+      - billing-data:/data
+
+  mailer:
+    <<: *fixture
+    command: ["python", "-B", "/fixtures/mailer.py"]
+    mem_limit: ${SIM_MEM_MAILER:-512m}
+    cpus: 0.5
+    environment:
+      SIM_DAY_SECONDS: ${SIM_DAY_SECONDS:-86400}
+      MAILER_PUBLIC_URL: https://app.sim.example.com
+
+  smtp-sink:
+    <<: *fixture
+    command: ["python", "-B", "/fixtures/smtp_sink.py", "/sim/tls"]
+    mem_limit: 256m
+    cpus: 0.25
+    networks:
+      sim:
+        aliases:
+          - smtp.sim.example.com
+    ports:
+      - "127.0.0.1:8025:8025"
+    environment:
+      SIM_SMTP_PASSWORD: ${SIM_SMTP_PASSWORD:-sim}
+    healthcheck:
+      <<: *fixture-health
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8025/healthz', timeout=3)"]
+
+  receiver:
+    <<: *fixture
+    command: ["python", "-B", "/fixtures/receiver.py"]
+    mem_limit: 128m
+    cpus: 0.1
+
+  dns:
+    <<: *fixture
+    command: ["python", "-B", "/fixtures/dns.py", "/sim"]
+    mem_limit: 64m
+    cpus: 0.1
+    networks:
+      sim:
+        ipv4_address: ${SIM_SUBNET_BASE:-172.29.77}.53
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import socket
+          q = b'\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x01a\x00\x00\x10\x00\x01'
+          s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+          s.settimeout(2)
+          s.sendto(q, ('127.0.0.1', 53))
+          assert s.recv(512)[:2] == b'\x12\x34'
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # ---- data and traffic (group A2 fills in gen/; these start only with their profile) ----
+  seed:
+    <<: *generator
+    profiles: [data]
+    restart: "no"
+    command: ["python", "-B", "/gen/seed.py"]
+    mem_limit: 1536m
+    cpus: 1
+
+  gen-ingest:
+    <<: *generator
+    profiles: [traffic]
+    command: ["python", "-B", "/gen/ingest.py"]
+    mem_limit: 256m
+    cpus: 0.5
+
+  gen-changes:
+    <<: *generator
+    profiles: [traffic]
+    command: ["python", "-B", "/gen/changes.py"]
+    mem_limit: 256m
+    cpus: 0.5
+
+  gen-kafka:
+    <<: *generator
+    profiles: [traffic]
+    command: ["python", "-B", "/gen/kafka.py"]
+    mem_limit: 256m
+    cpus: 0.25
+
+  gen-forms:
+    <<: *generator
+    profiles: [traffic]
+    command: ["python", "-B", "/gen/forms.py"]
+    mem_limit: 128m
+    cpus: 0.1
+
+  # Builds the shared tools image: `docker compose --profile tools build sim-tools`.
+  sim-tools:
+    image: *tools-image
+    profiles: [tools]
+    build:
+      context: .
+      dockerfile: Dockerfile.tools
+
+networks:
+  sim:
+    ipam:
+      config:
+        - subnet: ${SIM_SUBNET:-172.29.77.0/24}
+
+volumes:
+  zf-db-data:
+  zf-secrets:
+  prom-data:
+  company-pg-data:
+  company-mysql-data:
+  kafka-data:
+  billing-data:
