@@ -60,8 +60,9 @@ confirmation and changes nothing; the `POST /u/{token}` unsubscribes the scope o
 token authorizes the one message. A bad token shows a not-found page. After a successful unsubscribe, the next marketing
 send in that consent scope is skipped for lack of consent. Transactional sends skip the consent gate,
 and sends in other topics or verticals can still go out, unless the unsubscribe fell back to the
-whole channel. *Limit:* `server.public_url` may be `http` or `https`, but the
-one-click header is only useful over `https`, so set an `https` URL. The tokens die with the master
+whole channel. *Limit:* the one-click header needs an `https` `server.public_url`; with an `http` URL
+every marketing send fails `render_error` (`invalid_unsubscribe_url`), and with none it fails `render_error`
+because tracking links need the URL. The tokens die with the master
 key (see E17).
 
 ### Suppressions

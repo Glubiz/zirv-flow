@@ -19,7 +19,7 @@ pub(crate) enum Command {
     All,
     /// Serve the API, ingestion endpoints, webhooks, assets, UI, and health endpoints.
     Serve,
-    /// Claim and execute jobs, with dedicated pools selectable by job kind.
+    /// Claim and execute jobs of every kind, up to `worker.concurrency` at a time.
     Worker,
     /// Schedule due jobs and maintain leases, partitions, retention, and source status.
     Scheduler,

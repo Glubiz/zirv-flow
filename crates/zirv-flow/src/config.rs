@@ -1173,6 +1173,26 @@ impl Config {
         }
     }
 
+    /// Why every marketing send will fail with this public URL, if it will: tracking links need a
+    /// public URL, and one-click unsubscribe needs it to be `https`.
+    pub(crate) fn public_url_warning(&self) -> Option<&'static str> {
+        match self.public_url() {
+            None => Some(
+                "server.public_url is not set: marketing sends fail with render_error until it is                  set to an https address",
+            ),
+            Some(url)
+                if !url
+                    .get(..8)
+                    .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://")) =>
+            {
+                Some(
+                    "server.public_url is not https: marketing sends need an https address for                      one-click unsubscribe and fail with invalid_unsubscribe_url",
+                )
+            }
+            Some(_) => None,
+        }
+    }
+
     /// Whether the session cookie is marked `Secure`; turn off only for plain-HTTP development.
     pub(crate) fn server_cookie_secure(&self) -> bool {
         self.server.cookie_secure
@@ -2364,6 +2384,31 @@ auto_create_users = true
             Some("https://flow.example.com")
         );
         assert_eq!(bound.public_url(), None);
+    }
+
+    #[test]
+    fn an_unset_or_plain_http_public_url_gets_its_own_warning() {
+        let https = TestFile::new(OIDC_FILE);
+        let http = TestFile::new(
+            "[database]
+url = \"postgres://localhost/database\"
+[server]
+public_url = \"http://flow.example.com\"
+",
+        );
+
+        let secure = Config::load(Some(&https.0), []).unwrap();
+        let plain = Config::load(Some(&http.0), []).unwrap();
+        let unset = Config::load(None, database_env("postgres://localhost/database")).unwrap();
+
+        assert_eq!(secure.public_url_warning(), None);
+        assert!(
+            plain
+                .public_url_warning()
+                .unwrap()
+                .contains("invalid_unsubscribe_url")
+        );
+        assert!(unset.public_url_warning().unwrap().contains("is not set"));
     }
 
     #[test]

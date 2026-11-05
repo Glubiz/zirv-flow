@@ -401,6 +401,11 @@ async fn run_roles_reporting(
         .as_ref()
         .map(|secrets| Arc::clone(&secrets.hmac_root));
     let ops_bind = ops_bind(roles, config);
+    if (roles.serve || roles.worker)
+        && let Some(warning) = config.public_url_warning()
+    {
+        warn!("{warning}");
+    }
     if roles.worker
         && let Err(code) = check_ledger_dir(config)
     {
