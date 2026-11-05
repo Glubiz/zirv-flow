@@ -174,6 +174,23 @@ value lengthens crash recovery, which replays up to one interval of WAL. The hal
 estimate, not a measurement; verify it with `pg_stat_checkpointer` (`num_timed` against
 `num_requested`).
 
+**Segment previews take parallel workers from the cluster.** A preview of a definition without a
+grouped event aggregate (none, or only `since_trait` ones, which read per person) runs with
+`max_parallel_workers_per_gather = 4` in its own transaction; every other query, an aggregate
+preview included, keeps the server's value (2 in the recorded configuration) (#397). An aggregate
+preview stays at 2 because each extra worker would aggregate the event set again. The workers come
+from the cluster-wide `max_parallel_workers` and `max_worker_processes` (8 each in the recorded
+configuration), which the explorer, segment refreshes and other parallel queries share: one preview
+can hold half of them while its scan of `people` runs, and a query that finds none free runs with
+fewer workers. Four workers and the leader keep five processes busy, so on the recorded 8-vCPU
+database a preview takes CPU that ingestion would otherwise use, and two concurrent previews can
+take all of it. Four is the smallest value at which the #397 investigation's model (CPU-bound people
+scan, linear in its processes) puts a trait preview at 10 M people under its 3 s target, at about
+2.7 s against 3.9 s with two workers; more workers would buy about 0.2 s each at another core. Size
+the database's cores and the worker pool for concurrent previews next to the ingest rate. Previews
+run with JIT off, which saved about 0.25 s of compilation per statement without changing the run
+time.
+
 The performance effect of disabling `synchronous_commit` or increasing
 `wal_buffers` is **not measured** ([#151](https://github.com/Glubiz/zirv-flow/issues/151)).
 [M4 §6.5.1](../benchmarks/m4-segments.md#651-ingest-p99-with-and-without-segment-re-evaluation-on-0760-151)

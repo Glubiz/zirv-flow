@@ -131,7 +131,8 @@ pub(super) fn bind_all_as<'q, O>(
 }
 
 /// Runs the count and the sample, and finds each sampled person's display identifier. A statement
-/// cancelled at the timeout is [`StoreError::is_timeout`].
+/// cancelled at the timeout is [`StoreError::is_timeout`]. An ungrouped preview leaves
+/// `max_parallel_workers_per_gather` at 4 for the rest of the caller's transaction.
 pub async fn run_segment_preview(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -149,6 +150,14 @@ pub async fn run_segment_preview(
         .await
         .map_err(StoreError::bounded)?,
         PreviewSql::Ungrouped { count, sample } => {
+            // Without a grouped set the count is a scan of the workspace's people that CPU bounds,
+            // and four workers bring it at 10 M people under the 3 s target (#397). A grouped set
+            // keeps the server's value: each worker would aggregate the set again. Local to the
+            // transaction; docs/operations/sizing.md has the cost to the cluster.
+            sqlx::query("SET LOCAL max_parallel_workers_per_gather = 4")
+                .execute(&mut *connection)
+                .await
+                .map_err(StoreError::bounded)?;
             let total = bind_all(
                 sqlx::query_scalar(sqlx::AssertSqlSafe(count.sql.clone())),
                 workspace,
@@ -537,6 +546,49 @@ mod tests {
             "on",
             "only the transaction"
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_preview_without_a_grouped_set_scans_with_four_workers_and_one_with_a_set_does_not(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        person(&pool, ws, "a@example.com", "pro").await;
+        let mut connection = pool.acquire().await.unwrap();
+        let server = setting(&mut connection, "max_parallel_workers_per_gather").await;
+        drop(connection);
+        assert_ne!(server, "4", "the server's own value");
+        // Each "count" is the worker setting its own statement runs under.
+        let workers = "current_setting('max_parallel_workers_per_gather')::bigint";
+        let ungrouped = PreviewSql::Ungrouped {
+            count: SqlQuery {
+                sql: format!(
+                    "SELECT {workers} + 0 * count(*) FROM people p WHERE p.workspace_id = $1"
+                ),
+                params: Vec::new(),
+            },
+            sample: query("true", " ORDER BY p.id", Vec::new()),
+        };
+        let grouped = PreviewSql::Grouped(SqlQuery {
+            sql: format!(
+                "SELECT {workers}, ARRAY(SELECT p.id FROM people p WHERE p.workspace_id = $1)"
+            ),
+            params: Vec::new(),
+        });
+
+        let mut tx = begin_segment_snapshot(&pool, Duration::from_secs(5))
+            .await
+            .unwrap();
+        let (raised, _) = run_segment_preview(&mut tx, ws, &ungrouped).await.unwrap();
+        tx.rollback().await.unwrap();
+        let mut tx = begin_segment_snapshot(&pool, Duration::from_secs(5))
+            .await
+            .unwrap();
+        let (kept, _) = run_segment_preview(&mut tx, ws, &grouped).await.unwrap();
+
+        assert_eq!(raised, 4);
+        assert_eq!(kept.to_string(), server);
     }
 
     #[sqlx::test]
