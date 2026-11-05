@@ -11,6 +11,11 @@ x-m8-image: &m8-image
 x-m8-db: &m8-db
   ZIRV_FLOW_DATABASE__URL: postgres://zirv:zirv-m8-bench@postgres:5432/zirv_flow_m8
 
+# Serve pool D = 32 (sizing.md serve rule, D about 24-32). Worker and scheduler keep the shipped D = 10.
+x-m8-serve-db: &m8-serve-db
+  <<: *m8-db
+  ZIRV_FLOW_DATABASE__MAX_CONNECTIONS: ${M8_SERVE_DB_CONNECTIONS:-32}
+
 services:
   postgres:
     image: ${M8_PG_IMAGE:?set by scripts/bench/m8/common.sh}
@@ -32,9 +37,29 @@ services:
       - -c
       - maintenance_work_mem=1GB
       - -c
-      - max_wal_size=8GB
+      - max_wal_size=${M8_MAX_WAL_SIZE:-32GB}
+      - -c
+      - wal_compression=lz4
+      - -c
+      - shared_preload_libraries=pg_stat_statements
       - -c
       - checkpoint_timeout=15min
+      - -c
+      - max_connections=${M8_PG_MAX_CONNECTIONS:-400}
+      # The settings A/B (ab-settings.sh, M8_PG_SETTINGS=a|b). These defaults are PostgreSQL's own, so a stack
+      # started without the A/B runs as before; common.sh pg_side_env sets them for side A and side B.
+      - -c
+      - track_io_timing=${M8_PG_TRACK_IO_TIMING:-off}
+      - -c
+      - track_wal_io_timing=${M8_PG_TRACK_IO_TIMING:-off}
+      - -c
+      - backend_flush_after=${M8_PG_BACKEND_FLUSH_AFTER:-0}
+      - -c
+      - bgwriter_lru_maxpages=${M8_PG_BGWRITER_MAXPAGES:-100}
+      - -c
+      - bgwriter_delay=${M8_PG_BGWRITER_DELAY:-200ms}
+      - -c
+      - wal_buffers=${M8_PG_WAL_BUFFERS:--1}
 
   zirv-flow-key:
     <<: *m8-image
@@ -45,7 +70,7 @@ services:
     command: ["serve"]
     cpuset: ${M8_SERVE_CPUSET:-0-3}
     mem_limit: ${M8_SERVE_MEMORY:-8g}
-    environment: *m8-db
+    environment: *m8-serve-db
 
   zirv-flow-worker:
     <<: *m8-image

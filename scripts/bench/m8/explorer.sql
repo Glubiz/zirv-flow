@@ -70,7 +70,7 @@ SELECT e.id, e.occurred_at, e.name, e.source, e.person_id, e.validation_state,
 :scope AND (e.occurred_at, e.id) < (:'cursor_at'::timestamptz, :'cursor_id'::uuid)
 ORDER BY e.occurred_at DESC, e.id DESC LIMIT 1001;
 \else
-\echo 'export cursor page skipped: fewer than 1000 rows in the window'
+\warn 'export cursor page skipped: fewer than 1000 rows in the window'
 \endif
 \endif
 \endif

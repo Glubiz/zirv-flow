@@ -49,6 +49,16 @@ UPDATE sending_domains SET status = 'verified', verified_at = now(), last_checke
 SQL
   log "domain $M6_DOMAIN verified by SQL"
 fi
+if [ "$(api GET "/workspaces/$ws/sending-domains/$domain_id" | jq -r .status)" != verified ]; then
+  # A reused domain: the product's own re-check of its (unpublished) DNS records has since reset it.
+  pg -v d="$domain_id" -f - <<'SQL'
+UPDATE sending_domain_records SET status = 'ok', observed_text = ARRAY[expected_text], checked_at = now()
+ WHERE domain_id = :'d';
+UPDATE sending_domains SET status = 'verified', verified_at = now(), last_checked_at = now(), updated_at = now()
+ WHERE id = :'d';
+SQL
+  log "domain $M6_DOMAIN verified again by SQL"
+fi
 [ "$(api GET "/workspaces/$ws/sending-domains/$domain_id" | jq -r .status)" = verified ] || die "the domain is not verified"
 
 identity="$(state_get M6_IDENTITY)"

@@ -5,7 +5,7 @@
 //! dispatcher, which resends the throttled requests after the pause, ahead of new ones and paced
 //! at the target rate, so retries never stampede.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -109,6 +109,9 @@ pub struct PhaseOutcome {
     pub schedule_us: Vec<u64>,
     pub service_us: Vec<u64>,
     pub lag_us: Vec<u64>,
+    /// Latencies from schedule, in microseconds, by whole second of the scheduled time since the
+    /// phase start.
+    pub by_second: BTreeMap<u64, Vec<u64>>,
     pub next_seq: u64,
 }
 
@@ -126,6 +129,7 @@ struct Collector {
     schedule_us: Vec<u64>,
     service_us: Vec<u64>,
     lag_us: Vec<u64>,
+    by_second: BTreeMap<u64, Vec<u64>>,
     requests: u64,
     items_accepted: u64,
     retries: u64,
@@ -135,6 +139,8 @@ struct Collector {
 }
 
 struct Shared {
+    /// The phase start, from which scheduled times are bucketed by second.
+    start: Instant,
     /// Set by a 429 to the latest `Retry-After` seen; the dispatcher sends nothing before it.
     pause_until: Mutex<Option<Instant>>,
     /// Refused requests waiting for the dispatcher to resend them.
@@ -244,9 +250,17 @@ async fn send_once<T: Transport>(transport: T, shared: Arc<Shared>, mut job: Job
             // One sample per request at its final outcome, whatever it was: an overloaded
             // server's timeouts, 5xx and exhausted retries must move the percentiles too.
             // schedule = dispatch lag + service time.
+            let schedule = micros(done.saturating_duration_since(job.scheduled_at));
             collector
-                .schedule_us
-                .push(micros(done.saturating_duration_since(job.scheduled_at)));
+                .by_second
+                .entry(
+                    job.scheduled_at
+                        .saturating_duration_since(shared.start)
+                        .as_secs(),
+                )
+                .or_default()
+                .push(schedule);
+            collector.schedule_us.push(schedule);
             collector.service_us.push(micros(done - started));
             collector
                 .lag_us
@@ -284,7 +298,9 @@ async fn run_phase_with<T: Transport>(
     phase: &Phase,
     first_seq: u64,
 ) -> PhaseOutcome {
+    let start = Instant::now();
     let shared = Arc::new(Shared {
+        start,
         pause_until: Mutex::new(None),
         retries: Mutex::new(VecDeque::new()),
         in_flight: AtomicU64::new(0),
@@ -320,7 +336,6 @@ async fn run_phase_with<T: Transport>(
         }
     };
 
-    let start = Instant::now();
     // Time the schedule was held back: pauses obeyed and the slots retries used.
     let mut held = Duration::ZERO;
     let mut offered = 0u64;
@@ -398,6 +413,7 @@ async fn run_phase_with<T: Transport>(
     PhaseOutcome {
         report,
         schedule_us: collector.schedule_us,
+        by_second: collector.by_second,
         service_us: collector.service_us,
         lag_us: collector.lag_us,
         next_seq: first_seq + offered,
@@ -582,6 +598,9 @@ mod tests {
         assert_eq!(report.late_dispatch, 0);
         assert_eq!(outcome.schedule_us.len() as u64, report.requests);
         assert_eq!(outcome.service_us.len() as u64, report.requests);
+        let timeline_requests: usize = outcome.by_second.values().map(Vec::len).sum();
+        assert_eq!(timeline_requests as u64, report.requests);
+        assert_eq!(outcome.by_second.keys().copied().max(), Some(0));
         assert_eq!(report.dispatch_lag.count, report.requests);
         assert_eq!(outcome.next_seq, report.items_offered);
         assert_eq!(mock.bodies.lock().unwrap().len() as u64, report.requests);
