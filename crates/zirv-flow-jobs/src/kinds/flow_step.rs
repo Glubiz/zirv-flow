@@ -13,6 +13,8 @@
 //! commits with the job or not at all. A failed attempt rolls back to a savepoint and is retried
 //! with backoff; on the last attempt the enrollment becomes `failed` with the error stored.
 
+use std::time::Instant;
+
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use hashbrown::HashMap;
@@ -91,6 +93,7 @@ impl JobKind for FlowStep {
                 at: attempt,
                 last_attempt,
                 now,
+                read_at: None,
                 alone: true,
             };
             let mut decisions = DecisionBuffer::default();
@@ -111,6 +114,7 @@ impl JobKind for FlowStep {
             at: attempt,
             last_attempt,
             now: batch.now,
+            read_at: batch.read_at,
             alone: false,
         };
         step(
@@ -126,16 +130,39 @@ impl JobKind for FlowStep {
 }
 
 /// One attempt of a `flow.step` job, as its steps see it.
+#[derive(Clone, Copy)]
 struct StepRun<'a> {
     job: &'a StepJobPayload,
     /// The job and its attempt, for the decisions it makes.
     at: (Uuid, i32),
     last_attempt: bool,
-    /// The time the step runs at: its own read of the clock, or its batch's (#397).
+    /// The time the step runs at: its own read of the clock, or its batch's (#397), which
+    /// [`StepRun::locked`] moves on to the wake's own start.
     now: OffsetDateTime,
+    /// When the batch read the clock, on this process's monotonic clock; `None` for a job alone,
+    /// whose read is its own, and for a test's clock, which stays where the test set it.
+    read_at: Option<Instant>,
     /// Whether the job runs in a transaction of its own, which appends the decisions of its walk
     /// before the walk's savepoint is released; a batch appends them all before it commits.
     alone: bool,
+}
+
+impl StepRun<'_> {
+    /// The run once its enrollment and person are locked: a wake of a batch runs at the batch's
+    /// read of the clock plus the time since that read (ruling 512669c0), so a wake that waited
+    /// behind the batch's earlier wakes or for its own locks schedules from its own start, and
+    /// its lateness counts that wait.
+    fn locked(&self) -> Self {
+        let Some(read) = self.read_at else {
+            return *self;
+        };
+        let since = time::Duration::try_from(read.elapsed()).unwrap_or(time::Duration::ZERO);
+        Self {
+            now: self.now.checked_add(since).unwrap_or(self.now),
+            read_at: None,
+            ..*self
+        }
+    }
 }
 
 /// Locks the enrollment `read` found and advances it as the job asks, or holds, releases or
@@ -148,7 +175,7 @@ async fn step(
     graphs: Option<&mut PinnedGraphs>,
     decisions: &mut DecisionBuffer,
 ) -> Result<(), JobError> {
-    let (job, now) = (run.job, run.now);
+    let job = run.job;
     let Some(StepEnrollment {
         mut enrollment,
         workspace_zone,
@@ -157,6 +184,8 @@ async fn step(
     else {
         return Ok(());
     };
+    let run = &run.locked();
+    let now = run.now;
     if is_stale(&enrollment, job) {
         return Ok(());
     }
@@ -225,9 +254,13 @@ async fn step(
 /// What the `flow.step` jobs of one workspace that run in one transaction share (#397).
 #[derive(Debug)]
 pub(crate) struct WakeBatch {
-    /// The time every wake of the batch runs at: one read of the clock, after the guard and before
-    /// any lock. The claim found each wake due by then, so none runs early.
+    /// The batch's one read of the clock, after the guard and before any lock. The claim found
+    /// each wake due by then, so none runs early; each wake runs at this time plus the time since
+    /// [`WakeBatch::read_at`] when it holds its locks.
     now: OffsetDateTime,
+    /// When `now` was read, on this process's monotonic clock; `None` for a test's clock, which
+    /// stays where the test set it.
+    read_at: Option<Instant>,
     /// Each job's enrollment as one statement read it before any lock; one it did not find is
     /// absent.
     reads: HashMap<Uuid, EnrollmentRead>,
@@ -288,6 +321,10 @@ pub(crate) async fn plan_wakes(
     jobs: &[ClaimedJob],
 ) -> Result<WakeBatch, StoreError> {
     let now = clock.now(conn).await?;
+    let read_at = match clock {
+        Clock::Manual(_) => None,
+        Clock::Database => Some(Instant::now()),
+    };
     let enrollments: Vec<Uuid> = jobs.iter().filter_map(enrollment_of).collect();
     let reads: HashMap<Uuid, EnrollmentRead> = read_enrollments(conn, workspace, &enrollments)
         .await?
@@ -301,6 +338,7 @@ pub(crate) async fn plan_wakes(
         .collect();
     Ok(WakeBatch {
         now,
+        read_at,
         reads,
         flows,
         graphs: PinnedGraphs::new(),
@@ -4312,6 +4350,63 @@ pub(super) mod tests {
             assert!(
                 warm <= BEFORE - 2 * batch as u64,
                 "a warm batch of {batch} made {warm} round trips, against {BEFORE} on 0.231.0"
+            );
+        })
+        .await;
+    }
+
+    /// On the database's clock a wake of a batch runs at the batch's one read of the clock plus
+    /// the time since (ruling 512669c0): the second wake, which waits while the first waits for
+    /// its person, schedules its next wait from when it ran, not from when the batch read the
+    /// clock.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_later_wake_of_a_batch_schedules_from_its_own_start(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            env.define_trait("visits", TraitType::Number).await;
+            let people = visitors(&env, 0..2).await;
+            let twice = json!({"v": 1, "nodes": [
+                {"id": "w", "type": "wait.duration", "seconds": 60},
+                {"id": "w2", "type": "wait.duration", "seconds": 60},
+                {"id": "end", "type": "exit"}
+            ], "edges": [edge("e1", "w", "next", "w2"), edge("e2", "w2", "next", "end")]});
+            let enrolled = enroll_asleep(&env, "Twice", twice, &people).await;
+            // The database's clock, which the batch reads here, is past their timers too.
+            sqlx::query("UPDATE enrollments SET wake_at = wake_at - interval '2 minutes'")
+                .execute(&env.pool)
+                .await
+                .unwrap();
+            let jobs = claim_wakes(&env, 2).await;
+            let blocker = hold_person(&env, enrolled[0].person).await;
+            let mut config = batch_config(&env);
+            config.clock = Clock::Database;
+            let (pool, ws, claimed) = (env.pool.clone(), env.ws, jobs.clone());
+            let batch =
+                tokio::spawn(
+                    async move { crate::worker::run_wakes(&pool, config, ws, claimed).await },
+                );
+            until_waiting(&env, 1).await;
+            // Long enough to tell the batch's read of the clock from the second wake's start.
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            let released: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
+                .fetch_one(&env.pool)
+                .await
+                .unwrap();
+            blocker.rollback().await.unwrap();
+            let outcomes = batch.await.unwrap();
+
+            assert_eq!(
+                outcomes_of(&jobs, &outcomes),
+                [crate::metrics::Outcome::Completed; 2]
+            );
+            let later = env.enrollment(enrolled[1].enrollment).await;
+            assert_eq!(later.node, "w2");
+            let scheduled_from = later.wake_at.unwrap() - Span::seconds(60);
+            // The batch takes its monotonic instant a moment after the database read its clock.
+            assert!(
+                scheduled_from >= released - Span::milliseconds(250),
+                "the second wake scheduled from {scheduled_from}, though it ran after {released}"
             );
         })
         .await;

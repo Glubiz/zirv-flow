@@ -2675,7 +2675,10 @@ after the transaction, and a lost lease leaves the job to its new owner. The bat
 fenced delete of the jobs of every wake that completed, `DELETE ... WHERE (id, lease_token) IN
 (...) RETURNING id` with the rows taken `FOR UPDATE` in id order, one append of the decisions of
 the wakes it kept, and one commit, so 32 steps make one handler commit instead of 32; it reads
-the clock once, before it plans the wakes, and every wake steps at that time. A wake the delete
+the clock once, before it plans the wakes, and each wake steps at that time plus the time since
+the read on the worker's monotonic clock, taken once the wake holds its locks (ruling 512669c0),
+so a wake that waited behind the batch's earlier wakes schedules its waits and measures its
+lateness from its own start; a test's manual clock stays where the test set it. A wake the delete
 does not return lost its lease after its step ran, and the batch is rolled back, as a job alone
 is when its fenced delete finds no row: that job is left to its new owner or the reaper. When the
 commit fails, or an error leaves the transaction unusable, it is rolled back too: every other
