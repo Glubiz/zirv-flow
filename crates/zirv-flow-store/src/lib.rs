@@ -207,7 +207,7 @@ pub use ingest::{
 pub use jobs::{
     ClaimedJob, DEFAULT_MAX_ATTEMPTS, DeadCursor, FailOutcome, Job, JobListener, JobSummary,
     KindDepth, Leadership, NOTIFY_CHANNEL, NewJob, NewSchedule, QueueCounts, QueueDepth, Reaped,
-    Schedule, advance_schedule, claim_job, claim_jobs, complete_job, confirm_lease,
+    Schedule, advance_schedule, claim_job, claim_jobs, complete_job, complete_jobs, confirm_lease,
     create_schedule, database_now, disable_schedule, due_schedules, enqueue, enqueue_many,
     fail_job, find_job, heartbeat_job, kind_depths, list_dead_jobs, listen_for_jobs, lock_lease,
     purge_dead_jobs, queue_counts, queue_depths, reap_expired, release_jobs, retry_dead_job,

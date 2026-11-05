@@ -22,8 +22,8 @@ use zirv_flow_render::RenderPool;
 use zirv_flow_store::{
     ClaimedJob, Clock, DecisionRetention, EventRetention, FailOutcome, HmacKey, Keyring,
     MessageRetention, PgConnection, PgPool, RetentionSettings, STEP_JOB_KIND, begin,
-    cache_change_readers, claim_jobs, complete_job, confirm_lease, fail_job, heartbeat_job,
-    listen_for_jobs, lock_lease, observe_pool, release_jobs, sized_like,
+    cache_change_readers, claim_jobs, complete_job, complete_jobs, confirm_lease, fail_job,
+    heartbeat_job, listen_for_jobs, lock_lease, observe_pool, release_jobs, sized_like,
 };
 
 use crate::JobError;
@@ -909,19 +909,24 @@ async fn process_wakes(shared: &Arc<Shared>, wakes: Wakes) -> Vec<(Uuid, Outcome
 /// The batch transaction of the `flow.step` jobs of one workspace (#397): begin, take the
 /// person-change guard, read every wake's enrollment and hold their flows ([`plan_wakes`]), run
 /// the wakes one after another in the order their steps lock people in, each inside a savepoint
-/// of its own, and commit once.
+/// of its own, then complete the wakes that completed, append the batch's decisions and commit
+/// once ([`complete_wakes`]).
 ///
-/// A wake runs as a job alone does: its lease check, handler beside its heartbeat, and fenced
-/// completion, in its savepoint, which is released when the wake completes. A wake that fails or
-/// loses its lease rolls back to its savepoint, which undoes its writes and frees its locks, and
-/// the next wake goes on. A failure is then written in the transaction ([`record_failure`]), with
-/// the attempt counted as a job alone's is, and commits with the batch. A wake begins only before
-/// the deadline and while the pool runs; the rest stay in the queue, to be given back.
+/// A wake runs as a job alone does, its lease check and handler beside its heartbeat, in its
+/// savepoint, which is released when the handler succeeds; its heartbeat beats on until the
+/// batch ends, through the fenced delete, which can wait behind a lock on a job row. A wake that
+/// fails or loses its lease rolls back to its savepoint, which
+/// undoes its writes, drops its decisions and frees its locks, and the next wake goes on. A
+/// failure is then written in the transaction ([`record_failure`]), with the attempt counted as a
+/// job alone's is, and commits with the batch. A wake begins only before the deadline and while
+/// the pool runs; the rest stay in the queue, to be given back.
 ///
-/// When the transaction cannot go on (a savepoint that cannot be begun, released or rolled back)
-/// or its commit fails, nothing of it is kept: every wake that completed fails as a job alone
-/// whose commit failed, back to the queue with an attempt counted or dead on its last attempt,
-/// and every failure it recorded is settled again after it, as a job alone's is.
+/// When the transaction cannot go on (a savepoint that cannot be begun, released or rolled back),
+/// a wake that completed lost its lease by the completion, or the completion, the append or the
+/// commit fails, nothing of it is kept: a wake that lost its lease is left to the reaper, as a
+/// job alone's is, every other wake that completed fails as a job alone whose commit failed, back
+/// to the queue with an attempt counted or dead on its last attempt, and every failure it
+/// recorded is settled again after it, as a job alone's is.
 async fn execute_wakes(shared: Arc<Shared>, wakes: Wakes) -> Vec<Ran> {
     let Wakes {
         workspace,
@@ -947,13 +952,15 @@ async fn execute_wakes(shared: Arc<Shared>, wakes: Wakes) -> Vec<Ran> {
     if kind.needs_change_readers() && cache_change_readers(&mut tx, workspace).await.is_err() {
         return fail_all("could not guard person changes");
     }
-    let mut batch = match plan_wakes(&mut tx, workspace, &queue.pending()).await {
-        Ok(batch) => batch,
-        Err(error) => return fail_all(&JobError::from(error).to_string()),
-    };
+    let mut batch =
+        match plan_wakes(&mut tx, &shared.config.clock, workspace, &queue.pending()).await {
+            Ok(batch) => batch,
+            Err(error) => return fail_all(&JobError::from(error).to_string()),
+        };
     queue.order(|job| batch.lock_order(job));
 
     let mut ran = Vec::new();
+    let mut beating = Vec::new();
     let mut usable = true;
     while usable && !*stop.borrow() && tokio::time::Instant::now() < deadline {
         let Some(job) = queue.begin_next() else {
@@ -970,7 +977,7 @@ async fn execute_wakes(shared: Arc<Shared>, wakes: Wakes) -> Vec<Ran> {
             .instrument(span.clone())
             .await;
         let attempt = match attempt {
-            Some(Attempt::Failed(reason, retry_after)) => {
+            Some((Attempt::Failed(reason, retry_after), _)) => {
                 let (attempt, went_on) =
                     record_failure(&shared, &mut tx, &job, reason, retry_after)
                         .instrument(span.clone())
@@ -978,7 +985,10 @@ async fn execute_wakes(shared: Arc<Shared>, wakes: Wakes) -> Vec<Ran> {
                 usable = went_on;
                 attempt
             }
-            Some(attempt) => attempt,
+            Some((attempt, heartbeat)) => {
+                beating.extend(heartbeat);
+                attempt
+            }
             None => {
                 usable = false;
                 Attempt::Failed(NOT_COMMITTED.into(), None)
@@ -991,19 +1001,35 @@ async fn execute_wakes(shared: Arc<Shared>, wakes: Wakes) -> Vec<Ran> {
             span,
         });
     }
-    if usable {
-        if tx.commit().await.is_ok() {
-            return ran;
+    let lost = if usable {
+        complete_wakes(&mut tx, &mut batch, &ran).await
+    } else {
+        None
+    };
+    let committed = match lost {
+        Some(ref lost) if lost.is_empty() => tx.commit().await.is_ok(),
+        _ => {
+            if tx.rollback().await.is_err() {
+                // The connection is broken; the server ends the transaction when it goes.
+                warn!("could not roll back a batch transaction");
+            }
+            false
         }
-    } else if tx.rollback().await.is_err() {
-        // The connection is broken; the server ends the transaction when it goes.
-        warn!("could not roll back a batch transaction");
+    };
+    // The heartbeats beat until here: a delete that waits behind a lock on a job row past the
+    // lease would otherwise find the reaper's token on it. A beat on a row the delete took waits
+    // for the transaction, which has ended now.
+    drop(beating);
+    if committed {
+        return ran;
     }
+    let lost = lost.unwrap_or_default();
     // Rolled back before the failures are settled, so its row locks are gone by then, and so are
     // the failures it recorded: their leases are as they were, and they are settled again.
     for wake in &mut ran {
         let attempt = std::mem::replace(&mut wake.attempt, Attempt::LeaseLost);
         wake.attempt = match attempt {
+            Attempt::Completed if lost.contains(&wake.job.id) => Attempt::LeaseLost,
             Attempt::Completed => Attempt::Failed(NOT_COMMITTED.into(), None),
             Attempt::Recorded(reason, retry_after, _) => Attempt::Failed(reason, retry_after),
             attempt => attempt,
@@ -1047,38 +1073,71 @@ async fn record_failure(
     }
 }
 
-/// One wake of a batch transaction, inside a savepoint of its own. `None` means the savepoint
-/// could not be begun, released or rolled back, which leaves the transaction unusable.
+/// The end of a batch transaction that can still commit: deletes the jobs of the wakes that
+/// completed, each fenced on its lease, in one statement ([`complete_jobs`]), then appends the
+/// decisions of the wakes kept, in one statement. Returns the wakes that completed but lost their
+/// lease, so the batch must not commit, or `None` when a statement failed.
+async fn complete_wakes(
+    tx: &mut PgConnection,
+    batch: &mut WakeBatch,
+    ran: &[Ran],
+) -> Option<Vec<Uuid>> {
+    let completed: Vec<(Uuid, Uuid)> = ran
+        .iter()
+        .filter(|wake| matches!(wake.attempt, Attempt::Completed))
+        .map(|wake| (wake.job.id, wake.job.lease_token))
+        .collect();
+    let deleted = complete_jobs(&mut *tx, &completed).await.ok()?;
+    let lost: Vec<Uuid> = completed
+        .into_iter()
+        .map(|(id, _)| id)
+        .filter(|id| !deleted.contains(id))
+        .collect();
+    if lost.is_empty() {
+        batch.flush_decisions(tx).await.ok()?;
+    }
+    Some(lost)
+}
+
+/// One wake of a batch transaction, inside a savepoint of its own, with the heartbeat of a wake
+/// that completed. `None` means the savepoint could not be begun, released or rolled back, which
+/// leaves the transaction unusable.
 async fn run_wake(
     shared: &Arc<Shared>,
     kind: &'static dyn ErasedKind,
     tx: &mut PgConnection,
     job: &ClaimedJob,
     batch: &mut WakeBatch,
-) -> Option<Attempt> {
+) -> Option<(Attempt, Option<AbortOnDrop<()>>)> {
+    let mark = batch.decisions_mark();
     let mut savepoint = tx.begin().await.ok()?;
-    let attempt = match lock_lease(&mut savepoint, job.id, job.lease_token).await {
+    let (attempt, heartbeat) = match lock_lease(&mut savepoint, job.id, job.lease_token).await {
         Ok(true) => attempt_wake(shared, kind, &mut savepoint, job, batch).await,
-        Ok(false) => Attempt::LeaseLost,
-        Err(_) => Attempt::Failed("could not confirm the lease".into(), None),
+        Ok(false) => (Attempt::LeaseLost, None),
+        Err(_) => (
+            Attempt::Failed("could not confirm the lease".into(), None),
+            None,
+        ),
     };
     let ended = match attempt {
         Attempt::Completed => savepoint.commit().await,
         Attempt::LeaseLost | Attempt::Failed(..) | Attempt::Recorded(..) => {
+            batch.discard_decisions(mark);
             savepoint.rollback().await
         }
     };
-    ended.ok().map(|()| attempt)
+    ended.ok().map(|()| (attempt, heartbeat))
 }
 
-/// A wake's handler beside its heartbeat, then its completion, fenced on its lease.
+/// A wake's handler beside its heartbeat, which a wake that completed hands back to beat on until
+/// the batch completes it.
 async fn attempt_wake(
     shared: &Arc<Shared>,
     kind: &'static dyn ErasedKind,
     connection: &mut PgConnection,
     job: &ClaimedJob,
     batch: &mut WakeBatch,
-) -> Attempt {
+) -> (Attempt, Option<AbortOnDrop<()>>) {
     let (lost, mut lease_lost) = oneshot::channel();
     let heartbeat = AbortOnDrop(tokio::spawn(heartbeat(
         Arc::clone(shared),
@@ -1094,18 +1153,13 @@ async fn attempt_wake(
             Ok(()) = &mut lease_lost => None,
         }
     };
-    // Stopped before the completion: once the job row is deleted, a beat would wait for the
-    // batch's commit.
-    drop(heartbeat);
     match result {
-        None => Attempt::LeaseLost,
-        Some(Err(error)) => Attempt::Failed(error.to_string(), error.retry_after()),
-        Some(Ok(())) => match complete_job(&mut *connection, job.id, job.lease_token).await {
-            Ok(true) => Attempt::Completed,
-            // Another worker owns the job now: roll back this wake's writes.
-            Ok(false) => Attempt::LeaseLost,
-            Err(_) => Attempt::Failed("could not complete the job".into(), None),
-        },
+        None => (Attempt::LeaseLost, None),
+        Some(Err(error)) => (
+            Attempt::Failed(error.to_string(), error.retry_after()),
+            None,
+        ),
+        Some(Ok(())) => (Attempt::Completed, Some(heartbeat)),
     }
 }
 

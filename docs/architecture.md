@@ -1073,8 +1073,8 @@ events (`message.sent`, `message.skipped`, ...) that later nodes can wait for.
 - Step idempotency key: `(enrollment_id, node_id)`, sufficient because graphs are acyclic and re-entry creates a new enrollment. It is stored on `step_executions` and passed to effect jobs and destinations.
 - A wait sets `wake_at` and enqueues `flow.step` with `run_at = wake_at`, unique key `wake:{enrollment_id}:{state_version}`. `wait.until_event` also writes `enrollment_waits(person_id, event_name, enrollment_id, timeout_at)`, which apply-batch checks on event insert.
 - Failed steps retry with backoff; then the enrollment is `failed` with the error visible, and an operator can retry or skip.
-- Merge: the merged-away person's active enrollments exit with reason `merge` on the merge trace and their `enrollment_waits` are removed; the survivor keeps its own enrollments. Erasure deletes enrollments, `step_executions`, `enrollment_waits` and `flow_entries` (16.3).
-- Per-node counts are computed on read from `step_executions`, with an index and a statement timeout. There are no hot counter rows.
+- Merge: the merged-away person's active enrollments exit with reason `merge` on the merge trace and their `enrollment_waits` are removed; the survivor keeps its own enrollments. Erasure deletes enrollments, `step_executions`, `enrollment_waits` and `flow_entries` (16.3). A person's enrollments are found through `enrollments_person_id_idx` (`person_id` alone, 0090, #510), which the cascade of a person's delete can seek as well as the reads by workspace and person.
+- Per-node counts are computed on read from `step_executions`, joined to the enrollments of the version through the primary key, under a statement timeout. There are no hot counter rows. No index of `step_executions` holds `outcome` (0090, #397): every read finds step rows by enrollment, or by workspace, node and start time for the rollup's goal count (`step_executions_started_idx`, which reads the outcome of the few goal rows from the table), so the settle of a wait (`waiting` to `done`) is a HOT update that writes no index entry when its page has room. The table keeps the default fillfactor, so a settle on a full page is not; a bench-shaped run measured 59% of settles HOT (section 14).
 - Enrollment states: `active`, `waiting` (timer or event), `awaiting_conditions` (yielded at a branch; transient, since the runtime evaluates the conditions and resumes in the same transaction), `held` (a step fell due while the flow was paused; it keeps its node, timer, waits and version, and `resume_input` names the step to run on resume), `completed` (exit node or end of graph), `exited` (goal exit, exit criteria, merge, flow archived), `failed` (back to `active` on operator retry or skip).
 - Lifecycle runtime. The goal and exit criteria are matched in batched store queries (events of an apply-batch; the `segment.entered` and `segment.exited` rows of a refresh or re-evaluation, which are captured for a goal segment and for the trigger segment of a `leaves_segment` criterion too) against the version each enrollment is pinned to, and applied by the `flow.settle` job through `engine::settle`. A conversion is a `settings.goal` step row and a `flow.goal` decision, written once. A `definition_change` settles nothing. `flow.step` holds a due step of a paused flow (`flow_state_for_step` reads the flow `FOR KEY SHARE` first, so a resume that locks it `FOR UPDATE` waits for the hold; a wake transaction, section 14, takes that lock on all its flows at once, in id order, before any person lock). Resume, archive and the bulk exit of an older version are `flow.lifecycle` jobs of 500 enrollments per transaction, person locks in id order, a decision per enrollment under the action's trace (cause `manual`). A bulk exit is point-in-time: it ends the in-flight enrollments it meets when it runs, so a delayed `flow.enroll` job pinned to an older version can still insert an enrollment for a person it has passed, and that one is not exited. Operator routes under `/flows/{id}`: `POST enrollments/{enrollment_id}/retry`, `POST enrollments/{enrollment_id}/skip` and `POST versions/{n}/exit-enrollments`, all Admin and audited.
 - Built runtime choices. `flow.step` carries `{enrollment_id, state_version, input}` where `input` is `start`, `wake` or `event`; it locks the enrollment row, so the version compare-and-set cannot lose a race, and a job is stale when the version or the status differs. `failed` enrollments still hold the person (the in-flight unique index covers `active`, `waiting` and `failed`). Enrollments are keyed on the trigger occurrence too (`occurrence_id`), so a redelivered `flow.enroll` enrolls nobody twice; a person-scoped trigger (an event, a segment entry, a single-person API enrollment) continues the trace of its trigger (the event's, the segment mark's or the request's) with the trigger's cause, while an audience run (a schedule slot or a manual start) starts a fresh trace per enrollment with the trigger's cause; no new cause kind is needed.
@@ -2661,29 +2661,47 @@ zone is still read after the person lock (ruling 699e7ad5), and a read made befo
 checked again under it, so a merge or an erasure that came first is seen. The wakes run in lock
 order: by the lowest person id of the wake's lock group (its person, and the survivor that person
 was merged into), then by person id, a wake whose enrollment is gone first. Each runs behind a
-savepoint of its own: its lease check, the step and its decisions, and its fenced completion, with
-its heartbeat running until the completion. A wake whose handler fails, or whose lease check,
-heartbeat or completion finds the lease gone, rolls back to its savepoint, which drops its writes
-and the row locks it took, and the others go on. A failure is then written in the batch
+savepoint of its own, its lease check and its step, with its heartbeat running until the batch
+ends. A wake whose handler fails, or whose lease check or heartbeat finds the lease gone,
+rolls back to its savepoint, which drops its writes, its decisions and the row locks it took, and
+the others go on. A failure is then written in the batch
 transaction, outside the wake's savepoint and in a savepoint of its own (ruling 4e9d24be), with
 the statement that settles a job alone's: the attempt and its error, the backoff, the cleared
 lease and the `job_error` decision (on the last attempt the enrollment fails). Its job row is
 `ready` once the batch commits, so a reaper that waited for the batch finds it settled, not a
 running job whose lease ran out while the later wakes ran. A failure that cannot be written there
 (a deadlock with a reaper that holds the row, say) is rolled back to that savepoint and settled
-after the transaction, and a lost lease leaves the job to its new owner. One commit ends the batch,
-so 32 steps make one handler commit instead of 32. When the commit fails, or an error leaves
-the transaction unusable, it is rolled back: every wake that completed in it fails with `could not
-commit the job transaction`, as a job alone whose commit fails (its attempt counts and it retries),
-and every failure written in it is settled again after it, on a lease the rollback left as it was.
-A completed wake's fenced delete and a failed wake's written failure hold its job row until the
-commit, so the reaper waits for the batch instead of returning the job meanwhile. The slot begins
-no wake past the hold limit and gives the rest back as for any claim, so a wake starts with five
-sixths of its lease, and a batch holds at most 32. The decisions of one batch share their
-`recorded_at` (the column's default, the transaction's start) and keep their order by id; a
-failure written in the batch shares it too, under a random id, so in a trace it sorts after the
-enrollment's earlier steps, as before, but by its id among the rows another wake of the same
-trace wrote in the batch, and before the rows of transactions that began while the batch ran.
+after the transaction, and a lost lease leaves the job to its new owner. The batch ends with one
+fenced delete of the jobs of every wake that completed, `DELETE ... WHERE (id, lease_token) IN
+(...) RETURNING id` with the rows taken `FOR UPDATE` in id order, one append of the decisions of
+the wakes it kept, and one commit, so 32 steps make one handler commit instead of 32; it reads
+the clock once, before it plans the wakes, and each wake steps at that time plus the time since
+the read on the worker's monotonic clock, taken once the wake holds its locks (ruling 512669c0),
+so a wake that waited behind the batch's earlier wakes schedules its waits and measures its
+lateness from its own start; a test's manual clock stays where the test set it. A wake the delete
+does not return lost its lease after its step ran, and the batch is rolled back, as a job alone
+is when its fenced delete finds no row: that job is left to its new owner or the reaper. When the
+commit fails, or an error leaves the transaction unusable, it is rolled back too: every other
+wake that completed in it fails with `could not commit the job transaction`, as a job alone whose
+commit fails (its attempt counts and it retries), and every failure written in it is settled again
+after it, on a lease the rollback left as it was. A completed wake's heartbeat beats on until the
+commit or the rollback, so its lease runs out neither while the later wakes run nor while the
+delete waits behind a lock on a job row (the reaper would replace the token and the batch would
+roll back), and a failed wake's written
+failure holds its job row until the commit, so the reaper waits for the batch instead of returning
+that job meanwhile. On 0.231.0, with a completion, a decision append and a clock read per wake, a
+batch of 32 timer wakes made 490 round trips; it makes 397 (12.4 a wake). Since 0090 no index
+holds `outcome`, so a timer wake's settle of its wait step can be a HOT update, which writes none
+of the four index entries a settle wrote before; in a bench-shaped test of 32,000 wakes, 59% of
+the settles were HOT (the rest found no room on their page) and the step writes took 29% less
+WAL. The slot begins no wake
+past the hold limit and gives the rest back as for any claim, so a wake starts with five sixths of
+its lease, and a batch holds at most 32. The decisions of one batch share their `recorded_at`
+(the column's default, the transaction's start) and keep their order by id, minted as each is
+made, and a wake that rolls back to its savepoint drops its own; a failure written in the batch
+shares it too, under a random id, so in a trace it sorts after the enrollment's earlier steps, as
+before, but by its id among the rows another wake of the same trace wrote in the batch, and before
+the rows of transactions that began while the batch ran.
 `zirv_flow_job_transactions_total{kind}` counts handler transactions, so jobs per
 transaction is `zirv_flow_jobs_total` over it; a batched job's duration is its own wake plus an
 equal share of the batch's setup and commit.
@@ -2698,10 +2716,10 @@ A deadlock among those is found after `deadlock_timeout` (1 s by default) and Po
 statement of one side; in a batch that is one wake, which rolls back to its savepoint and retries
 alone, while the wait has used the hold limit, so the batch gives its unbegun wakes back.
 
-The engine invariants (section 18) hold per wake as for a job alone. A wake's writes, step rows,
-next wake and completion sit inside its savepoint and commit or roll back together, with the batch,
-so a completion that commits still means that its step committed once, and a wake that rolls back
-leaves nothing. A later wake of the batch reads what the earlier ones wrote, as it would after
+The engine invariants (section 18) hold per wake as for a job alone. A wake's writes, step rows
+and next wake sit inside its savepoint, and its completion and decisions in the batch, so they
+commit or roll back together, with the batch: a completion that commits still means that its step
+committed once, and a wake that rolls back leaves nothing. A later wake of the batch reads what the earlier ones wrote, as it would after
 their commit, and the `state_version` compare-and-set, the step and effect keys and the wake keys
 are unchanged. Both simulation layers run batches (section 18).
 
@@ -3620,7 +3638,7 @@ they were ruled as their capabilities were added to the plan.
   stays in `jsonb`. `string_list` traits stay in `jsonb`. The promotion is built in the
   segment milestone (M4); until the slots exist the `jsonb_path_ops` index stays, and it is reconsidered once promoted
   traits cover the equality searches. The slots are live (#125): states `backfilling`, `ready` and `retiring`; writers take the shared slot lock before they read the assignments and assignment changes take the exclusive one, so a backfill never leaves a stale value (`people/slots.rs`); the routes are `POST` and `DELETE /traits/{key}/index`.
-  Known limitation and upgrade decision: keep released migration 0033 and its checksum. Its initial `ALTER TABLE` holds ACCESS EXCLUSIVE on `people` through all 30 partial index builds, blocking reads and writes. Populated upgrades stop all roles and budget the full build when upgrading from before 0033; `v0.187.0` already contains it. No populated build timing is recorded. Rehearse at the installation's row counts before setting the downtime window; see the [lock review](operations/upgrade.md#lock-review-through-0089). This supports stopped upgrades only; online and mixed-version upgrades remain OQ-17.
+  Known limitation and upgrade decision: keep released migration 0033 and its checksum. Its initial `ALTER TABLE` holds ACCESS EXCLUSIVE on `people` through all 30 partial index builds, blocking reads and writes. Populated upgrades stop all roles and budget the full build when upgrading from before 0033; `v0.187.0` already contains it. No populated build timing is recorded. Rehearse at the installation's row counts before setting the downtime window; see the [lock review](operations/upgrade.md#lock-review-through-0090). This supports stopped upgrades only; online and mixed-version upgrades remain OQ-17.
   Details in [docs/benchmarks/m2-ingestion.md](benchmarks/m2-ingestion.md).
 
 - **OQ-8:** A per-workspace running cap in the claim query
