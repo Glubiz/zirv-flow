@@ -1,0 +1,1840 @@
+{
+  "benchmark": "explorer",
+  "label": "reference-resource emulation, not a reference-hardware run",
+  "ruling": "ef99d178",
+  "limitations": [
+    "shared storage",
+    "Docker Desktop overhead",
+    "mixed core types of the dev CPU"
+  ],
+  "reference_hardware_validation": "outstanding",
+  "image_version": "0.214.0",
+  "measurement_scope": "Docker app stack",
+  "recorded_at": "2026-11-02T04:58:16.547152+00:00",
+  "smoke": false,
+  "command_line": [
+    "bash",
+    "scripts/bench/m8/run.sh",
+    "explorer"
+  ],
+  "benchmark_command": [
+    "bash",
+    "D:/GitHub/zirv-flow/.zirv/worktrees/m8-validation/scripts/bench/m8/explorer.sh",
+    "D:/GitHub/zirv-flow/.zirv/worktrees/m8-validation/.zirv/work/m8/auth/../runs/explorer-20261102T041552-156975",
+    "1000000"
+  ],
+  "exit_code": 2,
+  "topology": {
+    "containers": [
+      {
+        "service": "postgres",
+        "image": "postgres:16.15",
+        "image_id": "sha256:74d436cb49d3398cf7b5d7b33635d43623d9e4da4b93c22db453f7d5d81181b1",
+        "cpuset": "8-15",
+        "memory_bytes": 21474836480,
+        "shm_bytes": 6442450944,
+        "cores": 8
+      },
+      {
+        "service": "zirv-flow",
+        "image": "ghcr.io/glubiz/zirv-flow:0.214.0",
+        "image_id": "sha256:799c01211a786a05ea84dc28fd384126badf8753e1e5eff5feeaffdcab467e86",
+        "cpuset": "0-3",
+        "memory_bytes": 5368709120,
+        "shm_bytes": 67108864,
+        "cores": 4
+      },
+      {
+        "service": "zirv-flow-worker",
+        "image": "ghcr.io/glubiz/zirv-flow:0.214.0",
+        "image_id": "sha256:799c01211a786a05ea84dc28fd384126badf8753e1e5eff5feeaffdcab467e86",
+        "cpuset": "4-7",
+        "memory_bytes": 5368709120,
+        "shm_bytes": 67108864,
+        "cores": 4
+      },
+      {
+        "service": "zirv-flow-scheduler",
+        "image": "ghcr.io/glubiz/zirv-flow:0.214.0",
+        "image_id": "sha256:799c01211a786a05ea84dc28fd384126badf8753e1e5eff5feeaffdcab467e86",
+        "cpuset": "4-7",
+        "memory_bytes": 1073741824,
+        "shm_bytes": 67108864,
+        "cores": 4
+      }
+    ],
+    "postgres_settings": {
+      "shared_buffers": "5GB",
+      "effective_cache_size": "16GB",
+      "maintenance_work_mem": "1GB",
+      "max_wal_size": "8GB",
+      "checkpoint_timeout": "15min"
+    },
+    "host": {
+      "os": "Windows",
+      "logical_cpus": 32,
+      "memory_bytes": 68470984704
+    },
+    "docker_vm": {
+      "cpus": 32,
+      "memory_bytes": 33526329344,
+      "operating_system": "Docker Desktop (containerized)"
+    }
+  },
+  "seeds": {
+    "targets": {
+      "events": 500000000,
+      "people": 25000000,
+      "enrollments": 10000000
+    },
+    "seed_at": "2026-11-01T17:53:26.293706+00:00",
+    "wake_at": "2026-11-08T17:53:26.293706+00:00",
+    "event_window_days": 365,
+    "source": "m8bench.progress (committed seed rows, not current live counts)",
+    "workspaces": [
+      {
+        "workspace_id": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+        "people": 10000000,
+        "events": 200000000,
+        "enrollments": 4000000
+      },
+      {
+        "workspace_id": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+        "people": 10000000,
+        "events": 200000000,
+        "enrollments": 4000000
+      },
+      {
+        "workspace_id": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+        "people": 5000000,
+        "events": 100000000,
+        "enrollments": 2000000
+      }
+    ],
+    "committed": {
+      "events": 50100000,
+      "people": 25000000
+    }
+  },
+  "results": {
+    "explorer\\scale.json": {
+      "retained_rows": 50100000,
+      "workspace_retained_rows": 50100000,
+      "workspace_window_rows": 12351081,
+      "seed_committed_rows": 50100000,
+      "from": "2026-08-03T17:53:26.293706Z",
+      "to": "2026-11-01T17:53:26.293706Z",
+      "person_id": "062dc6b1-dc0c-3aa9-3ef9-8af269921179",
+      "person_exists": true,
+      "measurement": "exact retained counts before load; not the requested seed target"
+    },
+    "explorer\\timeout-default\\clients-1\\comparison.json": {
+      "scale": {
+        "retained_rows": 50100000,
+        "workspace_retained_rows": 50100000,
+        "workspace_window_rows": 12351081,
+        "seed_committed_rows": 50100000,
+        "from": "2026-08-03T17:53:26.293706Z",
+        "to": "2026-11-01T17:53:26.293706Z",
+        "person_id": "062dc6b1-dc0c-3aa9-3ef9-8af269921179",
+        "person_exists": true,
+        "measurement": "exact retained counts before load; not the requested seed target"
+      },
+      "configuration": {
+        "interactive_timeout_ms": 5000,
+        "configuration": "shipped default",
+        "export_timeout_ms": 60000
+      },
+      "queries": {
+        "clients": 1,
+        "duration_s": 600.0,
+        "elapsed_s": 602.7842183,
+        "from": "2026-08-03T17:53:26.293706Z",
+        "latency_note": "Closed loop: one outstanding request per client, cycling through shapes with staggered starting shapes. Latency includes the entire body (CSV drained and discarded). Requests started before duration finish afterwards; latency includes all outcomes, successful_latency only complete 200 responses. No retries. Empty shapes invalidate the run.",
+        "mix_note": "Name plus source is replaced by name plus a seeded person: the explorer supports person_id, not source. The M8/M4 seed writes source=api on every event. category is low cardinality (six values); amount is high cardinality (0..200 at two decimal places).",
+        "mode": "explorer",
+        "request_timeout_seconds": 300,
+        "shapes": [
+          {
+            "endpoint": "count",
+            "latency": {
+              "count": 27,
+              "max_ms": 2185.124,
+              "p50_ms": 367.763,
+              "p95_ms": 480.623,
+              "p99_ms": 2185.124
+            },
+            "outcomes": {
+              "body_errors": 0,
+              "client_timeouts": 0,
+              "query_timeouts": 0,
+              "status": {
+                "200": 27
+              },
+              "transport_errors": 0
+            },
+            "shape": "count_name",
+            "successful_latency": {
+              "count": 27,
+              "max_ms": 2185.124,
+              "p50_ms": 367.763,
+              "p95_ms": 480.623,
+              "p99_ms": 2185.124
+            }
+          },
+          {
+            "endpoint": "count",
+            "latency": {
+              "count": 27,
+              "max_ms": 3566.831,
+              "p50_ms": 509.833,
+              "p95_ms": 1101.143,
+              "p99_ms": 3566.831
+            },
+            "outcomes": {
+              "body_errors": 0,
+              "client_timeouts": 0,
+              "query_timeouts": 0,
+              "status": {
+                "200": 27
+              },
+              "transport_errors": 0
+            },
+            "shape": "count_property",
+            "successful_latency": {
+              "count": 27,
+              "max_ms": 3566.831,
+              "p50_ms": 509.833,
+              "p95_ms": 1101.143,
+              "p99_ms": 3566.831
+            }
+          },
+          {
+            "endpoint": "count",
+            "latency": {
+              "count": 27,
+              "max_ms": 5118.412,
+              "p50_ms": 5005.839,
+              "p95_ms": 5035.512,
+              "p99_ms": 5118.412
+            },
+            "outcomes": {
+              "body_errors": 0,
+              "client_timeouts": 0,
+              "query_timeouts": 27,
+              "status": {
+                "503": 27
+              },
+              "transport_errors": 0
+            },
+            "shape": "count_person",
+            "successful_latency": {
+              "count": 0,
+              "max_ms": 0.0,
+              "p50_ms": 0.0,
+              "p95_ms": 0.0,
+              "p99_ms": 0.0
+            }
+          },
+          {
+            "endpoint": "breakdown",
+            "latency": {
+              "count": 27,
+              "max_ms": 8115.276,
+              "p50_ms": 1474.409,
+              "p95_ms": 8037.734,
+              "p99_ms": 8115.276
+            },
+            "outcomes": {
+              "body_errors": 0,
+              "client_timeouts": 0,
+              "query_timeouts": 0,
+              "status": {
+                "200": 27
+              },
+              "transport_errors": 0
+            },
+            "shape": "breakdown_low",
+            "successful_latency": {
+              "count": 27,
+              "max_ms": 8115.276,
+              "p50_ms": 1474.409,
+              "p95_ms": 8037.734,
+              "p99_ms": 8115.276
+            }
+          },
+          {
+            "endpoint": "breakdown",
+            "latency": {
+              "count": 26,
+              "max_ms": 8721.993,
+              "p50_ms": 1674.592,
+              "p95_ms": 8688.424,
+              "p99_ms": 8721.993
+            },
+            "outcomes": {
+              "body_errors": 0,
+              "client_timeouts": 0,
+              "query_timeouts": 4,
+              "status": {
+                "200": 22,
+                "503": 4
+              },
+              "transport_errors": 0
+            },
+            "shape": "breakdown_high",
+            "successful_latency": {
+              "count": 22,
+              "max_ms": 8721.993,
+              "p50_ms": 1663.037,
+              "p95_ms": 8688.424,
+              "p99_ms": 8721.993
+            }
+          },
+          {
+            "endpoint": "list",
+            "latency": {
+              "count": 26,
+              "max_ms": 60.473,
+              "p50_ms": 4.909,
+              "p95_ms": 30.683,
+              "p99_ms": 60.473
+            },
+            "outcomes": {
+              "body_errors": 0,
+              "client_timeouts": 0,
+              "query_timeouts": 0,
+              "status": {
+                "200": 26
+              },
+              "transport_errors": 0
+            },
+            "shape": "list",
+            "successful_latency": {
+              "count": 26,
+              "max_ms": 60.473,
+              "p50_ms": 4.909,
+              "p95_ms": 30.683,
+              "p99_ms": 60.473
+            }
+          },
+          {
+            "endpoint": "export",
+            "latency": {
+              "count": 26,
+              "max_ms": 14033.17,
+              "p50_ms": 11521.898,
+              "p95_ms": 13071.23,
+              "p99_ms": 14033.17
+            },
+            "outcomes": {
+              "body_errors": 0,
+              "client_timeouts": 0,
+              "query_timeouts": 0,
+              "status": {
+                "200": 26
+              },
+              "transport_errors": 0
+            },
+            "shape": "export",
+            "successful_latency": {
+              "count": 26,
+              "max_ms": 14033.17,
+              "p50_ms": 11521.898,
+              "p95_ms": 13071.23,
+              "p99_ms": 14033.17
+            }
+          }
+        ],
+        "to": "2026-11-01T17:53:26.293706Z",
+        "tool": "zirv-flow-loadgen",
+        "valid": true
+      },
+      "ingest_rate": 2000,
+      "ingest_p99_alone_ms": 6.586,
+      "ingest_p99_with_explorer_ms": 32.26,
+      "ingest_p99_delta_ms": 25.674,
+      "ingest_p99_ratio": 4.898269055572426,
+      "ingest_achieved_rate_alone": 1999.960383751725,
+      "ingest_achieved_rate_with_explorer": 1999.934996725277,
+      "measurement": "ingest and explorer launched together for the same duration; explorer drains in-flight requests afterwards; ingest p99 is from schedule; EXPLAIN and retained counts run outside this window"
+    },
+    "explorer\\timeout-default\\clients-1\\ingest.json": {
+      "tool": "zirv-flow-loadgen",
+      "mode": "track",
+      "seed": 1,
+      "run_id": "1a19a82201c",
+      "started_unix_s": 1793593581,
+      "batch_size": 1,
+      "max_in_flight": 10000,
+      "latency_note": "One sample per request at its final outcome of any status (202, 4xx, 5xx, timeout or transport error, 429 retries exhausted). latency_from_schedule runs from the request's scheduled due time to its final response, retry waits and dispatch lag included: judge API latency targets on it. dispatch_lag is the final send minus the scheduled time and service_latency the final attempt's send to response, so latency_from_schedule is about dispatch_lag plus service_latency.",
+      "people": 1000000,
+      "total": {
+        "name": "total",
+        "target_rate": 2000,
+        "planned_duration_s": 600.0,
+        "elapsed_s": 600.0190016,
+        "requests": 1199999,
+        "items_offered": 1199999,
+        "items_accepted": 1199999,
+        "achieved_rate": 1999.934996725277,
+        "retries_after_429": 0,
+        "status": {
+          "accepted_202": 1199999,
+          "rate_limited_429": 0,
+          "server_5xx": 0,
+          "other": 0,
+          "transport_errors": 0
+        },
+        "latency_from_schedule": {
+          "count": 1199999,
+          "p50_ms": 4.73,
+          "p95_ms": 10.995,
+          "p99_ms": 32.26,
+          "max_ms": 1300.914
+        },
+        "service_latency": {
+          "count": 1199999,
+          "p50_ms": 3.746,
+          "p95_ms": 9.236,
+          "p99_ms": 30.499,
+          "max_ms": 1300.723
+        },
+        "dispatch_lag": {
+          "count": 1199999,
+          "p50_ms": 0.827,
+          "p95_ms": 2.704,
+          "p99_ms": 4.325,
+          "max_ms": 16.485
+        },
+        "late_dispatch": 0,
+        "abandoned_requests": 0,
+        "gave_up_after_retries": 0
+      },
+      "phases": [
+        {
+          "name": "base",
+          "target_rate": 2000,
+          "planned_duration_s": 600.0,
+          "elapsed_s": 600.0190016,
+          "requests": 1199999,
+          "items_offered": 1199999,
+          "items_accepted": 1199999,
+          "achieved_rate": 1999.934996725277,
+          "retries_after_429": 0,
+          "status": {
+            "accepted_202": 1199999,
+            "rate_limited_429": 0,
+            "server_5xx": 0,
+            "other": 0,
+            "transport_errors": 0
+          },
+          "latency_from_schedule": {
+            "count": 1199999,
+            "p50_ms": 4.73,
+            "p95_ms": 10.995,
+            "p99_ms": 32.26,
+            "max_ms": 1300.914
+          },
+          "service_latency": {
+            "count": 1199999,
+            "p50_ms": 3.746,
+            "p95_ms": 9.236,
+            "p99_ms": 30.499,
+            "max_ms": 1300.723
+          },
+          "dispatch_lag": {
+            "count": 1199999,
+            "p50_ms": 0.827,
+            "p95_ms": 2.704,
+            "p99_ms": 4.325,
+            "max_ms": 16.485
+          },
+          "late_dispatch": 0,
+          "abandoned_requests": 0,
+          "gave_up_after_retries": 0
+        }
+      ]
+    },
+    "explorer\\timeout-default\\clients-1\\metrics-after.json": {
+      "samples": [
+        "zirv_flow_explorer_timeouts_total{kind=\"count\"} 27",
+        "zirv_flow_explorer_timeouts_total{kind=\"breakdown\"} 4",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"0.005\"} 22",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"0.01\"} 24",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"0.025\"} 24",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"0.05\"} 25",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"0.1\"} 26",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"0.25\"} 26",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"0.5\"} 26",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"1\"} 26",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"2.5\"} 26",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"5\"} 26",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"+Inf\"} 26",
+        "zirv_flow_explorer_query_seconds_sum{kind=\"list\"} 0.15368340299999997",
+        "zirv_flow_explorer_query_seconds_count{kind=\"list\"} 26",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"0.005\"} 7294",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"0.01\"} 24779",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"0.025\"} 25989",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"0.05\"} 25999",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"0.1\"} 25999",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"0.25\"} 26024",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"0.5\"} 26026",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"1\"} 26026",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"2.5\"} 26026",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"5\"} 26026",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"+Inf\"} 26026",
+        "zirv_flow_explorer_query_seconds_sum{kind=\"export\"} 168.70648837200008",
+        "zirv_flow_explorer_query_seconds_count{kind=\"export\"} 26026",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"0.005\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"0.01\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"0.025\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"0.05\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"0.1\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"0.25\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"0.5\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"1\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"2.5\"} 42",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"5\"} 42",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"+Inf\"} 49",
+        "zirv_flow_explorer_query_seconds_sum{kind=\"breakdown\"} 122.88130630600001",
+        "zirv_flow_explorer_query_seconds_count{kind=\"breakdown\"} 49",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"0.005\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"0.01\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"0.025\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"0.05\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"0.1\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"0.25\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"0.5\"} 36",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"1\"} 51",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"2.5\"} 53",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"5\"} 54",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"+Inf\"} 54",
+        "zirv_flow_explorer_query_seconds_sum{kind=\"count\"} 29.640229416000004",
+        "zirv_flow_explorer_query_seconds_count{kind=\"count\"} 54"
+      ]
+    },
+    "explorer\\timeout-default\\clients-1\\metrics-before.json": {
+      "samples": []
+    },
+    "explorer\\timeout-default\\clients-1\\queries.json": {
+      "clients": 1,
+      "duration_s": 600.0,
+      "elapsed_s": 602.7842183,
+      "from": "2026-08-03T17:53:26.293706Z",
+      "latency_note": "Closed loop: one outstanding request per client, cycling through shapes with staggered starting shapes. Latency includes the entire body (CSV drained and discarded). Requests started before duration finish afterwards; latency includes all outcomes, successful_latency only complete 200 responses. No retries. Empty shapes invalidate the run.",
+      "mix_note": "Name plus source is replaced by name plus a seeded person: the explorer supports person_id, not source. The M8/M4 seed writes source=api on every event. category is low cardinality (six values); amount is high cardinality (0..200 at two decimal places).",
+      "mode": "explorer",
+      "request_timeout_seconds": 300,
+      "shapes": [
+        {
+          "endpoint": "count",
+          "latency": {
+            "count": 27,
+            "max_ms": 2185.124,
+            "p50_ms": 367.763,
+            "p95_ms": 480.623,
+            "p99_ms": 2185.124
+          },
+          "outcomes": {
+            "body_errors": 0,
+            "client_timeouts": 0,
+            "query_timeouts": 0,
+            "status": {
+              "200": 27
+            },
+            "transport_errors": 0
+          },
+          "shape": "count_name",
+          "successful_latency": {
+            "count": 27,
+            "max_ms": 2185.124,
+            "p50_ms": 367.763,
+            "p95_ms": 480.623,
+            "p99_ms": 2185.124
+          }
+        },
+        {
+          "endpoint": "count",
+          "latency": {
+            "count": 27,
+            "max_ms": 3566.831,
+            "p50_ms": 509.833,
+            "p95_ms": 1101.143,
+            "p99_ms": 3566.831
+          },
+          "outcomes": {
+            "body_errors": 0,
+            "client_timeouts": 0,
+            "query_timeouts": 0,
+            "status": {
+              "200": 27
+            },
+            "transport_errors": 0
+          },
+          "shape": "count_property",
+          "successful_latency": {
+            "count": 27,
+            "max_ms": 3566.831,
+            "p50_ms": 509.833,
+            "p95_ms": 1101.143,
+            "p99_ms": 3566.831
+          }
+        },
+        {
+          "endpoint": "count",
+          "latency": {
+            "count": 27,
+            "max_ms": 5118.412,
+            "p50_ms": 5005.839,
+            "p95_ms": 5035.512,
+            "p99_ms": 5118.412
+          },
+          "outcomes": {
+            "body_errors": 0,
+            "client_timeouts": 0,
+            "query_timeouts": 27,
+            "status": {
+              "503": 27
+            },
+            "transport_errors": 0
+          },
+          "shape": "count_person",
+          "successful_latency": {
+            "count": 0,
+            "max_ms": 0.0,
+            "p50_ms": 0.0,
+            "p95_ms": 0.0,
+            "p99_ms": 0.0
+          }
+        },
+        {
+          "endpoint": "breakdown",
+          "latency": {
+            "count": 27,
+            "max_ms": 8115.276,
+            "p50_ms": 1474.409,
+            "p95_ms": 8037.734,
+            "p99_ms": 8115.276
+          },
+          "outcomes": {
+            "body_errors": 0,
+            "client_timeouts": 0,
+            "query_timeouts": 0,
+            "status": {
+              "200": 27
+            },
+            "transport_errors": 0
+          },
+          "shape": "breakdown_low",
+          "successful_latency": {
+            "count": 27,
+            "max_ms": 8115.276,
+            "p50_ms": 1474.409,
+            "p95_ms": 8037.734,
+            "p99_ms": 8115.276
+          }
+        },
+        {
+          "endpoint": "breakdown",
+          "latency": {
+            "count": 26,
+            "max_ms": 8721.993,
+            "p50_ms": 1674.592,
+            "p95_ms": 8688.424,
+            "p99_ms": 8721.993
+          },
+          "outcomes": {
+            "body_errors": 0,
+            "client_timeouts": 0,
+            "query_timeouts": 4,
+            "status": {
+              "200": 22,
+              "503": 4
+            },
+            "transport_errors": 0
+          },
+          "shape": "breakdown_high",
+          "successful_latency": {
+            "count": 22,
+            "max_ms": 8721.993,
+            "p50_ms": 1663.037,
+            "p95_ms": 8688.424,
+            "p99_ms": 8721.993
+          }
+        },
+        {
+          "endpoint": "list",
+          "latency": {
+            "count": 26,
+            "max_ms": 60.473,
+            "p50_ms": 4.909,
+            "p95_ms": 30.683,
+            "p99_ms": 60.473
+          },
+          "outcomes": {
+            "body_errors": 0,
+            "client_timeouts": 0,
+            "query_timeouts": 0,
+            "status": {
+              "200": 26
+            },
+            "transport_errors": 0
+          },
+          "shape": "list",
+          "successful_latency": {
+            "count": 26,
+            "max_ms": 60.473,
+            "p50_ms": 4.909,
+            "p95_ms": 30.683,
+            "p99_ms": 60.473
+          }
+        },
+        {
+          "endpoint": "export",
+          "latency": {
+            "count": 26,
+            "max_ms": 14033.17,
+            "p50_ms": 11521.898,
+            "p95_ms": 13071.23,
+            "p99_ms": 14033.17
+          },
+          "outcomes": {
+            "body_errors": 0,
+            "client_timeouts": 0,
+            "query_timeouts": 0,
+            "status": {
+              "200": 26
+            },
+            "transport_errors": 0
+          },
+          "shape": "export",
+          "successful_latency": {
+            "count": 26,
+            "max_ms": 14033.17,
+            "p50_ms": 11521.898,
+            "p95_ms": 13071.23,
+            "p99_ms": 14033.17
+          }
+        }
+      ],
+      "to": "2026-11-01T17:53:26.293706Z",
+      "tool": "zirv-flow-loadgen",
+      "valid": true
+    },
+    "explorer\\timeout-default\\clients-16\\ingest.json": {
+      "tool": "zirv-flow-loadgen",
+      "mode": "track",
+      "seed": 1,
+      "run_id": "1a19a94a345",
+      "started_unix_s": 1793594794,
+      "batch_size": 1,
+      "max_in_flight": 10000,
+      "latency_note": "One sample per request at its final outcome of any status (202, 4xx, 5xx, timeout or transport error, 429 retries exhausted). latency_from_schedule runs from the request's scheduled due time to its final response, retry waits and dispatch lag included: judge API latency targets on it. dispatch_lag is the final send minus the scheduled time and service_latency the final attempt's send to response, so latency_from_schedule is about dispatch_lag plus service_latency.",
+      "people": 1000000,
+      "total": {
+        "name": "total",
+        "target_rate": 2000,
+        "planned_duration_s": 600.0,
+        "elapsed_s": 604.840952,
+        "requests": 1087246,
+        "items_offered": 1087246,
+        "items_accepted": 1087246,
+        "achieved_rate": 1797.5733891775237,
+        "retries_after_429": 0,
+        "status": {
+          "accepted_202": 1087246,
+          "rate_limited_429": 0,
+          "server_5xx": 0,
+          "other": 0,
+          "transport_errors": 0
+        },
+        "latency_from_schedule": {
+          "count": 1087246,
+          "p50_ms": 21498.716,
+          "p95_ms": 58837.292,
+          "p99_ms": 61177.298,
+          "max_ms": 61425.489
+        },
+        "service_latency": {
+          "count": 1087246,
+          "p50_ms": 5394.81,
+          "p95_ms": 6835.172,
+          "p99_ms": 7898.623,
+          "max_ms": 22160.874
+        },
+        "dispatch_lag": {
+          "count": 1087246,
+          "p50_ms": 16002.139,
+          "p95_ms": 53284.231,
+          "p99_ms": 55571.944,
+          "max_ms": 56393.945
+        },
+        "late_dispatch": 1003759,
+        "abandoned_requests": 0,
+        "gave_up_after_retries": 0
+      },
+      "phases": [
+        {
+          "name": "base",
+          "target_rate": 2000,
+          "planned_duration_s": 600.0,
+          "elapsed_s": 604.840952,
+          "requests": 1087246,
+          "items_offered": 1087246,
+          "items_accepted": 1087246,
+          "achieved_rate": 1797.5733891775237,
+          "retries_after_429": 0,
+          "status": {
+            "accepted_202": 1087246,
+            "rate_limited_429": 0,
+            "server_5xx": 0,
+            "other": 0,
+            "transport_errors": 0
+          },
+          "latency_from_schedule": {
+            "count": 1087246,
+            "p50_ms": 21498.716,
+            "p95_ms": 58837.292,
+            "p99_ms": 61177.298,
+            "max_ms": 61425.489
+          },
+          "service_latency": {
+            "count": 1087246,
+            "p50_ms": 5394.81,
+            "p95_ms": 6835.172,
+            "p99_ms": 7898.623,
+            "max_ms": 22160.874
+          },
+          "dispatch_lag": {
+            "count": 1087246,
+            "p50_ms": 16002.139,
+            "p95_ms": 53284.231,
+            "p99_ms": 55571.944,
+            "max_ms": 56393.945
+          },
+          "late_dispatch": 1003759,
+          "abandoned_requests": 0,
+          "gave_up_after_retries": 0
+        }
+      ]
+    },
+    "explorer\\timeout-default\\clients-16\\metrics-before.json": {
+      "samples": [
+        "zirv_flow_explorer_timeouts_total{kind=\"count\"} 49",
+        "zirv_flow_explorer_timeouts_total{kind=\"breakdown\"} 16",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"0.005\"} 22",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"0.01\"} 24",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"0.025\"} 24",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"0.05\"} 33",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"0.1\"} 36",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"0.25\"} 42",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"0.5\"} 48",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"1\"} 49",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"2.5\"} 49",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"5\"} 49",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"+Inf\"} 49",
+        "zirv_flow_explorer_query_seconds_sum{kind=\"list\"} 4.495437452000001",
+        "zirv_flow_explorer_query_seconds_count{kind=\"list\"} 49",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"0.005\"} 7411",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"0.01\"} 25843",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"0.025\"} 27392",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"0.05\"} 34019",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"0.1\"} 48184",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"0.25\"} 48875",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"0.5\"} 49021",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"1\"} 49049",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"2.5\"} 49049",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"5\"} 49049",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"+Inf\"} 49049",
+        "zirv_flow_explorer_query_seconds_sum{kind=\"export\"} 1531.8677093629992",
+        "zirv_flow_explorer_query_seconds_count{kind=\"export\"} 49049",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"0.005\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"0.01\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"0.025\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"0.05\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"0.1\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"0.25\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"0.5\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"1\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"2.5\"} 50",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"5\"} 50",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"+Inf\"} 83",
+        "zirv_flow_explorer_query_seconds_sum{kind=\"breakdown\"} 365.1543110850001",
+        "zirv_flow_explorer_query_seconds_count{kind=\"breakdown\"} 83",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"0.005\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"0.01\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"0.025\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"0.05\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"0.1\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"0.25\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"0.5\"} 49",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"1\"} 88",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"2.5\"} 90",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"5\"} 95",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"+Inf\"} 95",
+        "zirv_flow_explorer_query_seconds_sum{kind=\"count\"} 68.25613148",
+        "zirv_flow_explorer_query_seconds_count{kind=\"count\"} 95"
+      ]
+    },
+    "explorer\\timeout-default\\clients-16\\queries.json": {
+      "clients": 16,
+      "duration_s": 600.0,
+      "elapsed_s": 694.9090221,
+      "from": "2026-08-03T17:53:26.293706Z",
+      "latency_note": "Closed loop: one outstanding request per client, cycling through shapes with staggered starting shapes. Latency includes the entire body (CSV drained and discarded). Requests started before duration finish afterwards; latency includes all outcomes, successful_latency only complete 200 responses. No retries. Empty shapes invalidate the run.",
+      "mix_note": "Name plus source is replaced by name plus a seeded person: the explorer supports person_id, not source. The M8/M4 seed writes source=api on every event. category is low cardinality (six values); amount is high cardinality (0..200 at two decimal places).",
+      "mode": "explorer",
+      "request_timeout_seconds": 300,
+      "shapes": [
+        {
+          "endpoint": "count",
+          "latency": {
+            "count": 19,
+            "max_ms": 10310.3,
+            "p50_ms": 8045.646,
+            "p95_ms": 10310.3,
+            "p99_ms": 10310.3
+          },
+          "outcomes": {
+            "body_errors": 0,
+            "client_timeouts": 0,
+            "query_timeouts": 0,
+            "status": {
+              "200": 19
+            },
+            "transport_errors": 0
+          },
+          "shape": "count_name",
+          "successful_latency": {
+            "count": 19,
+            "max_ms": 10310.3,
+            "p50_ms": 8045.646,
+            "p95_ms": 10310.3,
+            "p99_ms": 10310.3
+          }
+        },
+        {
+          "endpoint": "count",
+          "latency": {
+            "count": 22,
+            "max_ms": 10568.641,
+            "p50_ms": 8369.4,
+            "p95_ms": 10275.961,
+            "p99_ms": 10568.641
+          },
+          "outcomes": {
+            "body_errors": 0,
+            "client_timeouts": 0,
+            "query_timeouts": 0,
+            "status": {
+              "200": 22
+            },
+            "transport_errors": 0
+          },
+          "shape": "count_property",
+          "successful_latency": {
+            "count": 22,
+            "max_ms": 10568.641,
+            "p50_ms": 8369.4,
+            "p95_ms": 10275.961,
+            "p99_ms": 10568.641
+          }
+        },
+        {
+          "endpoint": "count",
+          "latency": {
+            "count": 24,
+            "max_ms": 14601.873,
+            "p50_ms": 11968.543,
+            "p95_ms": 14415.121,
+            "p99_ms": 14601.873
+          },
+          "outcomes": {
+            "body_errors": 0,
+            "client_timeouts": 0,
+            "query_timeouts": 24,
+            "status": {
+              "503": 24
+            },
+            "transport_errors": 0
+          },
+          "shape": "count_person",
+          "successful_latency": {
+            "count": 0,
+            "max_ms": 0.0,
+            "p50_ms": 0.0,
+            "p95_ms": 0.0,
+            "p99_ms": 0.0
+          }
+        },
+        {
+          "endpoint": "breakdown",
+          "latency": {
+            "count": 26,
+            "max_ms": 18625.512,
+            "p50_ms": 9463.993,
+            "p95_ms": 18147.099,
+            "p99_ms": 18625.512
+          },
+          "outcomes": {
+            "body_errors": 0,
+            "client_timeouts": 0,
+            "query_timeouts": 2,
+            "status": {
+              "200": 24,
+              "503": 2
+            },
+            "transport_errors": 0
+          },
+          "shape": "breakdown_low",
+          "successful_latency": {
+            "count": 24,
+            "max_ms": 18625.512,
+            "p50_ms": 9463.7,
+            "p95_ms": 18147.099,
+            "p99_ms": 18625.512
+          }
+        },
+        {
+          "endpoint": "breakdown",
+          "latency": {
+            "count": 28,
+            "max_ms": 14196.335,
+            "p50_ms": 9704.894,
+            "p95_ms": 13965.182,
+            "p99_ms": 14196.335
+          },
+          "outcomes": {
+            "body_errors": 0,
+            "client_timeouts": 0,
+            "query_timeouts": 3,
+            "status": {
+              "200": 25,
+              "503": 3
+            },
+            "transport_errors": 0
+          },
+          "shape": "breakdown_high",
+          "successful_latency": {
+            "count": 25,
+            "max_ms": 11679.804,
+            "p50_ms": 9680.033,
+            "p95_ms": 11101.016,
+            "p99_ms": 11679.804
+          }
+        },
+        {
+          "endpoint": "list",
+          "latency": {
+            "count": 30,
+            "max_ms": 9490.572,
+            "p50_ms": 7407.416,
+            "p95_ms": 9388.08,
+            "p99_ms": 9490.572
+          },
+          "outcomes": {
+            "body_errors": 0,
+            "client_timeouts": 0,
+            "query_timeouts": 0,
+            "status": {
+              "200": 30
+            },
+            "transport_errors": 0
+          },
+          "shape": "list",
+          "successful_latency": {
+            "count": 30,
+            "max_ms": 9490.572,
+            "p50_ms": 7407.416,
+            "p95_ms": 9388.08,
+            "p99_ms": 9490.572
+          }
+        },
+        {
+          "endpoint": "export",
+          "latency": {
+            "count": 32,
+            "max_ms": 300016.028,
+            "p50_ms": 300003.045,
+            "p95_ms": 300015.615,
+            "p99_ms": 300016.028
+          },
+          "outcomes": {
+            "body_errors": 0,
+            "client_timeouts": 25,
+            "query_timeouts": 0,
+            "status": {
+              "200": 32
+            },
+            "transport_errors": 0
+          },
+          "shape": "export",
+          "successful_latency": {
+            "count": 7,
+            "max_ms": 295065.253,
+            "p50_ms": 290348.255,
+            "p95_ms": 295065.253,
+            "p99_ms": 295065.253
+          }
+        }
+      ],
+      "to": "2026-11-01T17:53:26.293706Z",
+      "tool": "zirv-flow-loadgen",
+      "valid": false
+    },
+    "explorer\\timeout-default\\clients-4\\comparison.json": {
+      "scale": {
+        "retained_rows": 50100000,
+        "workspace_retained_rows": 50100000,
+        "workspace_window_rows": 12351081,
+        "seed_committed_rows": 50100000,
+        "from": "2026-08-03T17:53:26.293706Z",
+        "to": "2026-11-01T17:53:26.293706Z",
+        "person_id": "062dc6b1-dc0c-3aa9-3ef9-8af269921179",
+        "person_exists": true,
+        "measurement": "exact retained counts before load; not the requested seed target"
+      },
+      "configuration": {
+        "interactive_timeout_ms": 5000,
+        "configuration": "shipped default",
+        "export_timeout_ms": 60000
+      },
+      "queries": {
+        "clients": 4,
+        "duration_s": 600.0,
+        "elapsed_s": 608.5050087,
+        "from": "2026-08-03T17:53:26.293706Z",
+        "latency_note": "Closed loop: one outstanding request per client, cycling through shapes with staggered starting shapes. Latency includes the entire body (CSV drained and discarded). Requests started before duration finish afterwards; latency includes all outcomes, successful_latency only complete 200 responses. No retries. Empty shapes invalidate the run.",
+        "mix_note": "Name plus source is replaced by name plus a seeded person: the explorer supports person_id, not source. The M8/M4 seed writes source=api on every event. category is low cardinality (six values); amount is high cardinality (0..200 at two decimal places).",
+        "mode": "explorer",
+        "request_timeout_seconds": 300,
+        "shapes": [
+          {
+            "endpoint": "count",
+            "latency": {
+              "count": 20,
+              "max_ms": 2717.724,
+              "p50_ms": 598.769,
+              "p95_ms": 740.793,
+              "p99_ms": 2717.724
+            },
+            "outcomes": {
+              "body_errors": 0,
+              "client_timeouts": 0,
+              "query_timeouts": 0,
+              "status": {
+                "200": 20
+              },
+              "transport_errors": 0
+            },
+            "shape": "count_name",
+            "successful_latency": {
+              "count": 20,
+              "max_ms": 2717.724,
+              "p50_ms": 598.769,
+              "p95_ms": 740.793,
+              "p99_ms": 2717.724
+            }
+          },
+          {
+            "endpoint": "count",
+            "latency": {
+              "count": 21,
+              "max_ms": 5705.489,
+              "p50_ms": 938.971,
+              "p95_ms": 4454.464,
+              "p99_ms": 5705.489
+            },
+            "outcomes": {
+              "body_errors": 0,
+              "client_timeouts": 0,
+              "query_timeouts": 0,
+              "status": {
+                "200": 21
+              },
+              "transport_errors": 0
+            },
+            "shape": "count_property",
+            "successful_latency": {
+              "count": 21,
+              "max_ms": 5705.489,
+              "p50_ms": 938.971,
+              "p95_ms": 4454.464,
+              "p99_ms": 5705.489
+            }
+          },
+          {
+            "endpoint": "count",
+            "latency": {
+              "count": 22,
+              "max_ms": 6121.76,
+              "p50_ms": 5311.457,
+              "p95_ms": 5747.386,
+              "p99_ms": 6121.76
+            },
+            "outcomes": {
+              "body_errors": 0,
+              "client_timeouts": 0,
+              "query_timeouts": 22,
+              "status": {
+                "503": 22
+              },
+              "transport_errors": 0
+            },
+            "shape": "count_person",
+            "successful_latency": {
+              "count": 0,
+              "max_ms": 0.0,
+              "p50_ms": 0.0,
+              "p95_ms": 0.0,
+              "p99_ms": 0.0
+            }
+          },
+          {
+            "endpoint": "breakdown",
+            "latency": {
+              "count": 23,
+              "max_ms": 10893.228,
+              "p50_ms": 8710.838,
+              "p95_ms": 10663.167,
+              "p99_ms": 10893.228
+            },
+            "outcomes": {
+              "body_errors": 0,
+              "client_timeouts": 0,
+              "query_timeouts": 1,
+              "status": {
+                "200": 22,
+                "503": 1
+              },
+              "transport_errors": 0
+            },
+            "shape": "breakdown_low",
+            "successful_latency": {
+              "count": 22,
+              "max_ms": 10893.228,
+              "p50_ms": 8710.838,
+              "p95_ms": 10663.167,
+              "p99_ms": 10893.228
+            }
+          },
+          {
+            "endpoint": "breakdown",
+            "latency": {
+              "count": 23,
+              "max_ms": 11120.773,
+              "p50_ms": 7264.394,
+              "p95_ms": 10754.05,
+              "p99_ms": 11120.773
+            },
+            "outcomes": {
+              "body_errors": 0,
+              "client_timeouts": 0,
+              "query_timeouts": 11,
+              "status": {
+                "200": 12,
+                "503": 11
+              },
+              "transport_errors": 0
+            },
+            "shape": "breakdown_high",
+            "successful_latency": {
+              "count": 12,
+              "max_ms": 11120.773,
+              "p50_ms": 9380.185,
+              "p95_ms": 11120.773,
+              "p99_ms": 11120.773
+            }
+          },
+          {
+            "endpoint": "list",
+            "latency": {
+              "count": 23,
+              "max_ms": 2654.79,
+              "p50_ms": 747.399,
+              "p95_ms": 2042.118,
+              "p99_ms": 2654.79
+            },
+            "outcomes": {
+              "body_errors": 0,
+              "client_timeouts": 0,
+              "query_timeouts": 0,
+              "status": {
+                "200": 23
+              },
+              "transport_errors": 0
+            },
+            "shape": "list",
+            "successful_latency": {
+              "count": 23,
+              "max_ms": 2654.79,
+              "p50_ms": 747.399,
+              "p95_ms": 2042.118,
+              "p99_ms": 2654.79
+            }
+          },
+          {
+            "endpoint": "export",
+            "latency": {
+              "count": 23,
+              "max_ms": 102056.077,
+              "p50_ms": 82385.374,
+              "p95_ms": 97085.713,
+              "p99_ms": 102056.077
+            },
+            "outcomes": {
+              "body_errors": 0,
+              "client_timeouts": 0,
+              "query_timeouts": 0,
+              "status": {
+                "200": 23
+              },
+              "transport_errors": 0
+            },
+            "shape": "export",
+            "successful_latency": {
+              "count": 23,
+              "max_ms": 102056.077,
+              "p50_ms": 82385.374,
+              "p95_ms": 97085.713,
+              "p99_ms": 102056.077
+            }
+          }
+        ],
+        "to": "2026-11-01T17:53:26.293706Z",
+        "tool": "zirv-flow-loadgen",
+        "valid": true
+      },
+      "ingest_rate": 2000,
+      "ingest_p99_alone_ms": 6.586,
+      "ingest_p99_with_explorer_ms": 2019.532,
+      "ingest_p99_delta_ms": 2012.946,
+      "ingest_p99_ratio": 306.64014576374126,
+      "ingest_achieved_rate_alone": 1999.960383751725,
+      "ingest_achieved_rate_with_explorer": 1999.1735722992062,
+      "measurement": "ingest and explorer launched together for the same duration; explorer drains in-flight requests afterwards; ingest p99 is from schedule; EXPLAIN and retained counts run outside this window"
+    },
+    "explorer\\timeout-default\\clients-4\\ingest.json": {
+      "tool": "zirv-flow-loadgen",
+      "mode": "track",
+      "seed": 1,
+      "run_id": "1a19a8b5692",
+      "started_unix_s": 1793594185,
+      "batch_size": 1,
+      "max_in_flight": 10000,
+      "latency_note": "One sample per request at its final outcome of any status (202, 4xx, 5xx, timeout or transport error, 429 retries exhausted). latency_from_schedule runs from the request's scheduled due time to its final response, retry waits and dispatch lag included: judge API latency targets on it. dispatch_lag is the final send minus the scheduled time and service_latency the final attempt's send to response, so latency_from_schedule is about dispatch_lag plus service_latency.",
+      "people": 1000000,
+      "total": {
+        "name": "total",
+        "target_rate": 2000,
+        "planned_duration_s": 600.0,
+        "elapsed_s": 600.2480308,
+        "requests": 1200000,
+        "items_offered": 1200000,
+        "items_accepted": 1200000,
+        "achieved_rate": 1999.1735722992062,
+        "retries_after_429": 0,
+        "status": {
+          "accepted_202": 1200000,
+          "rate_limited_429": 0,
+          "server_5xx": 0,
+          "other": 0,
+          "transport_errors": 0
+        },
+        "latency_from_schedule": {
+          "count": 1200000,
+          "p50_ms": 210.429,
+          "p95_ms": 1517.247,
+          "p99_ms": 2019.532,
+          "max_ms": 4210.56
+        },
+        "service_latency": {
+          "count": 1200000,
+          "p50_ms": 208.407,
+          "p95_ms": 1516.422,
+          "p99_ms": 2018.607,
+          "max_ms": 4209.974
+        },
+        "dispatch_lag": {
+          "count": 1200000,
+          "p50_ms": 0.803,
+          "p95_ms": 6.357,
+          "p99_ms": 11.91,
+          "max_ms": 37.436
+        },
+        "late_dispatch": 0,
+        "abandoned_requests": 0,
+        "gave_up_after_retries": 0
+      },
+      "phases": [
+        {
+          "name": "base",
+          "target_rate": 2000,
+          "planned_duration_s": 600.0,
+          "elapsed_s": 600.2480308,
+          "requests": 1200000,
+          "items_offered": 1200000,
+          "items_accepted": 1200000,
+          "achieved_rate": 1999.1735722992062,
+          "retries_after_429": 0,
+          "status": {
+            "accepted_202": 1200000,
+            "rate_limited_429": 0,
+            "server_5xx": 0,
+            "other": 0,
+            "transport_errors": 0
+          },
+          "latency_from_schedule": {
+            "count": 1200000,
+            "p50_ms": 210.429,
+            "p95_ms": 1517.247,
+            "p99_ms": 2019.532,
+            "max_ms": 4210.56
+          },
+          "service_latency": {
+            "count": 1200000,
+            "p50_ms": 208.407,
+            "p95_ms": 1516.422,
+            "p99_ms": 2018.607,
+            "max_ms": 4209.974
+          },
+          "dispatch_lag": {
+            "count": 1200000,
+            "p50_ms": 0.803,
+            "p95_ms": 6.357,
+            "p99_ms": 11.91,
+            "max_ms": 37.436
+          },
+          "late_dispatch": 0,
+          "abandoned_requests": 0,
+          "gave_up_after_retries": 0
+        }
+      ]
+    },
+    "explorer\\timeout-default\\clients-4\\metrics-after.json": {
+      "samples": [
+        "zirv_flow_explorer_timeouts_total{kind=\"count\"} 49",
+        "zirv_flow_explorer_timeouts_total{kind=\"breakdown\"} 16",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"0.005\"} 22",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"0.01\"} 24",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"0.025\"} 24",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"0.05\"} 33",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"0.1\"} 36",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"0.25\"} 42",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"0.5\"} 48",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"1\"} 49",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"2.5\"} 49",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"5\"} 49",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"+Inf\"} 49",
+        "zirv_flow_explorer_query_seconds_sum{kind=\"list\"} 4.495437452000001",
+        "zirv_flow_explorer_query_seconds_count{kind=\"list\"} 49",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"0.005\"} 7411",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"0.01\"} 25843",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"0.025\"} 27392",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"0.05\"} 34019",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"0.1\"} 48184",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"0.25\"} 48875",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"0.5\"} 49021",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"1\"} 49049",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"2.5\"} 49049",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"5\"} 49049",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"+Inf\"} 49049",
+        "zirv_flow_explorer_query_seconds_sum{kind=\"export\"} 1531.8677093629992",
+        "zirv_flow_explorer_query_seconds_count{kind=\"export\"} 49049",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"0.005\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"0.01\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"0.025\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"0.05\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"0.1\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"0.25\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"0.5\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"1\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"2.5\"} 50",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"5\"} 50",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"+Inf\"} 83",
+        "zirv_flow_explorer_query_seconds_sum{kind=\"breakdown\"} 365.1543110850001",
+        "zirv_flow_explorer_query_seconds_count{kind=\"breakdown\"} 83",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"0.005\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"0.01\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"0.025\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"0.05\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"0.1\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"0.25\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"0.5\"} 49",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"1\"} 88",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"2.5\"} 90",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"5\"} 95",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"+Inf\"} 95",
+        "zirv_flow_explorer_query_seconds_sum{kind=\"count\"} 68.25613148",
+        "zirv_flow_explorer_query_seconds_count{kind=\"count\"} 95"
+      ]
+    },
+    "explorer\\timeout-default\\clients-4\\metrics-before.json": {
+      "samples": [
+        "zirv_flow_explorer_timeouts_total{kind=\"count\"} 27",
+        "zirv_flow_explorer_timeouts_total{kind=\"breakdown\"} 4",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"0.005\"} 22",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"0.01\"} 24",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"0.025\"} 24",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"0.05\"} 25",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"0.1\"} 26",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"0.25\"} 26",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"0.5\"} 26",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"1\"} 26",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"2.5\"} 26",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"5\"} 26",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"list\",le=\"+Inf\"} 26",
+        "zirv_flow_explorer_query_seconds_sum{kind=\"list\"} 0.15368340299999997",
+        "zirv_flow_explorer_query_seconds_count{kind=\"list\"} 26",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"0.005\"} 7294",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"0.01\"} 24779",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"0.025\"} 25989",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"0.05\"} 25999",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"0.1\"} 25999",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"0.25\"} 26024",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"0.5\"} 26026",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"1\"} 26026",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"2.5\"} 26026",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"5\"} 26026",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"export\",le=\"+Inf\"} 26026",
+        "zirv_flow_explorer_query_seconds_sum{kind=\"export\"} 168.70648837200008",
+        "zirv_flow_explorer_query_seconds_count{kind=\"export\"} 26026",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"0.005\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"0.01\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"0.025\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"0.05\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"0.1\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"0.25\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"0.5\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"1\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"2.5\"} 42",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"5\"} 42",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"breakdown\",le=\"+Inf\"} 49",
+        "zirv_flow_explorer_query_seconds_sum{kind=\"breakdown\"} 122.88130630600001",
+        "zirv_flow_explorer_query_seconds_count{kind=\"breakdown\"} 49",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"0.005\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"0.01\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"0.025\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"0.05\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"0.1\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"0.25\"} 0",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"0.5\"} 36",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"1\"} 51",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"2.5\"} 53",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"5\"} 54",
+        "zirv_flow_explorer_query_seconds_bucket{kind=\"count\",le=\"+Inf\"} 54",
+        "zirv_flow_explorer_query_seconds_sum{kind=\"count\"} 29.640229416000004",
+        "zirv_flow_explorer_query_seconds_count{kind=\"count\"} 54"
+      ]
+    },
+    "explorer\\timeout-default\\clients-4\\queries.json": {
+      "clients": 4,
+      "duration_s": 600.0,
+      "elapsed_s": 608.5050087,
+      "from": "2026-08-03T17:53:26.293706Z",
+      "latency_note": "Closed loop: one outstanding request per client, cycling through shapes with staggered starting shapes. Latency includes the entire body (CSV drained and discarded). Requests started before duration finish afterwards; latency includes all outcomes, successful_latency only complete 200 responses. No retries. Empty shapes invalidate the run.",
+      "mix_note": "Name plus source is replaced by name plus a seeded person: the explorer supports person_id, not source. The M8/M4 seed writes source=api on every event. category is low cardinality (six values); amount is high cardinality (0..200 at two decimal places).",
+      "mode": "explorer",
+      "request_timeout_seconds": 300,
+      "shapes": [
+        {
+          "endpoint": "count",
+          "latency": {
+            "count": 20,
+            "max_ms": 2717.724,
+            "p50_ms": 598.769,
+            "p95_ms": 740.793,
+            "p99_ms": 2717.724
+          },
+          "outcomes": {
+            "body_errors": 0,
+            "client_timeouts": 0,
+            "query_timeouts": 0,
+            "status": {
+              "200": 20
+            },
+            "transport_errors": 0
+          },
+          "shape": "count_name",
+          "successful_latency": {
+            "count": 20,
+            "max_ms": 2717.724,
+            "p50_ms": 598.769,
+            "p95_ms": 740.793,
+            "p99_ms": 2717.724
+          }
+        },
+        {
+          "endpoint": "count",
+          "latency": {
+            "count": 21,
+            "max_ms": 5705.489,
+            "p50_ms": 938.971,
+            "p95_ms": 4454.464,
+            "p99_ms": 5705.489
+          },
+          "outcomes": {
+            "body_errors": 0,
+            "client_timeouts": 0,
+            "query_timeouts": 0,
+            "status": {
+              "200": 21
+            },
+            "transport_errors": 0
+          },
+          "shape": "count_property",
+          "successful_latency": {
+            "count": 21,
+            "max_ms": 5705.489,
+            "p50_ms": 938.971,
+            "p95_ms": 4454.464,
+            "p99_ms": 5705.489
+          }
+        },
+        {
+          "endpoint": "count",
+          "latency": {
+            "count": 22,
+            "max_ms": 6121.76,
+            "p50_ms": 5311.457,
+            "p95_ms": 5747.386,
+            "p99_ms": 6121.76
+          },
+          "outcomes": {
+            "body_errors": 0,
+            "client_timeouts": 0,
+            "query_timeouts": 22,
+            "status": {
+              "503": 22
+            },
+            "transport_errors": 0
+          },
+          "shape": "count_person",
+          "successful_latency": {
+            "count": 0,
+            "max_ms": 0.0,
+            "p50_ms": 0.0,
+            "p95_ms": 0.0,
+            "p99_ms": 0.0
+          }
+        },
+        {
+          "endpoint": "breakdown",
+          "latency": {
+            "count": 23,
+            "max_ms": 10893.228,
+            "p50_ms": 8710.838,
+            "p95_ms": 10663.167,
+            "p99_ms": 10893.228
+          },
+          "outcomes": {
+            "body_errors": 0,
+            "client_timeouts": 0,
+            "query_timeouts": 1,
+            "status": {
+              "200": 22,
+              "503": 1
+            },
+            "transport_errors": 0
+          },
+          "shape": "breakdown_low",
+          "successful_latency": {
+            "count": 22,
+            "max_ms": 10893.228,
+            "p50_ms": 8710.838,
+            "p95_ms": 10663.167,
+            "p99_ms": 10893.228
+          }
+        },
+        {
+          "endpoint": "breakdown",
+          "latency": {
+            "count": 23,
+            "max_ms": 11120.773,
+            "p50_ms": 7264.394,
+            "p95_ms": 10754.05,
+            "p99_ms": 11120.773
+          },
+          "outcomes": {
+            "body_errors": 0,
+            "client_timeouts": 0,
+            "query_timeouts": 11,
+            "status": {
+              "200": 12,
+              "503": 11
+            },
+            "transport_errors": 0
+          },
+          "shape": "breakdown_high",
+          "successful_latency": {
+            "count": 12,
+            "max_ms": 11120.773,
+            "p50_ms": 9380.185,
+            "p95_ms": 11120.773,
+            "p99_ms": 11120.773
+          }
+        },
+        {
+          "endpoint": "list",
+          "latency": {
+            "count": 23,
+            "max_ms": 2654.79,
+            "p50_ms": 747.399,
+            "p95_ms": 2042.118,
+            "p99_ms": 2654.79
+          },
+          "outcomes": {
+            "body_errors": 0,
+            "client_timeouts": 0,
+            "query_timeouts": 0,
+            "status": {
+              "200": 23
+            },
+            "transport_errors": 0
+          },
+          "shape": "list",
+          "successful_latency": {
+            "count": 23,
+            "max_ms": 2654.79,
+            "p50_ms": 747.399,
+            "p95_ms": 2042.118,
+            "p99_ms": 2654.79
+          }
+        },
+        {
+          "endpoint": "export",
+          "latency": {
+            "count": 23,
+            "max_ms": 102056.077,
+            "p50_ms": 82385.374,
+            "p95_ms": 97085.713,
+            "p99_ms": 102056.077
+          },
+          "outcomes": {
+            "body_errors": 0,
+            "client_timeouts": 0,
+            "query_timeouts": 0,
+            "status": {
+              "200": 23
+            },
+            "transport_errors": 0
+          },
+          "shape": "export",
+          "successful_latency": {
+            "count": 23,
+            "max_ms": 102056.077,
+            "p50_ms": 82385.374,
+            "p95_ms": 97085.713,
+            "p99_ms": 102056.077
+          }
+        }
+      ],
+      "to": "2026-11-01T17:53:26.293706Z",
+      "tool": "zirv-flow-loadgen",
+      "valid": true
+    },
+    "explorer\\timeout-default\\config.json": {
+      "interactive_timeout_ms": 5000,
+      "configuration": "shipped default",
+      "export_timeout_ms": 60000
+    },
+    "explorer\\timeout-default\\ingest-alone.json": {
+      "tool": "zirv-flow-loadgen",
+      "mode": "track",
+      "seed": 1,
+      "run_id": "1a19a78ed2a",
+      "started_unix_s": 1793592978,
+      "batch_size": 1,
+      "max_in_flight": 10000,
+      "latency_note": "One sample per request at its final outcome of any status (202, 4xx, 5xx, timeout or transport error, 429 retries exhausted). latency_from_schedule runs from the request's scheduled due time to its final response, retry waits and dispatch lag included: judge API latency targets on it. dispatch_lag is the final send minus the scheduled time and service_latency the final attempt's send to response, so latency_from_schedule is about dispatch_lag plus service_latency.",
+      "people": 1000000,
+      "total": {
+        "name": "total",
+        "target_rate": 2000,
+        "planned_duration_s": 600.0,
+        "elapsed_s": 600.0113851,
+        "requests": 1199999,
+        "items_offered": 1199999,
+        "items_accepted": 1199999,
+        "achieved_rate": 1999.960383751725,
+        "retries_after_429": 0,
+        "status": {
+          "accepted_202": 1199999,
+          "rate_limited_429": 0,
+          "server_5xx": 0,
+          "other": 0,
+          "transport_errors": 0
+        },
+        "latency_from_schedule": {
+          "count": 1199999,
+          "p50_ms": 3.516,
+          "p95_ms": 5.356,
+          "p99_ms": 6.586,
+          "max_ms": 81.104
+        },
+        "service_latency": {
+          "count": 1199999,
+          "p50_ms": 2.681,
+          "p95_ms": 3.665,
+          "p99_ms": 4.637,
+          "max_ms": 78.849
+        },
+        "dispatch_lag": {
+          "count": 1199999,
+          "p50_ms": 0.798,
+          "p95_ms": 2.114,
+          "p99_ms": 2.632,
+          "max_ms": 13.567
+        },
+        "late_dispatch": 0,
+        "abandoned_requests": 0,
+        "gave_up_after_retries": 0
+      },
+      "phases": [
+        {
+          "name": "base",
+          "target_rate": 2000,
+          "planned_duration_s": 600.0,
+          "elapsed_s": 600.0113851,
+          "requests": 1199999,
+          "items_offered": 1199999,
+          "items_accepted": 1199999,
+          "achieved_rate": 1999.960383751725,
+          "retries_after_429": 0,
+          "status": {
+            "accepted_202": 1199999,
+            "rate_limited_429": 0,
+            "server_5xx": 0,
+            "other": 0,
+            "transport_errors": 0
+          },
+          "latency_from_schedule": {
+            "count": 1199999,
+            "p50_ms": 3.516,
+            "p95_ms": 5.356,
+            "p99_ms": 6.586,
+            "max_ms": 81.104
+          },
+          "service_latency": {
+            "count": 1199999,
+            "p50_ms": 2.681,
+            "p95_ms": 3.665,
+            "p99_ms": 4.637,
+            "max_ms": 78.849
+          },
+          "dispatch_lag": {
+            "count": 1199999,
+            "p50_ms": 0.798,
+            "p95_ms": 2.114,
+            "p99_ms": 2.632,
+            "max_ms": 13.567
+          },
+          "late_dispatch": 0,
+          "abandoned_requests": 0,
+          "gave_up_after_retries": 0
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,376 @@
+{
+  "benchmark": "jobs",
+  "label": "reference-resource emulation, not a reference-hardware run",
+  "ruling": "ef99d178",
+  "limitations": [
+    "shared storage",
+    "Docker Desktop overhead",
+    "mixed core types of the dev CPU"
+  ],
+  "reference_hardware_validation": "outstanding",
+  "image_version": "0.214.0",
+  "measurement_scope": "Docker app stack",
+  "recorded_at": "2026-11-01T17:09:55.861337+00:00",
+  "smoke": true,
+  "command_line": [
+    "bash",
+    "scripts/bench/m8/run.sh",
+    "jobs"
+  ],
+  "benchmark_command": [
+    "bash",
+    "D:/GitHub/zirv-flow/.zirv/worktrees/m8-validation/scripts/bench/m8/jobs.sh",
+    "D:/GitHub/zirv-flow/.zirv/worktrees/m8-validation/.zirv/work/m8-smoke/auth/../runs/jobs-20261101T170854-125877"
+  ],
+  "exit_code": 0,
+  "topology": {
+    "containers": [
+      {
+        "service": "postgres",
+        "image": "postgres:16.15",
+        "image_id": "sha256:74d436cb49d3398cf7b5d7b33635d43623d9e4da4b93c22db453f7d5d81181b1",
+        "cpuset": "8-15",
+        "memory_bytes": 21474836480,
+        "shm_bytes": 6442450944,
+        "cores": 8
+      },
+      {
+        "service": "zirv-flow",
+        "image": "ghcr.io/glubiz/zirv-flow:0.214.0",
+        "image_id": "sha256:799c01211a786a05ea84dc28fd384126badf8753e1e5eff5feeaffdcab467e86",
+        "cpuset": "0-3",
+        "memory_bytes": 5368709120,
+        "shm_bytes": 67108864,
+        "cores": 4
+      },
+      {
+        "service": "zirv-flow-worker",
+        "image": "ghcr.io/glubiz/zirv-flow:0.214.0",
+        "image_id": "sha256:799c01211a786a05ea84dc28fd384126badf8753e1e5eff5feeaffdcab467e86",
+        "cpuset": "4-7",
+        "memory_bytes": 5368709120,
+        "shm_bytes": 67108864,
+        "cores": 4
+      },
+      {
+        "service": "zirv-flow-scheduler",
+        "image": "ghcr.io/glubiz/zirv-flow:0.214.0",
+        "image_id": "sha256:799c01211a786a05ea84dc28fd384126badf8753e1e5eff5feeaffdcab467e86",
+        "cpuset": "4-7",
+        "memory_bytes": 1073741824,
+        "shm_bytes": 67108864,
+        "cores": 4
+      }
+    ],
+    "postgres_settings": {
+      "shared_buffers": "5GB",
+      "effective_cache_size": "16GB",
+      "maintenance_work_mem": "1GB",
+      "max_wal_size": "8GB",
+      "checkpoint_timeout": "15min"
+    },
+    "host": {
+      "os": "Windows",
+      "logical_cpus": 32,
+      "memory_bytes": 68470984704
+    },
+    "docker_vm": {
+      "cpus": 32,
+      "memory_bytes": 33526329344,
+      "operating_system": "Docker Desktop (containerized)"
+    }
+  },
+  "seeds": {
+    "targets": {
+      "events": 5000,
+      "people": 5000,
+      "enrollments": 3000
+    },
+    "seed_at": "2026-11-01T17:05:55.767934+00:00",
+    "wake_at": "2026-11-08T17:05:55.767934+00:00",
+    "event_window_days": 365,
+    "source": "m8bench.progress (committed seed rows, not current live counts)",
+    "workspaces": [
+      {
+        "workspace_id": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+        "people": 2000,
+        "events": 2000,
+        "enrollments": 1200
+      },
+      {
+        "workspace_id": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+        "people": 2000,
+        "events": 2000,
+        "enrollments": 1200
+      },
+      {
+        "workspace_id": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+        "people": 1000,
+        "events": 1000,
+        "enrollments": 600
+      }
+    ],
+    "committed": {
+      "events": 5000,
+      "enrollments": 3000,
+      "people": 5000
+    }
+  },
+  "results": {
+    "cap-4\\job-kinds.json": [
+      {
+        "t": "2026-11-01T17:09:35.803889Z",
+        "kind": "maintenance.noop",
+        "claims_total": 1022.0,
+        "completed_total": 1021.0,
+        "claim_lag_seconds_sum": 559.807833,
+        "due_ready": 2077.0,
+        "running": 0.0,
+        "ready_lag_mean_seconds": 0.9661449995185364,
+        "ready_lag_max_seconds": 0.966145
+      },
+      {
+        "t": "2026-11-01T17:09:41.158641Z",
+        "kind": "maintenance.noop",
+        "claims_total": 3001.0,
+        "completed_total": 3001.0,
+        "claim_lag_seconds_sum": 4660.969101000001,
+        "due_ready": 0.0,
+        "running": 0.0,
+        "ready_lag_mean_seconds": null,
+        "ready_lag_max_seconds": null
+      }
+    ],
+    "cap-4\\jobs.json": {
+      "jobs": 3001,
+      "completed": 3001,
+      "elapsed_s": 3.547171115875244,
+      "completed_per_s": 846.0262845987684,
+      "target_per_s": 1000,
+      "meets_target": false,
+      "quiet_claim_lag_s": 3.088434,
+      "busy_max_running_sampled": 1,
+      "sample_sleep_s": 1.0,
+      "measurement": "enqueue-to-last-empty-poll; includes polling delay; running peak is sampled; the ready-count poll and the job-sampler due_ready query run during the window and scan the jobs run_at index with future wakes pending (observer effects)",
+      "worker": {
+        "worker_containers": 1,
+        "concurrency_per_worker": 16,
+        "max_running_per_workspace": 4
+      },
+      "samples": [
+        {
+          "t": 1793552964.947767,
+          "ready": 3001,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793552966.266647,
+          "ready": 3001,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793552967.589396,
+          "ready": 3001,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793552968.922845,
+          "ready": 3001,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793552970.268446,
+          "ready": 3001,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793552971.742713,
+          "ready": 3001,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793552973.047209,
+          "ready": 3001,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793552974.41221,
+          "ready": 3001,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793552975.717805,
+          "ready": 2163,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793552977.035884,
+          "ready": 900,
+          "running": 1,
+          "dead": 0,
+          "busy_running": 1
+        },
+        {
+          "t": 1793552978.384915,
+          "ready": 0,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        }
+      ],
+      "outcome": "done"
+    },
+    "cap-4\\metrics.json": {
+      "samples": [
+        "zirv_flow_jobs_total{kind=\"maintenance.noop\",outcome=\"completed\"} 3001"
+      ]
+    },
+    "cap-4\\probe.json": {
+      "busy": 3000,
+      "quiet_id": "58de64be-929d-41e6-8cfb-134361823edb",
+      "ready_at": "2026-11-01T17:09:34.837744+00:00",
+      "trace_id": "f4324a03-3956-469f-92a2-f86b15c3177e",
+      "ready_epoch": 1793552974.837744,
+      "quiet_claimed_at": "2026-11-01T17:09:37.926179+00:00",
+      "quiet_claim_lag_s": 3.088434
+    },
+    "cap-4\\worker.json": {
+      "worker_containers": 1,
+      "concurrency_per_worker": 16,
+      "max_running_per_workspace": 4
+    },
+    "cap-unset\\job-kinds.json": [
+      {
+        "t": "2026-11-01T17:09:20.567903Z",
+        "kind": "maintenance.noop",
+        "claims_total": 3001.0,
+        "completed_total": 3001.0,
+        "claim_lag_seconds_sum": 927.845453,
+        "due_ready": 0.0,
+        "running": 0.0,
+        "ready_lag_mean_seconds": null,
+        "ready_lag_max_seconds": null
+      }
+    ],
+    "cap-unset\\jobs.json": {
+      "jobs": 3001,
+      "completed": 3001,
+      "elapsed_s": 0.7499980926513672,
+      "completed_per_s": 4001.3435092760956,
+      "target_per_s": 1000,
+      "meets_target": true,
+      "quiet_claim_lag_s": 0.557341,
+      "busy_max_running_sampled": 0,
+      "sample_sleep_s": 1.0,
+      "measurement": "enqueue-to-last-empty-poll; includes polling delay; running peak is sampled; the ready-count poll and the job-sampler due_ready query run during the window and scan the jobs run_at index with future wakes pending (observer effects)",
+      "worker": {
+        "worker_containers": 1,
+        "concurrency_per_worker": 16,
+        "max_running_per_workspace": null
+      },
+      "samples": [
+        {
+          "t": 1793552949.75548,
+          "ready": 3001,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793552951.092381,
+          "ready": 3001,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793552952.42631,
+          "ready": 3001,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793552953.723681,
+          "ready": 3001,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793552955.061679,
+          "ready": 3001,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793552956.356597,
+          "ready": 3001,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793552957.708033,
+          "ready": 3001,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793552959.030546,
+          "ready": 3001,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793552960.381354,
+          "ready": 0,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        }
+      ],
+      "outcome": "done"
+    },
+    "cap-unset\\metrics.json": {
+      "samples": [
+        "zirv_flow_jobs_total{kind=\"maintenance.noop\",outcome=\"completed\"} 3001"
+      ]
+    },
+    "cap-unset\\probe.json": {
+      "busy": 3000,
+      "quiet_id": "aeb65a79-10bd-4728-b750-f4eed4b9cdb5",
+      "ready_at": "2026-11-01T17:09:19.631356+00:00",
+      "trace_id": "a3146a24-1360-4ecb-aedd-071a9ca574e2",
+      "ready_epoch": 1793552959.631356,
+      "quiet_claimed_at": "2026-11-01T17:09:20.188698+00:00",
+      "quiet_claim_lag_s": 0.557341
+    },
+    "cap-unset\\worker.json": {
+      "worker_containers": 1,
+      "concurrency_per_worker": 16,
+      "max_running_per_workspace": null
+    }
+  }
+}

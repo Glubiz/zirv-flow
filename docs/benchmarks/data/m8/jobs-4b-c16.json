@@ -1,0 +1,3481 @@
+{
+  "benchmark": "jobs",
+  "label": "reference-resource emulation, not a reference-hardware run",
+  "ruling": "ef99d178",
+  "limitations": [
+    "shared storage",
+    "Docker Desktop overhead",
+    "mixed core types of the dev CPU"
+  ],
+  "reference_hardware_validation": "outstanding",
+  "image_version": "0.230.0",
+  "measurement_scope": "Docker app stack",
+  "recorded_at": "2026-11-04T13:45:25.150449+00:00",
+  "smoke": false,
+  "command_line": [
+    "bash",
+    "scripts/bench/m8/run.sh",
+    "jobs"
+  ],
+  "benchmark_command": [
+    "bash",
+    "D:/GitHub/zirv-flow/.zirv/worktrees/m8-validation/scripts/bench/m8/jobs.sh",
+    "D:/GitHub/zirv-flow/.zirv/worktrees/m8-validation/.zirv/work/m8/auth/../runs/jobs-20261104T133924-665076"
+  ],
+  "exit_code": 0,
+  "topology": {
+    "containers": [
+      {
+        "service": "postgres",
+        "image": "postgres:16.15",
+        "image_id": "sha256:74d436cb49d3398cf7b5d7b33635d43623d9e4da4b93c22db453f7d5d81181b1",
+        "cpuset": "8-15",
+        "memory_bytes": 21474836480,
+        "shm_bytes": 6442450944,
+        "cores": 8
+      },
+      {
+        "service": "zirv-flow",
+        "image": "ghcr.io/glubiz/zirv-flow:0.230.0",
+        "image_id": "sha256:da7dc8f5aeb5b4989a61db58acc6f0b6aba1fe43d1c9353115aa09e40b612669",
+        "cpuset": "0-3",
+        "memory_bytes": 5368709120,
+        "shm_bytes": 67108864,
+        "cores": 4
+      },
+      {
+        "service": "zirv-flow-worker",
+        "image": "ghcr.io/glubiz/zirv-flow:0.230.0",
+        "image_id": "sha256:da7dc8f5aeb5b4989a61db58acc6f0b6aba1fe43d1c9353115aa09e40b612669",
+        "cpuset": "4-7",
+        "memory_bytes": 5368709120,
+        "shm_bytes": 67108864,
+        "cores": 4
+      },
+      {
+        "service": "zirv-flow-scheduler",
+        "image": "ghcr.io/glubiz/zirv-flow:0.230.0",
+        "image_id": "sha256:da7dc8f5aeb5b4989a61db58acc6f0b6aba1fe43d1c9353115aa09e40b612669",
+        "cpuset": "4-7",
+        "memory_bytes": 1073741824,
+        "shm_bytes": 67108864,
+        "cores": 4
+      }
+    ],
+    "postgres_settings": {
+      "shared_buffers": "5GB",
+      "effective_cache_size": "16GB",
+      "maintenance_work_mem": "1GB",
+      "max_wal_size": "32GB",
+      "checkpoint_timeout": "15min",
+      "wal_compression": "lz4",
+      "shared_preload_libraries": "pg_stat_statements",
+      "max_connections": "400"
+    },
+    "image_switch": null,
+    "host": {
+      "os": "Windows",
+      "logical_cpus": 32,
+      "memory_bytes": 68470984704
+    },
+    "docker_vm": {
+      "cpus": 32,
+      "memory_bytes": 33526329344,
+      "operating_system": "Docker Desktop (containerized)"
+    }
+  },
+  "seeds": {
+    "targets": {
+      "events": 500000000,
+      "people": 25000000,
+      "enrollments": 10000000
+    },
+    "seed_at": "2026-11-01T17:53:26.293706+00:00",
+    "wake_at": "2026-11-08T17:53:26.293706+00:00",
+    "event_window_days": 365,
+    "source": "m8bench.progress (committed seed rows, not current live counts)",
+    "workspaces": [
+      {
+        "workspace_id": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+        "people": 10000000,
+        "events": 200000000,
+        "enrollments": 4000000
+      },
+      {
+        "workspace_id": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+        "people": 10000000,
+        "events": 200000000,
+        "enrollments": 4000000
+      },
+      {
+        "workspace_id": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+        "people": 5000000,
+        "events": 100000000,
+        "enrollments": 2000000
+      }
+    ],
+    "committed": {
+      "events": 90700000,
+      "people": 25000000,
+      "enrollments": 10000000
+    }
+  },
+  "results": {
+    "cap-4\\job-kinds.json": [
+      {
+        "t": "2026-11-04T13:41:11.440711Z",
+        "kind": "maintenance.noop",
+        "claims_total": 2007.0,
+        "completed_total": 2006.0,
+        "claim_lag_seconds_sum": 2321.6297617849987,
+        "due_ready": 98119.0,
+        "running": 2.0,
+        "ready_lag_mean_seconds": 2.105735,
+        "ready_lag_max_seconds": 2.105735
+      },
+      {
+        "t": "2026-11-04T13:41:16.852950Z",
+        "kind": "maintenance.noop",
+        "claims_total": 7741.0,
+        "completed_total": 7741.0,
+        "claim_lag_seconds_sum": 30964.409016503007,
+        "due_ready": 92370.0,
+        "running": 2.0,
+        "ready_lag_mean_seconds": 7.517974,
+        "ready_lag_max_seconds": 7.517974
+      },
+      {
+        "t": "2026-11-04T13:41:22.205690Z",
+        "kind": "maintenance.noop",
+        "claims_total": 13365.0,
+        "completed_total": 13363.0,
+        "claim_lag_seconds_sum": 88616.29192176802,
+        "due_ready": 86766.0,
+        "running": 1.0,
+        "ready_lag_mean_seconds": 12.870714,
+        "ready_lag_max_seconds": 12.870714
+      },
+      {
+        "t": "2026-11-04T13:41:27.602744Z",
+        "kind": "maintenance.noop",
+        "claims_total": 19242.0,
+        "completed_total": 19241.0,
+        "claim_lag_seconds_sum": 181115.52797499896,
+        "due_ready": 80856.0,
+        "running": 3.0,
+        "ready_lag_mean_seconds": 18.267768,
+        "ready_lag_max_seconds": 18.267768
+      },
+      {
+        "t": "2026-11-04T13:41:32.999207Z",
+        "kind": "maintenance.noop",
+        "claims_total": 24862.0,
+        "completed_total": 24861.0,
+        "claim_lag_seconds_sum": 299393.3303033148,
+        "due_ready": 75238.0,
+        "running": 1.0,
+        "ready_lag_mean_seconds": 23.664231,
+        "ready_lag_max_seconds": 23.664231
+      },
+      {
+        "t": "2026-11-04T13:41:38.398218Z",
+        "kind": "maintenance.noop",
+        "claims_total": 30651.0,
+        "completed_total": 30650.0,
+        "claim_lag_seconds_sum": 452501.7090581985,
+        "due_ready": 69445.0,
+        "running": 3.0,
+        "ready_lag_mean_seconds": 29.063242,
+        "ready_lag_max_seconds": 29.063242
+      },
+      {
+        "t": "2026-11-04T13:41:43.805943Z",
+        "kind": "maintenance.noop",
+        "claims_total": 35939.0,
+        "completed_total": 35938.0,
+        "claim_lag_seconds_sum": 621139.7558841455,
+        "due_ready": 64160.0,
+        "running": 3.0,
+        "ready_lag_mean_seconds": 34.470967,
+        "ready_lag_max_seconds": 34.470967
+      },
+      {
+        "t": "2026-11-04T13:41:49.206035Z",
+        "kind": "maintenance.noop",
+        "claims_total": 41785.0,
+        "completed_total": 41784.0,
+        "claim_lag_seconds_sum": 839131.7659098348,
+        "due_ready": 58321.0,
+        "running": 3.0,
+        "ready_lag_mean_seconds": 39.871059,
+        "ready_lag_max_seconds": 39.871059
+      },
+      {
+        "t": "2026-11-04T13:41:54.578715Z",
+        "kind": "maintenance.noop",
+        "claims_total": 47425.0,
+        "completed_total": 47423.0,
+        "claim_lag_seconds_sum": 1079935.0639890619,
+        "due_ready": 52743.0,
+        "running": 1.0,
+        "ready_lag_mean_seconds": 45.243739,
+        "ready_lag_max_seconds": 45.243739
+      },
+      {
+        "t": "2026-11-04T13:41:59.972572Z",
+        "kind": "maintenance.noop",
+        "claims_total": 53205.0,
+        "completed_total": 53203.0,
+        "claim_lag_seconds_sum": 1357891.313466646,
+        "due_ready": 46914.0,
+        "running": 2.0,
+        "ready_lag_mean_seconds": 50.637596,
+        "ready_lag_max_seconds": 50.637596
+      },
+      {
+        "t": "2026-11-04T13:42:05.501477Z",
+        "kind": "maintenance.noop",
+        "claims_total": 57602.0,
+        "completed_total": 57602.0,
+        "claim_lag_seconds_sum": 1590366.6287142383,
+        "due_ready": 42419.0,
+        "running": 1.0,
+        "ready_lag_mean_seconds": 56.166501,
+        "ready_lag_max_seconds": 56.166501
+      },
+      {
+        "t": "2026-11-04T13:42:10.842325Z",
+        "kind": "maintenance.noop",
+        "claims_total": 58712.0,
+        "completed_total": 58712.0,
+        "claim_lag_seconds_sum": 1655780.3252877314,
+        "due_ready": 41312.0,
+        "running": 0.0,
+        "ready_lag_mean_seconds": 61.507349,
+        "ready_lag_max_seconds": 61.507349
+      },
+      {
+        "t": "2026-11-04T13:42:16.235956Z",
+        "kind": "maintenance.noop",
+        "claims_total": 59822.0,
+        "completed_total": 59822.0,
+        "claim_lag_seconds_sum": 1727236.6413565518,
+        "due_ready": 40203.0,
+        "running": 0.0,
+        "ready_lag_mean_seconds": 66.90098,
+        "ready_lag_max_seconds": 66.90098
+      },
+      {
+        "t": "2026-11-04T13:42:21.611060Z",
+        "kind": "maintenance.noop",
+        "claims_total": 60966.0,
+        "completed_total": 60966.0,
+        "claim_lag_seconds_sum": 1807011.9387938187,
+        "due_ready": 39069.0,
+        "running": 0.0,
+        "ready_lag_mean_seconds": 72.276084,
+        "ready_lag_max_seconds": 72.276084
+      },
+      {
+        "t": "2026-11-04T13:42:27.024779Z",
+        "kind": "maintenance.noop",
+        "claims_total": 62110.0,
+        "completed_total": 62110.0,
+        "claim_lag_seconds_sum": 1893005.0078828249,
+        "due_ready": 37914.0,
+        "running": 0.0,
+        "ready_lag_mean_seconds": 77.689803,
+        "ready_lag_max_seconds": 77.689803
+      },
+      {
+        "t": "2026-11-04T13:42:32.456578Z",
+        "kind": "maintenance.noop",
+        "claims_total": 63284.0,
+        "completed_total": 63284.0,
+        "claim_lag_seconds_sum": 1987543.3703321605,
+        "due_ready": 36755.0,
+        "running": 1.0,
+        "ready_lag_mean_seconds": 83.121602,
+        "ready_lag_max_seconds": 83.121602
+      },
+      {
+        "t": "2026-11-04T13:42:38.002711Z",
+        "kind": "maintenance.noop",
+        "claims_total": 64530.0,
+        "completed_total": 64530.0,
+        "claim_lag_seconds_sum": 2094799.7883255442,
+        "due_ready": 35509.0,
+        "running": 0.0,
+        "ready_lag_mean_seconds": 88.667735,
+        "ready_lag_max_seconds": 88.667735
+      },
+      {
+        "t": "2026-11-04T13:42:43.459398Z",
+        "kind": "maintenance.noop",
+        "claims_total": 65742.0,
+        "completed_total": 65742.0,
+        "claim_lag_seconds_sum": 2205774.6246063504,
+        "due_ready": 34285.0,
+        "running": 0.0,
+        "ready_lag_mean_seconds": 94.124422,
+        "ready_lag_max_seconds": 94.124422
+      },
+      {
+        "t": "2026-11-04T13:42:48.894026Z",
+        "kind": "maintenance.noop",
+        "claims_total": 67036.0,
+        "completed_total": 67036.0,
+        "claim_lag_seconds_sum": 2331248.603473464,
+        "due_ready": 32993.0,
+        "running": 0.0,
+        "ready_lag_mean_seconds": 99.55905,
+        "ready_lag_max_seconds": 99.55905
+      },
+      {
+        "t": "2026-11-04T13:42:54.274904Z",
+        "kind": "maintenance.noop",
+        "claims_total": 68318.0,
+        "completed_total": 68318.0,
+        "claim_lag_seconds_sum": 2462485.343929631,
+        "due_ready": 31718.0,
+        "running": 3.0,
+        "ready_lag_mean_seconds": 104.939928,
+        "ready_lag_max_seconds": 104.939928
+      },
+      {
+        "t": "2026-11-04T13:42:59.674923Z",
+        "kind": "maintenance.noop",
+        "claims_total": 69675.0,
+        "completed_total": 69675.0,
+        "claim_lag_seconds_sum": 2608718.620037614,
+        "due_ready": 30354.0,
+        "running": 0.0,
+        "ready_lag_mean_seconds": 110.339947,
+        "ready_lag_max_seconds": 110.339947
+      },
+      {
+        "t": "2026-11-04T13:43:05.073276Z",
+        "kind": "maintenance.noop",
+        "claims_total": 71037.0,
+        "completed_total": 71037.0,
+        "claim_lag_seconds_sum": 2762857.1661148,
+        "due_ready": 28989.0,
+        "running": 0.0,
+        "ready_lag_mean_seconds": 115.7383,
+        "ready_lag_max_seconds": 115.7383
+      },
+      {
+        "t": "2026-11-04T13:43:10.497779Z",
+        "kind": "maintenance.noop",
+        "claims_total": 72418.0,
+        "completed_total": 72418.0,
+        "claim_lag_seconds_sum": 2926572.721027582,
+        "due_ready": 27615.0,
+        "running": 0.0,
+        "ready_lag_mean_seconds": 121.162803,
+        "ready_lag_max_seconds": 121.162803
+      },
+      {
+        "t": "2026-11-04T13:43:16.017018Z",
+        "kind": "maintenance.noop",
+        "claims_total": 73881.0,
+        "completed_total": 73881.0,
+        "claim_lag_seconds_sum": 3108105.8951391266,
+        "due_ready": 26150.0,
+        "running": 1.0,
+        "ready_lag_mean_seconds": 126.682042,
+        "ready_lag_max_seconds": 126.682042
+      },
+      {
+        "t": "2026-11-04T13:43:21.380337Z",
+        "kind": "maintenance.noop",
+        "claims_total": 75384.0,
+        "completed_total": 75384.0,
+        "claim_lag_seconds_sum": 3302698.4321233523,
+        "due_ready": 24642.0,
+        "running": 0.0,
+        "ready_lag_mean_seconds": 132.045361,
+        "ready_lag_max_seconds": 132.045361
+      },
+      {
+        "t": "2026-11-04T13:43:26.727725Z",
+        "kind": "maintenance.noop",
+        "claims_total": 76870.0,
+        "completed_total": 76869.0,
+        "claim_lag_seconds_sum": 3503108.4424967864,
+        "due_ready": 23161.0,
+        "running": 2.0,
+        "ready_lag_mean_seconds": 137.392749,
+        "ready_lag_max_seconds": 137.392749
+      },
+      {
+        "t": "2026-11-04T13:43:32.098652Z",
+        "kind": "maintenance.noop",
+        "claims_total": 78442.0,
+        "completed_total": 78442.0,
+        "claim_lag_seconds_sum": 3723450.1375870863,
+        "due_ready": 21588.0,
+        "running": 0.0,
+        "ready_lag_mean_seconds": 142.763676,
+        "ready_lag_max_seconds": 142.763676
+      },
+      {
+        "t": "2026-11-04T13:43:37.503457Z",
+        "kind": "maintenance.noop",
+        "claims_total": 80119.0,
+        "completed_total": 80119.0,
+        "claim_lag_seconds_sum": 3967733.1449917313,
+        "due_ready": 19930.0,
+        "running": 0.0,
+        "ready_lag_mean_seconds": 148.168481,
+        "ready_lag_max_seconds": 148.168481
+      },
+      {
+        "t": "2026-11-04T13:43:42.944298Z",
+        "kind": "maintenance.noop",
+        "claims_total": 81791.0,
+        "completed_total": 81791.0,
+        "claim_lag_seconds_sum": 4220325.66782096,
+        "due_ready": 18271.0,
+        "running": 0.0,
+        "ready_lag_mean_seconds": 153.609322,
+        "ready_lag_max_seconds": 153.609322
+      },
+      {
+        "t": "2026-11-04T13:43:48.472320Z",
+        "kind": "maintenance.noop",
+        "claims_total": 83544.0,
+        "completed_total": 83544.0,
+        "claim_lag_seconds_sum": 4494747.906208534,
+        "due_ready": 16493.0,
+        "running": 0.0,
+        "ready_lag_mean_seconds": 159.137344,
+        "ready_lag_max_seconds": 159.137344
+      },
+      {
+        "t": "2026-11-04T13:43:53.876976Z",
+        "kind": "maintenance.noop",
+        "claims_total": 85368.0,
+        "completed_total": 85368.0,
+        "claim_lag_seconds_sum": 4790138.69085228,
+        "due_ready": 14671.0,
+        "running": 3.0,
+        "ready_lag_mean_seconds": 164.542,
+        "ready_lag_max_seconds": 164.542
+      },
+      {
+        "t": "2026-11-04T13:43:59.384880Z",
+        "kind": "maintenance.noop",
+        "claims_total": 87406.0,
+        "completed_total": 87406.0,
+        "claim_lag_seconds_sum": 5131412.8812645115,
+        "due_ready": 12676.0,
+        "running": 0.0,
+        "ready_lag_mean_seconds": 170.049904,
+        "ready_lag_max_seconds": 170.049904
+      },
+      {
+        "t": "2026-11-04T13:44:04.817129Z",
+        "kind": "maintenance.noop",
+        "claims_total": 89226.0,
+        "completed_total": 89226.0,
+        "claim_lag_seconds_sum": 5446195.878234335,
+        "due_ready": 10812.0,
+        "running": 0.0,
+        "ready_lag_mean_seconds": 175.482153,
+        "ready_lag_max_seconds": 175.482153
+      },
+      {
+        "t": "2026-11-04T13:44:10.219761Z",
+        "kind": "maintenance.noop",
+        "claims_total": 91499.0,
+        "completed_total": 91498.0,
+        "claim_lag_seconds_sum": 5851455.517021981,
+        "due_ready": 8559.0,
+        "running": 0.0,
+        "ready_lag_mean_seconds": 180.884785,
+        "ready_lag_max_seconds": 180.884785
+      },
+      {
+        "t": "2026-11-04T13:44:15.618015Z",
+        "kind": "maintenance.noop",
+        "claims_total": 93851.0,
+        "completed_total": 93851.0,
+        "claim_lag_seconds_sum": 6283636.400582725,
+        "due_ready": 6194.0,
+        "running": 1.0,
+        "ready_lag_mean_seconds": 186.283039,
+        "ready_lag_max_seconds": 186.283039
+      },
+      {
+        "t": "2026-11-04T13:44:21.072776Z",
+        "kind": "maintenance.noop",
+        "claims_total": 96375.0,
+        "completed_total": 96374.0,
+        "claim_lag_seconds_sum": 6760875.450502823,
+        "due_ready": 3669.0,
+        "running": 3.0,
+        "ready_lag_mean_seconds": 191.7378,
+        "ready_lag_max_seconds": 191.7378
+      },
+      {
+        "t": "2026-11-04T13:44:26.516940Z",
+        "kind": "maintenance.noop",
+        "claims_total": 99131.0,
+        "completed_total": 99130.0,
+        "claim_lag_seconds_sum": 7297294.7774070315,
+        "due_ready": 944.0,
+        "running": 1.0,
+        "ready_lag_mean_seconds": 197.181964,
+        "ready_lag_max_seconds": 197.181964
+      },
+      {
+        "t": "2026-11-04T13:44:31.941423Z",
+        "kind": "maintenance.noop",
+        "claims_total": 100001.0,
+        "completed_total": 100001.0,
+        "claim_lag_seconds_sum": 7469569.719324784,
+        "due_ready": 0.0,
+        "running": 0.0,
+        "ready_lag_mean_seconds": null,
+        "ready_lag_max_seconds": null
+      }
+    ],
+    "cap-4\\jobs.json": {
+      "jobs": 100001,
+      "completed": 100001,
+      "elapsed_s": 199.17708706855774,
+      "completed_per_s": 502.0708027805385,
+      "target_per_s": 1000,
+      "meets_target": false,
+      "quiet_claim_lag_s": 0.000183,
+      "busy_max_running_sampled": 3,
+      "sample_sleep_s": 1.0,
+      "measurement": "enqueue-to-last-empty-poll; includes polling delay; running peak is sampled; the ready-count poll and the job-sampler due_ready query run during the window and scan the jobs run_at index with future wakes pending (observer effects)",
+      "worker": {
+        "worker_containers": 1,
+        "concurrency_per_worker": 16,
+        "max_running_per_workspace": 4
+      },
+      "samples": [
+        {
+          "t": 1793799660.720026,
+          "ready": 100001,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799662.326613,
+          "ready": 100001,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799663.826391,
+          "ready": 100001,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799665.375051,
+          "ready": 100001,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799666.945992,
+          "ready": 100001,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799668.46264,
+          "ready": 100001,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799670.091484,
+          "ready": 99399,
+          "running": 2,
+          "dead": 0,
+          "busy_running": 2
+        },
+        {
+          "t": 1793799671.645241,
+          "ready": 97958,
+          "running": 1,
+          "dead": 0,
+          "busy_running": 1
+        },
+        {
+          "t": 1793799673.305481,
+          "ready": 96213,
+          "running": 2,
+          "dead": 0,
+          "busy_running": 2
+        },
+        {
+          "t": 1793799674.909998,
+          "ready": 94485,
+          "running": 1,
+          "dead": 0,
+          "busy_running": 1
+        },
+        {
+          "t": 1793799676.43814,
+          "ready": 92835,
+          "running": 3,
+          "dead": 0,
+          "busy_running": 3
+        },
+        {
+          "t": 1793799678.060193,
+          "ready": 91049,
+          "running": 1,
+          "dead": 0,
+          "busy_running": 1
+        },
+        {
+          "t": 1793799679.605228,
+          "ready": 89395,
+          "running": 1,
+          "dead": 0,
+          "busy_running": 1
+        },
+        {
+          "t": 1793799681.270292,
+          "ready": 87631,
+          "running": 2,
+          "dead": 0,
+          "busy_running": 2
+        },
+        {
+          "t": 1793799682.823838,
+          "ready": 86162,
+          "running": 2,
+          "dead": 0,
+          "busy_running": 2
+        },
+        {
+          "t": 1793799684.421812,
+          "ready": 84435,
+          "running": 2,
+          "dead": 0,
+          "busy_running": 2
+        },
+        {
+          "t": 1793799685.951469,
+          "ready": 82716,
+          "running": 3,
+          "dead": 0,
+          "busy_running": 3
+        },
+        {
+          "t": 1793799687.554574,
+          "ready": 80910,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799689.132897,
+          "ready": 79253,
+          "running": 2,
+          "dead": 0,
+          "busy_running": 2
+        },
+        {
+          "t": 1793799690.654109,
+          "ready": 77635,
+          "running": 3,
+          "dead": 0,
+          "busy_running": 3
+        },
+        {
+          "t": 1793799692.273808,
+          "ready": 75972,
+          "running": 2,
+          "dead": 0,
+          "busy_running": 2
+        },
+        {
+          "t": 1793799693.831383,
+          "ready": 74388,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799695.349706,
+          "ready": 72650,
+          "running": 2,
+          "dead": 0,
+          "busy_running": 2
+        },
+        {
+          "t": 1793799696.990544,
+          "ready": 70965,
+          "running": 3,
+          "dead": 0,
+          "busy_running": 3
+        },
+        {
+          "t": 1793799698.552938,
+          "ready": 69308,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799700.152897,
+          "ready": 67744,
+          "running": 3,
+          "dead": 0,
+          "busy_running": 3
+        },
+        {
+          "t": 1793799701.846133,
+          "ready": 66117,
+          "running": 1,
+          "dead": 0,
+          "busy_running": 1
+        },
+        {
+          "t": 1793799703.539293,
+          "ready": 64437,
+          "running": 1,
+          "dead": 0,
+          "busy_running": 1
+        },
+        {
+          "t": 1793799705.15245,
+          "ready": 62736,
+          "running": 1,
+          "dead": 0,
+          "busy_running": 1
+        },
+        {
+          "t": 1793799706.771096,
+          "ready": 60991,
+          "running": 1,
+          "dead": 0,
+          "busy_running": 1
+        },
+        {
+          "t": 1793799708.338928,
+          "ready": 59254,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799709.857444,
+          "ready": 57630,
+          "running": 2,
+          "dead": 0,
+          "busy_running": 2
+        },
+        {
+          "t": 1793799711.463843,
+          "ready": 55909,
+          "running": 1,
+          "dead": 0,
+          "busy_running": 1
+        },
+        {
+          "t": 1793799713.005906,
+          "ready": 54500,
+          "running": 1,
+          "dead": 0,
+          "busy_running": 1
+        },
+        {
+          "t": 1793799714.580031,
+          "ready": 52743,
+          "running": 1,
+          "dead": 0,
+          "busy_running": 1
+        },
+        {
+          "t": 1793799716.188966,
+          "ready": 51014,
+          "running": 2,
+          "dead": 0,
+          "busy_running": 2
+        },
+        {
+          "t": 1793799717.727401,
+          "ready": 49392,
+          "running": 1,
+          "dead": 0,
+          "busy_running": 1
+        },
+        {
+          "t": 1793799719.276337,
+          "ready": 47660,
+          "running": 3,
+          "dead": 0,
+          "busy_running": 3
+        },
+        {
+          "t": 1793799720.839752,
+          "ready": 45971,
+          "running": 1,
+          "dead": 0,
+          "busy_running": 1
+        },
+        {
+          "t": 1793799722.380159,
+          "ready": 44354,
+          "running": 3,
+          "dead": 0,
+          "busy_running": 3
+        },
+        {
+          "t": 1793799723.954573,
+          "ready": 42734,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799725.550314,
+          "ready": 42410,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799727.075866,
+          "ready": 42085,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799728.609051,
+          "ready": 41768,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799730.205017,
+          "ready": 41445,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799731.719374,
+          "ready": 41146,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799733.444539,
+          "ready": 40798,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799735.074887,
+          "ready": 40453,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799736.622606,
+          "ready": 40122,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799738.208379,
+          "ready": 39795,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799739.835234,
+          "ready": 39446,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799741.363278,
+          "ready": 39116,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799742.978098,
+          "ready": 38787,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799744.727357,
+          "ready": 38418,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799746.248439,
+          "ready": 38088,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799747.833591,
+          "ready": 37739,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799749.391309,
+          "ready": 37401,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799750.944175,
+          "ready": 37069,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799752.528263,
+          "ready": 36740,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799754.226495,
+          "ready": 36365,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799755.750535,
+          "ready": 36019,
+          "running": 1,
+          "dead": 0,
+          "busy_running": 1
+        },
+        {
+          "t": 1793799757.28435,
+          "ready": 35669,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799758.794741,
+          "ready": 35340,
+          "running": 1,
+          "dead": 0,
+          "busy_running": 1
+        },
+        {
+          "t": 1793799760.397479,
+          "ready": 34974,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799761.948994,
+          "ready": 34628,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799763.617891,
+          "ready": 34245,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799765.20541,
+          "ready": 33874,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799766.76236,
+          "ready": 33497,
+          "running": 3,
+          "dead": 0,
+          "busy_running": 3
+        },
+        {
+          "t": 1793799768.445436,
+          "ready": 33103,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799770.059682,
+          "ready": 32713,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799771.623074,
+          "ready": 32342,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799773.286337,
+          "ready": 31948,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799774.80327,
+          "ready": 31585,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799776.337991,
+          "ready": 31199,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799777.938931,
+          "ready": 30791,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799779.457189,
+          "ready": 30406,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799781.027056,
+          "ready": 30023,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799782.661709,
+          "ready": 29609,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799784.259277,
+          "ready": 29198,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799785.849124,
+          "ready": 28792,
+          "running": 3,
+          "dead": 0,
+          "busy_running": 3
+        },
+        {
+          "t": 1793799787.435377,
+          "ready": 28377,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799788.967956,
+          "ready": 27993,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799790.546664,
+          "ready": 27603,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799792.174728,
+          "ready": 27183,
+          "running": 2,
+          "dead": 0,
+          "busy_running": 2
+        },
+        {
+          "t": 1793799793.848444,
+          "ready": 26739,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799795.401612,
+          "ready": 26321,
+          "running": 2,
+          "dead": 0,
+          "busy_running": 2
+        },
+        {
+          "t": 1793799796.988469,
+          "ready": 25883,
+          "running": 1,
+          "dead": 0,
+          "busy_running": 1
+        },
+        {
+          "t": 1793799798.519655,
+          "ready": 25448,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799800.062918,
+          "ready": 25012,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799801.705062,
+          "ready": 24557,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799803.285392,
+          "ready": 24132,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799804.874328,
+          "ready": 23685,
+          "running": 1,
+          "dead": 0,
+          "busy_running": 1
+        },
+        {
+          "t": 1793799806.50857,
+          "ready": 23228,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799808.022277,
+          "ready": 22781,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799809.583012,
+          "ready": 22321,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799811.260125,
+          "ready": 21818,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799812.787518,
+          "ready": 21399,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799814.364488,
+          "ready": 20913,
+          "running": 1,
+          "dead": 0,
+          "busy_running": 1
+        },
+        {
+          "t": 1793799815.99051,
+          "ready": 20431,
+          "running": 2,
+          "dead": 0,
+          "busy_running": 2
+        },
+        {
+          "t": 1793799817.520725,
+          "ready": 19923,
+          "running": 2,
+          "dead": 0,
+          "busy_running": 2
+        },
+        {
+          "t": 1793799819.079531,
+          "ready": 19449,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799820.724805,
+          "ready": 18948,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799822.290487,
+          "ready": 18474,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799824.073658,
+          "ready": 17911,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799825.771637,
+          "ready": 17367,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799827.349582,
+          "ready": 16865,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799828.8618,
+          "ready": 16365,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799830.554866,
+          "ready": 15774,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799832.105491,
+          "ready": 15264,
+          "running": 1,
+          "dead": 0,
+          "busy_running": 1
+        },
+        {
+          "t": 1793799833.660891,
+          "ready": 14753,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799835.314592,
+          "ready": 14142,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799836.913755,
+          "ready": 13567,
+          "running": 2,
+          "dead": 0,
+          "busy_running": 2
+        },
+        {
+          "t": 1793799838.434898,
+          "ready": 13018,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799840.060916,
+          "ready": 12439,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799841.554527,
+          "ready": 11937,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799843.193683,
+          "ready": 11384,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799844.830761,
+          "ready": 10807,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799846.38781,
+          "ready": 10186,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799847.913966,
+          "ready": 9493,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799849.509645,
+          "ready": 8840,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799851.013066,
+          "ready": 8222,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799852.649409,
+          "ready": 7549,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799854.249906,
+          "ready": 6796,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799855.833995,
+          "ready": 6110,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799857.42011,
+          "ready": 5356,
+          "running": 2,
+          "dead": 0,
+          "busy_running": 2
+        },
+        {
+          "t": 1793799859.00884,
+          "ready": 4580,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799860.571759,
+          "ready": 3893,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799862.140739,
+          "ready": 3177,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799863.818611,
+          "ready": 2346,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799865.366592,
+          "ready": 1526,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799866.934322,
+          "ready": 699,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799868.512063,
+          "ready": 0,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        }
+      ],
+      "outcome": "done"
+    },
+    "cap-4\\metrics.json": {
+      "samples": [
+        "zirv_flow_jobs_total{kind=\"maintenance.noop\",outcome=\"completed\"} 100001"
+      ]
+    },
+    "cap-4\\pgss.json": [
+      {
+        "rows": 45077,
+        "calls": 45077,
+        "query": "SELECT pg_advisory_xact_lock($1), set_config('jit', 'off', true)",
+        "mean_ms": 43.597,
+        "total_ms": 1965221
+      },
+      {
+        "rows": 100001,
+        "calls": 45077,
+        "query": "WITH RECURSIVE running AS MATERIALIZED ( SELECT workspace_id, count(*) AS running FROM jobs WHERE state = 'running' AND workspace_id IS NOT NULL GROUP BY worksp",
+        "mean_ms": 2.603,
+        "total_ms": 117357
+      },
+      {
+        "rows": 100001,
+        "calls": 100001,
+        "query": "SELECT $3 FROM jobs WHERE id = $1 AND lease_token = $2 FOR KEY SHARE",
+        "mean_ms": 0.02,
+        "total_ms": 1986
+      },
+      {
+        "rows": 132,
+        "calls": 132,
+        "query": "SELECT json_build_object($1, extract($2 FROM clock_timestamp()),\n  $3, (SELECT count(*) FROM jobs WHERE state = $4 AND kind = $5 AND trace_id = $6::uuid),\n  $7,",
+        "mean_ms": 8.655,
+        "total_ms": 1142
+      },
+      {
+        "rows": 22,
+        "calls": 14,
+        "query": "WITH RECURSIVE kinds (kind) AS ( (SELECT kind FROM jobs WHERE state = $2 ORDER BY kind LIMIT $3) UNION ALL SELECT (SELECT j.kind FROM jobs j WHERE j.state = $4 ",
+        "mean_ms": 63.454,
+        "total_ms": 888
+      },
+      {
+        "rows": 100001,
+        "calls": 100001,
+        "query": "DELETE FROM jobs WHERE id = $1 AND lease_token = $2",
+        "mean_ms": 0.008,
+        "total_ms": 826
+      },
+      {
+        "rows": 40,
+        "calls": 40,
+        "query": "WITH kinds AS (\n  SELECT kind,\n         count(*) FILTER (WHERE state = $1) AS due_ready,\n         count(*) FILTER (WHERE state = $2) AS running,\n         avg(ex",
+        "mean_ms": 11.074,
+        "total_ms": 443
+      },
+      {
+        "rows": 0,
+        "calls": 212,
+        "query": "WITH locked AS ( SELECT id, purge_on_release FROM jobs WHERE state = 'running' AND lease_expires_at < now() ORDER BY id FOR NO KEY UPDATE), purgeable AS ( SELEC",
+        "mean_ms": 0.024,
+        "total_ms": 5
+      },
+      {
+        "rows": 0,
+        "calls": 12,
+        "query": "EXPLAIN (FORMAT JSON) SELECT $3 FROM jobs WHERE state = $1 AND kind = $2",
+        "mean_ms": 0.113,
+        "total_ms": 1
+      },
+      {
+        "rows": 14,
+        "calls": 14,
+        "query": "SELECT d.workspace_id, d.id AS destination_id, COALESCE(q.depth, $1) AS queue_depth, COALESCE(GREATEST($2, EXTRACT($3 FROM (clock_timestamp() - q.oldest))), $4)",
+        "mean_ms": 0.019,
+        "total_ms": 0
+      },
+      {
+        "rows": 0,
+        "calls": 14,
+        "query": "SELECT d.workspace_id, d.id AS destination_id, p.depth, GREATEST($1, EXTRACT($2 FROM clock_timestamp() - p.oldest))::bigint AS oldest_lag_seconds, EXISTS (SELEC",
+        "mean_ms": 0.005,
+        "total_ms": 0
+      },
+      {
+        "rows": 0,
+        "calls": 4,
+        "query": "SELECT d.workspace_id, d.id FROM sending_domains d WHERE (d.last_checked_at IS NULL OR d.last_checked_at < now() - make_interval(secs => $1)) AND (d.last_attemp",
+        "mean_ms": 0.012,
+        "total_ms": 0
+      },
+      {
+        "rows": 0,
+        "calls": 4,
+        "query": "SELECT m.id, m.workspace_id, m.person_id, m.enrollment_id FROM messages m WHERE m.status IN ($2, $3) AND NOT EXISTS ( SELECT $4 FROM jobs j WHERE j.kind = $5 AN",
+        "mean_ms": 0.01,
+        "total_ms": 0
+      },
+      {
+        "rows": 0,
+        "calls": 4,
+        "query": "WITH failed AS ( UPDATE sync_runs r SET state = $1, error_code = $2, finished_at = now(), updated_at = now() WHERE r.state IN ($3, $4) AND NOT EXISTS (SELECT $5",
+        "mean_ms": 0.003,
+        "total_ms": 0
+      },
+      {
+        "rows": 0,
+        "calls": 4,
+        "query": "UPDATE test_sends t SET outcome = $5, reason = $1, completed_at = $2 WHERE t.id IN ( SELECT s.id FROM test_sends s WHERE s.outcome = $6 AND NOT EXISTS ( SELECT ",
+        "mean_ms": 0.002,
+        "total_ms": 0
+      }
+    ],
+    "cap-4\\probe.json": {
+      "busy": 100000,
+      "quiet_id": "8ef5792f-98fe-43ce-a3d6-5905fa189553",
+      "ready_at": "2026-11-04T13:41:09.334976+00:00",
+      "trace_id": "2bb98a7b-8962-461b-b008-ca4e868bce59",
+      "ready_epoch": 1793799669.334976,
+      "quiet_claimed_at": "2026-11-04T13:41:09.33516+00:00",
+      "quiet_claim_lag_s": 0.000183
+    },
+    "cap-4\\worker.json": {
+      "worker_containers": 1,
+      "concurrency_per_worker": 16,
+      "max_running_per_workspace": 4
+    },
+    "cap-unset\\job-kinds.json": [
+      {
+        "t": "2026-11-04T13:40:33.558122Z",
+        "kind": "maintenance.noop",
+        "claims_total": 18500.0,
+        "completed_total": 18484.0,
+        "claim_lag_seconds_sum": 20933.201795507004,
+        "due_ready": 82561.0,
+        "running": 210.0,
+        "ready_lag_mean_seconds": 2.0563089999878876,
+        "ready_lag_max_seconds": 2.056309
+      },
+      {
+        "t": "2026-11-04T13:40:38.979621Z",
+        "kind": "maintenance.noop",
+        "claims_total": 65951.0,
+        "completed_total": 65935.0,
+        "claim_lag_seconds_sum": 253337.1752348072,
+        "due_ready": 35009.0,
+        "running": 280.0,
+        "ready_lag_mean_seconds": 7.477807999971436,
+        "ready_lag_max_seconds": 7.477808
+      },
+      {
+        "t": "2026-11-04T13:40:44.443287Z",
+        "kind": "maintenance.noop",
+        "claims_total": 100001.0,
+        "completed_total": 100001.0,
+        "claim_lag_seconds_sum": 580294.3403318505,
+        "due_ready": 0.0,
+        "running": 0.0,
+        "ready_lag_mean_seconds": null,
+        "ready_lag_max_seconds": null
+      }
+    ],
+    "cap-unset\\jobs.json": {
+      "jobs": 100001,
+      "completed": 100001,
+      "elapsed_s": 12.12305998802185,
+      "completed_per_s": 8248.824974784062,
+      "target_per_s": 1000,
+      "meets_target": true,
+      "quiet_claim_lag_s": 11.503353,
+      "busy_max_running_sampled": 369,
+      "sample_sleep_s": 1.0,
+      "measurement": "enqueue-to-last-empty-poll; includes polling delay; running peak is sampled; the ready-count poll and the job-sampler due_ready query run during the window and scan the jobs run_at index with future wakes pending (observer effects)",
+      "worker": {
+        "worker_containers": 1,
+        "concurrency_per_worker": 16,
+        "max_running_per_workspace": null
+      },
+      "samples": [
+        {
+          "t": 1793799622.849851,
+          "ready": 100001,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799624.374743,
+          "ready": 100001,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799625.889391,
+          "ready": 100001,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799627.420152,
+          "ready": 100001,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799628.97511,
+          "ready": 100001,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799630.525936,
+          "ready": 100001,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        },
+        {
+          "t": 1793799632.110342,
+          "ready": 94977,
+          "running": 369,
+          "dead": 0,
+          "busy_running": 369
+        },
+        {
+          "t": 1793799633.760244,
+          "ready": 80737,
+          "running": 288,
+          "dead": 0,
+          "busy_running": 288
+        },
+        {
+          "t": 1793799635.405474,
+          "ready": 66433,
+          "running": 269,
+          "dead": 0,
+          "busy_running": 269
+        },
+        {
+          "t": 1793799637.012826,
+          "ready": 51841,
+          "running": 217,
+          "dead": 0,
+          "busy_running": 217
+        },
+        {
+          "t": 1793799638.572551,
+          "ready": 38561,
+          "running": 259,
+          "dead": 0,
+          "busy_running": 259
+        },
+        {
+          "t": 1793799640.220163,
+          "ready": 24449,
+          "running": 279,
+          "dead": 0,
+          "busy_running": 279
+        },
+        {
+          "t": 1793799641.866784,
+          "ready": 10305,
+          "running": 278,
+          "dead": 0,
+          "busy_running": 278
+        },
+        {
+          "t": 1793799643.624873,
+          "ready": 0,
+          "running": 0,
+          "dead": 0,
+          "busy_running": 0
+        }
+      ],
+      "outcome": "done"
+    },
+    "cap-unset\\metrics.json": {
+      "samples": [
+        "zirv_flow_jobs_total{kind=\"maintenance.noop\",outcome=\"completed\"} 100001"
+      ]
+    },
+    "cap-unset\\pgss.json": [
+      {
+        "rows": 100001,
+        "calls": 100001,
+        "query": "SELECT $3 FROM jobs WHERE id = $1 AND lease_token = $2 FOR KEY SHARE",
+        "mean_ms": 0.024,
+        "total_ms": 2364
+      },
+      {
+        "rows": 100001,
+        "calls": 3334,
+        "query": "WITH RECURSIVE bands (priority) AS ( (SELECT priority FROM jobs WHERE state = 'ready' ORDER BY priority LIMIT 1) UNION ALL SELECT (SELECT j.priority FROM jobs j",
+        "mean_ms": 0.609,
+        "total_ms": 2031
+      },
+      {
+        "rows": 100001,
+        "calls": 100001,
+        "query": "DELETE FROM jobs WHERE id = $1 AND lease_token = $2",
+        "mean_ms": 0.009,
+        "total_ms": 949
+      },
+      {
+        "rows": 14,
+        "calls": 14,
+        "query": "SELECT json_build_object($1, extract($2 FROM clock_timestamp()),\n  $3, (SELECT count(*) FROM jobs WHERE state = $4 AND kind = $5 AND trace_id = $6::uuid),\n  $7,",
+        "mean_ms": 10.609,
+        "total_ms": 149
+      },
+      {
+        "rows": 5,
+        "calls": 5,
+        "query": "WITH kinds AS (\n  SELECT kind,\n         count(*) FILTER (WHERE state = $1) AS due_ready,\n         count(*) FILTER (WHERE state = $2) AS running,\n         avg(ex",
+        "mean_ms": 8.868,
+        "total_ms": 44
+      },
+      {
+        "rows": 3,
+        "calls": 2,
+        "query": "WITH RECURSIVE kinds (kind) AS ( (SELECT kind FROM jobs WHERE state = $2 ORDER BY kind LIMIT $3) UNION ALL SELECT (SELECT j.kind FROM jobs j WHERE j.state = $4 ",
+        "mean_ms": 9.532,
+        "total_ms": 19
+      },
+      {
+        "rows": 0,
+        "calls": 24,
+        "query": "WITH locked AS ( SELECT id, purge_on_release FROM jobs WHERE state = $4 AND lease_expires_at < now() ORDER BY id FOR NO KEY UPDATE), purgeable AS ( SELECT j.id ",
+        "mean_ms": 0.255,
+        "total_ms": 6
+      },
+      {
+        "rows": 0,
+        "calls": 2,
+        "query": "EXPLAIN (FORMAT JSON) SELECT $3 FROM jobs WHERE state = $1 AND kind = $2",
+        "mean_ms": 0.143,
+        "total_ms": 0
+      },
+      {
+        "rows": 2,
+        "calls": 2,
+        "query": "SELECT d.workspace_id, d.id AS destination_id, COALESCE(q.depth, $1) AS queue_depth, COALESCE(GREATEST($2, EXTRACT($3 FROM (clock_timestamp() - q.oldest))), $4)",
+        "mean_ms": 0.024,
+        "total_ms": 0
+      },
+      {
+        "rows": 0,
+        "calls": 2,
+        "query": "SELECT d.workspace_id, d.id AS destination_id, p.depth, GREATEST($1, EXTRACT($2 FROM clock_timestamp() - p.oldest))::bigint AS oldest_lag_seconds, EXISTS (SELEC",
+        "mean_ms": 0.006,
+        "total_ms": 0
+      }
+    ],
+    "cap-unset\\probe.json": {
+      "busy": 100000,
+      "quiet_id": "150587c6-07cd-4ad5-b956-6eacebbc47b9",
+      "ready_at": "2026-11-04T13:40:31.501813+00:00",
+      "trace_id": "0ae750e8-d655-4aa2-9ffa-a5590efa3118",
+      "ready_epoch": 1793799631.501813,
+      "quiet_claimed_at": "2026-11-04T13:40:43.005167+00:00",
+      "quiet_claim_lag_s": 11.503353
+    },
+    "cap-unset\\worker.json": {
+      "worker_containers": 1,
+      "concurrency_per_worker": 16,
+      "max_running_per_workspace": null
+    },
+    "instrument\\pg-statements.json": {
+      "statements": [
+        {
+          "queryid": "7624519703604560731",
+          "query": "SELECT pg_advisory_xact_lock($1), set_config('jit', 'off', true)",
+          "calls": 45141,
+          "total_exec_time_ms": 1965245.592,
+          "mean_exec_time_ms": 43.536,
+          "rows": 45141,
+          "shared_blks_hit": 0,
+          "shared_blks_read": 0,
+          "wal_bytes": 0
+        },
+        {
+          "queryid": "-2885948672622511576",
+          "query": "WITH RECURSIVE running AS MATERIALIZED ( SELECT workspace_id, count(*) AS running FROM jobs WHERE state = 'running' AND workspace_id IS NOT NULL GROUP BY workspace_id), capped AS MATERIALIZED (SELECT workspace_id FROM running WHERE running >= $5), bands (priority) AS ( (SELECT priority FROM jobs WHE",
+          "calls": 45141,
+          "total_exec_time_ms": 117359.888,
+          "mean_exec_time_ms": 2.6,
+          "rows": 100001,
+          "shared_blks_hit": 179010826,
+          "shared_blks_read": 75,
+          "wal_bytes": 48552421
+        },
+        {
+          "queryid": "2386069832556376008",
+          "query": "SELECT $3 FROM jobs WHERE id = $1 AND lease_token = $2 FOR KEY SHARE",
+          "calls": 100001,
+          "total_exec_time_ms": 1986.11,
+          "mean_exec_time_ms": 0.02,
+          "rows": 100001,
+          "shared_blks_hit": 588904,
+          "shared_blks_read": 0,
+          "wal_bytes": 6783642
+        },
+        {
+          "queryid": "5601889745455940489",
+          "query": "SELECT json_build_object($1, extract($2 FROM clock_timestamp()), $3, (SELECT count(*) FROM jobs WHERE state = $4 AND kind = $5 AND trace_id = $6::uuid), $7, (SELECT count(*) FROM jobs WHERE state = $8 AND workspace_id IN (m8bench.ws($9), m8bench.ws($10)) AND trace_id = $11::uuid), $12, (SELECT count",
+          "calls": 132,
+          "total_exec_time_ms": 1142.475,
+          "mean_exec_time_ms": 8.655,
+          "rows": 132,
+          "shared_blks_hit": 1262932,
+          "shared_blks_read": 0,
+          "wal_bytes": 306230
+        },
+        {
+          "queryid": "3984481651625895286",
+          "query": "WITH RECURSIVE kinds (kind) AS ( (SELECT kind FROM jobs WHERE state = $2 ORDER BY kind LIMIT $3) UNION ALL SELECT (SELECT j.kind FROM jobs j WHERE j.state = $4 AND j.kind > k.kind ORDER BY j.kind LIMIT $5) FROM kinds k WHERE k.kind IS NOT NULL) SELECT k.kind, $6 AS state, (SELECT count(*) FROM (SELE",
+          "calls": 15,
+          "total_exec_time_ms": 953.685,
+          "mean_exec_time_ms": 63.579,
+          "rows": 22,
+          "shared_blks_hit": 88049,
+          "shared_blks_read": 0,
+          "wal_bytes": 123
+        },
+        {
+          "queryid": "2007074132590634391",
+          "query": "SELECT (SELECT count(*) FROM (SELECT $2 FROM enrollments WHERE state = $3 ORDER BY wake_at LIMIT $1) a), (SELECT count(*) FROM (SELECT $4 FROM enrollments WHERE state = $5 ORDER BY wake_at LIMIT $1) w)",
+          "calls": 4,
+          "total_exec_time_ms": 891.999,
+          "mean_exec_time_ms": 223.0,
+          "rows": 4,
+          "shared_blks_hit": 2664352,
+          "shared_blks_read": 0,
+          "wal_bytes": 0
+        },
+        {
+          "queryid": "4906929051792727823",
+          "query": "SELECT EXTRACT(EPOCH FROM now() - min(wake_at))::bigint FROM enrollments WHERE state = 'waiting' AND wake_at <= now()",
+          "calls": 4,
+          "total_exec_time_ms": 834.131,
+          "mean_exec_time_ms": 208.533,
+          "rows": 4,
+          "shared_blks_hit": 2637596,
+          "shared_blks_read": 0,
+          "wal_bytes": 0
+        },
+        {
+          "queryid": "-2387292157431517317",
+          "query": "DELETE FROM jobs WHERE id = $1 AND lease_token = $2",
+          "calls": 100001,
+          "total_exec_time_ms": 825.976,
+          "mean_exec_time_ms": 0.008,
+          "rows": 100001,
+          "shared_blks_hit": 587218,
+          "shared_blks_read": 0,
+          "wal_bytes": 5406994
+        },
+        {
+          "queryid": "-1146095802556028718",
+          "query": "WITH kinds AS ( SELECT kind, count(*) FILTER (WHERE state = $1) AS due_ready, count(*) FILTER (WHERE state = $2) AS running, avg(extract($3 FROM now() - run_at)) FILTER (WHERE state = $4) AS ready_lag_mean_seconds, max(extract($5 FROM now() - run_at)) FILTER (WHERE state = $6) AS ready_lag_max_secon",
+          "calls": 40,
+          "total_exec_time_ms": 442.977,
+          "mean_exec_time_ms": 11.074,
+          "rows": 40,
+          "shared_blks_hit": 376154,
+          "shared_blks_read": 0,
+          "wal_bytes": 59
+        },
+        {
+          "queryid": "2064869707185898531",
+          "query": "COMMIT",
+          "calls": 145390,
+          "total_exec_time_ms": 52.328,
+          "mean_exec_time_ms": 0.0,
+          "rows": 0,
+          "shared_blks_hit": 0,
+          "shared_blks_read": 0,
+          "wal_bytes": 0
+        },
+        {
+          "queryid": "6650430479887907887",
+          "query": "BEGIN",
+          "calls": 145390,
+          "total_exec_time_ms": 45.316,
+          "mean_exec_time_ms": 0.0,
+          "rows": 0,
+          "shared_blks_hit": 0,
+          "shared_blks_read": 0,
+          "wal_bytes": 0
+        },
+        {
+          "queryid": "-1643719597277478301",
+          "query": "SELECT json_build_object($1, to_char(clock_timestamp() AT TIME ZONE $2, $3), $4, coalesce(json_agg(w), $5::json)) FROM ( SELECT query ILIKE $6 AS ingest, state, wait_event_type, wait_event, count(*) AS backends FROM pg_stat_activity WHERE backend_type = $7 AND datname = current_database() AND pid <>",
+          "calls": 223,
+          "total_exec_time_ms": 40.702,
+          "mean_exec_time_ms": 0.183,
+          "rows": 223,
+          "shared_blks_hit": 9190,
+          "shared_blks_read": 0,
+          "wal_bytes": 0
+        },
+        {
+          "queryid": "-4886846914613981729",
+          "query": "WITH RECURSIVE bands (priority) AS ( (SELECT priority FROM jobs WHERE state = $5 ORDER BY priority LIMIT $6) UNION ALL SELECT (SELECT j.priority FROM jobs j WHERE j.state = $7 AND j.priority > b.priority ORDER BY j.priority LIMIT $8) FROM bands b WHERE b.priority IS NOT NULL) UPDATE jobs SET state =",
+          "calls": 52,
+          "total_exec_time_ms": 6.123,
+          "mean_exec_time_ms": 0.118,
+          "rows": 0,
+          "shared_blks_hit": 1882,
+          "shared_blks_read": 0,
+          "wal_bytes": 0
+        },
+        {
+          "queryid": "-8844568742785106702",
+          "query": "WITH locked AS ( SELECT id, purge_on_release FROM jobs WHERE state = 'running' AND lease_expires_at < now() ORDER BY id FOR NO KEY UPDATE), purgeable AS ( SELECT j.id FROM jobs j WHERE j.id IN (SELECT id FROM locked WHERE purge_on_release) FOR UPDATE OF j SKIP LOCKED), purged AS ( DELETE FROM jobs W",
+          "calls": 229,
+          "total_exec_time_ms": 5.278,
+          "mean_exec_time_ms": 0.023,
+          "rows": 0,
+          "shared_blks_hit": 2256,
+          "shared_blks_read": 0,
+          "wal_bytes": 777
+        },
+        {
+          "queryid": "2801371410868560448",
+          "query": "DELETE FROM jobs WHERE kind = $1 AND trace_id = $2::uuid",
+          "calls": 1,
+          "total_exec_time_ms": 4.371,
+          "mean_exec_time_ms": 4.371,
+          "rows": 0,
+          "shared_blks_hit": 9339,
+          "shared_blks_read": 0,
+          "wal_bytes": 0
+        },
+        {
+          "queryid": "5470946084296168314",
+          "query": "SELECT md5($2 || slot)::uuid",
+          "calls": 396,
+          "total_exec_time_ms": 3.789,
+          "mean_exec_time_ms": 0.01,
+          "rows": 396,
+          "shared_blks_hit": 0,
+          "shared_blks_read": 0,
+          "wal_bytes": 0
+        },
+        {
+          "queryid": "4454880474821872414",
+          "query": "SELECT id, workspace_id, kind, cron, timezone, next_run_at, payload, enabled FROM schedules WHERE enabled AND next_run_at <= $1 ORDER BY next_run_at LIMIT $2",
+          "calls": 229,
+          "total_exec_time_ms": 3.211,
+          "mean_exec_time_ms": 0.014,
+          "rows": 0,
+          "shared_blks_hit": 229,
+          "shared_blks_read": 0,
+          "wal_bytes": 0
+        },
+        {
+          "queryid": "-3253606849115541595",
+          "query": "SELECT w.id, EXTRACT(EPOCH FROM now() - head.received_at)::float8 FROM workspaces w CROSS JOIN LATERAL ( SELECT i.received_at FROM ingest_inbox i WHERE ROW(i.workspace_id, i.id) >= ROW(w.id, $1::bigint) AND ROW(i.workspace_id, i.id) <= ROW(w.id, $2::bigint) ORDER BY i.workspace_id, i.id LIMIT 1) hea",
+          "calls": 229,
+          "total_exec_time_ms": 3.135,
+          "mean_exec_time_ms": 0.014,
+          "rows": 0,
+          "shared_blks_hit": 229,
+          "shared_blks_read": 0,
+          "wal_bytes": 0
+        },
+        {
+          "queryid": "-7294528149181673010",
+          "query": "SELECT w.id, EXTRACT(EPOCH FROM clock_timestamp() - head.changed_at)::float8 FROM workspaces w CROSS JOIN LATERAL ( SELECT changed_at FROM person_changes WHERE workspace_id = w.id ORDER BY changed_at LIMIT 1) head",
+          "calls": 229,
+          "total_exec_time_ms": 2.669,
+          "mean_exec_time_ms": 0.012,
+          "rows": 0,
+          "shared_blks_hit": 229,
+          "shared_blks_read": 0,
+          "wal_bytes": 0
+        },
+        {
+          "queryid": "230475844351469518",
+          "query": "EXPLAIN (FORMAT JSON) SELECT $3 FROM jobs WHERE state = $1 AND kind = $2",
+          "calls": 12,
+          "total_exec_time_ms": 1.358,
+          "mean_exec_time_ms": 0.113,
+          "rows": 0,
+          "shared_blks_hit": 36,
+          "shared_blks_read": 0,
+          "wal_bytes": 0
+        },
+        {
+          "queryid": "7101487463917973217",
+          "query": "SELECT count(*) FROM person_changes",
+          "calls": 229,
+          "total_exec_time_ms": 1.029,
+          "mean_exec_time_ms": 0.004,
+          "rows": 229,
+          "shared_blks_hit": 0,
+          "shared_blks_read": 0,
+          "wal_bytes": 0
+        },
+        {
+          "queryid": "-7671699546557376099",
+          "query": "DROP TRIGGER m8_quiet_claim ON jobs",
+          "calls": 1,
+          "total_exec_time_ms": 0.612,
+          "mean_exec_time_ms": 0.612,
+          "rows": 0,
+          "shared_blks_hit": 290,
+          "shared_blks_read": 0,
+          "wal_bytes": 601
+        },
+        {
+          "queryid": "-4401966404739612396",
+          "query": "SELECT version, success, checksum FROM _sqlx_migrations ORDER BY version",
+          "calls": 16,
+          "total_exec_time_ms": 0.535,
+          "mean_exec_time_ms": 0.033,
+          "rows": 1376,
+          "shared_blks_hit": 35,
+          "shared_blks_read": 0,
+          "wal_bytes": 0
+        },
+        {
+          "queryid": "6865378226349601843",
+          "query": "SELECT 1",
+          "calls": 229,
+          "total_exec_time_ms": 0.472,
+          "mean_exec_time_ms": 0.002,
+          "rows": 229,
+          "shared_blks_hit": 0,
+          "shared_blks_read": 0,
+          "wal_bytes": 0
+        },
+        {
+          "queryid": "5494555571750295502",
+          "query": "SELECT now()",
+          "calls": 229,
+          "total_exec_time_ms": 0.366,
+          "mean_exec_time_ms": 0.002,
+          "rows": 229,
+          "shared_blks_hit": 0,
+          "shared_blks_read": 0,
+          "wal_bytes": 0
+        },
+        {
+          "queryid": "-4402750368539600176",
+          "query": "SELECT d.workspace_id, d.id AS destination_id, COALESCE(q.depth, $1) AS queue_depth, COALESCE(GREATEST($2, EXTRACT($3 FROM (clock_timestamp() - q.oldest))), $4)::bigint AS oldest_age_seconds FROM destinations d LEFT JOIN ( SELECT payload ->> $5 AS destination, count(*) AS depth, min(run_at) AS oldes",
+          "calls": 15,
+          "total_exec_time_ms": 0.308,
+          "mean_exec_time_ms": 0.021,
+          "rows": 15,
+          "shared_blks_hit": 45,
+          "shared_blks_read": 0,
+          "wal_bytes": 0
+        },
+        {
+          "queryid": "-6252664070075551016",
+          "query": "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity WHERE application_name LIKE $1 AND pid <> pg_backend_pid()",
+          "calls": 3,
+          "total_exec_time_ms": 0.302,
+          "mean_exec_time_ms": 0.101,
+          "rows": 3,
+          "shared_blks_hit": 0,
+          "shared_blks_read": 0,
+          "wal_bytes": 0
+        },
+        {
+          "queryid": "1705503745403092406",
+          "query": "SELECT coalesce(jsonb_pretty(jsonb_agg(to_jsonb(s))), $1) FROM ( SELECT calls, round(mean_exec_time::numeric, $2) AS mean_ms, round(total_exec_time::numeric) AS total_ms, rows, left(query, $3) AS query FROM pg_stat_statements WHERE query ILIKE $4 OR query ILIKE $5 OR query ILIKE $6 ORDER BY total_ex",
+          "calls": 1,
+          "total_exec_time_ms": 0.286,
+          "mean_exec_time_ms": 0.286,
+          "rows": 1,
+          "shared_blks_hit": 3,
+          "shared_blks_read": 0,
+          "wal_bytes": 0
+        },
+        {
+          "queryid": "-4578569994109596514",
+          "query": "SELECT json_build_object($1, to_char(clock_timestamp() AT TIME ZONE $2, $3), $4, pg_current_wal_lsn()::text, $5, pg_wal_lsn_diff(pg_current_wal_lsn(), $6), $7, (SELECT to_json(w) FROM pg_stat_wal w), $8, (SELECT json_agg(to_json(i)) FROM pg_stat_io i), $9, (SELECT to_json(b) FROM pg_stat_bgwriter b)",
+          "calls": 1,
+          "total_exec_time_ms": 0.212,
+          "mean_exec_time_ms": 0.212,
+          "rows": 1,
+          "shared_blks_hit": 0,
+          "shared_blks_read": 0,
+          "wal_bytes": 0
+        },
+        {
+          "queryid": "-3228989312109599827",
+          "query": "SELECT to_regclass('_sqlx_migrations') IS NOT NULL",
+          "calls": 17,
+          "total_exec_time_ms": 0.154,
+          "mean_exec_time_ms": 0.009,
+          "rows": 17,
+          "shared_blks_hit": 11,
+          "shared_blks_read": 0,
+          "wal_bytes": 0
+        }
+      ]
+    },
+    "instrument\\pg-stats-after.json": {
+      "t": "2026-11-04T13:44:50.100203Z",
+      "wal_lsn": "1F4/4A218000",
+      "wal_lsn_bytes": 2148727357440,
+      "pg_stat_wal": {
+        "wal_records": 3359836681,
+        "wal_fpi": 115898038,
+        "wal_bytes": 682752937249,
+        "wal_buffers_full": 1643707,
+        "wal_write": 22057811,
+        "wal_sync": 20368064,
+        "wal_write_time": 0,
+        "wal_sync_time": 0,
+        "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+      },
+      "pg_stat_io": [
+        {
+          "backend_type": "autovacuum launcher",
+          "object": "relation",
+          "context": "bulkread",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": null,
+          "extend_time": null,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": 0,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "autovacuum launcher",
+          "object": "relation",
+          "context": "normal",
+          "reads": 6,
+          "read_time": 0,
+          "writes": 1,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": null,
+          "extend_time": null,
+          "op_bytes": 8192,
+          "hits": 1164,
+          "evictions": 1,
+          "reuses": null,
+          "fsyncs": 0,
+          "fsync_time": 0,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "autovacuum worker",
+          "object": "relation",
+          "context": "bulkread",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": null,
+          "extend_time": null,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": 0,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "autovacuum worker",
+          "object": "relation",
+          "context": "normal",
+          "reads": 1438045,
+          "read_time": 0,
+          "writes": 761449,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": 641,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 333261901,
+          "evictions": 1436547,
+          "reuses": null,
+          "fsyncs": 0,
+          "fsync_time": 0,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "autovacuum worker",
+          "object": "relation",
+          "context": "vacuum",
+          "reads": 354163732,
+          "read_time": 0,
+          "writes": 46414469,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": 0,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 25947835,
+          "evictions": 66167,
+          "reuses": 354096145,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "client backend",
+          "object": "relation",
+          "context": "bulkread",
+          "reads": 990506390,
+          "read_time": 2437.152,
+          "writes": 2373839,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": null,
+          "extend_time": null,
+          "op_bytes": 8192,
+          "hits": 152663330,
+          "evictions": 1235216,
+          "reuses": 989260823,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "client backend",
+          "object": "relation",
+          "context": "bulkwrite",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": 0,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": 0,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "client backend",
+          "object": "relation",
+          "context": "normal",
+          "reads": 603305892,
+          "read_time": 12351.894,
+          "writes": 319380736,
+          "write_time": 154.967,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": 13918082,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 57232707734,
+          "evictions": 614873963,
+          "reuses": null,
+          "fsyncs": 0,
+          "fsync_time": 0,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "client backend",
+          "object": "relation",
+          "context": "vacuum",
+          "reads": 113995,
+          "read_time": 0,
+          "writes": 15652,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": 0,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 36005,
+          "evictions": 96,
+          "reuses": 113867,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "client backend",
+          "object": "temp relation",
+          "context": "normal",
+          "reads": 910258,
+          "read_time": 0,
+          "writes": 281768,
+          "write_time": 0,
+          "writebacks": null,
+          "writeback_time": null,
+          "extends": 141052,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 398253,
+          "evictions": 1049260,
+          "reuses": null,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "background worker",
+          "object": "relation",
+          "context": "bulkread",
+          "reads": 709971591,
+          "read_time": 4519.274,
+          "writes": 3486588,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": null,
+          "extend_time": null,
+          "op_bytes": 8192,
+          "hits": 149010233,
+          "evictions": 1269026,
+          "reuses": 708837749,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "background worker",
+          "object": "relation",
+          "context": "bulkwrite",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": 0,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": 0,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "background worker",
+          "object": "relation",
+          "context": "normal",
+          "reads": 85371569,
+          "read_time": 9009.829,
+          "writes": 13802341,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": 0,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 2532192874,
+          "evictions": 85103506,
+          "reuses": null,
+          "fsyncs": 0,
+          "fsync_time": 0,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "background worker",
+          "object": "relation",
+          "context": "vacuum",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": 0,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": 0,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "background worker",
+          "object": "temp relation",
+          "context": "normal",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": null,
+          "writeback_time": null,
+          "extends": 0,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": null,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "background writer",
+          "object": "relation",
+          "context": "normal",
+          "reads": null,
+          "read_time": null,
+          "writes": 18805909,
+          "write_time": 0,
+          "writebacks": 18805760,
+          "writeback_time": 0,
+          "extends": null,
+          "extend_time": null,
+          "op_bytes": 8192,
+          "hits": null,
+          "evictions": null,
+          "reuses": null,
+          "fsyncs": 0,
+          "fsync_time": 0,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "checkpointer",
+          "object": "relation",
+          "context": "normal",
+          "reads": null,
+          "read_time": null,
+          "writes": 11564228,
+          "write_time": 0,
+          "writebacks": 11564229,
+          "writeback_time": 0,
+          "extends": null,
+          "extend_time": null,
+          "op_bytes": 8192,
+          "hits": null,
+          "evictions": null,
+          "reuses": null,
+          "fsyncs": 8093,
+          "fsync_time": 0,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "standalone backend",
+          "object": "relation",
+          "context": "bulkread",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": null,
+          "extend_time": null,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": 0,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "standalone backend",
+          "object": "relation",
+          "context": "bulkwrite",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": 0,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": 0,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "standalone backend",
+          "object": "relation",
+          "context": "normal",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": 0,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": null,
+          "fsyncs": 0,
+          "fsync_time": 0,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "standalone backend",
+          "object": "relation",
+          "context": "vacuum",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": 0,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": 0,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "startup",
+          "object": "relation",
+          "context": "bulkread",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": null,
+          "extend_time": null,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": 0,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "startup",
+          "object": "relation",
+          "context": "bulkwrite",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": 0,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": 0,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "startup",
+          "object": "relation",
+          "context": "normal",
+          "reads": 60507,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": 4511,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 2002338,
+          "evictions": 0,
+          "reuses": null,
+          "fsyncs": 0,
+          "fsync_time": 0,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "startup",
+          "object": "relation",
+          "context": "vacuum",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": 0,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": 0,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "walsender",
+          "object": "relation",
+          "context": "bulkread",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": null,
+          "extend_time": null,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": 0,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "walsender",
+          "object": "relation",
+          "context": "bulkwrite",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": 0,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": 0,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "walsender",
+          "object": "relation",
+          "context": "normal",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": 0,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": null,
+          "fsyncs": 0,
+          "fsync_time": 0,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "walsender",
+          "object": "relation",
+          "context": "vacuum",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": 0,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": 0,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "walsender",
+          "object": "temp relation",
+          "context": "normal",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": null,
+          "writeback_time": null,
+          "extends": 0,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": null,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        }
+      ],
+      "checkpoints": {
+        "checkpoints_timed": 47,
+        "checkpoints_req": 58,
+        "checkpoint_write_time": 29864855,
+        "checkpoint_sync_time": 22959,
+        "buffers_checkpoint": 11564229,
+        "buffers_clean": 18805909,
+        "maxwritten_clean": 185099,
+        "buffers_backend": 400404023,
+        "buffers_backend_fsync": 0,
+        "buffers_alloc": 708101022,
+        "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+      },
+      "bgwriter": {
+        "checkpoints_timed": 47,
+        "checkpoints_req": 58,
+        "checkpoint_write_time": 29864855,
+        "checkpoint_sync_time": 22959,
+        "buffers_checkpoint": 11564229,
+        "buffers_clean": 18805909,
+        "maxwritten_clean": 185099,
+        "buffers_backend": 400404023,
+        "buffers_backend_fsync": 0,
+        "buffers_alloc": 708101022,
+        "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+      }
+    },
+    "instrument\\pg-stats-before.json": {
+      "t": "2026-11-04T13:40:09.003902Z",
+      "wal_lsn": "1F4/33B1CA30",
+      "wal_lsn_bytes": 2148350937648,
+      "pg_stat_wal": {
+        "wal_records": 3355554928,
+        "wal_fpi": 115897988,
+        "wal_bytes": 682384483899,
+        "wal_buffers_full": 1638134,
+        "wal_write": 21890491,
+        "wal_sync": 20206318,
+        "wal_write_time": 0,
+        "wal_sync_time": 0,
+        "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+      },
+      "pg_stat_io": [
+        {
+          "backend_type": "autovacuum launcher",
+          "object": "relation",
+          "context": "bulkread",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": null,
+          "extend_time": null,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": 0,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "autovacuum launcher",
+          "object": "relation",
+          "context": "normal",
+          "reads": 6,
+          "read_time": 0,
+          "writes": 1,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": null,
+          "extend_time": null,
+          "op_bytes": 8192,
+          "hits": 1164,
+          "evictions": 1,
+          "reuses": null,
+          "fsyncs": 0,
+          "fsync_time": 0,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "autovacuum worker",
+          "object": "relation",
+          "context": "bulkread",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": null,
+          "extend_time": null,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": 0,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "autovacuum worker",
+          "object": "relation",
+          "context": "normal",
+          "reads": 1438041,
+          "read_time": 0,
+          "writes": 761449,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": 640,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 330855581,
+          "evictions": 1436547,
+          "reuses": null,
+          "fsyncs": 0,
+          "fsync_time": 0,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "autovacuum worker",
+          "object": "relation",
+          "context": "vacuum",
+          "reads": 351790340,
+          "read_time": 0,
+          "writes": 46414469,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": 0,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 25881934,
+          "evictions": 66167,
+          "reuses": 351722881,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "client backend",
+          "object": "relation",
+          "context": "bulkread",
+          "reads": 990506390,
+          "read_time": 2437.152,
+          "writes": 2373839,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": null,
+          "extend_time": null,
+          "op_bytes": 8192,
+          "hits": 152663330,
+          "evictions": 1235216,
+          "reuses": 989260823,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "client backend",
+          "object": "relation",
+          "context": "bulkwrite",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": 0,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": 0,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "client backend",
+          "object": "relation",
+          "context": "normal",
+          "reads": 603305030,
+          "read_time": 12351.894,
+          "writes": 319380736,
+          "write_time": 154.967,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": 13908616,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 57032502432,
+          "evictions": 614873963,
+          "reuses": null,
+          "fsyncs": 0,
+          "fsync_time": 0,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "client backend",
+          "object": "relation",
+          "context": "vacuum",
+          "reads": 113995,
+          "read_time": 0,
+          "writes": 15652,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": 0,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 36005,
+          "evictions": 96,
+          "reuses": 113867,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "client backend",
+          "object": "temp relation",
+          "context": "normal",
+          "reads": 910258,
+          "read_time": 0,
+          "writes": 281768,
+          "write_time": 0,
+          "writebacks": null,
+          "writeback_time": null,
+          "extends": 141052,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 398253,
+          "evictions": 1049260,
+          "reuses": null,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "background worker",
+          "object": "relation",
+          "context": "bulkread",
+          "reads": 709971591,
+          "read_time": 4519.274,
+          "writes": 3486588,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": null,
+          "extend_time": null,
+          "op_bytes": 8192,
+          "hits": 149010233,
+          "evictions": 1269026,
+          "reuses": 708837749,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "background worker",
+          "object": "relation",
+          "context": "bulkwrite",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": 0,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": 0,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "background worker",
+          "object": "relation",
+          "context": "normal",
+          "reads": 85371569,
+          "read_time": 9009.829,
+          "writes": 13802341,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": 0,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 2532077728,
+          "evictions": 85103506,
+          "reuses": null,
+          "fsyncs": 0,
+          "fsync_time": 0,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "background worker",
+          "object": "relation",
+          "context": "vacuum",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": 0,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": 0,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "background worker",
+          "object": "temp relation",
+          "context": "normal",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": null,
+          "writeback_time": null,
+          "extends": 0,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": null,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "background writer",
+          "object": "relation",
+          "context": "normal",
+          "reads": null,
+          "read_time": null,
+          "writes": 18805909,
+          "write_time": 0,
+          "writebacks": 18805760,
+          "writeback_time": 0,
+          "extends": null,
+          "extend_time": null,
+          "op_bytes": 8192,
+          "hits": null,
+          "evictions": null,
+          "reuses": null,
+          "fsyncs": 0,
+          "fsync_time": 0,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "checkpointer",
+          "object": "relation",
+          "context": "normal",
+          "reads": null,
+          "read_time": null,
+          "writes": 11564228,
+          "write_time": 0,
+          "writebacks": 11564229,
+          "writeback_time": 0,
+          "extends": null,
+          "extend_time": null,
+          "op_bytes": 8192,
+          "hits": null,
+          "evictions": null,
+          "reuses": null,
+          "fsyncs": 8093,
+          "fsync_time": 0,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "standalone backend",
+          "object": "relation",
+          "context": "bulkread",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": null,
+          "extend_time": null,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": 0,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "standalone backend",
+          "object": "relation",
+          "context": "bulkwrite",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": 0,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": 0,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "standalone backend",
+          "object": "relation",
+          "context": "normal",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": 0,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": null,
+          "fsyncs": 0,
+          "fsync_time": 0,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "standalone backend",
+          "object": "relation",
+          "context": "vacuum",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": 0,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": 0,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "startup",
+          "object": "relation",
+          "context": "bulkread",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": null,
+          "extend_time": null,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": 0,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "startup",
+          "object": "relation",
+          "context": "bulkwrite",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": 0,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": 0,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "startup",
+          "object": "relation",
+          "context": "normal",
+          "reads": 60507,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": 4511,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 2002338,
+          "evictions": 0,
+          "reuses": null,
+          "fsyncs": 0,
+          "fsync_time": 0,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "startup",
+          "object": "relation",
+          "context": "vacuum",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": 0,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": 0,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "walsender",
+          "object": "relation",
+          "context": "bulkread",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": null,
+          "extend_time": null,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": 0,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "walsender",
+          "object": "relation",
+          "context": "bulkwrite",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": 0,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": 0,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "walsender",
+          "object": "relation",
+          "context": "normal",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": 0,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": null,
+          "fsyncs": 0,
+          "fsync_time": 0,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "walsender",
+          "object": "relation",
+          "context": "vacuum",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": 0,
+          "writeback_time": 0,
+          "extends": 0,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": 0,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        },
+        {
+          "backend_type": "walsender",
+          "object": "temp relation",
+          "context": "normal",
+          "reads": 0,
+          "read_time": 0,
+          "writes": 0,
+          "write_time": 0,
+          "writebacks": null,
+          "writeback_time": null,
+          "extends": 0,
+          "extend_time": 0,
+          "op_bytes": 8192,
+          "hits": 0,
+          "evictions": 0,
+          "reuses": null,
+          "fsyncs": null,
+          "fsync_time": null,
+          "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+        }
+      ],
+      "checkpoints": {
+        "checkpoints_timed": 47,
+        "checkpoints_req": 58,
+        "checkpoint_write_time": 29864855,
+        "checkpoint_sync_time": 22959,
+        "buffers_checkpoint": 11564229,
+        "buffers_clean": 18805909,
+        "maxwritten_clean": 185099,
+        "buffers_backend": 400404023,
+        "buffers_backend_fsync": 0,
+        "buffers_alloc": 708090529,
+        "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+      },
+      "bgwriter": {
+        "checkpoints_timed": 47,
+        "checkpoints_req": 58,
+        "checkpoint_write_time": 29864855,
+        "checkpoint_sync_time": 22959,
+        "buffers_checkpoint": 11564229,
+        "buffers_clean": 18805909,
+        "maxwritten_clean": 185099,
+        "buffers_backend": 400404023,
+        "buffers_backend_fsync": 0,
+        "buffers_alloc": 708090529,
+        "stats_reset": "2026-11-02T16:39:52.645264+00:00"
+      }
+    }
+  }
+}
