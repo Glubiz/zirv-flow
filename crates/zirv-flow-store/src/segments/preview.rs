@@ -67,12 +67,20 @@ impl std::fmt::Debug for SampleRow {
 }
 
 /// Starts the preview's transaction: read-only, one snapshot, cancelled at `timeout` per
-/// statement. Preview runs on the primary (ruling 3724f651).
+/// statement, and without JIT. Preview runs on the primary (ruling 3724f651).
 pub async fn begin_segment_snapshot(
     pool: &sqlx::PgPool,
     timeout: Duration,
 ) -> Result<Tx, StoreError> {
-    begin_snapshot_for(pool, timeout).await
+    let mut tx = begin_snapshot_for(pool, timeout).await?;
+    // A segment's statements look costly enough at millions of people for the server to compile
+    // them with JIT, which took about 0.25 s a statement and saved no run time (#397). Local to
+    // the transaction, as in the refresh.
+    sqlx::query("SET LOCAL jit = off")
+        .execute(&mut *tx)
+        .await
+        .map_err(StoreError::query)?;
+    Ok(tx)
 }
 
 /// The database's clock, inside the snapshot.
@@ -500,6 +508,35 @@ mod tests {
         assert!(snapshot_now(&mut tx).await.is_ok());
         let write = sqlx::query("DELETE FROM people").execute(&mut *tx).await;
         assert!(write.is_err());
+    }
+
+    async fn setting(connection: &mut PgConnection, name: &str) -> String {
+        sqlx::query_scalar("SELECT current_setting($1)")
+            .bind(name)
+            .fetch_one(connection)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_preview_transaction_runs_without_jit(pool: PgPool) {
+        let mut connection = pool.acquire().await.unwrap();
+        assert_eq!(setting(&mut connection, "jit").await, "on");
+        drop(connection);
+
+        let mut tx = begin_segment_snapshot(&pool, Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        assert_eq!(setting(&mut tx, "jit").await, "off");
+        tx.rollback().await.unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        assert_eq!(
+            setting(&mut connection, "jit").await,
+            "on",
+            "only the transaction"
+        );
     }
 
     #[sqlx::test]
