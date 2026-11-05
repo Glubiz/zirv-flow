@@ -299,7 +299,7 @@ t_consistency_search() {
 }
 
 t_consistency_sources() {
-  local n id detail missing=0 i sources keys
+  local n id detail missing=0 sources keys
   for _ in $(seq 1 20); do
     n=$(((RANDOM * 32768 + RANDOM) % $(env_value SIM_PEOPLE) + 1))
     id=$(person_by external:customer_id "$(printf 'C%07d' "$n")")

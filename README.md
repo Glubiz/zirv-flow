@@ -31,7 +31,7 @@ release requirements and [architecture](docs/architecture.md) for the design.
 - [Channels](docs/guide/channels.md): domains, destinations, delivery and consent.
 - [Compliance](docs/guide/compliance.md): product controls and operator responsibilities.
 - [API policy](docs/api.md), [contract audit](docs/api-audit.md) and [OpenAPI](crates/zirv-flow-api/openapi.json).
-- Operations: [backup and restore](docs/operations/backup-restore.md), [upgrades](docs/operations/upgrade.md), [secrets](docs/operations/secrets.md), [runbooks](docs/operations/runbooks.md).
+- Operations: [backup and restore](docs/operations/backup-restore.md), [upgrades](docs/operations/upgrade.md), [secrets](docs/operations/secrets.md), [runbooks](docs/operations/runbooks.md), [simulated production](docs/operations/simulated-production.md).
 
 ## Quickstart with Docker Compose
 
