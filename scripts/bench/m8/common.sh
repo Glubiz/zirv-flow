@@ -23,6 +23,7 @@ configure() {
   export M4_RESOURCE_COMPOSE="$m8_dir/compose.m8.yaml"
   export POSTGRES_USER=zirv POSTGRES_DB=zirv_flow_m8
   unset M4_EXTRA_COMPOSE
+  [ -z "${M8_PG_SETTINGS:-}" ] || pg_side_env "$M8_PG_SETTINGS"
   export M8_PEOPLE="${M8_PEOPLE:-25000000}" M8_EVENTS="${M8_EVENTS:-500000000}"
   export M8_ENROLLMENTS="${M8_ENROLLMENTS:-10000000}" M8_CHUNK="${M8_CHUNK:-100000}"
   export M8_SECONDS="${M8_SECONDS:-600}" M8_RATE="${M8_RATE:-2000}"
@@ -41,7 +42,7 @@ if not 5 <= int(os.environ['M8_PEOPLE']) <= 25_000_000:
 if int(os.environ['M8_ENROLLMENTS']) > int(os.environ['M8_PEOPLE']):
     raise SystemExit('M8_ENROLLMENTS must not exceed M8_PEOPLE')
 PY
-  out="$root/docs/benchmarks/data/m8"
+  out="${M8_DATA_DIR:-$root/docs/benchmarks/data/m8}"
 }
 
 compose() {
@@ -49,6 +50,61 @@ compose() {
     -f "$M4_RESOURCE_COMPOSE" "$@"
 }
 pg() { compose exec -T postgres psql -X -q -U zirv -d zirv_flow_m8 -v ON_ERROR_STOP=1 "$@"; }
+
+# PostgreSQL settings A/B (#397). Side A is the current M8 settings; side B adds backend_flush_after,
+# bgwriter_lru_maxpages, bgwriter_delay and wal_buffers. Both sides time I/O, so the diagnostic cost is equal.
+# The variables are read by compose.m8.yaml, so every compose call of a run must see the same side.
+pg_side_names='track_io_timing track_wal_io_timing backend_flush_after bgwriter_lru_maxpages bgwriter_delay wal_buffers'
+pg_side_env() {
+  export M8_PG_TRACK_IO_TIMING=on
+  case "$1" in
+    a) export M8_PG_BACKEND_FLUSH_AFTER=0 M8_PG_BGWRITER_MAXPAGES=100 M8_PG_BGWRITER_DELAY=200ms M8_PG_WAL_BUFFERS=-1 ;;
+    b) export M8_PG_BACKEND_FLUSH_AFTER=256kB M8_PG_BGWRITER_MAXPAGES=1000 M8_PG_BGWRITER_DELAY=50ms M8_PG_WAL_BUFFERS=64MB ;;
+    *) die 'M8_PG_SETTINGS must be a or b' ;;
+  esac
+}
+# SHOW values of the A/B settings as one JSON object.
+pg_side_show() {
+  pg -At -c "SELECT json_object_agg(name, current_setting(name)) FROM unnest(string_to_array('${pg_side_names// /,}', ',')) name"
+}
+# Fails unless every setting of the side took effect. Side A's wal_buffers is the automatic size: 16MB at 8GB shared_buffers.
+verify_pg_side() {
+  local show
+  show="$(pg_side_show)" || die 'cannot read the PostgreSQL settings'
+  python3 -I - "$1" "$show" <<'PY'
+import json, sys
+side, show = sys.argv[1], json.loads(sys.argv[2].strip())
+common = {'track_io_timing': 'on', 'track_wal_io_timing': 'on'}
+expected = {'a': dict(common, backend_flush_after='0', bgwriter_lru_maxpages='100', bgwriter_delay='200ms', wal_buffers='16MB'),
+            'b': dict(common, backend_flush_after='256kB', bgwriter_lru_maxpages='1000', bgwriter_delay='50ms', wal_buffers='64MB')}[side]
+bad = [f'{k} is {show.get(k)!r}, expected {v!r}' for k, v in expected.items() if show.get(k) != v]
+if bad:
+    raise SystemExit(f'PostgreSQL settings side {side} did not take effect: ' + '; '.join(bad))
+PY
+}
+# Recreates only the PostgreSQL container with the side's settings (wal_buffers needs a restart). No volume is
+# removed, nothing is reseeded and no other container is touched; their pools reconnect.
+switch_pg_settings() {
+  local side="$1" deadline
+  pg_side_env "$side"
+  log "PostgreSQL settings side $side: recreating only the postgres container (restart; volumes kept)"
+  pg -c CHECKPOINT >/dev/null 2>&1 || log 'checkpoint before the switch failed; the restart will recover from WAL'
+  compose up -d --no-build --no-deps --force-recreate --timeout 600 --wait --wait-timeout 600 postgres
+  deadline=$((SECONDS + 300))
+  until [ "$(pg -At -c 'SELECT 1' 2>/dev/null | tr -d '\r')" = 1 ]; do
+    [ "$SECONDS" -lt "$deadline" ] || die 'PostgreSQL did not accept connections after the settings switch'
+    sleep 2
+  done
+  verify_pg_side "$side"
+  wait_app_ready
+}
+wait_app_ready() {
+  local deadline=$((SECONDS + 180))
+  until curl -fsS --connect-timeout 2 --max-time 5 http://127.0.0.1:8080/metrics >/dev/null 2>&1; do
+    [ "$SECONDS" -lt "$deadline" ] || die 'serve did not answer after the settings switch'
+    sleep 2
+  done
+}
 
 # compose.m8.yaml fixes these credentials; compose.bench.yaml publishes this host port.
 host_pg_setup() {
@@ -198,7 +254,10 @@ assert_no_samplers() {
 # The wait-event sampler (pg-waits.sql, once per second) of an arm.
 waits_pid=''
 start_waits_sampler() {
-  (export PGAPPNAME=m8-sampler-waits; exec psql -X -q -v ON_ERROR_STOP=1 -At -f "$m8_dir/pg-waits.sql") >"$1/waits.ndjson" 2>"$1/waits.err" &
+  local keyed=()
+  # M8_IO_DIAG: the same sampler at 10 Hz, keyed by application_name and backend_type (no second sampler).
+  [ -z "${M8_IO_DIAG:-}" ] || keyed=(-v interval="${M8_WAITS_INTERVAL_S:-0.1}" -v keyed=1)
+  (export PGAPPNAME=m8-sampler-waits; exec psql -X -q -v ON_ERROR_STOP=1 -At "${keyed[@]}" -f "$m8_dir/pg-waits.sql") >"$1/waits.ndjson" 2>"$1/waits.err" &
   waits_pid=$!
   register_sampler waits "$waits_pid"
 }
@@ -244,9 +303,32 @@ start_docker_stats() {
 }
 # Ends every sampler of the run; the exit, INT and TERM trap of an arm.
 stop_samplers() {
+  stop_io_diag
   stop_docker_stats
   stop_waits_sampler
   stop_registered_samplers
+}
+
+# I/O diagnostics (M8_IO_DIAG=1), per second beside the arm: pg-io.sql (pg_stat_wal, pg_stat_io, pg_stat_bgwriter,
+# temp_bytes) and the PostgreSQL container's cgroup io.stat and swap, read inside the container with docker exec
+# (sample-cgroup-io.sh). Both land in instrument/; summarize_io_diag writes $1/io-diag.json.
+io_pid=''
+cgroup_pid=''
+start_io_diag() {
+  [ -n "${M8_IO_DIAG:-}" ] || return 0
+  (export PGAPPNAME=m8-sampler-io; exec psql -X -q -v ON_ERROR_STOP=1 -At -f "$m8_dir/pg-io.sql") >"$1/pg-io.ndjson" 2>"$1/pg-io.err" &
+  io_pid=$!
+  register_sampler pg-io "$io_pid"
+  (exec bash "$m8_dir/sample-cgroup-io.sh") >"$1/cgroup-io.txt" 2>"$1/cgroup-io.err" &
+  cgroup_pid=$!
+  register_sampler cgroup-io "$cgroup_pid"
+}
+stop_io_diag() {
+  stop_sampler pg-io "$io_pid"; io_pid=''
+  stop_sampler cgroup-io "$cgroup_pid"; cgroup_pid=''
+}
+summarize_io_diag() { # raw dir
+  python3 -I "$m8_dir/io-diag-summary.py" "$1" >"$1/io-diag.json.tmp" && mv "$1/io-diag.json.tmp" "$1/io-diag.json"
 }
 
 pg_snapshot() { pg -At -f /bench/m8/pg-stats.sql >"$1.tmp" && mv "$1.tmp" "$1"; }
@@ -262,13 +344,16 @@ instrument_begin() {
   pg_snapshot "$dir/pg-stats-before.json"
   start_docker_stats "$dir"
   start_waits_sampler "$dir"
+  start_io_diag "$dir"
 }
 
 instrument_end() {
   local dir="$1/instrument" rc=0
   kill -0 "$waits_pid" 2>/dev/null || { log "wait-event sampler exited early; see $dir/waits.err"; rc=1; }
+  stop_io_diag
   stop_docker_stats
   stop_waits_sampler
+  if [ -n "${M8_IO_DIAG:-}" ]; then summarize_io_diag "$1" || { log "I/O diagnostics summary failed; see $dir"; rc=1; }; fi
   curl -fsS --connect-timeout 5 --max-time 10 http://127.0.0.1:8080/metrics >"$dir/serve-metrics-after.prom" &&
     pg_snapshot "$dir/pg-stats-after.json" &&
     pg -At -f /bench/m8/pg-statements.sql >"$dir/pg-statements.json.tmp" &&
@@ -371,7 +456,12 @@ capture_topology() {
     [ -n "$cid" ] || die "no running $service; run up first"
     docker inspect --format '{"service":"{{index .Config.Labels "com.docker.compose.service"}}","image":"{{.Config.Image}}","image_id":"{{.Image}}","cpuset":"{{.HostConfig.CpusetCpus}}","memory_bytes":{{.HostConfig.Memory}},"shm_bytes":{{.HostConfig.ShmSize}}}' "$cid" >>"$dest"
   done
-  pg -At -c "SELECT json_build_object('postgres_settings', json_object_agg(name, current_setting(name))) FROM unnest(ARRAY['shared_buffers','effective_cache_size','maintenance_work_mem','max_wal_size','checkpoint_timeout','wal_compression','shared_preload_libraries','max_connections']) name" >>"$dest"
+  pg -At -c "SELECT json_build_object('postgres_settings', json_object_agg(name, current_setting(name))) FROM unnest(ARRAY['shared_buffers','effective_cache_size','maintenance_work_mem','max_wal_size','checkpoint_timeout','wal_compression','shared_preload_libraries','max_connections','track_io_timing','track_wal_io_timing','backend_flush_after','bgwriter_lru_maxpages','bgwriter_delay','wal_buffers']) name" >>"$dest"
+  if [ -n "${M8_PG_SETTINGS:-}" ]; then
+    verify_pg_side "$M8_PG_SETTINGS"
+    printf '{"pg_settings_side":{"side":"%s","show":%s}}
+' "$M8_PG_SETTINGS" "$(pg_side_show | tr -d '')" >>"$dest"
+  fi
   python3 -I - "$dest" "$tag" "$(mem_bytes "$M8_PG_MEMORY")" "$(mem_bytes "$M8_SERVE_MEMORY")" \
     "$(mem_bytes "$M8_WORKER_MEMORY")" "$(mem_bytes "$M8_SCHEDULER_MEMORY")" <<'PY'
 import json, os, sys
@@ -381,7 +471,7 @@ tag = sys.argv[2]
 memory = dict(zip(['postgres', 'zirv-flow', 'zirv-flow-worker', 'zirv-flow-scheduler'], map(int, sys.argv[3:])))
 for line in open(sys.argv[1]):
     row = json.loads(line)
-    if 'postgres_settings' in row:
+    if 'service' not in row:
         continue
     image = os.environ['M8_PG_IMAGE'] if row['service'] == 'postgres' else 'ghcr.io/glubiz/zirv-flow:' + tag
     if row['cpuset'] != os.environ[expected[row['service']]] or row['image'] != image:
@@ -394,8 +484,8 @@ PY
 
 write_data() {
   local bench="$1" rc="$2" raw="$3" topology="$4"; shift 4
-  local vm target="$out${smoke:+/smoke}/$bench.json"
-  [ "$rc" = 0 ] || target="$out${smoke:+/smoke}/$bench.failed.json"
+  local vm target="$out${smoke:+/smoke}/$bench${M8_DATA_SUFFIX:-}.json"
+  [ "$rc" = 0 ] || target="$out${smoke:+/smoke}/$bench${M8_DATA_SUFFIX:-}.failed.json"
   vm="$(docker info --format '{{json .}}' 2>/dev/null || echo '{}')"
   python3 -I - "$target" "$bench" "$rc" "$raw" "$topology" "$vm" "$label" "${smoke:-}" "${invocation[@]}" -- "$@" <<'PY'
 import datetime, json, os, pathlib, platform, subprocess, sys
@@ -405,6 +495,7 @@ rows = [json.loads(line) for line in pathlib.Path(topology).read_text().splitlin
 containers = [row for row in rows if 'service' in row]
 postgres_settings = next((row['postgres_settings'] for row in rows if 'postgres_settings' in row), None)
 image_switch = next((row['image_switch'] for row in rows if 'image_switch' in row), None)
+pg_settings_side = next((row['pg_settings_side'] for row in rows if 'pg_settings_side' in row), None)
 for row in containers:
     cpus = set()
     for part in row['cpuset'].split(','):
@@ -438,7 +529,7 @@ report = dict(benchmark=bench, label=label, ruling='ef99d178',
     measurement_scope='native host tool; Docker limits do not constrain renderbench' if bench == 'render' else 'Docker app stack',
     recorded_at=datetime.datetime.now(datetime.timezone.utc).isoformat(), smoke=bool(smoke),
     command_line=args[:cut], benchmark_command=args[cut+1:], exit_code=int(rc),
-    topology=dict(containers=containers, postgres_settings=postgres_settings, image_switch=image_switch, host=dict(os=platform.system(), logical_cpus=os.cpu_count(), memory_bytes=host_memory),
+    topology=dict(containers=containers, postgres_settings=postgres_settings, pg_settings_side=pg_settings_side, image_switch=image_switch, host=dict(os=platform.system(), logical_cpus=os.cpu_count(), memory_bytes=host_memory),
         docker_vm=dict(cpus=vm.get('NCPU'), memory_bytes=vm.get('MemTotal'), operating_system=vm.get('OperatingSystem'))),
     seeds=seeds, results=results)
 target = pathlib.Path(path)

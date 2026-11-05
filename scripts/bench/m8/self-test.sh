@@ -511,4 +511,117 @@ python3 -I -c 'import json,sys; r=json.load(open(sys.argv[1])); assert not r["sm
 write_data burst 1 "$work/burst-stuck" "$work/topology" bash burst.sh
 python3 -I -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["exit_code"]==1' "$out/burst.failed.json"
 
+# PostgreSQL settings A/B (#397), with stubs: the side switch, the SHOW check, the ABAB driver, the diagnostics summary.
+for var in M8_PG_TRACK_IO_TIMING M8_PG_BACKEND_FLUSH_AFTER M8_PG_BGWRITER_MAXPAGES M8_PG_BGWRITER_DELAY M8_PG_WAL_BUFFERS; do
+  grep -Fq -- "\${$var:-" "$here/compose.m8.yaml" || { echo "self-test FAILED: compose.m8.yaml lacks $var" >&2; exit 1; }
+done
+(pg_side_env b; [ "$M8_PG_BACKEND_FLUSH_AFTER" = 256kB ] && [ "$M8_PG_BGWRITER_MAXPAGES" = 1000 ] && [ "$M8_PG_BGWRITER_DELAY" = 50ms ] &&
+  [ "$M8_PG_WAL_BUFFERS" = 64MB ] && [ "$M8_PG_TRACK_IO_TIMING" = on ])
+(pg_side_env a; [ "$M8_PG_BACKEND_FLUSH_AFTER" = 0 ] && [ "$M8_PG_BGWRITER_MAXPAGES" = 100 ] && [ "$M8_PG_WAL_BUFFERS" = -1 ] && [ "$M8_PG_TRACK_IO_TIMING" = on ])
+expect_failure 'M8_PG_SETTINGS must be a or b' bash -c '. "$1/common.sh"; pg_side_env c' _ "$here"
+show_a='{"track_io_timing":"on","track_wal_io_timing":"on","backend_flush_after":"0","bgwriter_lru_maxpages":"100","bgwriter_delay":"200ms","wal_buffers":"16MB"}'
+show_b='{"track_io_timing":"on","track_wal_io_timing":"on","backend_flush_after":"256kB","bgwriter_lru_maxpages":"1000","bgwriter_delay":"50ms","wal_buffers":"64MB"}'
+(pg_side_show() { echo "$show_a"; }; verify_pg_side a)
+(pg_side_show() { echo "$show_b"; }; verify_pg_side b)
+# A setting that did not take effect (wal_buffers needs the restart) fails the run before the arm.
+expect_failure "wal_buffers is '16MB', expected '64MB'" \
+  env SHOW="$show_a" bash -c '. "$1/run.sh"; pg_side_show() { echo "$SHOW"; }; verify_pg_side b' _ "$here"
+expect_failure 'did not take effect' env SHOW="$show_b" bash -c '. "$1/run.sh"; pg_side_show() { echo "$SHOW"; }; verify_pg_side a' _ "$here"
+# The switch recreates only postgres, keeps volumes, and checks SHOW afterwards.
+switch_calls="$work/switch-calls"; : >"$switch_calls"
+(
+  compose() { printf '%s\n' "$*" >>"$switch_calls"; }
+  pg() { [ "$*" = "-At -c SELECT 1" ] && echo 1; return 0; }
+  curl() { return 0; }
+  pg_side_show() { echo "$show_b"; }
+  switch_pg_settings b
+)
+grep -Fq -- 'up -d --no-build --no-deps --force-recreate' "$switch_calls"
+[ "$(grep -c . "$switch_calls")" = 1 ] && [ "$(awk '{print $NF}' "$switch_calls")" = postgres ]
+if grep -Eq -- 'down|rm |volume| -v' "$switch_calls"; then echo 'self-test FAILED: the switch touched volumes or other containers' >&2; exit 1; fi
+expect_failure 'did not take effect' env SHOW="$show_a" bash -c '. "$1/run.sh"; compose() { :; }; pg() { [ "$*" = "-At -c SELECT 1" ] && echo 1; return 0; }
+  curl() { return 0; }; pg_side_show() { echo "$SHOW"; }; switch_pg_settings b' _ "$here"
+# The wait sampler is one sampler: M8_IO_DIAG makes it keyed and 10 Hz, otherwise it keeps its 1 Hz form.
+grep -Fq 'keyed' "$here/pg-waits.sql" && grep -Fq 'application_name, backend_type' "$here/pg-waits.sql" && grep -Fq '\watch :interval' "$here/pg-waits.sql"
+mkdir -p "$work/waits-bin" "$work/waits-a" "$work/waits-b"
+cat >"$work/waits-bin/psql" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >"$M8_TEST_PSQL_ARGS"
+STUB
+chmod +x "$work/waits-bin/psql"
+(
+  export PATH="$work/waits-bin:$PATH" M8_TEST_PSQL_ARGS="$work/waits-args-a"
+  unset M8_IO_DIAG
+  start_waits_sampler "$work/waits-a"; wait "$waits_pid" || true; stop_waits_sampler
+  export M8_TEST_PSQL_ARGS="$work/waits-args-b" M8_IO_DIAG=1
+  start_waits_sampler "$work/waits-b"; wait "$waits_pid" || true; stop_waits_sampler
+)
+! grep -Fq 'keyed' "$work/waits-args-a"
+grep -Fq -- '-v interval=0.1 -v keyed=1' "$work/waits-args-b"
+# The diagnostics summary: slow seconds, WAL sync per sync, writeback bytes, cgroup writes and swap, keyed waits.
+dg="$work/diag"; mkdir -p "$dg/instrument"
+cat >"$dg/ingest.json" <<'JSON'
+{"total":{"latency_from_schedule":{"p99_ms":300.0}},"timeline_from_schedule":[{"second":0,"max_ms":10.0},{"second":1,"max_ms":263.0},{"second":2,"max_ms":262.0},{"second":3,"max_ms":900.0}]}
+JSON
+cat >"$dg/instrument/pg-io.ndjson" <<'JSON'
+{"t":"a","wal":{"wal_write":10,"wal_sync":10,"wal_write_time":5,"wal_sync_time":20,"wal_buffers_full":0},"io":[{"backend_type":"client backend","context":"normal","object":"relation","writes":5,"writebacks":0,"fsyncs":0,"op_bytes":8192}],"bgwriter":{"maxwritten_clean":0,"buffers_clean":0},"temp_bytes":0}
+{"t":"b","wal":{"wal_write":20,"wal_sync":14,"wal_write_time":6,"wal_sync_time":40,"wal_buffers_full":2},"io":[{"backend_type":"client backend","context":"normal","object":"relation","writes":9,"writebacks":16,"fsyncs":0,"op_bytes":8192}],"bgwriter":{"maxwritten_clean":3,"buffers_clean":50},"temp_bytes":100}
+{"t":"c","wal":{"wal_write":30,"wal_sync":14,"wal_write_time":7,"wal_sync_time":40,"wal_buffers_full":2},"io":[{"backend_type":"client backend","context":"normal","object":"relation","writes":9,"writebacks":16,"fsyncs":0,"op_bytes":8192}],"bgwriter":{"maxwritten_clean":3,"buffers_clean":50},"temp_bytes":100}
+JSON
+printf '%s\n' '@@source docker exec test' '@@t 1' '8:0 rbytes=1 wbytes=1000 rios=1 wios=1 dbytes=0 dios=0' '@@mem' '0' 'SwapTotal:  1000 kB' 'SwapFree:  900 kB' '@@end' \
+  '@@t 2' '8:0 rbytes=1 wbytes=5000 rios=1 wios=1 dbytes=0 dios=0' '@@mem' 'SwapTotal:  1000 kB' 'SwapFree:  400 kB' '@@end' >"$dg/instrument/cgroup-io.txt"
+printf '%s\n' '{"t":"a","waits":[{"application_name":"zf-serve","backend_type":"client backend","state":"active","wait_event_type":"IO","wait_event":"WALSync","backends":30}]}' \
+  '{"t":"b","waits":[{"application_name":"zf-serve","backend_type":"client backend","state":"active","wait_event_type":null,"wait_event":null,"backends":2}]}' >"$dg/instrument/waits.ndjson"
+summarize_io_diag "$dg"
+json_of "$dg/io-diag.json" "assert r['latency']['slow_seconds']==2 and r['latency']['slow_second_indexes']==[1,3] and r['latency']['p99_ms']==300.0
+p=r['pg']; assert p['wal_sync_ms_per_sync']['n']==1 and p['wal_sync_ms_per_sync']['max']==5.0 and p['wal_sync_total']==4
+assert p['writeback_bytes_per_second']['max']==16*8192 and p['maxwritten_clean_total']==3 and p['wal_buffers_full_total']==2 and p['temp_bytes_total']==100
+c=r['cgroup']; assert c['available'] and c['write_bytes_per_second']['max']==4000 and c['swap_kb']['SwapFree']['min']==400
+assert r['waits']['top_backend_samples']=={'zf-serve|client backend|IO|WALSync':30}"
+mkdir -p "$work/diag-none"; summarize_io_diag "$work/diag-none"
+json_of "$work/diag-none/io-diag.json" "assert r['latency'] is None and not r['cgroup']['available'] and r['pg']['wal_sync_ms_per_sync'] is None"
+# A data file keeps the side and SHOW values in its topology, and M8_DATA_SUFFIX keeps runs apart.
+printf '{"pg_settings_side":{"side":"b","show":%s}}\n' "$show_b" >>"$work/topology"
+(M8_DATA_SUFFIX=-ab-b1 write_data ingest 0 "$raw" "$work/topology" side-tool)
+json_of "$out/ingest-ab-b1.json" "assert r['topology']['pg_settings_side']['side']=='b' and r['topology']['pg_settings_side']['show']['wal_buffers']=='64MB'"
+# The driver, with a stub run.sh: ABAB order, one comparison JSON, side A restored after the last run and after a failure.
+cat >"$work/bin/fakerun" <<'STUB'
+#!/usr/bin/env bash
+echo "$* side=${M8_PG_SETTINGS:-} diag=${M8_IO_DIAG:-} suffix=${M8_DATA_SUFFIX:-}" >>"$M8_TEST_RUNS"
+[ "$1" != pg-settings ] || exit "${M8_TEST_RESTORE_RC:-0}"
+n="${M8_DATA_SUFFIX: -1}"
+[ "${M8_TEST_FAIL_ON:-}" != "$M8_PG_SETTINGS$n" ] || exit 3
+p99=100; [ "$M8_PG_SETTINGS" = a ] || p99=50
+[ "$n" = 1 ] || p99=$((p99 + 10))
+printf '{"image_version":"0.233.0","exit_code":0,"topology":{"pg_settings_side":{"side":"%s","show":{"wal_buffers":"x"}}},"results":{"ingest.json":{"total":{"latency_from_schedule":{"p99_ms":%s,"max_ms":1},"achieved_rate":2000}},"noload/timers.json":{"lateness":{"overall":{"p99_s":2,"max_s":3}}},"io-diag.json":{"latency":{"slow_seconds":%s},"pg":{"wal_sync_ms_per_sync":{"p99":7,"max":9}}}}}\n' \
+  "$M8_PG_SETTINGS" "$p99" "$([ "$M8_PG_SETTINGS" = a ] && echo 21 || echo 3)" >"$M8_DATA_DIR/$1$M8_DATA_SUFFIX.json"
+STUB
+chmod +x "$work/bin/fakerun"
+ab_env() { # data dir, runs file; the rest is the command
+  local dir="$1" runs="$2"; shift 2
+  env M8_DATA_DIR="$dir" M8_TEST_RUNS="$runs" M8_AB_RUN_CMD="$work/bin/fakerun" BENCH_IMAGE_TAG=0.233.0 "$@"
+}
+mkdir -p "$work/ab-out" "$work/ab-out2"
+: >"$work/ab-runs"
+ab_env "$work/ab-out" "$work/ab-runs" bash "$here/ab-settings.sh" ingest 2 >/dev/null 2>&1
+[ "$(sed 's/ diag.*//' "$work/ab-runs" | paste -sd, -)" = 'ingest side=a,ingest side=b,ingest side=a,ingest side=b,pg-settings a side=' ] ||
+  { cat "$work/ab-runs" >&2; echo 'self-test FAILED: driver order' >&2; exit 1; }
+grep -Fq 'diag=1 suffix=-ab-b2' "$work/ab-runs"
+json_of "$work/ab-out/ab-settings-ingest.json" "assert r['order']=='ABAB' and r['complete'] and r['exit_code']==0 and r['image_version']=='0.233.0' and r['runs_per_side']==2 and len(r['runs'])==4
+assert r['means']['a']['p99_ms']==105.0 and r['means']['b']['p99_ms']==55.0 and r['means']['a']['slow_seconds']==21 and r['means']['b']['slow_seconds']==3
+assert r['means']['a']['wal_sync_ms_per_sync_max']==9 and r['runs'][1]['show']['wal_buffers']=='x' and r['runs'][1]['side']=='b' and r['topology']['sides']['b']
+assert r['runs'][0]['data_file'].endswith('ingest-ab-a1.json')"
+# A failing run stops the A/B, is recorded, and side A is still restored.
+: >"$work/ab-runs2"
+expect_failure 'run b1 failed (3)' ab_env "$work/ab-out2" "$work/ab-runs2" M8_TEST_FAIL_ON=b1 bash "$here/ab-settings.sh" timers 2
+[ "$(sed 's/ diag.*//' "$work/ab-runs2" | paste -sd, -)" = 'timers side=a,timers side=b,pg-settings a side=' ]
+json_of "$work/ab-out2/ab-settings-timers.json" "assert not r['complete'] and r['exit_code']==1 and [x['exit_code'] for x in r['runs']]==[0,3] and r['means']['a']['noload_p99_s']==2 and r['means']['b']['runs']==0"
+# A failed restore fails the driver; a bad arm, a bad count and an old image are refused before any run.
+expect_failure 'could not restore side A' ab_env "$work/ab-out" "$work/ab-runs" M8_TEST_RESTORE_RC=1 bash "$here/ab-settings.sh" ingest 1
+expect_failure 'usage: ab-settings.sh' bash "$here/ab-settings.sh" burst 1
+expect_failure 'runs-per-side must be an integer' bash "$here/ab-settings.sh" ingest 0
+expect_failure 'below 0.233.0' env M8_DATA_DIR="$work/ab-out" M8_AB_RUN_CMD="$work/bin/fakerun" BENCH_IMAGE_TAG=0.232.9 bash "$here/ab-settings.sh" ingest 1
+expect_failure 'unknown settings side' bash "$here/run.sh" pg-settings c
+bash "$here/run.sh" --help | grep -Fq pg-settings
+
 echo 'm8 self-test: parsing, registration, cpusets, disk/memory guards, metadata and prebuilt render passed'

@@ -46,6 +46,20 @@ services:
       - checkpoint_timeout=15min
       - -c
       - max_connections=${M8_PG_MAX_CONNECTIONS:-400}
+      # The settings A/B (ab-settings.sh, M8_PG_SETTINGS=a|b). These defaults are PostgreSQL's own, so a stack
+      # started without the A/B runs as before; common.sh pg_side_env sets them for side A and side B.
+      - -c
+      - track_io_timing=${M8_PG_TRACK_IO_TIMING:-off}
+      - -c
+      - track_wal_io_timing=${M8_PG_TRACK_IO_TIMING:-off}
+      - -c
+      - backend_flush_after=${M8_PG_BACKEND_FLUSH_AFTER:-0}
+      - -c
+      - bgwriter_lru_maxpages=${M8_PG_BGWRITER_MAXPAGES:-100}
+      - -c
+      - bgwriter_delay=${M8_PG_BGWRITER_DELAY:-200ms}
+      - -c
+      - wal_buffers=${M8_PG_WAL_BUFFERS:--1}
 
   zirv-flow-key:
     <<: *m8-image

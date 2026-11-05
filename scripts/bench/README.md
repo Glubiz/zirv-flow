@@ -751,3 +751,67 @@ take deltas for interval counts and divide the lag-sum delta by the claim-count 
 claim lag (undefined with no claims). Start a new file if workers restart. Samples cover all
 workspaces; SQL and worker scrapes are sequential, not atomic. `JOB_KINDS_TICK_S` sets the sleep
 between samples (default 5 seconds); a query or scrape failure stops the sampler.
+
+## 15. PostgreSQL settings A/B for ingest and timers (M8, issue #397)
+
+Settings **A** are the current M8 settings; **B** is A plus `backend_flush_after=256kB`,
+`bgwriter_lru_maxpages=1000`, `bgwriter_delay=50ms` and `wal_buffers=64MB`. Both sides set
+`track_io_timing=on` and `track_wal_io_timing=on`, so the diagnostic cost is the same. Both sides must use the
+same app image, at least 0.233.0 (the driver refuses an older tag). Run it only in an approved bench window, on a
+quiet host (no host cargo task, `zf-pg16*` stopped), with the stack up and seeded:
+
+```sh
+export BENCH_IMAGE_TAG=0.233.0            # the image the operator gives, the same for both sides
+bash scripts/bench/m8/ab-settings.sh ingest 2     # A1 B1 A2 B2, 600 s each
+bash scripts/bench/m8/ab-settings.sh timers 1     # A1 B1 (the timers arm is two windows per run)
+bash scripts/bench/m8/run.sh pg-settings a        # by hand: switch to a side and verify it (also used to restore)
+M8_PG_SETTINGS=b M8_IO_DIAG=1 bash scripts/bench/m8/run.sh ingest   # one run on a side
+```
+
+Expected wall time (estimates, nothing here was run): per ingest run about 20 to 30 minutes (switch and
+reconnect 2 to 5, quiet start up to 30 when vacuum is busy, 600 s load, applied-latency drain, summary), so
+**about 1.5 to 2 hours for `ingest 2`** (four runs). A timers run is two windows of `M8_TIMERS_SECONDS`
+(2,400 s) plus their drains (bound `M8_DRAIN_SECONDS`, 3,600): about 1.5 to 3 hours, so **`timers 1` takes
+about 3 to 6 hours** and each further run per side adds the same again twice.
+
+How it works:
+
+- `M8_PG_SETTINGS=a|b` recreates **only** the PostgreSQL container (`up --no-deps --force-recreate`; a
+  `CHECKPOINT` first, then a stop allowance of 600 s). No volume is removed, nothing is reseeded and no other
+  container is touched (their pools reconnect). The switch is a PostgreSQL restart: `wal_buffers` needs it,
+  and the counters (`pg_stat_*`, `pg_stat_statements`) and `shared_buffers` start cold, which `quiet_start`
+  does not warm. Treat the first seconds of every run as cold on both sides alike (ABAB spreads that evenly).
+- Before the arm, `SHOW` (`current_setting`) is checked for the six settings; any mismatch fails the run
+  before load. Side A expects `wal_buffers=16MB` (the automatic size at the default 8GB `shared_buffers`).
+  The side and the values are recorded in `topology.pg_settings_side` of every data JSON and as a row in
+  `topology.ndjson`, and the final topology check re-verifies them.
+- `compose.m8.yaml` carries the six settings as `M8_PG_*` variables whose defaults are PostgreSQL's own
+  (`track_io_timing=off`, `backend_flush_after=0`, `bgwriter_lru_maxpages=100`, `bgwriter_delay=200ms`,
+  `wal_buffers=-1`). The first `run.sh up` after this change therefore recreates PostgreSQL once with the same
+  effective settings. A `run.sh up` made later without `M8_PG_SETTINGS` recreates it with those defaults
+  again; the driver leaves the stack on side A (timing on) when it ends, also after a failed run.
+- `M8_IO_DIAG=1` (set by the driver) adds, beside the arm: `instrument/pg-io.ndjson` (per second:
+  `pg_stat_wal` `wal_write`, `wal_sync`, `wal_write_time`, `wal_sync_time`, `wal_buffers_full`; `pg_stat_io`
+  writes, writebacks and fsyncs per `backend_type`, `context` and `object`; `pg_stat_bgwriter`
+  `maxwritten_clean` and `buffers_clean`; `pg_stat_database.temp_bytes`), `instrument/cgroup-io.txt` (the
+  PostgreSQL container's cgroup `io.stat`, read **inside the container** with `docker exec`, v2 `io.stat` or
+  the v1 blkio fallback; the swap lines come from the container's `/proc/meminfo`, which is the Docker VM's), and
+  the existing wait sampler (`waits.ndjson`) switched to 10 Hz and keyed by `application_name` and
+  `backend_type` (`-v interval=0.1 -v keyed=1` on `pg-waits.sql`; not a second sampler).
+- `io-diag.json` (in the raw directory, so inside each data JSON's `results`) summarises: the slow-second
+  count (seconds of loadgen's `timeline_from_schedule` whose max exceeds 262 ms) and the run p99; the WAL
+  sync time per sync (p50, p99, max over the seconds that had syncs); writeback bytes per second (backends'
+  `writebacks` x `op_bytes`); cgroup write bytes per second; swap; `maxwritten_clean`, `wal_buffers_full`
+  and `temp_bytes` totals; and the top wait events by backend samples.
+- The driver writes `ab-settings-<arm>.json` beside the data files in `docs/benchmarks/data/m8/`: each run
+  (side, exit code, data file, SHOW values, metrics) and the per-side means. Each run's own data JSON is
+  `<arm>-ab-<side><n>.json` (`M8_DATA_SUFFIX`), so the current `ingest.json` is not overwritten. A failed run
+  stops the A/B (`complete: false`, exit 1); side A is restored by an EXIT trap in every case.
+
+What the diagnostics cannot capture on this host: Docker Desktop on WSL2 may expose an empty `io.stat` in
+the container (the `cgroup.available` flag in `io-diag.json` says so); it counts the VM's virtual disk, not the
+Windows host's, so the host's own write latency and the virtual disk's fsync time remain unobserved (a loaded
+`pg_test_fsync` or a Linux host is needed to apportion them); `wal_sync_time` includes only what PostgreSQL
+times, and the swap figures are the VM's. The 10 Hz sampler needs a host `psql` that accepts a fractional
+`\watch` interval (PostgreSQL 14 or newer client). The self-test (`run.sh --self-test`) covers the switch, the
+`SHOW` failure, the ABAB order, the restore on failure and the JSON shapes with stubs.

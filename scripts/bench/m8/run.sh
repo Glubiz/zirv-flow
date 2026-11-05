@@ -17,8 +17,11 @@ Usage: bash scripts/bench/m8/run.sh <command>
   explorer             90-day queries at default/15000 ms, alongside track ingest
   jobs                 No-op throughput/fairness, uncapped then M8_JOBS_CAP=4
   timers               Re-arm waiting seed; measure without and with track load
+  pg-settings <a|b>    Recreate only PostgreSQL with settings side A or B and verify them (SHOW)
   --self-test          Shell tests; no Docker or database
   --help               Show this help
+Env: M8_PG_SETTINGS=a|b runs an arm on that settings side; M8_IO_DIAG=1 adds the I/O diagnostics.
+A/B driver: bash scripts/bench/m8/ab-settings.sh <ingest|timers> <runs-per-side>.
 See scripts/bench/README.md section 13 for scale, disk and prebuilt-tool requirements.
 HELP
 }
@@ -186,6 +189,7 @@ run_bench() {
   # Every arm but render runs the wait-event sampler (instrument_begin), which needs host psql.
   [ "$bench" = render ] || host_pg_setup
   validate_cpus
+  if [ "$bench" != render ] && [ -n "${M8_PG_SETTINGS:-}" ]; then switch_pg_settings "$M8_PG_SETTINGS"; fi
   seed_manifest
   mkdir -p "$raw"
   export M4_OUT="$raw" M4_INC_SECONDS="$M8_SECONDS" M4_INC_RATE="$M8_RATE" M4_INC_POOL="$pool"
@@ -256,13 +260,18 @@ main() {
     seed)
       [ "$#" = 2 ] || die 'seed requires one name: people, events or enrollments'
       case "$2" in people | events | enrollments) ;; *) die "unknown seed: $2" ;; esac ;;
+    pg-settings)
+      [ "$#" = 2 ] || die 'pg-settings requires a or b'
+      case "$2" in a | b) ;; *) die "unknown settings side: $2" ;; esac ;;
     up | smoke | all | ingest | burst | batch | debugger | explorer | jobs | timers | decisions | send | render | segments)
       [ "$#" = 1 ] || die 'unexpected arguments' ;;
     *) die "unknown subcommand: $1" ;;
   esac
   [ "$1" != smoke ] || { smoke=1; export M8_SMOKE=1; }
+  [ "$1" != pg-settings ] || export M8_PG_SETTINGS="$2"
   configure
   case "$1" in
+    pg-settings) host_pg_setup; switch_pg_settings "$2"; return ;;
     ingest | burst | batch | debugger | explorer) host_pg_setup ;;
     jobs | timers | smoke | all) host_pg_setup; require_job_sampler ;;
   esac
