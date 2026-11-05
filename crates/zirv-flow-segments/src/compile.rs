@@ -26,6 +26,19 @@ pub struct CompiledSegment {
     pub time_sensitive: bool,
 }
 
+/// The statements a preview runs for its count and its sample.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PreviewQuery {
+    /// A definition with a grouped event set (an aggregate over events, architecture 8.2): one
+    /// statement returns the count and the sample ids, `(bigint, uuid[])`, so the set is
+    /// aggregated once, where a count and a sample would each aggregate it (#397).
+    Grouped(Query),
+    /// A definition without one: [`CompiledSegment::count_sql`], then
+    /// [`CompiledSegment::sample_sql`], which stops at its first members instead of finding
+    /// them all.
+    Ungrouped { count: Query, sample: Query },
+}
+
 /// Validates, normalizes and lowers a definition at the explicit time `now`.
 pub fn compile(
     definition: &Definition,
@@ -89,6 +102,31 @@ impl CompiledSegment {
     /// Every member id.
     pub fn members_sql(&self) -> Query {
         self.query("p.id", "")
+    }
+
+    /// The count and the first `limit` member ids in id order, as a preview reads them.
+    pub fn preview_sql(&self, limit: u32) -> PreviewQuery {
+        if !self.groups_events() {
+            return PreviewQuery::Ungrouped {
+                count: self.count_sql(),
+                sample: self.sample_sql(limit),
+            };
+        }
+        let Query { sql, mut params } = self.members_sql();
+        let at = params.len() + 2;
+        params.push(Param::Int(i64::from(limit)));
+        PreviewQuery::Grouped(Query {
+            sql: format!(
+                "WITH m AS MATERIALIZED ({sql}) SELECT (SELECT count(*) FROM m), \
+                 ARRAY(SELECT m.id FROM m ORDER BY m.id LIMIT ${at}::bigint)"
+            ),
+            params,
+        })
+    }
+
+    /// Whether the definition reads a grouped event set: every one carries the scope marker.
+    fn groups_events(&self) -> bool {
+        self.predicate.contains(SCOPE) || self.joins.iter().any(|join| join.contains(SCOPE))
     }
 
     /// The members among a batch of people. The caller binds the batch last, as a `uuid[]`. The
@@ -947,6 +985,48 @@ mod tests {
         ] {
             assert!(!query.sql.contains("ANY($"), "{}", query.sql);
             assert!(!query.sql.contains("scope"), "{}", query.sql);
+        }
+    }
+
+    #[test]
+    fn a_preview_reads_a_grouped_set_in_one_statement_and_anything_else_in_two() {
+        for definition in [
+            count("gte", 2),
+            json!({"not": count("gte", 2)}),
+            json!({"all": [count("gte", 2), {"trait": "vip", "op": "eq", "value": true}]}),
+        ] {
+            let compiled = compiled(definition.clone());
+            let PreviewQuery::Grouped(query) = compiled.preview_sql(7) else {
+                panic!("{definition}: not one statement");
+            };
+            let members = compiled.members_sql();
+            let at = members.params.len() + 2;
+            assert_eq!(
+                query.sql,
+                format!(
+                    "WITH m AS MATERIALIZED ({}) SELECT (SELECT count(*) FROM m), \
+                     ARRAY(SELECT m.id FROM m ORDER BY m.id LIMIT ${at}::bigint)",
+                    members.sql
+                )
+            );
+            assert_eq!(query.params[..members.params.len()], members.params[..]);
+            assert_eq!(query.params.last(), Some(&Param::Int(7)));
+        }
+        for definition in [
+            json!({"trait": "vip", "op": "eq", "value": true}),
+            json!({"event": "order"}),
+            json!({"event": "order", "window": {"since_trait": "signed_up"},
+                   "agg": {"fn": "count", "op": "gte", "value": 2}}),
+        ] {
+            let compiled = compiled(definition.clone());
+            assert_eq!(
+                compiled.preview_sql(7),
+                PreviewQuery::Ungrouped {
+                    count: compiled.count_sql(),
+                    sample: compiled.sample_sql(7),
+                },
+                "{definition}"
+            );
         }
     }
 

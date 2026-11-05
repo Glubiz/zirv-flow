@@ -38,6 +38,16 @@ pub struct SqlQuery {
     pub params: Vec<SqlParam>,
 }
 
+/// The statements of a preview, as the compiler chose them for its definition.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PreviewSql {
+    /// One statement returning the count and the sample ids, `(bigint, uuid[])`: the definition
+    /// has a grouped event set, which this aggregates once instead of once per statement.
+    Grouped(SqlQuery),
+    /// A count, then a sample of ids: a definition without a grouped event set.
+    Ungrouped { count: SqlQuery, sample: SqlQuery },
+}
+
 /// A person in the sample.
 #[derive(Clone, PartialEq)]
 pub struct SampleRow {
@@ -117,28 +127,41 @@ pub(super) fn bind_all_as<'q, O>(
 pub async fn run_segment_preview(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
-    count: &SqlQuery,
-    sample: &SqlQuery,
+    preview: &PreviewSql,
 ) -> Result<(i64, Vec<SampleRow>), StoreError> {
     // The SQL comes from the compiler, which binds every value.
-    let total: i64 = bind_all(
-        sqlx::query_scalar(sqlx::AssertSqlSafe(count.sql.clone())),
-        workspace,
-        &count.params,
-    )
-    .persistent(false)
-    .fetch_one(&mut *connection)
-    .await
-    .map_err(StoreError::bounded)?;
-    let ids: Vec<Uuid> = bind_all(
-        sqlx::query_scalar(sqlx::AssertSqlSafe(sample.sql.clone())),
-        workspace,
-        &sample.params,
-    )
-    .persistent(false)
-    .fetch_all(&mut *connection)
-    .await
-    .map_err(StoreError::bounded)?;
+    let (total, ids): (i64, Vec<Uuid>) = match preview {
+        PreviewSql::Grouped(query) => bind_all_as(
+            sqlx::query_as(sqlx::AssertSqlSafe(query.sql.clone())),
+            workspace,
+            &query.params,
+        )
+        .persistent(false)
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(StoreError::bounded)?,
+        PreviewSql::Ungrouped { count, sample } => {
+            let total = bind_all(
+                sqlx::query_scalar(sqlx::AssertSqlSafe(count.sql.clone())),
+                workspace,
+                &count.params,
+            )
+            .persistent(false)
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(StoreError::bounded)?;
+            let ids = bind_all(
+                sqlx::query_scalar(sqlx::AssertSqlSafe(sample.sql.clone())),
+                workspace,
+                &sample.params,
+            )
+            .persistent(false)
+            .fetch_all(&mut *connection)
+            .await
+            .map_err(StoreError::bounded)?;
+            (total, ids)
+        }
+    };
     let mut display = strongest_identifiers(connection, workspace, &ids).await?;
     let rows = ids
         .into_iter()
@@ -238,6 +261,20 @@ mod tests {
         }
     }
 
+    /// The one statement of a grouped preview over the members `predicate` selects; the sample
+    /// size is the last of `params`.
+    fn grouped(predicate: &str, params: Vec<SqlParam>) -> PreviewSql {
+        let at = params.len() + 1;
+        PreviewSql::Grouped(SqlQuery {
+            sql: format!(
+                "WITH m AS MATERIALIZED (SELECT p.id FROM people p WHERE p.workspace_id = $1 \
+                 AND p.merged_into IS NULL AND ({predicate})) SELECT (SELECT count(*) FROM m), \
+                 ARRAY(SELECT m.id FROM m ORDER BY m.id LIMIT ${at}::bigint)"
+            ),
+            params,
+        })
+    }
+
     #[test]
     fn a_query_keeps_its_values_apart_from_its_text() {
         let query = query(
@@ -269,13 +306,24 @@ mod tests {
             .await
             .unwrap();
 
-        let (total, rows) = run_segment_preview(&mut tx, ws, &count, &sample)
-            .await
-            .unwrap();
+        let (total, rows) =
+            run_segment_preview(&mut tx, ws, &PreviewSql::Ungrouped { count, sample })
+                .await
+                .unwrap();
+        let one = grouped(
+            predicate,
+            vec![SqlParam::Text("pro".into()), SqlParam::Int(1)],
+        );
+        let in_one = run_segment_preview(&mut tx, ws, &one).await.unwrap();
 
         assert_eq!(total, 2);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, pro_a.min(pro_b));
+        assert_eq!(
+            in_one,
+            (total, rows.clone()),
+            "one statement reads the same"
+        );
         assert_eq!(
             rows[0].display.as_ref().map(|(kind, _)| kind.as_str()),
             Some("email")
@@ -297,9 +345,14 @@ mod tests {
             .await
             .unwrap();
 
-        run_segment_preview(&mut tx, ws, &count, &sample)
+        run_segment_preview(&mut tx, ws, &PreviewSql::Ungrouped { count, sample })
             .await
             .unwrap();
+        let one = grouped(
+            predicate,
+            vec![SqlParam::Text("pro".into()), SqlParam::Int(1)],
+        );
+        run_segment_preview(&mut tx, ws, &one).await.unwrap();
 
         // A persistent sqlx statement is a named prepared statement that the server keeps, and
         // after a few executions it plans without the bound values. Neither query may stay.
@@ -434,9 +487,11 @@ mod tests {
             .await
             .unwrap();
 
-        let error = run_segment_preview(&mut tx, ws, &slow, &slow)
-            .await
-            .unwrap_err();
+        let both = PreviewSql::Ungrouped {
+            count: slow.clone(),
+            sample: slow,
+        };
+        let error = run_segment_preview(&mut tx, ws, &both).await.unwrap_err();
 
         assert!(error.is_timeout());
         let mut tx = begin_segment_snapshot(&pool, Duration::from_secs(5))

@@ -10,8 +10,8 @@ use time::OffsetDateTime;
 use utoipa::ToSchema;
 use utoipa::openapi::{Ref, RefOr, Schema};
 use uuid::Uuid;
-use zirv_flow_segments::{Param, Query, compile, parse_and_validate};
-use zirv_flow_store::{DataAge, SqlParam, SqlQuery, StoreError};
+use zirv_flow_segments::{Param, PreviewQuery, Query, compile, parse_and_validate};
+use zirv_flow_store::{DataAge, PreviewSql, SqlParam, SqlQuery, StoreError};
 
 use super::{catalog_of, issues_error};
 use crate::AppState;
@@ -134,6 +134,17 @@ pub(crate) fn sql_query(query: Query) -> SqlQuery {
     }
 }
 
+/// The store's form of the statements a preview runs.
+fn preview_sql(query: PreviewQuery) -> PreviewSql {
+    match query {
+        PreviewQuery::Grouped(query) => PreviewSql::Grouped(sql_query(query)),
+        PreviewQuery::Ungrouped { count, sample } => PreviewSql::Ungrouped {
+            count: sql_query(count),
+            sample: sql_query(sample),
+        },
+    }
+}
+
 /// A read past its time limit is `segment_preview_timeout`, never a 500.
 pub(super) fn read_error(error: StoreError) -> ApiError {
     if error.is_timeout() {
@@ -190,8 +201,7 @@ pub(crate) async fn preview(
     let (count, sample) = zirv_flow_store::run_segment_preview(
         &mut tx,
         workspace.id,
-        &sql_query(compiled.count_sql()),
-        &sql_query(compiled.sample_sql(size)),
+        &preview_sql(compiled.preview_sql(size)),
     )
     .await
     .map_err(read_error)?;
@@ -219,7 +229,19 @@ pub(crate) async fn preview(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
     use axum::http::StatusCode;
+    use hashbrown::HashMap;
+    use serde_json::json;
+    use sqlx::PgPool;
+    use sqlx::postgres::{PgPoolOptions, PgSslMode};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use zirv_flow_core::people::TraitType;
+    use zirv_flow_core::{Slug, WorkspaceId, WorkspaceName};
+    use zirv_flow_segments::{Catalog, CompiledSegment, Definition, TraitStorage};
     use zirv_flow_store::FeedingSource;
 
     use super::*;
@@ -307,5 +329,239 @@ mod tests {
 
         assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(error.code(), Some("segment_preview_timeout"));
+    }
+
+    fn catalog() -> Catalog {
+        let mut catalog = Catalog::default();
+        catalog.traits.insert("plan".to_owned(), TraitType::String);
+        for name in ["order", "page_view"] {
+            catalog.events.insert(name.to_owned(), HashMap::new());
+        }
+        catalog
+    }
+
+    fn compiled(definition: Value) -> CompiledSegment {
+        let mut definition = definition;
+        definition["v"] = json!(1);
+        let definition = Definition::from_value(&definition).unwrap();
+        compile(
+            &definition,
+            &catalog(),
+            &TraitStorage::default(),
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap()
+    }
+
+    fn orders_at_least(count: i64) -> Value {
+        json!({"event": "order", "window": {"last": "P90D"},
+               "agg": {"fn": "count", "op": "gte", "value": count}})
+    }
+
+    fn pro() -> Value {
+        json!({"trait": "plan", "op": "eq", "value": "pro"})
+    }
+
+    /// Migrates, then seeds twelve people, numbered 1 to 12: the first six on `pro`. Person `n` has `n % 3` orders in
+    /// the last 90 days, three older ones and two page views. A person of another workspace has
+    /// orders too.
+    async fn seed(pool: &PgPool) -> WorkspaceId {
+        zirv_flow_store::migrate(pool).await.unwrap();
+        let mut ids = Vec::new();
+        for slug in ["one", "two"] {
+            let name = WorkspaceName::parse(slug).unwrap();
+            let slug = Slug::parse(slug).unwrap();
+            ids.push(
+                zirv_flow_store::create_workspace(pool, &name, &slug)
+                    .await
+                    .unwrap()
+                    .id,
+            );
+        }
+        let (ws, other) = (ids[0], ids[1]);
+        sqlx::query(
+            "INSERT INTO people (id, workspace_id, traits) \
+             SELECT md5('one/' || n)::uuid, $1, \
+                    jsonb_build_object('plan', CASE WHEN n <= 6 THEN 'pro' ELSE 'free' END) \
+             FROM generate_series(1, 12) n \
+             UNION ALL SELECT md5('two/1')::uuid, $2, '{\"plan\": \"pro\"}'",
+        )
+        .bind(ws.as_uuid())
+        .bind(other.as_uuid())
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO events (id, workspace_id, person_id, name, occurred_at, received_at, \
+                 source, trace_id, validation_state) \
+             SELECT gen_random_uuid(), p.workspace_id, p.id, e.name, e.at, now(), 'web', \
+                    gen_random_uuid(), 'valid' \
+             FROM (SELECT n, md5('one/' || n)::uuid AS id, $1::uuid AS workspace_id \
+                   FROM generate_series(1, 12) n \
+                   UNION ALL SELECT 5, md5('two/1')::uuid, $2::uuid) p \
+             CROSS JOIN LATERAL ( \
+                 SELECT 'order', now() - k * interval '1 day' FROM generate_series(1, p.n % 3) k \
+                 UNION ALL SELECT 'order', now() - (200 + k) * interval '1 day' \
+                     FROM generate_series(1, 3) k \
+                 UNION ALL SELECT 'page_view', now() - k * interval '1 hour' \
+                     FROM generate_series(1, 2) k) e(name, at)",
+        )
+        .bind(ws.as_uuid())
+        .bind(other.as_uuid())
+        .execute(pool)
+        .await
+        .unwrap();
+        ws
+    }
+
+    /// The ids of the people numbered `numbers`, in id order.
+    async fn people(pool: &PgPool, numbers: &[i32]) -> Vec<Uuid> {
+        sqlx::query_scalar("SELECT md5('one/' || n)::uuid FROM unnest($1::int4[]) n ORDER BY 1")
+            .bind(numbers)
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn run(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        preview: &PreviewSql,
+    ) -> (i64, Vec<zirv_flow_store::SampleRow>) {
+        let mut tx = zirv_flow_store::begin_segment_snapshot(pool, Duration::from_secs(10))
+            .await
+            .unwrap();
+        zirv_flow_store::run_segment_preview(&mut tx, ws, preview)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_preview_counts_and_samples_as_a_count_and_a_sample_statement_do(pool: PgPool) {
+        let ws = seed(&pool).await;
+        let negated = json!({"not": orders_at_least(2)});
+        let both = json!({"all": [pro(), orders_at_least(2)]});
+        // A sample smaller than the members, one smaller than its limit, an empty segment, a
+        // negated aggregate (a joined set), a trait and an aggregate, and a trait alone.
+        let cases: [(Value, u32, &[i32]); 5] = [
+            (orders_at_least(2), 3, &[2, 5, 8, 11]),
+            (both, 20, &[2, 5]),
+            (orders_at_least(100), 20, &[]),
+            (negated, 20, &[1, 3, 4, 6, 7, 9, 10, 12]),
+            (pro(), 20, &[1, 2, 3, 4, 5, 6]),
+        ];
+
+        for (definition, size, members) in cases {
+            let mut sample = people(&pool, members).await;
+            sample.truncate(usize::try_from(size).unwrap());
+            let compiled = compiled(definition.clone());
+            let previewed = run(&pool, ws, &preview_sql(compiled.preview_sql(size))).await;
+            let reference = PreviewSql::Ungrouped {
+                count: sql_query(compiled.count_sql()),
+                sample: sql_query(compiled.sample_sql(size)),
+            };
+
+            assert_eq!(previewed, run(&pool, ws, &reference).await, "{definition}");
+            assert_eq!(
+                previewed.0,
+                i64::try_from(members.len()).unwrap(),
+                "{definition}"
+            );
+            let ids: Vec<Uuid> = previewed.1.iter().map(|row| row.id).collect();
+            assert_eq!(ids, sample, "{definition}");
+        }
+    }
+
+    /// The SQL of every statement sent through the returned pool, read off the wire: a TCP relay
+    /// to the test server keeps the text of each Parse and simple Query message.
+    async fn relay(pool: &PgPool) -> (PgPool, Arc<Mutex<Vec<String>>>) {
+        let target = pool.connect_options();
+        let upstream = format!("{}:{}", target.get_host(), target.get_port());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&sent);
+        tokio::spawn(async move {
+            while let Ok((client, _)) = listener.accept().await {
+                let server = TcpStream::connect(&upstream).await.unwrap();
+                tokio::spawn(forward(client, server, Arc::clone(&log)));
+            }
+        });
+        let options = (*target)
+            .clone()
+            .host("127.0.0.1")
+            .port(port)
+            .ssl_mode(PgSslMode::Disable);
+        let relayed = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        (relayed, sent)
+    }
+
+    async fn forward(client: TcpStream, server: TcpStream, log: Arc<Mutex<Vec<String>>>) {
+        let (mut from_client, mut to_client) = client.into_split();
+        let (mut from_server, mut to_server) = server.into_split();
+        tokio::spawn(async move { tokio::io::copy(&mut from_server, &mut to_client).await });
+        let length = |bytes: [u8; 4]| usize::try_from(u32::from_be_bytes(bytes)).unwrap() - 4;
+        // The startup message is a length and a body, without a type byte.
+        let mut head = [0; 4];
+        if from_client.read_exact(&mut head).await.is_err() {
+            return;
+        }
+        let mut body = vec![0; length(head)];
+        from_client.read_exact(&mut body).await.unwrap();
+        to_server.write_all(&head).await.unwrap();
+        to_server.write_all(&body).await.unwrap();
+        let mut head = [0; 5];
+        while from_client.read_exact(&mut head).await.is_ok() {
+            let mut body = vec![0; length([head[1], head[2], head[3], head[4]])];
+            from_client.read_exact(&mut body).await.unwrap();
+            // A Parse is a statement name and then its text; a simple Query is its text.
+            let mut parts = body.split(|byte| *byte == 0);
+            let text = match head[0] {
+                b'P' => parts.nth(1),
+                b'Q' => parts.next(),
+                _ => None,
+            };
+            if let Some(text) = text {
+                log.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(text).into_owned());
+            }
+            to_server.write_all(&head).await.unwrap();
+            to_server.write_all(&body).await.unwrap();
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_aggregate_preview_reads_people_in_one_statement_and_a_trait_preview_in_two(
+        pool: PgPool,
+    ) {
+        let ws = seed(&pool).await;
+        let (relayed, sent) = relay(&pool).await;
+        let mut statements = Vec::new();
+
+        for definition in [orders_at_least(2), pro()] {
+            let preview = preview_sql(compiled(definition).preview_sql(20));
+            let mut tx = zirv_flow_store::begin_segment_snapshot(&relayed, Duration::from_secs(10))
+                .await
+                .unwrap();
+            sent.lock().unwrap().clear();
+            zirv_flow_store::run_segment_preview(&mut tx, ws, &preview)
+                .await
+                .unwrap();
+            let log = sent.lock().unwrap();
+            statements.push(
+                log.iter()
+                    .filter(|sql| sql.contains("FROM people p"))
+                    .count(),
+            );
+        }
+
+        assert_eq!(statements, [1, 2]);
     }
 }
