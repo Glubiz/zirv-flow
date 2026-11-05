@@ -69,7 +69,7 @@ services:
     networks: [sim]
     shm_size: 1g
     mem_limit: ${SIM_MEM_ZF_DB:-8g}
-    cpus: ${SIM_CPUS_ZF_DB:-3}
+    cpus: ${SIM_CPUS_ZF_DB:-2}
     environment:
       POSTGRES_USER: zirv
       POSTGRES_PASSWORD: ${SIM_PG_PASSWORD:?run sim.sh init}
@@ -137,7 +137,7 @@ services:
     <<: *zirv
     command: ["serve"]
     mem_limit: ${SIM_MEM_SERVE:-1536m}
-    cpus: ${SIM_CPUS_SERVE:-0.75}
+    cpus: ${SIM_CPUS_SERVE:-0.5}
     environment:
       <<: *zirv-env
       ZIRV_FLOW_DATABASE__MAX_CONNECTIONS: "24"
@@ -149,7 +149,7 @@ services:
     <<: *zirv
     command: ["worker"]
     mem_limit: ${SIM_MEM_WORKER:-2560m}
-    cpus: ${SIM_CPUS_WORKER:-1.25}
+    cpus: ${SIM_CPUS_WORKER:-0.75}
     # The image probes server.bind, which a worker does not open; Prometheus `up` is its signal.
     healthcheck:
       disable: true
@@ -219,7 +219,7 @@ services:
     image: postgres:16
     networks: [sim]
     mem_limit: ${SIM_MEM_COMPANY_PG:-2g}
-    cpus: ${SIM_CPUS_COMPANY_PG:-1}
+    cpus: ${SIM_CPUS_COMPANY_PG:-0.5}
     shm_size: 256m
     environment:
       POSTGRES_USER: shop_admin
@@ -246,7 +246,7 @@ services:
     image: mysql:8.4
     networks: [sim]
     mem_limit: ${SIM_MEM_COMPANY_MYSQL:-1536m}
-    cpus: ${SIM_CPUS_COMPANY_MYSQL:-1}
+    cpus: ${SIM_CPUS_COMPANY_MYSQL:-0.5}
     environment:
       MYSQL_ROOT_PASSWORD: ${SIM_MYSQL_ROOT_PASSWORD:?run sim.sh init}
       FLOW_READER_PASSWORD: ${SIM_FLOW_READER_PASSWORD:?run sim.sh init}
@@ -269,7 +269,7 @@ services:
     image: apache/kafka:4.2.0
     networks: [sim]
     mem_limit: ${SIM_MEM_KAFKA:-1536m}
-    cpus: ${SIM_CPUS_KAFKA:-1}
+    cpus: ${SIM_CPUS_KAFKA:-0.5}
     environment:
       KAFKA_NODE_ID: "1"
       KAFKA_PROCESS_ROLES: broker,controller
@@ -319,7 +319,7 @@ services:
     <<: *fixture
     command: ["python", "-B", "/fixtures/billing_api.py"]
     mem_limit: ${SIM_MEM_BILLING:-768m}
-    cpus: 0.5
+    cpus: 0.25
     volumes:
       - ./fixtures:/fixtures:ro
       - ${SIM_STATE:?run sim.sh}:/sim:ro
@@ -329,7 +329,7 @@ services:
     <<: *fixture
     command: ["python", "-B", "/fixtures/mailer.py"]
     mem_limit: ${SIM_MEM_MAILER:-512m}
-    cpus: 0.5
+    cpus: 0.25
     environment:
       SIM_DAY_SECONDS: ${SIM_DAY_SECONDS:-86400}
       MAILER_PUBLIC_URL: https://app.sim.example.com
@@ -392,14 +392,14 @@ services:
       - billing-data:/data
     command: ["python", "-B", "/gen/seed.py"]
     mem_limit: 1536m
-    cpus: 1
+    cpus: 0.5
 
   gen-ingest:
     <<: *generator
     profiles: [traffic]
     command: ["python", "-B", "/gen/ingest.py"]
     mem_limit: 256m
-    cpus: 0.5
+    cpus: 0.25
 
   gen-changes:
     <<: *generator
@@ -410,7 +410,7 @@ services:
       - billing-data:/data
     command: ["python", "-B", "/gen/changes.py"]
     mem_limit: 256m
-    cpus: 0.5
+    cpus: 0.25
 
   gen-kafka:
     <<: *generator
@@ -424,7 +424,7 @@ services:
     profiles: [traffic]
     command: ["python", "-B", "/gen/forms.py"]
     mem_limit: 128m
-    cpus: 0.1
+    cpus: 0.25
 
   # Builds the shared tools image: `docker compose --profile tools build sim-tools`.
   sim-tools:

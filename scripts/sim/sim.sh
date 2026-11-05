@@ -86,7 +86,7 @@ GRANT pg_monitor TO sim_monitor;
 SQL
   if [[ -f "$SIM_DIR/gen/seed.py" ]]; then
     say 'seeding the company sources'
-    compose --profile data run --rm seed
+    cmd_seed sources
   fi
   say 'stack is up: http://localhost:8080 (app), :9090 (prometheus), :8025 (mailbox viewer)'
 }
@@ -197,7 +197,7 @@ status_traffic() {
   zf_sql "SELECT 'people ' || count(*) FROM people WHERE merged_into IS NULL" || true
   zf_sql "SELECT 'inbox age ' || round(coalesce(extract(epoch FROM now() - min(received_at)), 0)::numeric, 1) || ' s, ' || count(*) || ' queued' FROM ingest_inbox" || true
   zf_sql "SELECT 'events (estimate) ' || coalesce(sum(n_live_tup), 0) FROM pg_stat_user_tables WHERE relname ~ '^events_(default|y[0-9]{4}m[0-9]{2})\$'" || true
-  zf_sql "WITH e AS (SELECT coalesce(sum(n_live_tup), 0) AS n FROM pg_stat_user_tables WHERE relname ~ '^events_(default|y[0-9]{4}m[0-9]{2})\$') SELECT 'db size ' || pg_size_pretty(pg_database_size('zirv_flow')) || ', bytes per event ' || CASE WHEN n > 0 THEN (pg_database_size('zirv_flow') / n)::bigint::text ELSE 'n/a' END FROM e" || true
+  zf_sql "WITH e AS (SELECT coalesce(sum(n_live_tup), 0) AS n, coalesce(sum(pg_total_relation_size(relid)), 0) AS b FROM pg_stat_user_tables WHERE relname ~ '^events_(default|y[0-9]{4}m[0-9]{2})\$') SELECT 'db size ' || pg_size_pretty(pg_database_size('zirv_flow')) || ', events ' || pg_size_pretty(b) || ', bytes per event ' || CASE WHEN n > 0 THEN (b / n)::bigint::text ELSE 'n/a' END FROM e" || true
 }
 
 later() { die "$1 is added by a later group (A2: traffic and seed, B: provisioning and verify)"; }
