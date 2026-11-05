@@ -84,3 +84,40 @@ for line in urllib.request.urlopen('http://127.0.0.1:$2/metrics', timeout=3).rea
         print(line)
 " 2> /dev/null
 }
+
+# call <method> <path> [json] [expected-status-regex]: prints the body, dies with the step on any
+# other status. The path is under /api/v1. Needs STEP (a name for the failure message).
+call() {
+  local out code
+  out=$(api "$1" "$2" "${3:-}") || die "${STEP:-api}: curl failed for $1 $2"
+  code=${out##*$'\n'}
+  if [[ ! $code =~ ^(${4:-2[0-9][0-9]})$ ]]; then
+    die "${STEP:-api}: $1 $2 answered $code: $(printf '%s' "${out%$'\n'*}" | head -c 600)"
+  fi
+  printf '%s' "${out%$'\n'*}"
+}
+
+# sign_in: opens a session as the owner and sets CSRF and WS (the workspace id, once it exists).
+sign_in() {
+  local password session
+  password=$(env_value SIM_OWNER_PASSWORD)
+  : > "$STATE/cookies"
+  CSRF=
+  session=$(call POST /session "$(jq -n --arg p "$password" '{email:"owner@sim.example.com",password:$p}')")
+  CSRF=$(jq -er .csrf_token <<< "$session")
+  # shellcheck disable=SC2034  # read by the scripts that source this file
+  OWNER_ID=$(jq -er .user.id <<< "$session")
+  # shellcheck disable=SC2034
+  [[ ! -f "$STATE/keys/workspace.id" ]] || WS=$(cat "$STATE/keys/workspace.id")
+}
+
+# The Windows jq prints CRLF line ends, which end up inside ids captured with $(...).
+jq() { command jq "$@" | tr -d '\r'; }
+
+# poll_jq <path> <jq-filter>: succeeds once the GET answer satisfies the filter (no dying).
+poll_jq() {
+  local out
+  out=$(api GET "$1" 2> /dev/null) || return 1
+  [[ ${out##*$'\n'} =~ ^2 ]] || return 1
+  printf '%s' "${out%$'\n'*}" | command jq -e "$2" > /dev/null 2>&1
+}

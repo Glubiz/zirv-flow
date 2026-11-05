@@ -27,7 +27,12 @@ usage: sim.sh <command>
   seed [sources|ingest-people|all] [--people N]  load the company sources and/or the people backbone
   traffic [on|off]          start or stop the four generators
   rate N | burst [factor] [seconds] | pause | resume | export-now   traffic controls
-Later groups add: provision, start, verify, sync-all, blast.
+  provision [stage...]      provision the workspace through the API (stages: base registry people connections
+                            sending segments templates syncs gate flows; default all)
+  start [--profile full|small]  up, provision, ready gate, traffic on, then the event-driven flows
+  verify [--provision] [group...]  the checks of design 8.2, exit non-zero when one fails
+  sync-all                  queue a run for every pull stream
+  blast                     start the re-engagement flow now on the lapsed customers
 TEXT
 }
 
@@ -200,7 +205,34 @@ status_traffic() {
   zf_sql "WITH e AS (SELECT coalesce(sum(n_live_tup), 0) AS n, coalesce(sum(pg_total_relation_size(relid)), 0) AS b FROM pg_stat_user_tables WHERE relname ~ '^events_(default|y[0-9]{4}m[0-9]{2})\$') SELECT 'db size ' || pg_size_pretty(pg_database_size('zirv_flow')) || ', events ' || pg_size_pretty(b) || ', bytes per event ' || CASE WHEN n > 0 THEN (b / n)::bigint::text ELSE 'n/a' END FROM e" || true
 }
 
-later() { die "$1 is added by a later group (A2: traffic and seed, B: provisioning and verify)"; }
+elapsed() { # elapsed <event> : seconds from the start to the event, or "not yet"
+  local from at
+  from=$(sed -n 's/^start //p' "$STATE/timeline" 2> /dev/null | head -1)
+  at=$(sed -n "s/^$1 //p" "$STATE/timeline" 2> /dev/null | head -1)
+  if [[ -n "$from" && -n "$at" ]]; then echo "$((at - from)) s"; else echo 'not yet'; fi
+}
+
+print_timeline() {
+  echo "fresh start: ready gate after $(elapsed gate), traffic on after $(elapsed traffic)," \
+    "backfill complete after $(elapsed backfill), event flows published after $(elapsed flows)"
+}
+
+cmd_start() {
+  mkdir -p "$STATE"
+  echo "start $(date +%s)" > "$STATE/timeline"
+  cmd_up "$@"
+  say "start: provisioning"
+  bash "$SIM_DIR/provision.sh" base registry people connections sending templates syncs gate
+  stamp_event traffic
+  cmd_traffic on
+  bash "$SIM_DIR/provision.sh" flows
+  print_timeline
+}
+
+stamp_event() { grep -q "^$1 " "$STATE/timeline" 2> /dev/null || echo "$1 $(date +%s)" >> "$STATE/timeline"; }
+
+cmd_sync_all() { bash "$SIM_DIR/provision.sh" sync-all; }
+cmd_blast() { bash "$SIM_DIR/provision.sh" blast; }
 
 main() {
   local command=${1:-help}
@@ -221,8 +253,11 @@ main() {
     export-now) cmd_export_now ;;
     seed) cmd_seed "$@" ;;
     traffic) cmd_traffic "$@" ;;
-    provision | start | verify | sync-all | blast)
-      later "$command" ;;
+    provision) bash "$SIM_DIR/provision.sh" "$@" ;;
+    start) cmd_start "$@" ;;
+    verify) bash "$SIM_DIR/verify.sh" "$@" ;;
+    sync-all) cmd_sync_all ;;
+    blast) cmd_blast ;;
     *) usage >&2; exit 2 ;;
   esac
 }

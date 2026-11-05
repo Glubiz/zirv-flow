@@ -2,7 +2,7 @@
 # project name, the profile env file and the state directory.
 name: zirv-flow-sim
 
-x-image: &zirv-image ghcr.io/glubiz/zirv-flow:${SIM_IMAGE_TAG:-0.234.0}
+x-image: &zirv-image ghcr.io/glubiz/zirv-flow:${SIM_IMAGE_TAG:-0.235.0}
 x-tools-image: &tools-image zirv-flow-sim-tools:local
 
 x-zirv-env: &zirv-env

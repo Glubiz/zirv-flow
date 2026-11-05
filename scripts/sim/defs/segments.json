@@ -1,0 +1,27 @@
+[
+  {"name": "Danish paying customers", "cadence_minutes": 60,
+   "definition": {"v": 1, "all": [
+     {"trait": "country", "op": "eq", "value": "DK"},
+     {"trait": "plan_status", "op": "eq", "value": "active"}]}},
+  {"name": "Premium plans", "cadence_minutes": 60,
+   "definition": {"v": 1, "all": [
+     {"trait": "plan", "op": "in", "value": ["pro", "team", "enterprise"]}]}},
+  {"name": "Big spenders", "cadence_minutes": 60,
+   "definition": {"v": 1, "all": [
+     {"event": "order_placed", "agg": {"fn": "sum", "prop": "amount", "op": "gte", "value": 300},
+      "window": {"last": "P3D"}}]}},
+  {"name": "Active shoppers", "cadence_minutes": 30,
+   "definition": {"v": 1, "all": [
+     {"event": "cart_item_added", "agg": {"fn": "count", "op": "gte", "value": 2},
+      "window": {"last": "P1D"}}]}},
+  {"name": "Abandoned checkout", "cadence_minutes": 30,
+   "definition": {"v": 1, "all": [
+     {"event": "checkout_started", "agg": {"fn": "count", "op": "gte", "value": 1}, "window": {"last": "P1D"}},
+     {"event": "order_placed", "agg": {"fn": "count", "op": "eq", "value": 0}, "window": {"last": "P1D"}}]}},
+  {"name": "Lapsed customers", "cadence_minutes": 240,
+   "definition": {"v": 1, "all": [
+     {"trait": "last_order_at", "op": "more_than_ago", "value": "P14D"},
+     {"trait": "plan_status", "op": "eq", "value": "active"}]}},
+  {"name": "Past due", "cadence_minutes": 30,
+   "definition": {"v": 1, "all": [{"trait": "billing_status", "op": "eq", "value": "past_due"}]}}
+]

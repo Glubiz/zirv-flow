@@ -1,0 +1,24 @@
+{
+  "webhooks": [
+    {"key": "newsletter", "name": "Newsletter form"},
+    {"key": "demo", "name": "Demo requests"},
+    {"key": "contact", "name": "Contact"}
+  ],
+  "stream": {
+    "enabled": true, "sync_mode": "full_refresh",
+    "mapping": {
+      "columns": [
+        {"column": "email", "target": {"type": "identifier", "kind": "email"},
+         "transforms": [{"op": "trim"}, {"op": "lower"}]},
+        {"column": "customer_id", "target": {"type": "identifier", "kind": "external:customer_id"}},
+        {"column": "name", "target": {"type": "trait", "key": "first_name"}},
+        {"column": "utm_source", "target": {"type": "trait", "key": "lead_source"}},
+        {"column": "consent.newsletter", "target": {"type": "list", "list_id": "{{NEWSLETTER_LIST}}"}}
+      ],
+      "event": {
+        "name": "form_submitted",
+        "properties": [{"property": "form", "column": "form"}]
+      }
+    }
+  }
+}

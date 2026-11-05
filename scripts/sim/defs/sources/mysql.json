@@ -1,0 +1,39 @@
+{
+  "create": {
+    "kind": "mysql", "name": "Company MySQL", "credential": "company-mysql reader",
+    "schedule": "*/5 * * * *",
+    "config": {"host": "company-mysql", "database": "support", "tls": "off"}
+  },
+  "streams": {
+    "loyalty_accounts": {
+      "enabled": true, "sync_mode": "incremental", "cursor_field": "updated_at",
+      "primary_key": ["customer_id"], "staleness_threshold_seconds": 900,
+      "mapping": {
+        "key_column": "customer_id",
+        "columns": [
+          {"column": "customer_id", "target": {"type": "identifier", "kind": "external:customer_id"}},
+          {"column": "loyalty_tier", "target": {"type": "trait", "key": "loyalty_tier"}},
+          {"column": "loyalty_points", "target": {"type": "trait", "key": "loyalty_points"},
+           "transforms": [{"op": "cast", "to": "number"}]}
+        ]
+      }
+    },
+    "support_tickets": {
+      "enabled": true, "sync_mode": "incremental", "cursor_field": "updated_at",
+      "primary_key": ["ticket_id"], "staleness_threshold_seconds": 900,
+      "mapping": {
+        "key_column": "ticket_id",
+        "columns": [
+          {"column": "customer_id", "target": {"type": "identifier", "kind": "external:customer_id"}}
+        ],
+        "event": {
+          "name": "support_ticket_opened", "timestamp": {"column": "opened_at"},
+          "properties": [
+            {"property": "priority", "column": "priority"},
+            {"property": "channel", "column": "channel"}
+          ]
+        }
+      }
+    }
+  }
+}

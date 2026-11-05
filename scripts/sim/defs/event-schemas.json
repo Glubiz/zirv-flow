@@ -1,0 +1,25 @@
+[
+  {"name": "order_placed", "properties": [
+    {"name": "order_id", "type": "string"}, {"name": "amount", "type": "number"},
+    {"name": "currency", "type": "string"}, {"name": "category", "type": "string"},
+    {"name": "items", "type": "integer"}]},
+  {"name": "support_ticket_opened", "properties": [
+    {"name": "priority", "type": "string"}, {"name": "channel", "type": "string"}]},
+  {"name": "payment_received", "properties": [
+    {"name": "amount", "type": "number"}, {"name": "currency", "type": "string"}]},
+  {"name": "feature_used", "properties": [
+    {"name": "feature", "type": "string"}, {"name": "duration_ms", "type": "integer"}]},
+  {"name": "license_activated", "properties": [
+    {"name": "plan", "type": "string"}, {"name": "seats", "type": "integer"}]},
+  {"name": "form_submitted", "properties": [{"name": "form", "type": "string"}]},
+  {"name": "page_viewed", "properties": [{"name": "path", "type": "string"}]},
+  {"name": "product_viewed", "properties": [
+    {"name": "sku", "type": "string"}, {"name": "category", "type": "string"}]},
+  {"name": "search_performed", "properties": [
+    {"name": "query_length", "type": "integer"}, {"name": "results", "type": "integer"}]},
+  {"name": "cart_item_added", "properties": [
+    {"name": "sku", "type": "string"}, {"name": "quantity", "type": "integer"}]},
+  {"name": "checkout_started", "properties": [
+    {"name": "items", "type": "integer"}, {"name": "value", "type": "number"}]},
+  {"name": "app_opened", "properties": [{"name": "platform", "type": "string"}]}
+]
