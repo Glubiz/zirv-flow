@@ -67,13 +67,13 @@ With all roles stopped, a lock wait is not application traffic. Check other admi
 sessions, open transactions, backups and another migrator in `pg_stat_activity` and `pg_locks`.
 End the conflicting operation deliberately before retrying. Do not kill sessions blindly.
 
-## Lock review through 0089
+## Lock review through 0091
 
-This review covers every migration added in M8, from `0060` through `0089`; there are no `0076`,
+This review covers every migration added in M8, from `0060` through `0091`; there are no `0076`,
 `0080` or `0086` files. Paths are relative to `crates/zirv-flow-store/migrations/`. Every merged
 version is published as a release. As of 2026-11-01 the latest is `v0.214.0`, which includes
 every migration through `0088`; an upgrade from an older release replays the files after its last
-one (from `v0.187.0`, `0084` through `0088`, and `0089` from the next release). The drill selects the latest published older
+one (from `v0.187.0`, `0084` through `0088`, and `0089` through `0091` from later releases). The drill selects the latest published older
 stable release from GitHub at runtime, independently of local git tags. Its replay range can
 change as releases are published.
 
@@ -113,6 +113,7 @@ referenced tables, even when the new child table is empty.
 | `0087_flow_warmup.sql` | Four new `flows` columns: two `NOT NULL` with constant defaults (a catalog change, no rewrite) and two nullable. ACCESS EXCLUSIVE on `flows` lasts through the scan that checks the new `warmup_seconds` CHECK; `flows` is small. New empty table `flow_warmup_waiting` with one index; its foreign keys briefly lock `people` and `flows`. Keep. |
 | `0088_jobs_capped_claim_indexes.sql` | Two partial indexes on the ready `jobs` for the capped claim (#207). SHARE blocks enqueues and claims through each build, which scans the whole `jobs` table. Keep and budget the builds, or pre-build each before the stop under the same name (the migration uses `IF NOT EXISTS`; drop an invalid index a failed build leaves, then retry): `CREATE INDEX CONCURRENTLY jobs_ready_workspace_idx ON jobs (workspace_id, priority, run_at) WHERE state = 'ready' AND workspace_id IS NOT NULL;` `CREATE INDEX CONCURRENTLY jobs_ready_instance_idx ON jobs (priority, run_at) WHERE state = 'ready' AND workspace_id IS NULL;` |
 | `0089_people_merged_into_index.sql` | One partial index on the merged `people` for the merge-group lookup (#397). SHARE blocks every write to `people` through the build, which scans the whole table. Keep and budget the build, or pre-build it before the stop under the same name (the migration uses `IF NOT EXISTS`; drop an invalid index a failed build leaves, then retry): `CREATE INDEX CONCURRENTLY people_merged_into_idx ON people (workspace_id, merged_into) WHERE merged_into IS NOT NULL;` |
+| `0091_events_name_person_index.sql` | Replaces `events_name_idx` with `events_name_person_idx` (`workspace_id, name, occurred_at DESC` `INCLUDE (person_id)`), so the event side of a segment aggregate is an index-only scan (#397). The drop of the old index takes ACCESS EXCLUSIVE on `events` and every partition, blocking reads and writes; a partitioned index cannot be dropped CONCURRENTLY. It goes first and waits at most 2 s per attempt, ten attempts one second apart, then fails with SQLSTATE `55P03` and the whole file rolls back. Because the drop goes first, its lock lasts through every partition index the file builds itself, a scan of each partition: estimated at about 11 GB of index and 10-30 min over the M8 bench's 130 M events. Keep, and pre-build before the stop as in [Pre-building 0091](#pre-building-0091); the file then only checks that work and takes brief locks, and it resumes a manual run that stopped halfway. |
 
 **Older installs: `0033_trait_slots.sql`.** This is already present in `v0.187.0`, so that upgrade
 does not replay it. Keep its released SQL. It adds 30 nullable columns to `people`, builds 30
@@ -131,6 +132,121 @@ the job summary. Its fixture has 3,000 people and 3,000 events across three mont
 then one erasure before the baseline. It does not measure a large audit log, message history or
 the 30-index `0033` build. Record rehearsal counts and downtime on production-sized data before
 committing to a maintenance window. Until a green CI run exists, the drill is unverified.
+
+### Pre-building 0091
+
+`0091` replaces the event name index. Left to the migration, the build of every partition index
+falls inside the stopped window and lengthens it by the whole build. Build it before the stop
+instead, while the stack runs, from `psql` on the primary as the application's database owner.
+Each step can be run again, and a step that fails undoes nothing before it.
+
+Budget about 11 GB of disk for the new index next to the old one until step 6, and 10-30 min for
+step 1 over the M8 bench's 130 M events (two passes over each partition, about 50-60 GB read).
+These are estimates from the #397 investigation, not measurements; rehearse on a restored copy.
+
+1. **Build one index per partition, concurrently.** Each build takes SHARE UPDATE EXCLUSIVE on its
+   partition: reads and writes continue, and the build first waits for the transactions already
+   open on it, so run it without a lock timeout. `IF NOT EXISTS` skips the partitions already
+   built:
+
+   ```sql
+   SELECT format('CREATE INDEX CONCURRENTLY IF NOT EXISTS %I ON %I '
+                 '(workspace_id, name, occurred_at DESC) INCLUDE (person_id)',
+                 c.relname || '_workspace_id_name_occurred_at_person_id_idx', c.relname)
+   FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+   WHERE i.inhparent = 'events'::regclass ORDER BY c.relname \gexec
+   ```
+
+   A failed or cancelled build leaves an invalid index, which `IF NOT EXISTS` would then skip. List
+   them, drop each with `DROP INDEX CONCURRENTLY <name>;` and run step 1 again:
+
+   ```sql
+   SELECT c.relname FROM pg_index x JOIN pg_class c ON c.oid = x.indexrelid
+   WHERE c.relname LIKE 'events%_workspace_id_name_occurred_at_person_id_idx' AND NOT x.indisvalid;
+   ```
+
+2. **Bound every lock wait** from here on: the steps below block other sessions while they wait.
+
+   ```sql
+   SET lock_timeout = '2s';
+   ```
+
+3. **Create the parent index on `events` alone.** It takes SHARE on `events` only, until the
+   statement commits: an insert waits for that moment, and the statement waits for the inserts in
+   flight.
+
+   ```sql
+   CREATE INDEX IF NOT EXISTS events_name_person_idx
+       ON ONLY events (workspace_id, name, occurred_at DESC) INCLUDE (person_id);
+   ```
+
+   From here on, a partition the scheduler creates gets its own index, attached. One created
+   between steps 1 and 3 has none: run step 1 again.
+
+4. **Attach each partition index.** Each attach takes ACCESS SHARE on `events` and the partition,
+   SHARE UPDATE EXCLUSIVE on the parent index and ACCESS EXCLUSIVE on the partition index. Every
+   open transaction that read or wrote the partition holds a lock on its indexes until it ends, so
+   the attach waits for those and holds up new readers and writers of the partition while it
+   waits, at most the lock timeout. Attaching an attached index only checks the parent again:
+
+   ```sql
+   SELECT format('ALTER INDEX events_name_person_idx ATTACH PARTITION %I',
+                 c.relname || '_workspace_id_name_occurred_at_person_id_idx')
+   FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+   WHERE i.inhparent = 'events'::regclass ORDER BY c.relname \gexec
+   ```
+
+5. **Check that the parent is valid**, which it is once every partition has a valid index
+   attached. If not, find the invalid partition index with step 1's query and rebuild it in place
+   (an attached index cannot be dropped) with `RESET lock_timeout;` and
+   `REINDEX INDEX CONCURRENTLY <name>;`, then run steps 2 and 4 again:
+
+   ```sql
+   SELECT indisvalid FROM pg_index WHERE indexrelid = 'events_name_person_idx'::regclass;
+   ```
+
+6. **Drop the old index.** This is the one step that cannot be concurrent: it takes ACCESS
+   EXCLUSIVE on `events` and every partition. Once granted it holds the lock for milliseconds, but
+   while it waits it blocks every read and write of events, so each attempt waits at most 2 s,
+   ten attempts one second apart, as the migration does:
+
+   ```sql
+   DO $$
+   DECLARE attempt integer := 0;
+   BEGIN
+       PERFORM set_config('lock_timeout', '2s', true);
+       LOOP
+           attempt := attempt + 1;
+           BEGIN
+               DROP INDEX IF EXISTS events_name_idx;
+               EXIT;
+           EXCEPTION WHEN lock_not_available THEN
+               IF attempt >= 10 THEN RAISE; END IF;
+               PERFORM pg_sleep(1);
+           END;
+       END LOOP;
+   END
+   $$;
+   ```
+
+**If every attempt fails**, nothing changed: both indexes stay, and inserts keep writing both. At
+each attempt a transaction had held a lock on `events` or a partition for more than 2 s, typically
+a segment refresh, an explorer export, a preview or a backup. Find the holders, without query text:
+
+```sql
+SELECT DISTINCT a.pid, a.backend_type, a.state, a.xact_start
+FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+WHERE a.pid <> pg_backend_pid()
+  AND l.relation IN (SELECT 'events'::regclass
+                     UNION ALL SELECT inhrelid FROM pg_inherits WHERE inhparent = 'events'::regclass)
+ORDER BY a.xact_start;
+```
+
+Run step 6 again once it has ended, or leave the drop to `migrate`, which makes the same attempts in
+the stopped window. If `migrate` fails on `0091` with SQLSTATE `55P03`, the file rolled back whole
+and the stack stays stopped: with all roles stopped the holder is an administrative session, a
+backup (`pg_dump` holds ACCESS SHARE on every table it dumps until it finishes) or another
+migrator. Let it finish or end it deliberately, then run `migrate` again.
 
 ## Upgrade drill and release gate
 

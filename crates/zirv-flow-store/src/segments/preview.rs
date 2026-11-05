@@ -313,6 +313,88 @@ mod tests {
         assert!(kept.is_empty(), "kept prepared statements: {kept:?}");
     }
 
+    /// Every node of an `EXPLAIN (FORMAT JSON)` plan that scans a relation whose name starts
+    /// with `prefix`.
+    fn scans<'a>(plan: &'a Value, prefix: &str, found: &mut Vec<&'a Value>) {
+        if plan["Relation Name"]
+            .as_str()
+            .is_some_and(|name| name.starts_with(prefix))
+        {
+            found.push(plan);
+        }
+        for child in plan["Plans"].as_array().into_iter().flatten() {
+            scans(child, prefix, found);
+        }
+    }
+
+    /// The event side of an aggregate finds the person of each event in the name index (#397).
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_events_of_a_grouped_set_are_read_from_the_name_index_alone(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        sqlx::query(
+            "INSERT INTO people (id, workspace_id) \
+             SELECT gen_random_uuid(), $1 FROM generate_series(1, 2000)",
+        )
+        .bind(ws.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+        // Twenty events a person over the last 40 days, so in two or three monthly partitions, and
+        // a quarter of them orders.
+        sqlx::query(
+            "INSERT INTO events (id, workspace_id, person_id, name, occurred_at, received_at, \
+                 source, trace_id, validation_state) \
+             SELECT gen_random_uuid(), $1, p.id, \
+                    CASE WHEN g % 4 = 0 THEN 'order' ELSE 'page_view' END, \
+                    now() - (g * 2) * interval '1 day', now(), 'web', gen_random_uuid(), 'valid' \
+             FROM people p, generate_series(1, 20) g WHERE p.workspace_id = $1",
+        )
+        .bind(ws.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("VACUUM (ANALYZE) people, events")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let now = OffsetDateTime::now_utc();
+
+        let plan: Value = sqlx::query_scalar(
+            "EXPLAIN (ANALYZE, FORMAT JSON) SELECT count(*) FROM people p \
+             WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND ((p.id IN \
+                 (SELECT e.person_id FROM events e WHERE e.workspace_id = $1 \
+                    AND e.name = $2::text AND e.occurred_at > $3::timestamptz \
+                    AND e.occurred_at <= $4::timestamptz \
+                  GROUP BY e.person_id HAVING count(*)::float8 >= $5::float8)))",
+        )
+        .bind(ws.as_uuid())
+        .bind("order")
+        .bind(now - time::Duration::days(90))
+        .bind(now)
+        .bind(2.0_f64)
+        .persistent(false)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let mut found = Vec::new();
+        scans(&plan[0]["Plan"], "events_y", &mut found);
+        // A month of the window without events is an empty table, which is scanned as such.
+        found.retain(|scan| scan["Actual Rows"].as_f64().is_some_and(|rows| rows > 0.0));
+        assert!(found.len() >= 2, "{plan:#}");
+        for scan in found {
+            assert_eq!(scan["Node Type"], "Index Only Scan", "{plan:#}");
+            assert!(
+                scan["Index Name"].as_str().is_some_and(
+                    |name| name.ends_with("_workspace_id_name_occurred_at_person_id_idx")
+                ),
+                "{plan:#}"
+            );
+            assert_eq!(scan["Heap Fetches"], 0, "{plan:#}");
+        }
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_ids_of_a_query_are_those_of_its_workspace_and_a_batch_narrows_them(pool: PgPool) {
