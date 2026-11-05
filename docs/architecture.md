@@ -96,7 +96,7 @@ one process and is the default (bare `zirv-flow` and the container image).
 - Roles never call each other; all coordination is rows in Postgres.
 - **Transactional enqueue:** a state change and the jobs it causes commit in one transaction, so a committed change always has its follow-up job and a rolled-back one never does. No dual write, no outbox relay.
 - Jobs are claimed in a short transaction and executed outside it (section 14).
-- `LISTEN/NOTIFY` wakes workers as a latency hint; fixed-interval polling is the correctness path.
+- `LISTEN/NOTIFY` wakes workers as a latency hint; fixed-interval polling is the correctness path. Under a per-workspace cap, a job that leaves running also wakes one idle slot of its own worker (section 14, Fairness).
 - The scheduler leader holds a session-level `pg_try_advisory_lock`; if its connection drops another scheduler takes over. Schedule slots carry unique keys, so a brief two-leader overlap cannot fire a slot twice.
 - Due-time comparisons use the database's `now()`, so host clock skew cannot fire timers early.
 
@@ -2103,9 +2103,10 @@ As built (debugger, explorer):
   use only `eq` and `exists` on PII or undeclared properties and cannot break them down
   (`403 pii_property_not_explorable`). Count, breakdown, list and export share one `WHERE`.
   The export counts first (so a timeout is an error response and the audit entry exists),
-  audits `events.exported` with operators and counts only, then streams keyset pages and
-  ends with a `#` comment when the row limit cut it short. The `[explorer]` settings hold the
-  timeouts and row limits. At most `explorer.max_exports` (default 1) exports stream at once per
+  audits `events.exported` with operators and counts only, then streams keyset pages of
+  10,000 rows (one snapshot transaction and one explorer connection per page, one page held in
+  memory per open stream) and ends with a `#` comment when the row limit cut it short. The
+  `[explorer]` settings hold the timeouts and row limits. At most `explorer.max_exports` (default 1) exports stream at once per
   `serve` process: the export takes a permit before it counts, answers `503 explorer_busy` with
   `Retry-After` when none is free, and releases it when the stream ends, fails or the client
   goes away. Counts, breakdowns and lists take none. Several streams at once starved ingest of
@@ -2781,6 +2782,17 @@ over a capped workspace's flood (#207). The statement that takes the claim lock 
 turns JIT off for the claim's transaction: the plan's estimates grow with the queue,
 past `jit_above_cost`, and compiling it took longer than running it (about 260-375 ms
 of a claim against a 3 M-job queue, #397).
+A slot whose claim found nothing waits for an enqueue notification or the 1 s poll,
+and, while a cap is set, for a job of its own worker to leave running: each job that
+completes, fails, loses its lease or is given back unstarted wakes one waiting slot of
+that worker (one wake per job, never all of them), which claims the room the job freed
+at once; with no slot waiting, the next slot to wait claims again at once. Polling alone
+left every slot whose claim found the due workspaces at their caps asleep for the whole
+poll while jobs were due (bench phase 4, #397, ruling b5b87299). Room that another
+worker process frees is still found by the poll: waking across processes would take a
+`pg_notify` on every finished job, and a transaction that notifies takes a
+database-wide lock at commit, the suspect of #298. `zirv_flow_job_idle_waits_total`
+counts the waits by what ended them.
 Weighted claiming is rejected for v1: it is more complex and nothing yet shows the
 cap is not enough. M8 validates the cap under load.
 

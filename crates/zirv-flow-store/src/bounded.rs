@@ -49,10 +49,10 @@ pub(crate) async fn begin_snapshot_for(
     pool: &sqlx::PgPool,
     timeout: Duration,
 ) -> Result<Tx, StoreError> {
-    let mut tx = begin(pool).await?;
-    // It must come before the first query of the transaction.
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-        .execute(&mut *tx)
+    // The isolation level and access mode ride on the `BEGIN`, so the snapshot costs no round
+    // trip of its own.
+    let mut tx = pool
+        .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .await
         .map_err(StoreError::query)?;
     limit_statements(&mut tx, timeout).await?;
@@ -287,5 +287,29 @@ mod tests {
         assert!(!plain_is_timeout);
         assert!(reclassified.is_timeout());
         assert!(!StoreError::retryable_race().into_bounded().is_timeout());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_snapshot_transaction_carries_the_isolation_access_mode_and_timeout_from_its_first_statement(
+        pool: PgPool,
+    ) {
+        let mut tx = begin_snapshot_for(&pool, Duration::from_millis(7_500))
+            .await
+            .unwrap();
+
+        let (level, read_only, timeout): (String, String, String) = sqlx::query_as(
+            "SELECT current_setting('transaction_isolation'), \
+                    current_setting('transaction_read_only'), \
+                    current_setting('statement_timeout')",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+
+        assert_eq!(
+            (level.as_str(), read_only.as_str(), timeout.as_str()),
+            ("repeatable read", "on", "7500ms")
+        );
     }
 }

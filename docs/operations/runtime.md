@@ -68,6 +68,7 @@ does not exist.
 | `zirv_flow_job_duration_seconds` | histogram | `kind` | Handler duration; a flow step run in a shared transaction counts its own run plus an equal share of the transaction's setup and commit |
 | `zirv_flow_job_claim_lag_seconds` | histogram | `kind` | Time from `run_at` until a worker starts the job: its claim, plus its wait behind the jobs claimed with it |
 | `zirv_flow_job_transactions_total` | counter | `kind` | Handler transactions; `zirv_flow_jobs_total` over this is jobs per transaction, above 1 when flow steps share one |
+| `zirv_flow_job_idle_waits_total` | counter | `ended` | Waits of a worker slot whose claim found nothing, by what ended them: `enqueued` (a job was enqueued), `freed` (a job of the same worker left running under `worker.max_running_per_workspace`) or `poll` (the one-second poll ran out). A rising `poll` count while jobs are due means slots sleep through work |
 | `zirv_flow_retention_deleted_total` | counter | `table` | Rows a retention job removed; `table` is `messages`, `decision_records`, `jobs` or `audit_log` |
 | `zirv_flow_retention_last_run_timestamp_seconds` | gauge | `table` | Unix time of the last retention run of `table` |
 | `zirv_flow_egress_denied_total` | counter | `class` | Outbound requests refused by the egress policy |
@@ -189,8 +190,13 @@ that fails is retried with exponential backoff and jitter, and is kept as
 completion, so a job never completes twice. Work that reaches outside the
 database must be idempotent: a crash can run a job again. A workspace is limited
 to `worker.max_running_per_workspace` running jobs when that is set, so one busy
-workspace cannot take every worker. A claimed job counts as running from its
-claim, for that limit and in the `running` queue depth, so the depth can exceed
+workspace cannot take every worker. A slot whose claim finds nothing waits for
+a job to be enqueued, or for the next poll a second later; while the limit is
+set, each job of the same worker that leaves running (completed, failed, lost
+or given back) also wakes one waiting slot, which claims the room it freed at
+once. Room that another worker frees is found by the next poll. A claimed job
+counts as running from its claim, for that limit and in the `running` queue
+depth, so the depth can exceed
 the number of slots.
 
 For pool sizes and the deployment connection budget, see [connection arithmetic](sizing.md#connection-arithmetic).
