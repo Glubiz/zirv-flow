@@ -181,8 +181,8 @@ const ENROLLMENT_ROW: &str = "id, workspace_id, flow_id, flow_version, person_id
 
 /// The read before an enrollment's lock: `$1` is the workspace, `$2` the enrollment. The
 /// enrollment and its person are found by primary key and the workspace is checked on the rows
-/// found, so the plan never walks `enrollments_person_idx` or `people_workspace_idx` (the person
-/// of another workspace reads as not merged; its lock then finds nobody).
+/// found, so the plan never walks `enrollments_person_id_idx` or `people_workspace_idx` (the
+/// person of another workspace reads as not merged; its lock then finds nobody).
 const ENROLLMENT_READ: &str = "WITH found AS MATERIALIZED ( \
          SELECT workspace_id, flow_id, person_id FROM enrollments WHERE id = $2) \
      SELECT f.flow_id, f.person_id, \
@@ -200,7 +200,7 @@ const ENROLLMENTS_READ: &str = "WITH found AS MATERIALIZED ( \
 
 /// The enrollment's lock in a round of [`lock_enrollment`]: `$1` is the workspace, `$2` the
 /// enrollment and `$3` the person the round locked. The row is locked by primary key and checked
-/// after, so the plan never walks `enrollments_person_idx`. The workspace's time zone is read
+/// after, so the plan never walks `enrollments_person_id_idx`. The workspace's time zone is read
 /// here, after the step's flow and person locks.
 ///
 /// A wait keeps the zone it was scheduled with: changing a workspace's zone re-arms nothing.
@@ -1218,9 +1218,23 @@ mod tests {
         assert_eq!(holding, 0);
     }
 
+    /// The definitions of the person indexes of `enrollments`, the old and the new.
+    async fn person_indexes(pool: &PgPool) -> Vec<String> {
+        sqlx::query_scalar(
+            "SELECT indexdef FROM pg_indexes WHERE tablename = 'enrollments' \
+               AND indexname LIKE 'enrollments_person%' ORDER BY indexname",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    const PERSON_INDEXES: [&str; 1] =
+        ["CREATE INDEX enrollments_person_id_idx ON public.enrollments USING btree (person_id)"];
+
     #[sqlx::test(migrations = false)]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn the_hot_settle_migration_accepts_the_indexes_changed_by_hand(pool: PgPool) {
+    async fn migration_0090_accepts_the_indexes_changed_by_hand(pool: PgPool) {
         let mut before = sqlx::migrate!("./migrations");
         before.migrations = before
             .migrations
@@ -1234,6 +1248,8 @@ mod tests {
                  ON step_executions (workspace_id, node_id, started_at) INCLUDE (enrollment_id)",
             "DROP INDEX step_executions_workspace_node_started_idx",
             "DROP INDEX step_executions_workspace_idx",
+            "CREATE INDEX enrollments_person_id_idx ON enrollments (person_id)",
+            "DROP INDEX enrollments_person_idx",
         ] {
             sqlx::query(statement).execute(&pool).await.unwrap();
         }
@@ -1243,6 +1259,78 @@ mod tests {
         let (names, holding) = step_indexes(&pool).await;
         assert_eq!(names, STEP_INDEXES);
         assert_eq!(holding, 0);
+        assert_eq!(person_indexes(&pool).await, PERSON_INDEXES);
+    }
+
+    /// The blocks of `enrollments` and of its indexes this transaction has read.
+    async fn enrollment_blocks(connection: &mut PgConnection) -> i64 {
+        sqlx::query_scalar(
+            "SELECT sum(pg_stat_get_xact_blocks_fetched(oid))::bigint FROM pg_class \
+             WHERE oid = 'enrollments'::regclass \
+                OR oid IN (SELECT indexrelid FROM pg_index WHERE indrelid = 'enrollments'::regclass)",
+        )
+        .fetch_one(&mut *connection)
+        .await
+        .unwrap()
+    }
+
+    /// A person's delete finds the enrollments it cascades to by `person_id` (#510), so a person
+    /// with none reads a few index blocks and not the table or a whole index.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_person_delete_finds_the_enrollments_it_cascades_to_by_index(pool: PgPool) {
+        let ws = workspace(&pool, "person-delete").await;
+        let flow = create(&pool, ws, "Flow").await;
+        publish(&pool, ws, flow.id).await.unwrap();
+        sqlx::query(
+            "INSERT INTO people (id, workspace_id) \
+             SELECT gen_random_uuid(), $1 FROM generate_series(1, 20000)",
+        )
+        .bind(ws.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO enrollments \
+                (id, workspace_id, flow_id, flow_version, person_id, state, node, occurrence_id, \
+                 trace_id, cause_kind, cause_id) \
+             SELECT gen_random_uuid(), $1, $2, 1, id, 'waiting', 'w', gen_random_uuid(), \
+                 gen_random_uuid(), 'api', 't' \
+             FROM people WHERE workspace_id = $1",
+        )
+        .bind(ws.as_uuid())
+        .bind(flow.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("ANALYZE people, enrollments")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (first, lonely) = (person(&pool, ws).await, person(&pool, ws).await);
+        let delete = "DELETE FROM people WHERE workspace_id = $1 AND id = $2";
+        let mut tx = crate::begin(&pool).await.unwrap();
+        // The first delete plans the cascade, which reads the metapage of every index once.
+        sqlx::query(delete)
+            .bind(ws.as_uuid())
+            .bind(first)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        // This transaction's own counts, so no other test's reads are in them.
+        let before = enrollment_blocks(&mut tx).await;
+
+        let deleted = sqlx::query(delete)
+            .bind(ws.as_uuid())
+            .bind(lonely)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+
+        let read = enrollment_blocks(&mut tx).await - before;
+        assert_eq!(deleted.rows_affected(), 1);
+        assert!(read < 10, "the delete read {read} blocks of enrollments");
+        assert_eq!(person_indexes(&pool).await, PERSON_INDEXES);
     }
 
     #[sqlx::test]
@@ -1995,7 +2083,7 @@ mod tests {
             for plan in [read, lock, batch_read] {
                 for path in [
                     "people_workspace_idx",
-                    "enrollments_person_idx",
+                    "enrollments_person_id_idx",
                     "Seq Scan on people",
                     "Seq Scan on enrollments",
                 ] {
