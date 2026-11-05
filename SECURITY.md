@@ -4,8 +4,9 @@ Threat model: [boundaries, controls, test evidence and accepted risks](docs/thre
 
 ## Supported versions
 
-Only the [latest release](https://github.com/Glubiz/zirv-flow/releases) is supported
-for security updates.
+The 1.0 release line is the supported release: only the
+[latest 1.x release](https://github.com/Glubiz/zirv-flow/releases) receives security
+updates, and releases before 1.0.0 are not supported.
 The `/api/v1` HTTP API follows the [API contract policy](docs/api.md): from 1.0 it changes
 only additively, and the policy names the surface that stays unfrozen.
 
