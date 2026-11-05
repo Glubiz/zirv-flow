@@ -401,7 +401,7 @@ async fn run_roles_reporting(
         .as_ref()
         .map(|secrets| Arc::clone(&secrets.hmac_root));
     let ops_bind = ops_bind(roles, config);
-    if (roles.serve || roles.worker) && config.base_url_needs_https() {
+    if (roles.serve || roles.worker) && !config.base_url_is_https() {
         warn!(
             "server.public_url is not https: marketing sends need an https server.public_url for one-click unsubscribe and will fail with invalid_unsubscribe_url"
         );

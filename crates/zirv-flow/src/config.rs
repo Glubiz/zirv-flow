@@ -1173,11 +1173,10 @@ impl Config {
         }
     }
 
-    /// Whether the base URL is not `https`: one-click unsubscribe needs an `https` URL, so every
-    /// marketing send fails while this holds.
-    pub(crate) fn base_url_needs_https(&self) -> bool {
-        !self
-            .base_url()
+    /// Whether the base URL is `https`: one-click unsubscribe needs an `https` URL, so every
+    /// marketing send fails while it is not.
+    pub(crate) fn base_url_is_https(&self) -> bool {
+        self.base_url()
             .get(..8)
             .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))
     }
@@ -2376,7 +2375,7 @@ auto_create_users = true
     }
 
     #[test]
-    fn a_base_url_that_is_not_https_needs_the_startup_warning() {
+    fn only_an_https_base_url_counts_as_https() {
         let https = TestFile::new(OIDC_FILE);
         let http = TestFile::new(
             "[database]
@@ -2390,9 +2389,9 @@ public_url = \"http://flow.example.com\"
         let plain = Config::load(Some(&http.0), []).unwrap();
         let unset = Config::load(None, database_env("postgres://localhost/database")).unwrap();
 
-        assert!(!secure.base_url_needs_https());
-        assert!(plain.base_url_needs_https());
-        assert!(unset.base_url_needs_https());
+        assert!(secure.base_url_is_https());
+        assert!(!plain.base_url_is_https());
+        assert!(!unset.base_url_is_https());
     }
 
     #[test]
