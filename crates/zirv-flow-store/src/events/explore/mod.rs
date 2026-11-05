@@ -686,8 +686,8 @@ async fn rows_page(
             schemas.insert((name, version), Arc::new(properties.0));
         }
     }
-    let traces: Vec<Uuid> = rows.iter().map(|row| row.trace_id).collect();
     let traced: HashSet<Uuid> = if with_decisions {
+        let traces: Vec<Uuid> = rows.iter().map(|row| row.trace_id).collect();
         sqlx::query_scalar(TRACES_WITH_DECISIONS)
             .bind(workspace.as_uuid())
             .bind(&traces)
