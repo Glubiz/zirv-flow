@@ -36,11 +36,12 @@ UPDATE enrollments e SET state = t.row->>'state', node = t.row->>'node',
 FROM m5bench.rows r JOIN m5bench.tmpl t ON t.set = r.set AND t.kind = 'enrollment'
 WHERE r.run = 1 AND e.id = r.enrollment_id;
 INSERT INTO jobs
-SELECT (jsonb_populate_record(NULL::jobs, t.row || jsonb_build_object(
+SELECT j.*
+FROM m5bench.rows r JOIN m5bench.tmpl t ON t.set = r.set AND t.kind = 'job',
+LATERAL jsonb_populate_record(NULL::jobs, t.row || jsonb_build_object(
   'id', r.job_id, 'run_at', r.wake_at, 'created_at', clock_timestamp(), 'trace_id', r.trace_id,
   'payload', (t.row->'payload') || jsonb_build_object('enrollment_id', r.enrollment_id),
-  'unique_key', 'wake:' || r.enrollment_id || ':' || (t.row->'payload'->>'state_version')))).*
-FROM m5bench.rows r JOIN m5bench.tmpl t ON t.set = r.set AND t.kind = 'job'
+  'unique_key', 'wake:' || r.enrollment_id || ':' || (t.row->'payload'->>'state_version'))) j
 WHERE r.run = 1;
 
 SELECT t0 > clock_timestamp() + interval '5 seconds' AS future_window FROM m5bench.runs WHERE run = 1
