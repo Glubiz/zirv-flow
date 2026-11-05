@@ -34,8 +34,8 @@ ZIRV_FLOW_SERVER__PUBLIC_URL: "https://flow.example.com"
 
 Replace the example address with the HTTPS address that reaches your instance,
 then run the same Compose command again to apply the change. Sign in there for
-the rest of the guide. Marketing mail needs this address for unsubscribe and
-tracking links. The default Compose file has no public URL or TLS proxy.
+the rest of the guide. Marketing mail needs this `https` address for unsubscribe and
+tracking links; with an `http` or unset address every marketing send fails. The default Compose file has no public URL or TLS proxy.
 
 **Common mistake:** using the bind address as the public email-link address.
 **Fix:** use the HTTPS address recipients can reach, and check it before sending.

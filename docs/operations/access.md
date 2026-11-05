@@ -42,6 +42,10 @@ Passwords are 12 to 1024 characters.
   Secure unless `server.cookie_secure` is false). Sessions expire after 12 hours
   idle or 7 days in total. `GET /api/v1/session` shows the current user and CSRF
   token; `DELETE /api/v1/session` signs out.
+- **Public URL.** `server.public_url` is the address recipients and browsers reach. Marketing
+  email needs it to be `https` (one-click unsubscribe, RFC 8058): with an `http` or unset URL
+  every marketing send fails `render_error` (`invalid_unsubscribe_url`), and `serve` and
+  `worker` log a startup warning naming the key.
 - **OIDC sign-in.** With `auth.oidc` configured, `GET /api/v1/session/oidc/start`
   redirects (303) to the identity provider using the authorization-code flow
   with PKCE (S256); the provider sends the browser back to

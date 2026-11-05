@@ -20,7 +20,7 @@ use zirv_flow_core::tracking::{TokenKind, sign};
 use zirv_flow_render::{Hooks, RenderContext, RenderFailure, RenderPool, Rendered, Tracking};
 use zirv_flow_store::{StoreError, Template, VerifiedSender, find_workspace};
 use zirv_flow_templates::{
-    RenderExtras, TemplateDocument, UtmPlan, UtmValues, parse_template_document,
+    RenderError, RenderExtras, TemplateDocument, UtmPlan, UtmValues, parse_template_document,
 };
 
 use super::payload::SendJob;
@@ -298,7 +298,17 @@ impl LinkIndexes {
 /// refused the document or the host failed (`memory_limit`, `deadline`, a crashed child). Only the
 /// failure's fixed reason is logged; its text can quote the template.
 pub(super) fn failed(failure: RenderFailure) -> &'static str {
-    warn!(reason = failure.reason(), "email not rendered");
+    if matches!(
+        failure,
+        RenderFailure::Render(RenderError::InvalidUnsubscribeUrl)
+    ) {
+        warn!(
+            reason = failure.reason(),
+            "email not rendered: one-click unsubscribe needs an https server.public_url; set it to an https address"
+        );
+    } else {
+        warn!(reason = failure.reason(), "email not rendered");
+    }
     RENDER_ERROR
 }
 

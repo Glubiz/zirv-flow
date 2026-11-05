@@ -1173,6 +1173,15 @@ impl Config {
         }
     }
 
+    /// Whether the base URL is not `https`: one-click unsubscribe needs an `https` URL, so every
+    /// marketing send fails while this holds.
+    pub(crate) fn base_url_needs_https(&self) -> bool {
+        !self
+            .base_url()
+            .get(..8)
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))
+    }
+
     /// Whether the session cookie is marked `Secure`; turn off only for plain-HTTP development.
     pub(crate) fn server_cookie_secure(&self) -> bool {
         self.server.cookie_secure
@@ -2364,6 +2373,26 @@ auto_create_users = true
             Some("https://flow.example.com")
         );
         assert_eq!(bound.public_url(), None);
+    }
+
+    #[test]
+    fn a_base_url_that_is_not_https_needs_the_startup_warning() {
+        let https = TestFile::new(OIDC_FILE);
+        let http = TestFile::new(
+            "[database]
+url = \"postgres://localhost/database\"
+[server]
+public_url = \"http://flow.example.com\"
+",
+        );
+
+        let secure = Config::load(Some(&https.0), []).unwrap();
+        let plain = Config::load(Some(&http.0), []).unwrap();
+        let unset = Config::load(None, database_env("postgres://localhost/database")).unwrap();
+
+        assert!(!secure.base_url_needs_https());
+        assert!(plain.base_url_needs_https());
+        assert!(unset.base_url_needs_https());
     }
 
     #[test]
