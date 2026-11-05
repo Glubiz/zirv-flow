@@ -1,0 +1,718 @@
+{
+  "benchmark": "segments",
+  "label": "reference-resource emulation, not a reference-hardware run",
+  "ruling": "ef99d178",
+  "limitations": [
+    "shared storage",
+    "Docker Desktop overhead",
+    "mixed core types of the dev CPU"
+  ],
+  "reference_hardware_validation": "outstanding",
+  "image_version": "0.214.0",
+  "measurement_scope": "Docker app stack",
+  "recorded_at": "2026-11-01T17:16:16.483354+00:00",
+  "smoke": true,
+  "command_line": [
+    "bash",
+    "scripts/bench/m8/run.sh",
+    "segments"
+  ],
+  "benchmark_command": [
+    "bash",
+    "D:/GitHub/zirv-flow/.zirv/worktrees/m8-validation/scripts/bench/m4/measure.sh",
+    "all"
+  ],
+  "exit_code": 0,
+  "topology": {
+    "containers": [
+      {
+        "service": "postgres",
+        "image": "postgres:16.15",
+        "image_id": "sha256:74d436cb49d3398cf7b5d7b33635d43623d9e4da4b93c22db453f7d5d81181b1",
+        "cpuset": "8-15",
+        "memory_bytes": 21474836480,
+        "shm_bytes": 6442450944,
+        "cores": 8
+      },
+      {
+        "service": "zirv-flow",
+        "image": "ghcr.io/glubiz/zirv-flow:0.214.0",
+        "image_id": "sha256:799c01211a786a05ea84dc28fd384126badf8753e1e5eff5feeaffdcab467e86",
+        "cpuset": "0-3",
+        "memory_bytes": 5368709120,
+        "shm_bytes": 67108864,
+        "cores": 4
+      },
+      {
+        "service": "zirv-flow-worker",
+        "image": "ghcr.io/glubiz/zirv-flow:0.214.0",
+        "image_id": "sha256:799c01211a786a05ea84dc28fd384126badf8753e1e5eff5feeaffdcab467e86",
+        "cpuset": "4-7",
+        "memory_bytes": 5368709120,
+        "shm_bytes": 67108864,
+        "cores": 4
+      },
+      {
+        "service": "zirv-flow-scheduler",
+        "image": "ghcr.io/glubiz/zirv-flow:0.214.0",
+        "image_id": "sha256:799c01211a786a05ea84dc28fd384126badf8753e1e5eff5feeaffdcab467e86",
+        "cpuset": "4-7",
+        "memory_bytes": 1073741824,
+        "shm_bytes": 67108864,
+        "cores": 4
+      }
+    ],
+    "postgres_settings": {
+      "shared_buffers": "5GB",
+      "effective_cache_size": "16GB",
+      "maintenance_work_mem": "1GB",
+      "max_wal_size": "8GB",
+      "checkpoint_timeout": "15min"
+    },
+    "host": {
+      "os": "Windows",
+      "logical_cpus": 32,
+      "memory_bytes": 68470984704
+    },
+    "docker_vm": {
+      "cpus": 32,
+      "memory_bytes": 33526329344,
+      "operating_system": "Docker Desktop (containerized)"
+    }
+  },
+  "seeds": {
+    "targets": {
+      "events": 5000,
+      "people": 5000,
+      "enrollments": 3000
+    },
+    "seed_at": "2026-11-01T17:05:55.767934+00:00",
+    "wake_at": "2026-11-08T17:05:55.767934+00:00",
+    "event_window_days": 365,
+    "source": "m8bench.progress (committed seed rows, not current live counts)",
+    "workspaces": [
+      {
+        "workspace_id": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+        "people": 2000,
+        "events": 2000,
+        "enrollments": 1200
+      },
+      {
+        "workspace_id": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+        "people": 2000,
+        "events": 2000,
+        "enrollments": 1200
+      },
+      {
+        "workspace_id": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+        "people": 1000,
+        "events": 1000,
+        "enrollments": 600
+      }
+    ],
+    "committed": {
+      "events": 5000,
+      "enrollments": 3000,
+      "people": 5000
+    }
+  },
+  "results": {
+    "incremental-loadgen.json": {
+      "tool": "zirv-flow-loadgen",
+      "mode": "track",
+      "seed": 1,
+      "run_id": "m4-171501",
+      "started_unix_s": 1793553301,
+      "batch_size": 1,
+      "max_in_flight": 10000,
+      "latency_note": "One sample per request at its final outcome of any status (202, 4xx, 5xx, timeout or transport error, 429 retries exhausted). latency_from_schedule runs from the request's scheduled due time to its final response, retry waits and dispatch lag included: judge API latency targets on it. dispatch_lag is the final send minus the scheduled time and service_latency the final attempt's send to response, so latency_from_schedule is about dispatch_lag plus service_latency.",
+      "people": 2000,
+      "total": {
+        "name": "total",
+        "target_rate": 50,
+        "planned_duration_s": 60.0,
+        "elapsed_s": 60.013118,
+        "requests": 3000,
+        "items_offered": 3000,
+        "items_accepted": 3000,
+        "achieved_rate": 49.98907072283763,
+        "retries_after_429": 0,
+        "status": {
+          "accepted_202": 3000,
+          "rate_limited_429": 0,
+          "server_5xx": 0,
+          "other": 0,
+          "transport_errors": 0
+        },
+        "latency_from_schedule": {
+          "count": 3000,
+          "p50_ms": 11.598,
+          "p95_ms": 21.347,
+          "p99_ms": 48.058,
+          "max_ms": 158.682
+        },
+        "service_latency": {
+          "count": 3000,
+          "p50_ms": 2.49,
+          "p95_ms": 9.94,
+          "p99_ms": 34.67,
+          "max_ms": 152.333
+        },
+        "dispatch_lag": {
+          "count": 3000,
+          "p50_ms": 8.362,
+          "p95_ms": 15.729,
+          "p99_ms": 16.707,
+          "max_ms": 44.998
+        },
+        "late_dispatch": 0,
+        "abandoned_requests": 0,
+        "gave_up_after_retries": 0
+      },
+      "phases": [
+        {
+          "name": "base",
+          "target_rate": 50,
+          "planned_duration_s": 60.0,
+          "elapsed_s": 60.013118,
+          "requests": 3000,
+          "items_offered": 3000,
+          "items_accepted": 3000,
+          "achieved_rate": 49.98907072283763,
+          "retries_after_429": 0,
+          "status": {
+            "accepted_202": 3000,
+            "rate_limited_429": 0,
+            "server_5xx": 0,
+            "other": 0,
+            "transport_errors": 0
+          },
+          "latency_from_schedule": {
+            "count": 3000,
+            "p50_ms": 11.598,
+            "p95_ms": 21.347,
+            "p99_ms": 48.058,
+            "max_ms": 158.682
+          },
+          "service_latency": {
+            "count": 3000,
+            "p50_ms": 2.49,
+            "p95_ms": 9.94,
+            "p99_ms": 34.67,
+            "max_ms": 152.333
+          },
+          "dispatch_lag": {
+            "count": 3000,
+            "p50_ms": 8.362,
+            "p95_ms": 15.729,
+            "p99_ms": 16.707,
+            "max_ms": 44.998
+          },
+          "late_dispatch": 0,
+          "abandoned_requests": 0,
+          "gave_up_after_retries": 0
+        }
+      ]
+    },
+    "incremental.json": {
+      "phase": "incremental",
+      "workspace": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+      "measured_at": "2026-11-01T17:16:05Z",
+      "segment": "01a1981b-61d9-7465-b3dc-31871d76d90e",
+      "since": "2026-11-01T17:15:01.511511Z",
+      "definition_name": "agg90",
+      "loadgen": {
+        "rate_per_s": 50,
+        "seconds": 60,
+        "people": 2000,
+        "total": {
+          "name": "total",
+          "target_rate": 50,
+          "planned_duration_s": 60.0,
+          "elapsed_s": 60.013118,
+          "requests": 3000,
+          "items_offered": 3000,
+          "items_accepted": 3000,
+          "achieved_rate": 49.98907072283763,
+          "retries_after_429": 0,
+          "status": {
+            "accepted_202": 3000,
+            "rate_limited_429": 0,
+            "server_5xx": 0,
+            "other": 0,
+            "transport_errors": 0
+          },
+          "latency_from_schedule": {
+            "count": 3000,
+            "p50_ms": 11.598,
+            "p95_ms": 21.347,
+            "p99_ms": 48.058,
+            "max_ms": 158.682
+          },
+          "service_latency": {
+            "count": 3000,
+            "p50_ms": 2.49,
+            "p95_ms": 9.94,
+            "p99_ms": 34.67,
+            "max_ms": 152.333
+          },
+          "dispatch_lag": {
+            "count": 3000,
+            "p50_ms": 8.362,
+            "p95_ms": 15.729,
+            "p99_ms": 16.707,
+            "max_ms": 44.998
+          },
+          "late_dispatch": 0,
+          "abandoned_requests": 0,
+          "gave_up_after_retries": 0
+        }
+      },
+      "members_before": {
+        "member_count": 43,
+        "computed_version": 1
+      },
+      "members_after": {
+        "member_count": 178,
+        "computed_version": 1
+      },
+      "pending_after_wait": 0,
+      "latency_s": {
+        "entries_caused_by_events": 135,
+        "p50_s": 0.007,
+        "p95_s": 0.017,
+        "p99_s": 0.037,
+        "max_s": 0.039,
+        "entries_total": 135,
+        "exits_total": 0
+      },
+      "target_p95_s": 60,
+      "note": "recorded_at of the segment.entered decision minus the causing event received_at; recorded_at is the start of the re-evaluating transaction (slight under-estimate)"
+    },
+    "index.json": {
+      "phase": "index",
+      "workspace": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+      "measured_at": "2026-11-01T17:13:47Z",
+      "people": 2000,
+      "backfills": [
+        {
+          "trait": "plan",
+          "seconds_to_ready": 0.553
+        },
+        {
+          "trait": "age",
+          "seconds_to_ready": 0.558
+        },
+        {
+          "trait": "marketing_opt_in",
+          "seconds_to_ready": 0.476
+        }
+      ],
+      "slots": {
+        "plan": "trait_s1",
+        "age": "trait_n1",
+        "marketing_opt_in": "trait_b1"
+      },
+      "note": "client clock from the POST to the first poll that reports ready (0.5 s poll)"
+    },
+    "preview-agg.json": {
+      "phase": "preview-agg",
+      "workspace": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+      "measured_at": "2026-11-01T17:14:06Z",
+      "definition_name": "agg90",
+      "definition": {
+        "v": 1,
+        "all": [
+          {
+            "trait": "plan",
+            "op": "eq",
+            "value": "pro"
+          },
+          {
+            "event": "bench_order_placed",
+            "window": {
+              "last": "P90D"
+            },
+            "agg": {
+              "fn": "count",
+              "op": "gte",
+              "value": 2
+            }
+          }
+        ]
+      },
+      "runs": 2,
+      "warmup": {
+        "status": 200,
+        "seconds": 0.007966
+      },
+      "samples": [
+        {
+          "status": 200,
+          "seconds": 0.013497,
+          "count": 43,
+          "compiled_at": "2026-11-01T17:13:59.596157Z",
+          "code": null
+        },
+        {
+          "status": 200,
+          "seconds": 0.007196,
+          "count": 43,
+          "compiled_at": "2026-11-01T17:13:59.817892Z",
+          "code": null
+        }
+      ],
+      "seconds": {
+        "n": 2,
+        "min": 0.007196,
+        "max": 0.013497,
+        "p50": 0.0103465,
+        "p95": 0.013497
+      },
+      "non_200": 0,
+      "count": [
+        43
+      ],
+      "mirror_count_at_last_compiled_at": 43,
+      "target_p95_s": 15,
+      "explain_indexes": [
+        "events_y2026m08_workspace_id_person_id_occurred_at_idx",
+        "events_y2026m09_workspace_id_person_id_occurred_at_idx",
+        "events_y2026m10_workspace_id_person_id_occurred_at_idx",
+        "events_y2026m11_workspace_id_person_id_occurred_at_idx",
+        "people_trait_s1_idx"
+      ]
+    },
+    "preview-jsonb.json": {
+      "phase": "preview-jsonb",
+      "workspace": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+      "measured_at": "2026-11-01T17:13:41Z",
+      "definition_name": "trait_only",
+      "definition": {
+        "v": 1,
+        "all": [
+          {
+            "trait": "plan",
+            "op": "eq",
+            "value": "pro"
+          },
+          {
+            "trait": "age",
+            "op": "between",
+            "value": [
+              25,
+              45
+            ]
+          },
+          {
+            "trait": "marketing_opt_in",
+            "op": "eq",
+            "value": true
+          }
+        ]
+      },
+      "runs": 2,
+      "warmup": {
+        "status": 200,
+        "seconds": 0.013444
+      },
+      "samples": [
+        {
+          "status": 200,
+          "seconds": 0.006798,
+          "count": 130,
+          "compiled_at": "2026-11-01T17:13:34.690886Z",
+          "code": null
+        },
+        {
+          "status": 200,
+          "seconds": 0.01131,
+          "count": 130,
+          "compiled_at": "2026-11-01T17:13:34.875314Z",
+          "code": null
+        }
+      ],
+      "seconds": {
+        "n": 2,
+        "min": 0.006798,
+        "max": 0.01131,
+        "p50": 0.009054,
+        "p95": 0.01131
+      },
+      "non_200": 0,
+      "count": [
+        130
+      ],
+      "mirror_count_at_last_compiled_at": 130,
+      "target_p95_s": 3,
+      "explain_indexes": [
+        "people_traits_idx",
+        "people_workspace_created_idx"
+      ]
+    },
+    "preview-slots.json": {
+      "phase": "preview-slots",
+      "workspace": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+      "measured_at": "2026-11-01T17:13:57Z",
+      "definition_name": "trait_only",
+      "definition": {
+        "v": 1,
+        "all": [
+          {
+            "trait": "plan",
+            "op": "eq",
+            "value": "pro"
+          },
+          {
+            "trait": "age",
+            "op": "between",
+            "value": [
+              25,
+              45
+            ]
+          },
+          {
+            "trait": "marketing_opt_in",
+            "op": "eq",
+            "value": true
+          }
+        ]
+      },
+      "runs": 2,
+      "warmup": {
+        "status": 200,
+        "seconds": 0.008514
+      },
+      "samples": [
+        {
+          "status": 200,
+          "seconds": 0.005826,
+          "count": 130,
+          "compiled_at": "2026-11-01T17:13:50.176204Z",
+          "code": null
+        },
+        {
+          "status": 200,
+          "seconds": 0.006178,
+          "count": 130,
+          "compiled_at": "2026-11-01T17:13:50.335425Z",
+          "code": null
+        }
+      ],
+      "seconds": {
+        "n": 2,
+        "min": 0.005826,
+        "max": 0.006178,
+        "p50": 0.006002,
+        "p95": 0.006178
+      },
+      "non_200": 0,
+      "count": [
+        130
+      ],
+      "mirror_count_at_last_compiled_at": 130,
+      "target_p95_s": 3,
+      "explain_indexes": [
+        "people_trait_s1_idx"
+      ]
+    },
+    "preview-sum.json": {
+      "phase": "preview-sum",
+      "workspace": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+      "measured_at": "2026-11-01T17:14:15Z",
+      "definition_name": "sum_category90",
+      "definition": {
+        "v": 1,
+        "all": [
+          {
+            "event": "bench_order_placed",
+            "window": {
+              "last": "P90D"
+            },
+            "where": [
+              {
+                "prop": "category",
+                "op": "eq",
+                "value": "books"
+              }
+            ],
+            "agg": {
+              "fn": "sum",
+              "prop": "amount",
+              "op": "gt",
+              "value": 150.005
+            }
+          }
+        ]
+      },
+      "runs": 2,
+      "warmup": {
+        "status": 200,
+        "seconds": 0.006985
+      },
+      "samples": [
+        {
+          "status": 200,
+          "seconds": 0.010636,
+          "count": 3,
+          "compiled_at": "2026-11-01T17:14:08.658013Z",
+          "code": null
+        },
+        {
+          "status": 200,
+          "seconds": 0.008067,
+          "count": 3,
+          "compiled_at": "2026-11-01T17:14:08.86902Z",
+          "code": null
+        }
+      ],
+      "seconds": {
+        "n": 2,
+        "min": 0.008067,
+        "max": 0.010636,
+        "p50": 0.009351499999999999,
+        "p95": 0.010636
+      },
+      "non_200": 0,
+      "count": [
+        3
+      ],
+      "mirror_count_at_last_compiled_at": 3,
+      "target_p95_s": 15,
+      "explain_indexes": [
+        "events_y2026m08_workspace_id_person_id_occurred_at_idx",
+        "events_y2026m09_workspace_id_person_id_occurred_at_idx",
+        "events_y2026m10_workspace_id_person_id_occurred_at_idx",
+        "events_y2026m11_workspace_id_person_id_occurred_at_idx",
+        "people_workspace_created_idx"
+      ]
+    },
+    "refresh-agg.json": {
+      "phase": "refresh-agg",
+      "workspace": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+      "measured_at": "2026-11-01T17:14:50Z",
+      "definition_name": "agg90",
+      "definition": {
+        "v": 1,
+        "all": [
+          {
+            "trait": "plan",
+            "op": "eq",
+            "value": "pro"
+          },
+          {
+            "event": "bench_order_placed",
+            "window": {
+              "last": "P90D"
+            },
+            "agg": {
+              "fn": "count",
+              "op": "gte",
+              "value": 2
+            }
+          }
+        ]
+      },
+      "runs": [
+        {
+          "run": 1,
+          "segment": "01a1981b-1d20-76de-ba8e-94bb94119d59",
+          "members": {
+            "member_count": 43,
+            "computed_version": 1
+          },
+          "first_refresh": {
+            "queue_s": 5.16,
+            "run_s": 0.0,
+            "total_s": 5.16
+          },
+          "manual_refresh": {
+            "queue_s": 5.013,
+            "run_s": 0.0,
+            "total_s": 5.013
+          }
+        }
+      ],
+      "median_first_refresh_total_s": 5.16,
+      "median_manual_refresh_total_s": 5.013,
+      "target_s": 600,
+      "note": "queue_s and run_s are only as fine as the 0.3 s poll (run_s is 0 when no poll caught the job running); total_s is the figure. first_refresh is the save-triggered initial refresh of a new segment (every member enters); manual_refresh is POST .../refresh on it, a full recompute that diffs against the open rows"
+    },
+    "refresh-trait.json": {
+      "phase": "refresh-trait",
+      "workspace": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+      "measured_at": "2026-11-01T17:14:33Z",
+      "definition_name": "trait_only",
+      "definition": {
+        "v": 1,
+        "all": [
+          {
+            "trait": "plan",
+            "op": "eq",
+            "value": "pro"
+          },
+          {
+            "trait": "age",
+            "op": "between",
+            "value": [
+              25,
+              45
+            ]
+          },
+          {
+            "trait": "marketing_opt_in",
+            "op": "eq",
+            "value": true
+          }
+        ]
+      },
+      "runs": [
+        {
+          "run": 1,
+          "segment": "01a1981a-d9ca-7217-9ac6-dbb53e2e15ee",
+          "members": {
+            "member_count": 130,
+            "computed_version": 1
+          },
+          "first_refresh": {
+            "queue_s": 4.771,
+            "run_s": 0.0,
+            "total_s": 4.771
+          },
+          "manual_refresh": {
+            "queue_s": 4.64,
+            "run_s": 0.0,
+            "total_s": 4.64
+          }
+        }
+      ],
+      "median_first_refresh_total_s": 4.771,
+      "median_manual_refresh_total_s": 4.64,
+      "target_s": 120,
+      "note": "queue_s and run_s are only as fine as the 0.3 s poll (run_s is 0 when no poll caught the job running); total_s is the figure. first_refresh is the save-triggered initial refresh of a new segment (every member enters); manual_refresh is POST .../refresh on it, a full recompute that diffs against the open rows"
+    },
+    "verify.json": {
+      "trait_only": {
+        "api_status": 200,
+        "api_preview": 130,
+        "handwritten_sql": 130,
+        "equal": true,
+        "compiled_at": "2026-11-01T17:13:26.748945Z"
+      },
+      "agg90": {
+        "api_status": 200,
+        "api_preview": 43,
+        "handwritten_sql": 43,
+        "equal": true,
+        "compiled_at": "2026-11-01T17:13:29.002496Z"
+      },
+      "sum_category90": {
+        "api_status": 200,
+        "api_preview": 3,
+        "handwritten_sql": 3,
+        "equal": true,
+        "compiled_at": "2026-11-01T17:13:31.018015Z"
+      }
+    }
+  }
+}

@@ -42,6 +42,10 @@ pub(crate) struct Args {
     /// Client deadline for a whole response, including CSV download (server export cap is per query).
     #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u32).range(1..))]
     request_timeout_seconds: u32,
+    /// Shapes to run, comma separated: a shape name, `interactive` (every shape but the export) or
+    /// `export`. Default: all seven. Lets one run be export-only and another interactive-only.
+    #[arg(long, value_delimiter = ',')]
+    shapes: Vec<String>,
     #[arg(long)]
     out: PathBuf,
 }
@@ -99,10 +103,33 @@ fn query_set(to: OffsetDateTime, person: &str) -> Result<Vec<Query>, String> {
         .collect())
 }
 
+fn select_shapes(queries: Vec<Query>, wanted: &[String]) -> Result<Vec<Query>, String> {
+    if wanted.is_empty() {
+        return Ok(queries);
+    }
+    for name in wanted {
+        let known = matches!(name.as_str(), "interactive" | "export")
+            || queries.iter().any(|query| query.shape == name);
+        if !known {
+            return Err(format!("--shapes: unknown shape {name}"));
+        }
+    }
+    Ok(queries
+        .into_iter()
+        .filter(|query| {
+            wanted.iter().any(|name| match name.as_str() {
+                "interactive" => query.endpoint != "export",
+                name => query.shape == name,
+            })
+        })
+        .collect())
+}
+
 #[derive(Default, Serialize)]
 struct Outcomes {
     status: BTreeMap<u16, u64>,
     query_timeouts: u64,
+    explorer_busy: u64,
     transport_errors: u64,
     body_errors: u64,
     client_timeouts: u64,
@@ -121,6 +148,7 @@ impl Samples {
             *self.outcomes.status.entry(status).or_default() += count;
         }
         self.outcomes.query_timeouts += other.outcomes.query_timeouts;
+        self.outcomes.explorer_busy += other.outcomes.explorer_busy;
         self.outcomes.transport_errors += other.outcomes.transport_errors;
         self.outcomes.body_errors += other.outcomes.body_errors;
         self.outcomes.client_timeouts += other.outcomes.client_timeouts;
@@ -129,9 +157,17 @@ impl Samples {
     }
 }
 
+fn is_503_with_code(status: u16, body: &[u8], code: &str) -> bool {
+    status == 503 && serde_json::from_slice::<Value>(body).is_ok_and(|value| value["code"] == code)
+}
+
 fn is_query_timeout(status: u16, body: &[u8]) -> bool {
-    status == 503
-        && serde_json::from_slice::<Value>(body).is_ok_and(|value| value["code"] == "query_timeout")
+    is_503_with_code(status, body, "query_timeout")
+}
+
+/// The explorer pool is full: an expected, counted outcome at more clients than the pool has connections.
+fn is_explorer_busy(status: u16, body: &[u8]) -> bool {
+    is_503_with_code(status, body, "explorer_busy")
 }
 
 async fn request(
@@ -170,6 +206,7 @@ async fn request(
         }
     }
     counts.query_timeouts += u64::from(is_query_timeout(status, &problem));
+    counts.explorer_busy += u64::from(is_explorer_busy(status, &problem));
     status == 200
 }
 
@@ -180,7 +217,10 @@ pub(crate) async fn run(args: Args) -> Result<(), String> {
         return Err("--duration must be positive".into());
     }
     let to = OffsetDateTime::parse(&args.to, &Rfc3339).map_err(|error| format!("--to: {error}"))?;
-    let queries = Arc::new(query_set(to, &args.person_id)?);
+    let queries = Arc::new(select_shapes(
+        query_set(to, &args.person_id)?,
+        &args.shapes,
+    )?);
     let mut base = reqwest::Url::parse(&args.url).map_err(|error| error.to_string())?;
     if base.scheme() != "http" {
         return Err("--url must use plain http://".into());
@@ -262,7 +302,10 @@ pub(crate) async fn run(args: Args) -> Result<(), String> {
         .map(|(query, samples)| {
             let count = samples.all.len() as u64;
             valid &= count > 0
-                && count == samples.successful.len() as u64 + samples.outcomes.query_timeouts;
+                && count
+                    == samples.successful.len() as u64
+                        + samples.outcomes.query_timeouts
+                        + samples.outcomes.explorer_busy;
             json!({"shape": query.shape, "endpoint": query.endpoint,
             "latency": Latency::from_micros(samples.all),
             "successful_latency": Latency::from_micros(samples.successful),
@@ -272,6 +315,7 @@ pub(crate) async fn run(args: Args) -> Result<(), String> {
     let report = json!({"tool": "zirv-flow-loadgen", "mode": "explorer", "clients": args.clients,
         "duration_s": args.duration, "elapsed_s": started.elapsed().as_secs_f64(),
         "request_timeout_seconds": args.request_timeout_seconds,
+        "shapes_selected": queries.iter().map(|query| query.shape).collect::<Vec<_>>(),
         "from": queries[0].body["from"], "to": queries[0].body["to"], "mix_note": MIX_NOTE,
         "latency_note": "Closed loop: one outstanding request per client, cycling through shapes with staggered starting shapes. Latency includes the entire body (CSV drained and discarded). Requests started before duration finish afterwards; latency includes all outcomes, successful_latency only complete 200 responses. No retries. Empty shapes invalidate the run.",
         "valid": valid, "shapes": shapes});
@@ -282,7 +326,7 @@ pub(crate) async fn run(args: Args) -> Result<(), String> {
     .map_err(|error| format!("cannot write --out: {error}"))?;
     if !valid {
         return Err(
-            "incomplete query mix or errors other than 503 query_timeout; see --out".into(),
+            "incomplete query mix or errors other than 503 query_timeout or explorer_busy; see --out".into(),
         );
     }
     Ok(())
@@ -331,6 +375,28 @@ mod tests {
         assert_eq!(queries[5].endpoint, "list");
         assert_eq!(queries[6].endpoint, "export");
         assert!(MIX_NOTE.contains("replaced"));
+    }
+
+    #[test]
+    fn shapes_select_by_name_or_group_and_reject_unknown_names() {
+        let to = OffsetDateTime::parse("2026-10-30T00:00:00Z", &Rfc3339).unwrap();
+        let pick = |wanted: &[&str]| {
+            let wanted: Vec<String> = wanted.iter().map(|name| (*name).to_owned()).collect();
+            select_shapes(query_set(to, "p").unwrap(), &wanted)
+        };
+        assert_eq!(pick(&[]).unwrap().len(), 7);
+        let interactive = pick(&["interactive"]).unwrap();
+        assert_eq!(interactive.len(), 6);
+        assert!(interactive.iter().all(|query| query.endpoint != "export"));
+        let export = pick(&["export"]).unwrap();
+        assert_eq!(export.len(), 1);
+        assert_eq!(export[0].shape, "export");
+        let two = pick(&["list", "count_name"]).unwrap();
+        assert_eq!(
+            two.iter().map(|query| query.shape).collect::<Vec<_>>(),
+            ["count_name", "list"]
+        );
+        assert!(pick(&["nope"]).is_err());
     }
 
     #[tokio::test]
@@ -399,5 +465,14 @@ mod tests {
         assert!(!is_query_timeout(500, problem));
         assert!(!is_query_timeout(503, br#"{"code":"overloaded"}"#));
         assert!(!is_query_timeout(503, b"broken body"));
+    }
+
+    #[test]
+    fn only_a_503_with_the_problem_code_counts_as_explorer_busy() {
+        let problem = br#"{"code":"explorer_busy"}"#;
+        assert!(is_explorer_busy(503, problem));
+        assert!(!is_explorer_busy(500, problem));
+        assert!(!is_query_timeout(503, problem));
+        assert!(!is_explorer_busy(503, br#"{"code":"query_timeout"}"#));
     }
 }

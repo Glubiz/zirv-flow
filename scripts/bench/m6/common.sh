@@ -55,6 +55,8 @@ pgc() {
 
 # Waits until no cargo.exe is running (another build or test run would skew a measurement).
 wait_no_cargo() {
+  # The M8 runs happen under the CPU cap beside host builds the orchestrator logs as LIMITS lines.
+  [ -z "${M6_ALLOW_HOST_CARGO:-}" ] || return 0
   until ! tasklist //FI "IMAGENAME eq cargo.exe" 2>/dev/null | grep -qi cargo.exe; do
     log "cargo.exe is running; waiting 30 s"
     sleep 30

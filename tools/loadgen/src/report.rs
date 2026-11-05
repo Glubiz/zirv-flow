@@ -1,6 +1,8 @@
 //! The run report and its math. Percentiles are exact (nearest rank over every recorded
 //! latency), so no histogram precision caveat applies.
 
+use std::collections::BTreeMap;
+
 use serde::Serialize;
 
 /// A latency distribution in milliseconds over the accepted (202) requests of a phase or a run.
@@ -109,6 +111,34 @@ pub fn achieved_rate(items_accepted: u64, elapsed_s: f64) -> f64 {
     }
 }
 
+/// One second of the run: the requests scheduled in it and their latency from schedule.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct TimelineSecond {
+    /// Whole seconds from the start of the first phase to the scheduled time.
+    pub second: u64,
+    pub requests: u64,
+    pub p50_ms: f64,
+    pub p99_ms: f64,
+    pub max_ms: f64,
+}
+
+/// The per-second timeline from latencies in microseconds keyed by second, in second order.
+pub fn timeline(by_second: BTreeMap<u64, Vec<u64>>) -> Vec<TimelineSecond> {
+    by_second
+        .into_iter()
+        .map(|(second, micros)| {
+            let latency = Latency::from_micros(micros);
+            TimelineSecond {
+                second,
+                requests: latency.count,
+                p50_ms: latency.p50_ms,
+                p99_ms: latency.p99_ms,
+                max_ms: latency.max_ms,
+            }
+        })
+        .collect()
+}
+
 #[derive(Serialize)]
 pub struct Report {
     pub tool: &'static str,
@@ -122,11 +152,26 @@ pub struct Report {
     pub people: u64,
     pub total: PhaseReport,
     pub phases: Vec<PhaseReport>,
+    /// Latency from schedule by whole second of the scheduled time, across all phases.
+    pub timeline_from_schedule: Vec<TimelineSecond>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_timeline_reports_each_second_in_order() {
+        let by_second = BTreeMap::from([(2, vec![9000, 1000]), (0, vec![3000])]);
+        let seconds = timeline(by_second);
+        assert_eq!(seconds.len(), 2);
+        assert_eq!(
+            (seconds[0].second, seconds[0].requests, seconds[0].p99_ms),
+            (0, 1, 3.0)
+        );
+        assert_eq!((seconds[1].second, seconds[1].requests), (2, 2));
+        assert_eq!((seconds[1].p50_ms, seconds[1].max_ms), (1.0, 9.0));
+    }
 
     #[test]
     fn percentiles_use_nearest_rank() {

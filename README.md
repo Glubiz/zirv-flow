@@ -286,6 +286,7 @@ scale seeds and reference-resource emulation; its Docker smoke run and hardware 
 - [m5-flows](docs/benchmarks/m5-flows.md)
 - [m6-send](docs/benchmarks/m6-send.md)
 - [m7-render](docs/benchmarks/m7-render.md)
+- [m8-validation](docs/benchmarks/m8-validation.md)
 
 ## Development
 

@@ -212,6 +212,28 @@ fn wall_time() -> Result<u64, String> {
     u64::try_from(now.as_micros()).map_err(|error| error.to_string())
 }
 
+/// The monotonic and wall-clock start stamps, taken together before `slow` runs, and its result.
+/// A slow step between the two stamps would show up as a run clock step.
+fn stamp_then<T>(slow: impl FnOnce() -> T) -> Result<(Instant, u64, T), String> {
+    let start = Instant::now();
+    let wall = wall_time()?;
+    Ok((start, wall, slow()))
+}
+
+/// The short lowercase host name, as the latency SQL compares it.
+fn watcher_host() -> Result<String, String> {
+    let host = std::process::Command::new("hostname")
+        .output()
+        .map_err(|error| format!("cannot run hostname: {error}"))?;
+    let host = String::from_utf8_lossy(&host.stdout);
+    Ok(host
+        .trim()
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_lowercase())
+}
+
 async fn watch(
     client: reqwest::Client,
     url: reqwest::Url,
@@ -342,24 +364,15 @@ pub(crate) async fn run(args: Args) -> Result<(), String> {
     let output = Arc::new(Mutex::new(BufWriter::new(
         File::create(&args.out).map_err(|error| format!("cannot write --out: {error}"))?,
     )));
-    let start = Instant::now();
+    let (start, started_at, host) = stamp_then(watcher_host)?;
+    let host = host?;
     let end = start
         .checked_add(duration)
         .ok_or("--duration is too large")?;
-    let host = std::process::Command::new("hostname")
-        .output()
-        .map_err(|error| format!("cannot run hostname: {error}"))?;
-    let host = String::from_utf8_lossy(&host.stdout);
-    let host = host
-        .trim()
-        .split('.')
-        .next()
-        .unwrap_or_default()
-        .to_lowercase();
     write_record(
         &output,
         json!({"kind": "started", "workspace": args.workspace, "host": host,
-        "clients": args.clients, "received_at": wall_time()?}),
+        "clients": args.clients, "received_at": started_at}),
     )?;
     let key = Arc::new(key);
     let mut tasks = JoinSet::new();
@@ -392,6 +405,18 @@ pub(crate) async fn run(args: Args) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_start_stamps_precede_the_slow_step() {
+        let (start, wall, ()) =
+            stamp_then(|| std::thread::sleep(Duration::from_millis(60))).unwrap();
+        let after = wall_time().unwrap();
+        assert!(
+            after - wall >= 60_000,
+            "wall time was taken after the slow step"
+        );
+        assert!(start.elapsed() >= Duration::from_millis(60));
+    }
 
     #[test]
     fn items_gaps_and_status_survive_every_chunk_boundary() {

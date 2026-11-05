@@ -18,7 +18,8 @@ for name in busy lead timeout concurrency; do positive_integer "$name" "${!name}
 require_job_sampler
 sampler_pid=''; restore_worker=''; probe=''; trace=''
 cleanup() {
-  if [ -n "$sampler_pid" ]; then kill "$sampler_pid" 2>/dev/null || true; wait "$sampler_pid" 2>/dev/null || true; fi
+  stop_sampler jobkinds "$sampler_pid"
+  terminate_pg_samplers m8-sampler-jobkinds
   if [ -n "$probe" ]; then
     host_pg -c 'DROP TRIGGER IF EXISTS m8_quiet_claim ON jobs; DROP FUNCTION IF EXISTS m8bench.record_quiet_claim()' || log 'failed to remove quiet-claim probe'
   fi
@@ -30,6 +31,8 @@ SQL
   if [ -n "$restore_worker" ]; then compose up -d --no-build --no-deps --force-recreate zirv-flow-worker; fi
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 caps=(unset)
 [ "$cap" = unset ] || caps+=("$cap")
 for setting in "${caps[@]}"; do
@@ -60,7 +63,9 @@ json.dump(dict(worker_containers=1, concurrency_per_worker=int(env["ZIRV_FLOW_WO
   trace="$(python3 -I -c 'import uuid; print(uuid.uuid4())')"
   probe=1
   host_pg -v trace="$trace" -v busy="$busy" -v lead="$lead" -f "$m8_dir/jobs.sql" >"$dest/enqueue.log"
+  host_pg -At -c 'SELECT pg_stat_statements_reset()' >/dev/null
   start_job_sampler "$dest"
+  stall_left=''; stall_at=$SECONDS
   deadline=$((SECONDS + lead + timeout))
   while :; do
     host_pg -At -v trace="$trace" -f - >>"$dest/samples.ndjson" <<'SQL'
@@ -82,10 +87,20 @@ else:
 PY
 )"
     [ "$state" = waiting ] || break
+    left="$(tail -n 1 "$dest/samples.ndjson" | python3 -I -c 'import json,sys; r=json.load(sys.stdin); print(r["ready"]+r["running"])')"
+    if [ "$left" != "$stall_left" ]; then stall_left="$left"; stall_at=$SECONDS; fi
+    if [ $((SECONDS - stall_at)) -ge 300 ]; then state=timeout; log "no progress for 300 s with $left jobs left"; break; fi
     if [ "$SECONDS" -ge "$deadline" ]; then state=timeout; break; fi
     sleep "$tick"
   done
   stop_job_sampler "$dest"
+  host_pg -At -f - >"$dest/pgss.json" <<'SQL'
+SELECT coalesce(jsonb_pretty(jsonb_agg(to_jsonb(s))), '[]') FROM (
+  SELECT calls, round(mean_exec_time::numeric, 3) AS mean_ms, round(total_exec_time::numeric) AS total_ms, rows, left(query, 160) AS query
+  FROM pg_stat_statements
+  WHERE query ILIKE '%FROM jobs%' OR query ILIKE '%UPDATE jobs%' OR query ILIKE '%pg_advisory_xact_lock%'
+  ORDER BY total_exec_time DESC LIMIT 15) s;
+SQL
   host_pg -At -v trace="$trace" -f - >"$dest/probe.json.tmp" <<'SQL'
 SELECT to_jsonb(p) || jsonb_build_object('ready_epoch', extract(epoch FROM ready_at))
 FROM m8bench.jobs_probe p WHERE trace_id = :'trace'::uuid;

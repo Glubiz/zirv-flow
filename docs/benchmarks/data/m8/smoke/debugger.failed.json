@@ -1,0 +1,237 @@
+{
+  "benchmark": "debugger",
+  "label": "reference-resource emulation, not a reference-hardware run",
+  "ruling": "ef99d178",
+  "limitations": [
+    "shared storage",
+    "Docker Desktop overhead",
+    "mixed core types of the dev CPU"
+  ],
+  "reference_hardware_validation": "outstanding",
+  "image_version": "0.214.0",
+  "measurement_scope": "Docker app stack",
+  "recorded_at": "2026-11-01T17:21:46.757833+00:00",
+  "smoke": true,
+  "command_line": [
+    "bash",
+    "scripts/bench/m8/run.sh",
+    "debugger"
+  ],
+  "benchmark_command": [
+    "bash",
+    "D:/GitHub/zirv-flow/.zirv/worktrees/m8-validation/scripts/bench/m8/debugger.sh",
+    "D:/GitHub/zirv-flow/.zirv/worktrees/m8-validation/.zirv/work/m8-smoke/auth/../runs/debugger-20261101T172112-131318",
+    "2000"
+  ],
+  "exit_code": 3,
+  "topology": {
+    "containers": [
+      {
+        "service": "postgres",
+        "image": "postgres:16.15",
+        "image_id": "sha256:74d436cb49d3398cf7b5d7b33635d43623d9e4da4b93c22db453f7d5d81181b1",
+        "cpuset": "8-15",
+        "memory_bytes": 21474836480,
+        "shm_bytes": 6442450944,
+        "cores": 8
+      },
+      {
+        "service": "zirv-flow",
+        "image": "ghcr.io/glubiz/zirv-flow:0.214.0",
+        "image_id": "sha256:799c01211a786a05ea84dc28fd384126badf8753e1e5eff5feeaffdcab467e86",
+        "cpuset": "0-3",
+        "memory_bytes": 5368709120,
+        "shm_bytes": 67108864,
+        "cores": 4
+      },
+      {
+        "service": "zirv-flow-worker",
+        "image": "ghcr.io/glubiz/zirv-flow:0.214.0",
+        "image_id": "sha256:799c01211a786a05ea84dc28fd384126badf8753e1e5eff5feeaffdcab467e86",
+        "cpuset": "4-7",
+        "memory_bytes": 5368709120,
+        "shm_bytes": 67108864,
+        "cores": 4
+      },
+      {
+        "service": "zirv-flow-scheduler",
+        "image": "ghcr.io/glubiz/zirv-flow:0.214.0",
+        "image_id": "sha256:799c01211a786a05ea84dc28fd384126badf8753e1e5eff5feeaffdcab467e86",
+        "cpuset": "4-7",
+        "memory_bytes": 1073741824,
+        "shm_bytes": 67108864,
+        "cores": 4
+      }
+    ],
+    "postgres_settings": {
+      "shared_buffers": "5GB",
+      "effective_cache_size": "16GB",
+      "maintenance_work_mem": "1GB",
+      "max_wal_size": "8GB",
+      "checkpoint_timeout": "15min"
+    },
+    "host": {
+      "os": "Windows",
+      "logical_cpus": 32,
+      "memory_bytes": 68470984704
+    },
+    "docker_vm": {
+      "cpus": 32,
+      "memory_bytes": 33526329344,
+      "operating_system": "Docker Desktop (containerized)"
+    }
+  },
+  "seeds": {
+    "targets": {
+      "events": 5000,
+      "people": 5000,
+      "enrollments": 3000
+    },
+    "seed_at": "2026-11-01T17:05:55.767934+00:00",
+    "wake_at": "2026-11-08T17:05:55.767934+00:00",
+    "event_window_days": 365,
+    "source": "m8bench.progress (committed seed rows, not current live counts)",
+    "workspaces": [
+      {
+        "workspace_id": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+        "people": 2000,
+        "events": 2000,
+        "enrollments": 1200
+      },
+      {
+        "workspace_id": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+        "people": 2000,
+        "events": 2000,
+        "enrollments": 1200
+      },
+      {
+        "workspace_id": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+        "people": 1000,
+        "events": 1000,
+        "enrollments": 600
+      }
+    ],
+    "committed": {
+      "events": 5000,
+      "enrollments": 3000,
+      "people": 5000
+    }
+  },
+  "results": {
+    "ingest.json": {
+      "tool": "zirv-flow-loadgen",
+      "mode": "track",
+      "seed": 1,
+      "run_id": "1a198215c5d",
+      "started_unix_s": 1793553685,
+      "batch_size": 1,
+      "max_in_flight": 10000,
+      "latency_note": "One sample per request at its final outcome of any status (202, 4xx, 5xx, timeout or transport error, 429 retries exhausted). latency_from_schedule runs from the request's scheduled due time to its final response, retry waits and dispatch lag included: judge API latency targets on it. dispatch_lag is the final send minus the scheduled time and service_latency the final attempt's send to response, so latency_from_schedule is about dispatch_lag plus service_latency.",
+      "people": 2000,
+      "total": {
+        "name": "total",
+        "target_rate": 50,
+        "planned_duration_s": 5.0,
+        "elapsed_s": 5.0055107,
+        "requests": 250,
+        "items_offered": 250,
+        "items_accepted": 250,
+        "achieved_rate": 49.9449536687635,
+        "retries_after_429": 0,
+        "status": {
+          "accepted_202": 250,
+          "rate_limited_429": 0,
+          "server_5xx": 0,
+          "other": 0,
+          "transport_errors": 0
+        },
+        "latency_from_schedule": {
+          "count": 250,
+          "p50_ms": 11.4,
+          "p95_ms": 23.205,
+          "p99_ms": 56.486,
+          "max_ms": 68.636
+        },
+        "service_latency": {
+          "count": 250,
+          "p50_ms": 2.639,
+          "p95_ms": 11.528,
+          "p99_ms": 45.39,
+          "max_ms": 54.937
+        },
+        "dispatch_lag": {
+          "count": 250,
+          "p50_ms": 8.467,
+          "p95_ms": 15.711,
+          "p99_ms": 16.88,
+          "max_ms": 23.591
+        },
+        "late_dispatch": 0,
+        "abandoned_requests": 0,
+        "gave_up_after_retries": 0
+      },
+      "phases": [
+        {
+          "name": "base",
+          "target_rate": 50,
+          "planned_duration_s": 5.0,
+          "elapsed_s": 5.0055107,
+          "requests": 250,
+          "items_offered": 250,
+          "items_accepted": 250,
+          "achieved_rate": 49.9449536687635,
+          "retries_after_429": 0,
+          "status": {
+            "accepted_202": 250,
+            "rate_limited_429": 0,
+            "server_5xx": 0,
+            "other": 0,
+            "transport_errors": 0
+          },
+          "latency_from_schedule": {
+            "count": 250,
+            "p50_ms": 11.4,
+            "p95_ms": 23.205,
+            "p99_ms": 56.486,
+            "max_ms": 68.636
+          },
+          "service_latency": {
+            "count": 250,
+            "p50_ms": 2.639,
+            "p95_ms": 11.528,
+            "p99_ms": 45.39,
+            "max_ms": 54.937
+          },
+          "dispatch_lag": {
+            "count": 250,
+            "p50_ms": 8.467,
+            "p95_ms": 15.711,
+            "p99_ms": 16.88,
+            "max_ms": 23.591
+          },
+          "late_dispatch": 0,
+          "abandoned_requests": 0,
+          "gave_up_after_retries": 0
+        }
+      ]
+    },
+    "metrics.json": {
+      "samples": [
+        "zirv_flow_debugger_clients 0",
+        "zirv_flow_debugger_delivery_seconds_bucket{le=\"0.005\"} 234",
+        "zirv_flow_debugger_delivery_seconds_bucket{le=\"0.01\"} 249",
+        "zirv_flow_debugger_delivery_seconds_bucket{le=\"0.025\"} 250",
+        "zirv_flow_debugger_delivery_seconds_bucket{le=\"0.05\"} 250",
+        "zirv_flow_debugger_delivery_seconds_bucket{le=\"0.1\"} 250",
+        "zirv_flow_debugger_delivery_seconds_bucket{le=\"0.25\"} 250",
+        "zirv_flow_debugger_delivery_seconds_bucket{le=\"0.5\"} 250",
+        "zirv_flow_debugger_delivery_seconds_bucket{le=\"1\"} 250",
+        "zirv_flow_debugger_delivery_seconds_bucket{le=\"2.5\"} 250",
+        "zirv_flow_debugger_delivery_seconds_bucket{le=\"5\"} 250",
+        "zirv_flow_debugger_delivery_seconds_bucket{le=\"+Inf\"} 250",
+        "zirv_flow_debugger_delivery_seconds_sum 1.017057054",
+        "zirv_flow_debugger_delivery_seconds_count 250"
+      ]
+    }
+  }
+}

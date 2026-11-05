@@ -1,0 +1,735 @@
+{
+  "benchmark": "timers",
+  "label": "reference-resource emulation, not a reference-hardware run",
+  "ruling": "ef99d178",
+  "limitations": [
+    "shared storage",
+    "Docker Desktop overhead",
+    "mixed core types of the dev CPU"
+  ],
+  "reference_hardware_validation": "outstanding",
+  "image_version": "0.214.0",
+  "measurement_scope": "Docker app stack",
+  "recorded_at": "2026-11-01T17:11:01.922423+00:00",
+  "smoke": true,
+  "command_line": [
+    "bash",
+    "scripts/bench/m8/run.sh",
+    "timers"
+  ],
+  "benchmark_command": [
+    "bash",
+    "D:/GitHub/zirv-flow/.zirv/worktrees/m8-validation/scripts/bench/m8/timers.sh",
+    "D:/GitHub/zirv-flow/.zirv/worktrees/m8-validation/.zirv/work/m8-smoke/auth/../runs/timers-20261101T170956-126427",
+    "2000"
+  ],
+  "exit_code": 0,
+  "topology": {
+    "containers": [
+      {
+        "service": "postgres",
+        "image": "postgres:16.15",
+        "image_id": "sha256:74d436cb49d3398cf7b5d7b33635d43623d9e4da4b93c22db453f7d5d81181b1",
+        "cpuset": "8-15",
+        "memory_bytes": 21474836480,
+        "shm_bytes": 6442450944,
+        "cores": 8
+      },
+      {
+        "service": "zirv-flow",
+        "image": "ghcr.io/glubiz/zirv-flow:0.214.0",
+        "image_id": "sha256:799c01211a786a05ea84dc28fd384126badf8753e1e5eff5feeaffdcab467e86",
+        "cpuset": "0-3",
+        "memory_bytes": 5368709120,
+        "shm_bytes": 67108864,
+        "cores": 4
+      },
+      {
+        "service": "zirv-flow-worker",
+        "image": "ghcr.io/glubiz/zirv-flow:0.214.0",
+        "image_id": "sha256:799c01211a786a05ea84dc28fd384126badf8753e1e5eff5feeaffdcab467e86",
+        "cpuset": "4-7",
+        "memory_bytes": 5368709120,
+        "shm_bytes": 67108864,
+        "cores": 4
+      },
+      {
+        "service": "zirv-flow-scheduler",
+        "image": "ghcr.io/glubiz/zirv-flow:0.214.0",
+        "image_id": "sha256:799c01211a786a05ea84dc28fd384126badf8753e1e5eff5feeaffdcab467e86",
+        "cpuset": "4-7",
+        "memory_bytes": 1073741824,
+        "shm_bytes": 67108864,
+        "cores": 4
+      }
+    ],
+    "postgres_settings": {
+      "shared_buffers": "5GB",
+      "effective_cache_size": "16GB",
+      "maintenance_work_mem": "1GB",
+      "max_wal_size": "8GB",
+      "checkpoint_timeout": "15min"
+    },
+    "host": {
+      "os": "Windows",
+      "logical_cpus": 32,
+      "memory_bytes": 68470984704
+    },
+    "docker_vm": {
+      "cpus": 32,
+      "memory_bytes": 33526329344,
+      "operating_system": "Docker Desktop (containerized)"
+    }
+  },
+  "seeds": {
+    "targets": {
+      "events": 5000,
+      "people": 5000,
+      "enrollments": 3000
+    },
+    "seed_at": "2026-11-01T17:05:55.767934+00:00",
+    "wake_at": "2026-11-08T17:05:55.767934+00:00",
+    "event_window_days": 365,
+    "source": "m8bench.progress (committed seed rows, not current live counts)",
+    "workspaces": [
+      {
+        "workspace_id": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+        "people": 2000,
+        "events": 2000,
+        "enrollments": 1200
+      },
+      {
+        "workspace_id": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+        "people": 2000,
+        "events": 2000,
+        "enrollments": 1200
+      },
+      {
+        "workspace_id": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+        "people": 1000,
+        "events": 1000,
+        "enrollments": 600
+      }
+    ],
+    "committed": {
+      "events": 5000,
+      "enrollments": 3000,
+      "people": 5000
+    }
+  },
+  "results": {
+    "loaded\\ingest.json": {
+      "tool": "zirv-flow-loadgen",
+      "mode": "track",
+      "seed": 1,
+      "run_id": "1a19817890f",
+      "started_unix_s": 1793553041,
+      "batch_size": 1,
+      "max_in_flight": 10000,
+      "latency_note": "One sample per request at its final outcome of any status (202, 4xx, 5xx, timeout or transport error, 429 retries exhausted). latency_from_schedule runs from the request's scheduled due time to its final response, retry waits and dispatch lag included: judge API latency targets on it. dispatch_lag is the final send minus the scheduled time and service_latency the final attempt's send to response, so latency_from_schedule is about dispatch_lag plus service_latency.",
+      "people": 2000,
+      "total": {
+        "name": "total",
+        "target_rate": 50,
+        "planned_duration_s": 5.0,
+        "elapsed_s": 5.0106969,
+        "requests": 250,
+        "items_offered": 250,
+        "items_accepted": 250,
+        "achieved_rate": 49.89325935879298,
+        "retries_after_429": 0,
+        "status": {
+          "accepted_202": 250,
+          "rate_limited_429": 0,
+          "server_5xx": 0,
+          "other": 0,
+          "transport_errors": 0
+        },
+        "latency_from_schedule": {
+          "count": 250,
+          "p50_ms": 11.55,
+          "p95_ms": 18.552,
+          "p99_ms": 19.549,
+          "max_ms": 24.496
+        },
+        "service_latency": {
+          "count": 250,
+          "p50_ms": 2.367,
+          "p95_ms": 4.938,
+          "p99_ms": 10.538,
+          "max_ms": 12.705
+        },
+        "dispatch_lag": {
+          "count": 250,
+          "p50_ms": 8.474,
+          "p95_ms": 15.723,
+          "p99_ms": 16.249,
+          "max_ms": 16.985
+        },
+        "late_dispatch": 0,
+        "abandoned_requests": 0,
+        "gave_up_after_retries": 0
+      },
+      "phases": [
+        {
+          "name": "base",
+          "target_rate": 50,
+          "planned_duration_s": 5.0,
+          "elapsed_s": 5.0106969,
+          "requests": 250,
+          "items_offered": 250,
+          "items_accepted": 250,
+          "achieved_rate": 49.89325935879298,
+          "retries_after_429": 0,
+          "status": {
+            "accepted_202": 250,
+            "rate_limited_429": 0,
+            "server_5xx": 0,
+            "other": 0,
+            "transport_errors": 0
+          },
+          "latency_from_schedule": {
+            "count": 250,
+            "p50_ms": 11.55,
+            "p95_ms": 18.552,
+            "p99_ms": 19.549,
+            "max_ms": 24.496
+          },
+          "service_latency": {
+            "count": 250,
+            "p50_ms": 2.367,
+            "p95_ms": 4.938,
+            "p99_ms": 10.538,
+            "max_ms": 12.705
+          },
+          "dispatch_lag": {
+            "count": 250,
+            "p50_ms": 8.474,
+            "p95_ms": 15.723,
+            "p99_ms": 16.249,
+            "max_ms": 16.985
+          },
+          "late_dispatch": 0,
+          "abandoned_requests": 0,
+          "gave_up_after_retries": 0
+        }
+      ]
+    },
+    "loaded\\job-kinds.json": [
+      {
+        "t": "2026-11-01T17:10:44.597631Z",
+        "kind": "flow.step",
+        "claims_total": 2111.0,
+        "completed_total": 2110.0,
+        "claim_lag_seconds_sum": 32.245780999999994,
+        "due_ready": 1.0,
+        "running": 2.0,
+        "ready_lag_mean_seconds": 0.00137,
+        "ready_lag_max_seconds": 0.00137
+      },
+      {
+        "t": "2026-11-01T17:10:44.597631Z",
+        "kind": "ingest.drain",
+        "claims_total": 138.0,
+        "completed_total": 138.0,
+        "claim_lag_seconds_sum": 0.4884510000000001,
+        "due_ready": 0.0,
+        "running": 1.0,
+        "ready_lag_mean_seconds": null,
+        "ready_lag_max_seconds": null
+      },
+      {
+        "t": "2026-11-01T17:10:49.945043Z",
+        "kind": "flow.step",
+        "claims_total": 3000.0,
+        "completed_total": 3000.0,
+        "claim_lag_seconds_sum": 35.53011,
+        "due_ready": 0.0,
+        "running": 0.0,
+        "ready_lag_mean_seconds": null,
+        "ready_lag_max_seconds": null
+      },
+      {
+        "t": "2026-11-01T17:10:49.945043Z",
+        "kind": "ingest.drain",
+        "claims_total": 235.0,
+        "completed_total": 235.0,
+        "claim_lag_seconds_sum": 0.733813,
+        "due_ready": 0.0,
+        "running": 0.0,
+        "ready_lag_mean_seconds": null,
+        "ready_lag_max_seconds": null
+      }
+    ],
+    "loaded\\lateness.json": {
+      "run": 1,
+      "t0": "2026-11-01T17:10:41.162928+00:00",
+      "window_s": 5,
+      "burst_at_s": 0,
+      "sets": {
+        "38da1dff-2a54-b92d-2456-fd5d8502fab9": {
+          "early": 0,
+          "max_s": 0.157193,
+          "min_s": 0.001211,
+          "p50_s": 0.005768,
+          "p95_s": 0.068419,
+          "p99_s": 0.147184,
+          "woken": 600,
+          "seeded": 600
+        },
+        "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5": {
+          "early": 0,
+          "max_s": 0.156225,
+          "min_s": 0.000648,
+          "p50_s": 0.002976,
+          "p95_s": 0.065877,
+          "p99_s": 0.145372,
+          "woken": 1200,
+          "seeded": 1200
+        },
+        "e0572d44-1b49-f641-5a00-60d8c4b766ae": {
+          "early": 0,
+          "max_s": 0.156916,
+          "min_s": 0.000773,
+          "p50_s": 0.004264,
+          "p95_s": 0.067503,
+          "p99_s": 0.146824,
+          "woken": 1200,
+          "seeded": 1200
+        }
+      },
+      "overall": {
+        "early": 0,
+        "max_s": 0.157193,
+        "min_s": 0.000648,
+        "p50_s": 0.004175,
+        "p95_s": 0.067404,
+        "p99_s": 0.146926,
+        "woken": 3000,
+        "seeded": 3000
+      },
+      "spread_in_burst_minute": null,
+      "spread_outside_burst_minute": {
+        "early": 0,
+        "max_s": null,
+        "min_s": null,
+        "p50_s": null,
+        "p95_s": null,
+        "p99_s": null,
+        "woken": 0,
+        "seeded": 0
+      },
+      "per_minute": [
+        {
+          "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+          "max_s": 0.157193,
+          "p50_s": 0.005768,
+          "p99_s": 0.147184,
+          "woken": 600,
+          "minute": 0,
+          "seeded": 600
+        },
+        {
+          "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+          "max_s": 0.156225,
+          "p50_s": 0.002976,
+          "p99_s": 0.145372,
+          "woken": 1200,
+          "minute": 0,
+          "seeded": 1200
+        },
+        {
+          "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+          "max_s": 0.156916,
+          "p50_s": 0.004264,
+          "p99_s": 0.146824,
+          "woken": 1200,
+          "minute": 0,
+          "seeded": 1200
+        }
+      ],
+      "first_step_started": "2026-11-01T17:10:41.314685+00:00",
+      "last_step_started": "2026-11-01T17:10:46.161216+00:00",
+      "dead_wake_jobs": 0,
+      "jobs_left": 0,
+      "enrollments_by_state": {
+        "completed": 3000
+      }
+    },
+    "loaded\\metrics.json": {
+      "samples": [
+        "zirv_flow_timer_wake_lateness_seconds_bucket{le=\"0.005\"} 1624",
+        "zirv_flow_timer_wake_lateness_seconds_bucket{le=\"0.01\"} 2416",
+        "zirv_flow_timer_wake_lateness_seconds_bucket{le=\"0.025\"} 2672",
+        "zirv_flow_timer_wake_lateness_seconds_bucket{le=\"0.05\"} 2787",
+        "zirv_flow_timer_wake_lateness_seconds_bucket{le=\"0.1\"} 2901",
+        "zirv_flow_timer_wake_lateness_seconds_bucket{le=\"0.25\"} 3000",
+        "zirv_flow_timer_wake_lateness_seconds_bucket{le=\"0.5\"} 3000",
+        "zirv_flow_timer_wake_lateness_seconds_bucket{le=\"1\"} 3000",
+        "zirv_flow_timer_wake_lateness_seconds_bucket{le=\"2.5\"} 3000",
+        "zirv_flow_timer_wake_lateness_seconds_bucket{le=\"5\"} 3000",
+        "zirv_flow_timer_wake_lateness_seconds_bucket{le=\"+Inf\"} 3000",
+        "zirv_flow_timer_wake_lateness_seconds_sum 39.53824699999999",
+        "zirv_flow_timer_wake_lateness_seconds_count 3000"
+      ]
+    },
+    "loaded\\timers.json": {
+      "mode": "loaded",
+      "ingest_rate": 50,
+      "lateness": {
+        "run": 1,
+        "t0": "2026-11-01T17:10:41.162928+00:00",
+        "window_s": 5,
+        "burst_at_s": 0,
+        "sets": {
+          "38da1dff-2a54-b92d-2456-fd5d8502fab9": {
+            "early": 0,
+            "max_s": 0.157193,
+            "min_s": 0.001211,
+            "p50_s": 0.005768,
+            "p95_s": 0.068419,
+            "p99_s": 0.147184,
+            "woken": 600,
+            "seeded": 600
+          },
+          "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5": {
+            "early": 0,
+            "max_s": 0.156225,
+            "min_s": 0.000648,
+            "p50_s": 0.002976,
+            "p95_s": 0.065877,
+            "p99_s": 0.145372,
+            "woken": 1200,
+            "seeded": 1200
+          },
+          "e0572d44-1b49-f641-5a00-60d8c4b766ae": {
+            "early": 0,
+            "max_s": 0.156916,
+            "min_s": 0.000773,
+            "p50_s": 0.004264,
+            "p95_s": 0.067503,
+            "p99_s": 0.146824,
+            "woken": 1200,
+            "seeded": 1200
+          }
+        },
+        "overall": {
+          "early": 0,
+          "max_s": 0.157193,
+          "min_s": 0.000648,
+          "p50_s": 0.004175,
+          "p95_s": 0.067404,
+          "p99_s": 0.146926,
+          "woken": 3000,
+          "seeded": 3000
+        },
+        "spread_in_burst_minute": null,
+        "spread_outside_burst_minute": {
+          "early": 0,
+          "max_s": null,
+          "min_s": null,
+          "p50_s": null,
+          "p95_s": null,
+          "p99_s": null,
+          "woken": 0,
+          "seeded": 0
+        },
+        "per_minute": [
+          {
+            "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+            "max_s": 0.157193,
+            "p50_s": 0.005768,
+            "p99_s": 0.147184,
+            "woken": 600,
+            "minute": 0,
+            "seeded": 600
+          },
+          {
+            "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+            "max_s": 0.156225,
+            "p50_s": 0.002976,
+            "p99_s": 0.145372,
+            "woken": 1200,
+            "minute": 0,
+            "seeded": 1200
+          },
+          {
+            "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+            "max_s": 0.156916,
+            "p50_s": 0.004264,
+            "p99_s": 0.146824,
+            "woken": 1200,
+            "minute": 0,
+            "seeded": 1200
+          }
+        ],
+        "first_step_started": "2026-11-01T17:10:41.314685+00:00",
+        "last_step_started": "2026-11-01T17:10:46.161216+00:00",
+        "dead_wake_jobs": 0,
+        "jobs_left": 0,
+        "enrollments_by_state": {
+          "completed": 3000
+        }
+      },
+      "distribution": "uniform per workspace; no M5 burst set",
+      "lead_left_at_worker_ready_s": 7.7,
+      "measurement": "the job-sampler due_ready query and the wake-count poll run during the window and scan the jobs run_at index with all wakes pending; observer effects, not product load"
+    },
+    "loaded\\window.json": {
+      "run": 1,
+      "t0": "2026-11-01T17:10:41.162928+00:00",
+      "window_s": 5,
+      "burst_at_s": 0,
+      "n_spread": 3000,
+      "n_burst": 0,
+      "staged_at": "2026-11-01T17:10:09.545517+00:00"
+    },
+    "noload\\job-kinds.json": [
+      {
+        "t": "2026-11-01T17:10:23.172548Z",
+        "kind": "flow.step",
+        "claims_total": 2122.0,
+        "completed_total": 2119.0,
+        "claim_lag_seconds_sum": 470.40808,
+        "due_ready": 142.0,
+        "running": 2.0,
+        "ready_lag_mean_seconds": 0.12028033098591549,
+        "ready_lag_max_seconds": 0.236947
+      },
+      {
+        "t": "2026-11-01T17:10:28.492329Z",
+        "kind": "flow.step",
+        "claims_total": 3000.0,
+        "completed_total": 3000.0,
+        "claim_lag_seconds_sum": 671.4049009999999,
+        "due_ready": 0.0,
+        "running": 0.0,
+        "ready_lag_mean_seconds": null,
+        "ready_lag_max_seconds": null
+      }
+    ],
+    "noload\\lateness.json": {
+      "run": 1,
+      "t0": "2026-11-01T17:10:19.573101+00:00",
+      "window_s": 5,
+      "burst_at_s": 0,
+      "sets": {
+        "38da1dff-2a54-b92d-2456-fd5d8502fab9": {
+          "early": 0,
+          "max_s": 0.445887,
+          "min_s": 0.003711,
+          "p50_s": 0.23117,
+          "p95_s": 0.420196,
+          "p99_s": 0.436019,
+          "woken": 600,
+          "seeded": 600
+        },
+        "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5": {
+          "early": 0,
+          "max_s": 0.444456,
+          "min_s": 0.000796,
+          "p50_s": 0.229125,
+          "p95_s": 0.416583,
+          "p99_s": 0.434185,
+          "woken": 1200,
+          "seeded": 1200
+        },
+        "e0572d44-1b49-f641-5a00-60d8c4b766ae": {
+          "early": 0,
+          "max_s": 0.445321,
+          "min_s": 0.001556,
+          "p50_s": 0.231382,
+          "p95_s": 0.418923,
+          "p99_s": 0.436174,
+          "woken": 1200,
+          "seeded": 1200
+        }
+      },
+      "overall": {
+        "early": 0,
+        "max_s": 0.445887,
+        "min_s": 0.000796,
+        "p50_s": 0.230403,
+        "p95_s": 0.418893,
+        "p99_s": 0.435439,
+        "woken": 3000,
+        "seeded": 3000
+      },
+      "spread_in_burst_minute": null,
+      "spread_outside_burst_minute": {
+        "early": 0,
+        "max_s": null,
+        "min_s": null,
+        "p50_s": null,
+        "p95_s": null,
+        "p99_s": null,
+        "woken": 0,
+        "seeded": 0
+      },
+      "per_minute": [
+        {
+          "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+          "max_s": 0.445887,
+          "p50_s": 0.23117,
+          "p99_s": 0.436019,
+          "woken": 600,
+          "minute": 0,
+          "seeded": 600
+        },
+        {
+          "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+          "max_s": 0.444456,
+          "p50_s": 0.229125,
+          "p99_s": 0.434185,
+          "woken": 1200,
+          "minute": 0,
+          "seeded": 1200
+        },
+        {
+          "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+          "max_s": 0.445321,
+          "p50_s": 0.231382,
+          "p99_s": 0.436174,
+          "woken": 1200,
+          "minute": 0,
+          "seeded": 1200
+        }
+      ],
+      "first_step_started": "2026-11-01T17:10:19.893972+00:00",
+      "last_step_started": "2026-11-01T17:10:24.773623+00:00",
+      "dead_wake_jobs": 0,
+      "jobs_left": 0,
+      "enrollments_by_state": {
+        "completed": 3000
+      }
+    },
+    "noload\\metrics.json": {
+      "samples": [
+        "zirv_flow_timer_wake_lateness_seconds_bucket{le=\"0.005\"} 29",
+        "zirv_flow_timer_wake_lateness_seconds_bucket{le=\"0.01\"} 62",
+        "zirv_flow_timer_wake_lateness_seconds_bucket{le=\"0.025\"} 156",
+        "zirv_flow_timer_wake_lateness_seconds_bucket{le=\"0.05\"} 312",
+        "zirv_flow_timer_wake_lateness_seconds_bucket{le=\"0.1\"} 624",
+        "zirv_flow_timer_wake_lateness_seconds_bucket{le=\"0.25\"} 1641",
+        "zirv_flow_timer_wake_lateness_seconds_bucket{le=\"0.5\"} 3000",
+        "zirv_flow_timer_wake_lateness_seconds_bucket{le=\"1\"} 3000",
+        "zirv_flow_timer_wake_lateness_seconds_bucket{le=\"2.5\"} 3000",
+        "zirv_flow_timer_wake_lateness_seconds_bucket{le=\"5\"} 3000",
+        "zirv_flow_timer_wake_lateness_seconds_bucket{le=\"+Inf\"} 3000",
+        "zirv_flow_timer_wake_lateness_seconds_sum 675.0633859999999",
+        "zirv_flow_timer_wake_lateness_seconds_count 3000"
+      ]
+    },
+    "noload\\timers.json": {
+      "mode": "noload",
+      "ingest_rate": 0,
+      "lateness": {
+        "run": 1,
+        "t0": "2026-11-01T17:10:19.573101+00:00",
+        "window_s": 5,
+        "burst_at_s": 0,
+        "sets": {
+          "38da1dff-2a54-b92d-2456-fd5d8502fab9": {
+            "early": 0,
+            "max_s": 0.445887,
+            "min_s": 0.003711,
+            "p50_s": 0.23117,
+            "p95_s": 0.420196,
+            "p99_s": 0.436019,
+            "woken": 600,
+            "seeded": 600
+          },
+          "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5": {
+            "early": 0,
+            "max_s": 0.444456,
+            "min_s": 0.000796,
+            "p50_s": 0.229125,
+            "p95_s": 0.416583,
+            "p99_s": 0.434185,
+            "woken": 1200,
+            "seeded": 1200
+          },
+          "e0572d44-1b49-f641-5a00-60d8c4b766ae": {
+            "early": 0,
+            "max_s": 0.445321,
+            "min_s": 0.001556,
+            "p50_s": 0.231382,
+            "p95_s": 0.418923,
+            "p99_s": 0.436174,
+            "woken": 1200,
+            "seeded": 1200
+          }
+        },
+        "overall": {
+          "early": 0,
+          "max_s": 0.445887,
+          "min_s": 0.000796,
+          "p50_s": 0.230403,
+          "p95_s": 0.418893,
+          "p99_s": 0.435439,
+          "woken": 3000,
+          "seeded": 3000
+        },
+        "spread_in_burst_minute": null,
+        "spread_outside_burst_minute": {
+          "early": 0,
+          "max_s": null,
+          "min_s": null,
+          "p50_s": null,
+          "p95_s": null,
+          "p99_s": null,
+          "woken": 0,
+          "seeded": 0
+        },
+        "per_minute": [
+          {
+            "set": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+            "max_s": 0.445887,
+            "p50_s": 0.23117,
+            "p99_s": 0.436019,
+            "woken": 600,
+            "minute": 0,
+            "seeded": 600
+          },
+          {
+            "set": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+            "max_s": 0.444456,
+            "p50_s": 0.229125,
+            "p99_s": 0.434185,
+            "woken": 1200,
+            "minute": 0,
+            "seeded": 1200
+          },
+          {
+            "set": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+            "max_s": 0.445321,
+            "p50_s": 0.231382,
+            "p99_s": 0.436174,
+            "woken": 1200,
+            "minute": 0,
+            "seeded": 1200
+          }
+        ],
+        "first_step_started": "2026-11-01T17:10:19.893972+00:00",
+        "last_step_started": "2026-11-01T17:10:24.773623+00:00",
+        "dead_wake_jobs": 0,
+        "jobs_left": 0,
+        "enrollments_by_state": {
+          "completed": 3000
+        }
+      },
+      "distribution": "uniform per workspace; no M5 burst set",
+      "lead_left_at_worker_ready_s": 7.5,
+      "measurement": "the job-sampler due_ready query and the wake-count poll run during the window and scan the jobs run_at index with all wakes pending; observer effects, not product load"
+    },
+    "noload\\window.json": {
+      "run": 1,
+      "t0": "2026-11-01T17:10:19.573101+00:00",
+      "window_s": 5,
+      "burst_at_s": 0,
+      "n_spread": 3000,
+      "n_burst": 0,
+      "staged_at": "2026-11-01T17:10:09.545517+00:00"
+    }
+  }
+}

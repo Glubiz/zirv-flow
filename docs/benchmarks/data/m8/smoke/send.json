@@ -1,0 +1,230 @@
+{
+  "benchmark": "send",
+  "label": "reference-resource emulation, not a reference-hardware run",
+  "ruling": "ef99d178",
+  "limitations": [
+    "shared storage",
+    "Docker Desktop overhead",
+    "mixed core types of the dev CPU"
+  ],
+  "reference_hardware_validation": "outstanding",
+  "image_version": "0.214.0",
+  "measurement_scope": "Docker app stack",
+  "recorded_at": "2026-11-01T17:12:49.984454+00:00",
+  "smoke": true,
+  "command_line": [
+    "bash",
+    "scripts/bench/m8/run.sh",
+    "send"
+  ],
+  "benchmark_command": [
+    "bash",
+    "D:/GitHub/zirv-flow/.zirv/worktrees/m8-validation/scripts/bench/m6/run.sh",
+    "m8-send-20261101T171102-126898"
+  ],
+  "exit_code": 0,
+  "topology": {
+    "containers": [
+      {
+        "service": "postgres",
+        "image": "postgres:16.15",
+        "image_id": "sha256:74d436cb49d3398cf7b5d7b33635d43623d9e4da4b93c22db453f7d5d81181b1",
+        "cpuset": "8-15",
+        "memory_bytes": 21474836480,
+        "shm_bytes": 6442450944,
+        "cores": 8
+      },
+      {
+        "service": "zirv-flow",
+        "image": "ghcr.io/glubiz/zirv-flow:0.214.0",
+        "image_id": "sha256:799c01211a786a05ea84dc28fd384126badf8753e1e5eff5feeaffdcab467e86",
+        "cpuset": "0-3",
+        "memory_bytes": 5368709120,
+        "shm_bytes": 67108864,
+        "cores": 4
+      },
+      {
+        "service": "zirv-flow-worker",
+        "image": "ghcr.io/glubiz/zirv-flow:0.214.0",
+        "image_id": "sha256:799c01211a786a05ea84dc28fd384126badf8753e1e5eff5feeaffdcab467e86",
+        "cpuset": "4-7",
+        "memory_bytes": 5368709120,
+        "shm_bytes": 67108864,
+        "cores": 4
+      },
+      {
+        "service": "zirv-flow-scheduler",
+        "image": "ghcr.io/glubiz/zirv-flow:0.214.0",
+        "image_id": "sha256:799c01211a786a05ea84dc28fd384126badf8753e1e5eff5feeaffdcab467e86",
+        "cpuset": "4-7",
+        "memory_bytes": 1073741824,
+        "shm_bytes": 67108864,
+        "cores": 4
+      }
+    ],
+    "postgres_settings": {
+      "shared_buffers": "5GB",
+      "effective_cache_size": "16GB",
+      "maintenance_work_mem": "1GB",
+      "max_wal_size": "8GB",
+      "checkpoint_timeout": "15min"
+    },
+    "host": {
+      "os": "Windows",
+      "logical_cpus": 32,
+      "memory_bytes": 68470984704
+    },
+    "docker_vm": {
+      "cpus": 32,
+      "memory_bytes": 33526329344,
+      "operating_system": "Docker Desktop (containerized)"
+    }
+  },
+  "seeds": {
+    "targets": {
+      "events": 5000,
+      "people": 5000,
+      "enrollments": 3000
+    },
+    "seed_at": "2026-11-01T17:05:55.767934+00:00",
+    "wake_at": "2026-11-08T17:05:55.767934+00:00",
+    "event_window_days": 365,
+    "source": "m8bench.progress (committed seed rows, not current live counts)",
+    "workspaces": [
+      {
+        "workspace_id": "b5ec4fb1-33ca-9c66-4ca0-1359277db9a5",
+        "people": 2000,
+        "events": 2000,
+        "enrollments": 1200
+      },
+      {
+        "workspace_id": "e0572d44-1b49-f641-5a00-60d8c4b766ae",
+        "people": 2000,
+        "events": 2000,
+        "enrollments": 1200
+      },
+      {
+        "workspace_id": "38da1dff-2a54-b92d-2456-fd5d8502fab9",
+        "people": 1000,
+        "events": 1000,
+        "enrollments": 600
+      }
+    ],
+    "committed": {
+      "events": 5000,
+      "enrollments": 3000,
+      "people": 5000
+    }
+  },
+  "results": {
+    "m8-send-20261101T171102-126898\\report.json": {
+      "arrivals": 2000,
+      "bucket_check": null,
+      "clock_violations": 0,
+      "cpu": {
+        "database": {
+          "max_pct": 177.26,
+          "mean_pct": 88.78999999999999,
+          "samples": 2
+        },
+        "sink": {
+          "max_pct": 1.18,
+          "mean_pct": 0.59,
+          "samples": 2
+        },
+        "worker1": {
+          "max_pct": 115.19,
+          "mean_pct": 57.644999999999996,
+          "samples": 2
+        }
+      },
+      "delay": {
+        "count": 2000,
+        "max_s": 9.821328,
+        "p50_s": 6.021917,
+        "p95_s": 9.423215,
+        "p99_s": 9.744842
+      },
+      "duplicates": 0,
+      "inputs": {
+        "bucket": null,
+        "clocks": {
+          "offset_after_us": 637663,
+          "offset_before_us": 686034,
+          "uncertainty_us": 1491404
+        },
+        "expected": 2000,
+        "label": "m8-send-20261101T171102-126898",
+        "target_rate": 300.0,
+        "tolerance": 0.0,
+        "trim_percent": 10.0
+      },
+      "metrics": {
+        "attempt_record_failures_total": -0.0,
+        "delivery_send_claim_lag": {
+          "count": 2000.0,
+          "mean_s": 2.6008419050000002,
+          "note": "quantiles are estimated from the exposed buckets",
+          "p50_s": 2.683209647495362,
+          "p95_s": 4.770408163265306,
+          "p99_s": 4.955936920222634
+        },
+        "delivery_send_duration": {
+          "count": 2000.0,
+          "mean_s": 0.014845962521999996,
+          "note": "quantiles are estimated from the exposed buckets",
+          "p50_s": 0.015020040080160321,
+          "p95_s": 0.024038076152304612,
+          "p99_s": 0.024839679358717438
+        },
+        "destination_attempts_total": 2000.0,
+        "destination_outcomes_total": {
+          "outcome=delivered": 2000.0
+        },
+        "render_duration": {
+          "count": 2000.0,
+          "mean_s": 0.00043781308300000005,
+          "note": "quantiles are estimated from the exposed buckets",
+          "p50_s": 0.0025,
+          "p95_s": 0.00475,
+          "p99_s": 0.00495
+        },
+        "render_failures_total": -0.0,
+        "render_restarts_total": -0.0,
+        "render_wait": {
+          "count": 2000.0,
+          "mean_s": 4.484223499999999e-06,
+          "note": "quantiles are estimated from the exposed buckets",
+          "p50_s": 0.0025,
+          "p95_s": 0.00475,
+          "p99_s": 0.00495
+        }
+      },
+      "negative_delays": 0,
+      "overall_rate": 219.10381500276125,
+      "peak_per_second": 267,
+      "queue": {
+        "max_depth": 845.0,
+        "max_oldest_s": 2.0,
+        "missed_scrapes": 0,
+        "samples": 6
+      },
+      "unique_delivered": 2000,
+      "unmatched_arrivals": 0,
+      "unreadable_arrival_lines": 0,
+      "verdict": {
+        "complete": true,
+        "met": false,
+        "problems": [],
+        "valid": true
+      },
+      "window": {
+        "end_us": 1793553131889129,
+        "messages": 1599,
+        "rate": 214.3100402846584,
+        "seconds": 7.461153,
+        "start_us": 1793553124427976
+      }
+    }
+  }
+}

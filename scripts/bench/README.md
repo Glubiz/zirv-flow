@@ -115,8 +115,11 @@ psql -X "$DATABASE_URL" -v receive_file="$PWD/receive.jsonl" \
 The JSONL holds one `item` per receipt (`client`, nullable `event_id`, `received_at` in UTC Unix
 microseconds), `started`/`finished` clock boundaries and per-client gap/skipped/status summaries.
 Run SQL after the inbox drains, on the watcher's host with `python3` available and stable clocks;
-it fails unless that host's short name matches the `host` in the `started` record, then samples that host around database `now()` and fails if skew plus uncertainty, or the run's wall
-versus monotonic clock step, exceeds 50 ms. Saved boundaries alone cannot establish clock skew.
+it fails unless that host's short name matches the `host` in the `started` record, then samples that host around database `now()` (best of ten brackets) and fails if
+skew plus uncertainty at either end exceeds 50 ms, or if the offset drift does: `debugger.sh` takes
+the same bracket before the watcher starts (`debugger-clock-bracket.sql`, kept in `clock-before.csv`) and passes
+it as `-v offset_before_us -v uncertainty_before_us`, and the gate requires
+`|offset_after - offset_before| + u_before + u_after <= 50 ms`. Saved boundaries alone cannot establish clock skew.
 SQL reports first-receipt nearest-rank p50/p95/p99/max and delivered share per client and overall:
 distinct client/event pairs divided by clients times stored API events arriving during the run.
 Leave a drain window before watchers stop; non-stored outcomes are excluded from that denominator.
@@ -287,6 +290,12 @@ and EXPLAIN plans. `measure.sh verify` checks each preview count against a hand-
 over the seeded rows. The seed writes the rows the app writes (checked against an identify and a
 track sent through the API); it does not write the source-record ledger, decisions, event
 deduplication rows or event message ids, which no segment query reads.
+
+The incremental phase saves a segment of `plan = pro` and at least one `bench_order_placed` in the
+last 3 hours (`m4/defs/agg_recent.json`). The seed's events are older, so nobody is a member at first
+and every first order of a pro person in the loadgen pool is an event-caused entry. The phase records
+the orders and people created since its start (`diagnostics`) and fails when no entry was caused by
+an event: an earlier definition (two orders in 90 days) recorded such a run as valid.
 
 ## 10. Timer benchmark (M5, issue #169)
 
@@ -459,8 +468,40 @@ one-shot key generator exits before measurement. Defaults, all overridable:
 | `BENCH_IMAGE_TAG` | `0.190.0` | Pre-pulled versioned app image; no `latest` or build fallback |
 
 The other PostgreSQL settings match [M4 section 2.1](../../docs/benchmarks/m4-segments.md#21-hardware-spec-d1):
-`effective_cache_size=16GB`, `maintenance_work_mem=1GB`, `max_wal_size=8GB`,
-`checkpoint_timeout=15min`; 8 GiB shared memory follows the corrected M4 run. If changing the PG
+`effective_cache_size=16GB`, `maintenance_work_mem=1GB`, `checkpoint_timeout=15min`; 8 GiB shared
+memory follows the corrected M4 run. The M8 stack differs from M4 where `docs/operations/sizing.md`
+now recommends otherwise: `wal_compression=lz4`, `max_wal_size=32GB` (`M8_MAX_WAL_SIZE`) and
+`shared_preload_libraries=pg_stat_statements` (restart-only, so `up` recreates PostgreSQL; the
+extension is created idempotently by `up` and by every arm), so M8 WAL figures are not comparable
+with M4's 8 GB runs.
+
+Connections: `M8_PG_MAX_CONNECTIONS` defaults to 400. Serve gets `database.max_connections` 32
+(`ZIRV_FLOW_DATABASE__MAX_CONNECTIONS`, `M8_SERVE_DB_CONNECTIONS`; the sizing.md serve rule, D about
+24-32); worker and scheduler keep the shipped 10. Worst case at worker concurrency C = 32 and S = 8
+drain shards: serve D 32 + explorer pool (`explorer.max_connections`, default 4, lands with the
+explorer PR) 4 + worker (2 + S) x C + 1 = 321 gives **357** against 400. That leaves 43 for the
+worker and scheduler main pools (10 each), admin and monitoring clients. At the topology default
+C = 4 the worker adds 41.
+
+Every arm is wrapped by `run_bench` in a quiet start and shared instrumentation (`common.sh`):
+`quiet_start` waits (bound `M8_QUIET_TIMEOUT_S`, default 1800, failing the arm on timeout) until
+`pg_stat_progress_vacuum` is empty, then runs `CHECKPOINT`. `instrument_begin/end` write
+`instrument/` under the raw directory: serve `/metrics` before and after, `pg-stats-before/after.json`
+(`pg_current_wal_lsn()`, `pg_stat_wal`, `pg_stat_io`, checkpoint counters from
+`pg_stat_checkpointer` or, on 16, `pg_stat_bgwriter`), `pg-statements.json` (top 30 by
+`total_exec_time` since the arm's `pg_stat_statements_reset()`) and `docker-stats.ndjson` (read-only
+`docker stats --no-stream`, one JSON line per container per sample, keyed by container name so it
+survives the recreate of a service, about every `M8_DOCKER_STATS_TICK_S=1` second plus the call's
+own ~1 s) and `waits.ndjson`, the wait events of the client backends once per second
+(`pg-waits.sql`, every arm but render). Every sampler (docker stats, waits, the per-kind sampler)
+is registered in `$M8_STATE/samplers`, its database sessions carry `application_name`
+`m8-sampler*`, and it stops on exit, INT and TERM (the sessions are also ended in PostgreSQL). An
+arm refuses to start while a sampler of an earlier run is alive (live pid or session) and prints
+how to clear it. The final topology check follows an image switch made during the run (the
+containers must agree on the tag the serve container runs at the end) and records it as
+`topology.image_switch`. The ingest arm flags its inbox backends in the wait samples (ingest backends flagged by their inbox statements); loadgen's report
+gains `timeline_from_schedule`, per scheduled second the requests, p50, p99 and max latency from
+schedule (loadgen had no timeline before). Rebuild `target/release/loadgen` to get it. If changing the PG
 cap, size `M8_SHARED_BUFFERS` with it. `up` rejects intersections among all three CPU allocations
 before calling Docker. An enrollment seed also checks that the Docker VM can hold the sum of the
 configured memory caps (48 GiB by default). These IDs are logical CPUs, not claims about identical
@@ -533,14 +574,14 @@ seed to finish first; all three targets must be supplied together when selecting
 | Command | Existing measurement / registration |
 |---|---|
 | `ingest` | `tools/loadgen` track workload on the running stack |
-| `segments` | `m4/measure.sh all`, including the incremental load window |
-| `send` | M6 sink/setup and `m6/run.sh`; SQL email/consent fixtures on existing M8 people |
+| `segments` | `m4/measure.sh all`, including the incremental load window; `M8_SEGMENTS_PHASES=incremental` runs only that phase |
+| `send` | M6 sink/setup and `m6/run.sh`; SQL email/consent fixtures on existing M8 people. `PEOPLE` sets the audience (default 20000, up to the first workspace's people), `M8_WORKER_CONCURRENCY` the worker concurrency; `delivery-attempts.json` holds `delivery_attempts.duration_ms` p50, p95 and p99 over the steady window (the SMTP call time) |
 | `render` | `m7/render.sh` with prebuilt `tools/renderbench`; **native host tool, outside Docker CPU/memory caps**, explicitly labelled in JSON |
 | `debugger` | Watcher receipts and host SQL latency/clock report, alongside track load |
 | `explorer` | 90-day count/breakdown/list/CSV queries at both timeout budgets, alongside track ingest |
 | `jobs` | SQL no-op throughput and busy/quiet workspace fairness, with and without a cap |
 | `timers` | M5 lateness query on the M8 waiting seed, idle and alongside track ingest |
-| `decisions` | Non-zero until #397 adapts `ab.sh`, which currently deletes its own fixed stack and launches unpinned Windows processes |
+| `decisions` | `m8/decisions.sh`: the #75 A/B in container networking, `M8_DECISIONS_RUNS=3` interleaved rounds per side (the first side alternates); per run docker stats, `pg_stat_statements`, `pg_stat_wal` and waits; added p95 from `zirv_flow_decision_append_seconds`, throughput loss paired per round with its spread. Build the binaries with `m8/build-ab.sh [rev]` (default: newest `origin/main`; `source-rev` records it) |
 
 `all` and `smoke` note and skip only unregistered commands; a registered benchmark failure stops
 the suite. Bench setup may use the existing authenticated APIs; scale seeds do not. Each completed
@@ -561,6 +602,43 @@ citations (links relative to the report or literal paths starting at `docs/`; ne
 `docs/benchmarks/data/m8/`, including smoke and failed runs, must parse and carry a nonempty
 `image_version` string and a `topology` object. Invalid input exits 1; absent reports are skipped
 and zero data files pass. CI always checks fixtures and data, and checks the report once present.
+
+`ingest` and `burst` cover the section 19 rows "Ingestion API latency", "Inbox to applied profile" and
+"Sustained / burst ingestion" in two runs on the seeded, running stack (`run.sh up` and the seeds first):
+
+```sh
+bash scripts/bench/m8/run.sh ingest   # 2,000/s track for M8_SECONDS (600), then the applied latency
+bash scripts/bench/m8/run.sh burst    # 10,000/s batch for M8_BURST_SECONDS (600), then the drain time
+```
+
+`ingest` (track mode, not the `batch` arm) waits for the inbox to empty after the load, bounded by
+`M8_APPLIED_DRAIN_SECONDS` (600), and runs `scripts/bench/applied-latency.sql` from the run's start
+(database clock). It writes `ingest-applied.json` beside the loadgen report, so the data JSON carries
+`results["ingest-applied.json"]` with `items`, `p50_ms`, `p95_ms`, `p99_ms`, `max_ms`, `within_target`
+(p95 under 5 s) and `drain_wait_seconds`. The run fails, and the file says `valid: false` and why, if the
+inbox does not drain within its bound or if the measured track items differ from the items the API
+accepted; no latency is computed from a partial set. The SQL reads the apply time from the v7 event id
+(0.231.0 and later); with an older image it measures nothing and the run fails. Wall time: about 12 to
+15 minutes (quiet start, 10 minutes of load, a drain of seconds).
+
+`burst` recreates the serve container with `BENCH_RATE_PER_KEY=20000 BENCH_BURST_PER_KEY=40000` (the way
+`tier.sh` does; `compose.bench.yaml` reads them), checks the container really runs those limits, runs
+`loadgen --mode batch --batch-size 100 --burst-rate 10000 --burst-duration 600`, then times the inbox
+drain to empty from the end of the burst, capped at `M8_BURST_DRAIN_CAP_SECONDS` (1800). The stack's own
+limits are restored afterwards (the serve container restarts again, after the instrumentation has
+scraped its metrics). `results["burst.json"]` holds `achieved_rate`, `api_latency_ms` (p50/p95/p99/max from
+schedule), `rejected_or_failed` (429, 5xx, other, transport, gave up, abandoned and their total),
+`inbox_backlog_peak_rows` (sampled every `M8_INBOX_TICK_S`, 5 s, plus every drain poll),
+`drain_seconds`, `drain_within_15_min` (900 s), `rate_held` (at least 98% of 10,000/s and nothing
+rejected or failed) and `passed` (both). A drain past the cap fails the run (`burst.failed.json`,
+`drain_timed_out: true`). A missed 15-minute target is a measured result, not a failure. Wall time: about
+12 minutes if the backlog drains with the burst, up to 15 to 20 minutes with a 15-minute drain, and
+about 45 minutes at the 30-minute cap.
+
+`M8_BURST_SECONDS` shortens the burst for a trial run (`M8_BURST_SECONDS=30 bash scripts/bench/m8/run.sh
+burst`). Any value other than 600 marks the run as smoke: the data lands under `data/m8/smoke/`, the
+JSON says `smoke: true` and `shortened: true`, and `check-report.sh` rejects it as a citation. Under
+`run.sh smoke` the burst defaults to 10 seconds. `burst` is also part of `run.sh all`.
 
 `debugger` starts `M8_DEBUGGER_CLIENTS=1` streams (set **20** for the full run), waits for all to
 connect, then offers track load at `M8_RATE=2000` for `M8_SECONDS=600`. Connection allowance is
@@ -588,7 +666,13 @@ set to `15000`. It verifies the container environment, waits for readiness, and 
 serve configuration on success, error, INT and TERM. Export keeps its shipped 60,000 ms timeout
 per statement and 1,000,000-row cap. Each budget measures track ingest alone, then with **1, 4
 and 16** explorer clients at `M8_RATE` for `M8_SECONDS` (smoke: five seconds and one client).
-`M8_DRAIN_SECONDS=60` bounds inbox draining between scenarios. Explorer clients run closed loop,
+`M8_DRAIN_SECONDS=60` bounds inbox draining between scenarios.
+`M8_EXPLORER_SHAPES` (`export`, `interactive` or shape names, comma separated; default all seven)
+runs one family of shapes, for example an export-only and an interactive-only 4-client arm;
+`M8_EXPLORER_CONTAINER=1` runs the explorer loadgen in a Linux container on the bench network
+(the Linux loadgen under `$M8_STATE/send-tools/linux/loadgen`, as for the debugger), so the host
+path is out of the explorer measurement. `M8_EXPLORER_CLIENTS` and `M8_EXPLORER_SETTINGS` pick the
+scenarios. Explorer clients run closed loop,
 cycling the seven shapes with staggered starting positions, and finish outstanding requests after
 the launch window. The client deadline for an entire response is 300 seconds
 (`--request-timeout-seconds`); it is reported separately from server `503 query_timeout`.
@@ -640,7 +724,8 @@ future wakes are pending; both are named in the `measurement` field of the jobs 
 
 Jobs and timers call `m8/sample-job-kinds.sh` and `job-kinds.sql` from #455; merge that dependency
 and select an image emitting its per-kind claim metrics before running. `JOB_KINDS_TICK_S=5`
-controls that sampler. CSV samples and their JSON copy remain under each raw scenario, alongside
+controls that sampler (timers defaults to 30, since the query scans every due-ready job; the
+stop deadline of tick + 30 s still fits). CSV samples and their JSON copy remain under each raw scenario, alongside
 Prometheus scrapes and workload results; `write_data` embeds all raw JSON in the M8 report.
 
 The no-Docker self-test is in the existing CI job beside the benchmark feature gate. The feature
@@ -669,3 +754,67 @@ take deltas for interval counts and divide the lag-sum delta by the claim-count 
 claim lag (undefined with no claims). Start a new file if workers restart. Samples cover all
 workspaces; SQL and worker scrapes are sequential, not atomic. `JOB_KINDS_TICK_S` sets the sleep
 between samples (default 5 seconds); a query or scrape failure stops the sampler.
+
+## 15. PostgreSQL settings A/B for ingest and timers (M8, issue #397)
+
+Settings **A** are the current M8 settings; **B** is A plus `backend_flush_after=256kB`,
+`bgwriter_lru_maxpages=1000`, `bgwriter_delay=50ms` and `wal_buffers=64MB`. Both sides set
+`track_io_timing=on` and `track_wal_io_timing=on`, so the diagnostic cost is the same. Both sides must use the
+same app image, at least 0.233.0 (the driver refuses an older tag). Run it only in an approved bench window, on a
+quiet host (no host cargo task, `zf-pg16*` stopped), with the stack up and seeded:
+
+```sh
+export BENCH_IMAGE_TAG=0.233.0            # the image the operator gives, the same for both sides
+bash scripts/bench/m8/ab-settings.sh ingest 2     # A1 B1 A2 B2, 600 s each
+bash scripts/bench/m8/ab-settings.sh timers 1     # A1 B1 (the timers arm is two windows per run)
+bash scripts/bench/m8/run.sh pg-settings a        # by hand: switch to a side and verify it (also used to restore)
+M8_PG_SETTINGS=b M8_IO_DIAG=1 bash scripts/bench/m8/run.sh ingest   # one run on a side
+```
+
+Expected wall time (estimates, nothing here was run): per ingest run about 20 to 30 minutes (switch and
+reconnect 2 to 5, quiet start up to 30 when vacuum is busy, 600 s load, applied-latency drain, summary), so
+**about 1.5 to 2 hours for `ingest 2`** (four runs). A timers run is two windows of `M8_TIMERS_SECONDS`
+(2,400 s) plus their drains (bound `M8_DRAIN_SECONDS`, 3,600): about 1.5 to 3 hours, so **`timers 1` takes
+about 3 to 6 hours** and each further run per side adds the same again twice.
+
+How it works:
+
+- `M8_PG_SETTINGS=a|b` recreates **only** the PostgreSQL container (`up --no-deps --force-recreate`; a
+  `CHECKPOINT` first, then a stop allowance of 600 s). No volume is removed, nothing is reseeded and no other
+  container is touched (their pools reconnect). The switch is a PostgreSQL restart: `wal_buffers` needs it,
+  and the counters (`pg_stat_*`, `pg_stat_statements`) and `shared_buffers` start cold, which `quiet_start`
+  does not warm. Treat the first seconds of every run as cold on both sides alike (ABAB spreads that evenly).
+- Before the arm, `SHOW` (`current_setting`) is checked for the six settings; any mismatch fails the run
+  before load. Side A expects `wal_buffers=16MB` (the automatic size at the default 8GB `shared_buffers`).
+  The side and the values are recorded in `topology.pg_settings_side` of every data JSON and as a row in
+  `topology.ndjson`, and the final topology check re-verifies them.
+- `compose.m8.yaml` carries the six settings as `M8_PG_*` variables whose defaults are PostgreSQL's own
+  (`track_io_timing=off`, `backend_flush_after=0`, `bgwriter_lru_maxpages=100`, `bgwriter_delay=200ms`,
+  `wal_buffers=-1`). The first `run.sh up` after this change therefore recreates PostgreSQL once with the same
+  effective settings. A `run.sh up` made later without `M8_PG_SETTINGS` recreates it with those defaults
+  again; the driver leaves the stack on side A (timing on) when it ends, also after a failed run.
+- `M8_IO_DIAG=1` (set by the driver) adds, beside the arm: `instrument/pg-io.ndjson` (per second:
+  `pg_stat_wal` `wal_write`, `wal_sync`, `wal_write_time`, `wal_sync_time`, `wal_buffers_full`; `pg_stat_io`
+  writes, writebacks and fsyncs per `backend_type`, `context` and `object`; `pg_stat_bgwriter`
+  `maxwritten_clean` and `buffers_clean`; `pg_stat_database.temp_bytes`), `instrument/cgroup-io.txt` (the
+  PostgreSQL container's cgroup `io.stat`, read **inside the container** with `docker exec`, v2 `io.stat` or
+  the v1 blkio fallback; the swap lines come from the container's `/proc/meminfo`, which is the Docker VM's), and
+  the existing wait sampler (`waits.ndjson`) switched to 10 Hz and keyed by `application_name` and
+  `backend_type` (`-v interval=0.1 -v keyed=1` on `pg-waits.sql`; not a second sampler).
+- `io-diag.json` (in the raw directory, so inside each data JSON's `results`) summarises: the slow-second
+  count (seconds of loadgen's `timeline_from_schedule` whose max exceeds 262 ms) and the run p99; the WAL
+  sync time per sync (p50, p99, max over the seconds that had syncs); writeback bytes per second (backends'
+  `writebacks` x `op_bytes`); cgroup write bytes per second; swap; `maxwritten_clean`, `wal_buffers_full`
+  and `temp_bytes` totals; and the top wait events by backend samples.
+- The driver writes `ab-settings-<arm>.json` beside the data files in `docs/benchmarks/data/m8/`: each run
+  (side, exit code, data file, SHOW values, metrics) and the per-side means. Each run's own data JSON is
+  `<arm>-ab-<side><n>.json` (`M8_DATA_SUFFIX`), so the current `ingest.json` is not overwritten. A failed run
+  stops the A/B (`complete: false`, exit 1); side A is restored by an EXIT trap in every case.
+
+What the diagnostics cannot capture on this host: Docker Desktop on WSL2 may expose an empty `io.stat` in
+the container (the `cgroup.available` flag in `io-diag.json` says so); it counts the VM's virtual disk, not the
+Windows host's, so the host's own write latency and the virtual disk's fsync time remain unobserved (a loaded
+`pg_test_fsync` or a Linux host is needed to apportion them); `wal_sync_time` includes only what PostgreSQL
+times, and the swap figures are the VM's. The 10 Hz sampler needs a host `psql` that accepts a fractional
+`\watch` interval (PostgreSQL 14 or newer client). The self-test (`run.sh --self-test`) covers the switch, the
+`SHOW` failure, the ABAB order, the restore on failure and the JSON shapes with stubs.
