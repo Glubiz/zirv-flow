@@ -384,6 +384,9 @@ FLOW=$(api POST "$P/flows" 201 '{"name":"Drill wait","graph":{"v":1,"nodes":[
   {"id":"wait","type":"wait.duration","seconds":120},{"id":"end","type":"exit"}],
   "edges":[{"id":"next","from":"wait","port":"next","to":"end"}]},
   "settings":{"trigger":{"type":"manual"},"reentry":{"mode":"once"}}}' | jq -er .id)
+# The warm-up ramp (#328) is off: on, it admits the one entry anywhere in its first 300 s, often
+# past the 180 s wait below.
+api PUT "$P/flows/$FLOW/warmup" 200 '{"enabled":false,"seconds":300}' > /dev/null
 api POST "$P/flows/$FLOW/publish" 201 > /dev/null
 api POST "$P/flows/$FLOW/start" 202 "$(jq -n --arg list "$LIST" '{list_id:$list}')" > /dev/null
 wait_api "$P/flows/$FLOW/enrollments" '.enrollments | length == 1 and all(.[]; .state == "waiting")'
