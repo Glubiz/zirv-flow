@@ -30,7 +30,7 @@ use crate::JobError;
 use crate::context::{IngestSettings, JobContext};
 use crate::delivery::rate::RateGates;
 use crate::kinds::{WakeBatch, plan_wakes};
-use crate::metrics::{self, Outcome};
+use crate::metrics::{self, IdleEnd, Outcome};
 use crate::registry::{ErasedKind, Registry};
 
 /// How long a claim or a handler transaction waits for a connection of the worker's own.
@@ -172,6 +172,46 @@ struct Shared {
     kinds: Vec<&'static str>,
     /// Woken when a job is enqueued; polling covers a missed wake-up.
     wake: Notify,
+    /// Woken once for each job of a workspace that leaves running under a per-workspace cap,
+    /// so that one slot whose claim found the workspaces at their caps claims again (#397).
+    /// Only this worker's own jobs wake it; polling covers the room another worker frees.
+    room: Notify,
+}
+
+impl Shared {
+    fn new(
+        pool: PgPool,
+        heartbeat_pool: PgPool,
+        listener_pool: PgPool,
+        registry: Registry,
+        config: WorkerConfig,
+    ) -> Self {
+        Self {
+            kinds: registry.kinds(),
+            pool,
+            heartbeat_pool,
+            listener_pool,
+            registry,
+            config,
+            wake: Notify::new(),
+            room: Notify::new(),
+        }
+    }
+
+    /// Whether claims leave the workspaces at their caps behind, so a job leaving running frees
+    /// room that a slot may be waiting for.
+    fn capped(&self) -> bool {
+        self.config.max_running_per_workspace.is_some()
+    }
+
+    /// Wakes one slot waiting for room when `job`, which held its workspace's room under a cap,
+    /// no longer runs: it completed, failed, lost its lease or went back to the queue. With no
+    /// slot waiting, the next slot to wait claims again at once. Nothing happens without a cap.
+    fn left_running(&self, job: &ClaimedJob) {
+        if job.workspace_id.is_some() && self.capped() {
+            self.room.notify_one();
+        }
+    }
 }
 
 impl Worker {
@@ -188,9 +228,8 @@ impl Worker {
     /// dropped is cancelled and left to the reaper.
     pub async fn run(self, stop: watch::Receiver<bool>) {
         let slots = u32::try_from(self.config.concurrency).unwrap_or(u32::MAX);
-        let shared = Arc::new(Shared {
-            kinds: self.registry.kinds(),
-            pool: sized_like(
+        let shared = Arc::new(Shared::new(
+            sized_like(
                 &self.pool,
                 pool_size(slots, self.config.ingest_drain_shards),
                 0,
@@ -198,12 +237,11 @@ impl Worker {
             ),
             // A warm pool keeps connecting off the heartbeat's path; a beat may wait one
             // period, and a failed one is retried on the next, before the lease ends.
-            heartbeat_pool: sized_like(&self.pool, slots, slots, self.config.lease / 3),
-            listener_pool: self.pool,
-            registry: self.registry,
-            config: self.config,
-            wake: Notify::new(),
-        });
+            sized_like(&self.pool, slots, slots, self.config.lease / 3),
+            self.pool,
+            self.registry,
+            self.config,
+        ));
 
         let listener = AbortOnDrop(tokio::spawn(listen(Arc::clone(&shared), stop.clone())));
         let sampler = AbortOnDrop(tokio::spawn(sample_pools(Arc::clone(&shared))));
@@ -278,39 +316,59 @@ async fn listen(shared: Arc<Shared>, mut stop: watch::Receiver<bool>) {
     }
 }
 
-/// One worker: claim a batch of jobs, run them, repeat; wait for a wake-up when the queue is
-/// empty.
+/// One worker: claim a batch of jobs, run them, repeat; when a claim finds nothing, wait for a
+/// job to be enqueued, for the poll interval, or, under a per-workspace cap, for a job of this
+/// worker to leave running (#397): a claim finds nothing while the due jobs' workspaces are at
+/// their caps, and each job that leaves running wakes one waiting slot, so the room it frees is
+/// claimed without waiting for the poll.
 async fn work(shared: Arc<Shared>, slot: usize, mut stop: watch::Receiver<bool>) {
     let name = format!("{}:{slot}", std::process::id());
+    let capped = shared.capped();
     while !*stop.borrow() {
-        // Arm the wake-up before looking, so one sent in between is not missed.
-        let woken = shared.wake.notified();
-        tokio::pin!(woken);
-        woken.as_mut().enable();
-
-        match claim_jobs(
-            &shared.pool,
-            &name,
-            &shared.kinds,
-            shared.config.lease,
-            shared.config.max_running_per_workspace,
-            CLAIM_BATCH,
-        )
-        .await
-        {
-            Ok(batch) if !batch.is_empty() => {
-                run_batch(&shared, batch, &mut stop).await;
-                continue;
+        let batch = {
+            // Arm the wake-ups before looking, so one sent in between is not missed. They end
+            // with this block, before the batch runs: a wake-up for room that reaches a slot
+            // which then claimed something goes on to the next waiting slot.
+            let woken = shared.wake.notified();
+            tokio::pin!(woken);
+            woken.as_mut().enable();
+            let room = shared.room.notified();
+            tokio::pin!(room);
+            if capped {
+                room.as_mut().enable();
             }
-            Ok(_) => {}
-            Err(error) => warn!("could not claim jobs: {error}"),
-        }
 
-        tokio::select! {
-            () = &mut woken => {}
-            () = tokio::time::sleep(shared.config.poll_interval) => {}
-            _ = stop.changed() => {}
-        }
+            match claim_jobs(
+                &shared.pool,
+                &name,
+                &shared.kinds,
+                shared.config.lease,
+                shared.config.max_running_per_workspace,
+                CLAIM_BATCH,
+            )
+            .await
+            {
+                Ok(batch) if !batch.is_empty() => batch,
+                claimed => {
+                    if let Err(error) = claimed {
+                        warn!("could not claim jobs: {error}");
+                    }
+                    let ended = tokio::select! {
+                        () = &mut woken => Some(IdleEnd::Enqueued),
+                        () = &mut room, if capped => Some(IdleEnd::Freed),
+                        () = tokio::time::sleep(shared.config.poll_interval) => {
+                            Some(IdleEnd::Polled)
+                        }
+                        _ = stop.changed() => None,
+                    };
+                    if let Some(ended) = ended {
+                        metrics::record_idle_wait(ended);
+                    }
+                    continue;
+                }
+            }
+        };
+        run_batch(&shared, batch, &mut stop).await;
     }
 }
 
@@ -457,21 +515,20 @@ fn held_jobs(held: &mut VecDeque<Unit>, queue: Option<&Queue>) -> Vec<ClaimedJob
 }
 
 /// Gives claimed jobs a slot has not started back to the queue, on the heartbeat pool, as the
-/// slot's own connection may still be in its handler's transaction. A failure leaves them to lease
-/// expiry, the path of a slot that died.
+/// slot's own connection may still be in its handler's transaction, and wakes a waiting slot for
+/// each, as their room is free again. A failure leaves them to lease expiry, the path of a slot
+/// that died.
 async fn release(shared: &Shared, held: Vec<ClaimedJob>) {
     if held.is_empty() {
         return;
     }
-    let jobs: Vec<_> = held
-        .into_iter()
-        .map(|job| (job.id, job.lease_token))
-        .collect();
-    if let Err(error) = release_jobs(&shared.heartbeat_pool, &jobs).await {
-        warn!(
+    let jobs: Vec<_> = held.iter().map(|job| (job.id, job.lease_token)).collect();
+    match release_jobs(&shared.heartbeat_pool, &jobs).await {
+        Ok(_) => held.iter().for_each(|job| shared.left_running(job)),
+        Err(error) => warn!(
             "could not give back {} claimed jobs, which run again once their leases expire: {error}",
             jobs.len()
-        );
+        ),
     }
 }
 
@@ -533,6 +590,7 @@ async fn run_attempt(shared: &Arc<Shared>, job: ClaimedJob) {
         Err(_) => Attempt::Failed("the job handler panicked".into(), None),
     };
     settle(shared, &job, attempt, started.elapsed()).await;
+    shared.left_running(&job);
 }
 
 /// Settles an attempt that ended, then logs and counts it; `ran` is how long it ran before.
@@ -842,6 +900,7 @@ async fn process_wakes(shared: &Arc<Shared>, wakes: Wakes) -> Vec<(Uuid, Outcome
         let outcome = settle(shared, &job, attempt, took + share)
             .instrument(span)
             .await;
+        shared.left_running(&job);
         outcomes.push((job.id, outcome));
     }
     outcomes
@@ -1060,16 +1119,13 @@ pub(crate) async fn run_wakes(
     workspace: WorkspaceId,
     jobs: Vec<ClaimedJob>,
 ) -> Vec<(Uuid, Outcome)> {
-    let registry = Registry::built_in();
-    let shared = Arc::new(Shared {
-        pool: pool.clone(),
-        heartbeat_pool: pool.clone(),
-        listener_pool: pool.clone(),
-        kinds: registry.kinds(),
-        registry,
+    let shared = Arc::new(Shared::new(
+        pool.clone(),
+        pool.clone(),
+        pool.clone(),
+        Registry::built_in(),
         config,
-        wake: Notify::new(),
-    });
+    ));
     let now = tokio::time::Instant::now();
     let (_running, stop) = watch::channel(false);
     let wakes = Wakes {
@@ -1580,16 +1636,13 @@ mod tests {
             .fetch_one(&mut *save)
             .await
             .unwrap();
-        let registry = Registry::built_in();
-        let shared = Arc::new(Shared {
-            pool: pool.clone(),
-            heartbeat_pool: pool.clone(),
-            listener_pool: pool.clone(),
-            kinds: registry.kinds(),
-            registry,
-            config: test_config(1),
-            wake: Notify::new(),
-        });
+        let shared = Arc::new(Shared::new(
+            pool.clone(),
+            pool.clone(),
+            pool.clone(),
+            Registry::built_in(),
+            test_config(1),
+        ));
         let writer = tokio::spawn(execute(shared, claimed));
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
@@ -2343,6 +2396,85 @@ mod tests {
         wait_for(&pool, |counts| counts == QueueCounts::default()).await;
         stop_and_join(stop, handle).await;
         assert_eq!(effect_count(&pool).await, 40);
+    }
+
+    /// How many idle waits a scrape counts as ended by `ended`; none when it has no such series.
+    fn idle_waits(scrape: &str, ended: &str) -> u64 {
+        let series = format!("zirv_flow_job_idle_waits_total{{ended=\"{ended}\"}} ");
+        scrape
+            .lines()
+            .find_map(|line| line.strip_prefix(series.as_str()))
+            .map_or(0, |count| count.trim().parse().unwrap())
+    }
+
+    /// Bench phase 4's empty-claim sleeps (#397): under a cap of four, most of sixteen slots find
+    /// the workspace at its cap and wait. Polling alone left each such slot asleep for the whole
+    /// poll interval while jobs were due; every job that leaves running wakes one of them, so no
+    /// wait runs out the poll before the queue is empty, and the cap still holds.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn under_a_cap_each_finished_job_wakes_a_waiting_slot_before_the_poll(pool: PgPool) {
+        const JOBS: i64 = 2_000;
+        migrated(&pool).await;
+        let ws = workspace(&pool).await;
+        sqlx::query(
+            "INSERT INTO jobs (id, workspace_id, kind, payload, trace_id, cause_kind, cause_id) \
+             SELECT gen_random_uuid(), $1, 'maintenance.noop', '{}', gen_random_uuid(), \
+                    'manual', '' \
+             FROM generate_series(1, $2::bigint)",
+        )
+        .bind(ws.as_uuid())
+        .bind(JOBS)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let scrape = recorder.handle();
+        let _installed = ::metrics::set_default_local_recorder(&recorder);
+        let mut config = test_config(16);
+        config.poll_interval = Duration::from_secs(1);
+        config.max_running_per_workspace = Some(4);
+        let started = Instant::now();
+        let (stop, handle) = start(&pool, config);
+
+        let mut most_running = 0;
+        loop {
+            let (running, left): (i64, i64) = sqlx::query_as(
+                "SELECT count(*) FILTER (WHERE state = 'running'), count(*) FROM jobs",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            most_running = most_running.max(running);
+            if left == 0 {
+                break;
+            }
+            assert!(
+                started.elapsed() < WAIT_LIMIT,
+                "{left} of {JOBS} jobs left after {}s",
+                WAIT_LIMIT.as_secs()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let drained = started.elapsed();
+        let output = scrape.render();
+        stop_and_join(stop, handle).await;
+
+        let polled = idle_waits(&output, "poll");
+        eprintln!(
+            "{JOBS} jobs in {drained:?} ({:.0} jobs/s); idle waits ended by poll {polled}, by a \
+             freed job {}, by an enqueue {}",
+            JOBS as f64 / drained.as_secs_f64(),
+            idle_waits(&output, "freed"),
+            idle_waits(&output, "enqueued"),
+        );
+        assert!(most_running <= 4, "{most_running} jobs ran at once");
+        // Without the wake about a hundred waits run out; the margin takes one stall of more
+        // than the poll on a loaded runner, when each of the 12 idle slots runs out once.
+        assert!(
+            polled <= 24,
+            "{polled} idle waits ran out the poll interval while jobs were due"
+        );
     }
 
     /// The slot claims the gated job and the effect behind it, and runs the gated one, which
