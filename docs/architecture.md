@@ -2662,7 +2662,7 @@ checked again under it, so a merge or an erasure that came first is seen. The wa
 order: by the lowest person id of the wake's lock group (its person, and the survivor that person
 was merged into), then by person id, a wake whose enrollment is gone first. Each runs behind a
 savepoint of its own, its lease check and its step, with its heartbeat running until the batch
-completes it. A wake whose handler fails, or whose lease check or heartbeat finds the lease gone,
+ends. A wake whose handler fails, or whose lease check or heartbeat finds the lease gone,
 rolls back to its savepoint, which drops its writes, its decisions and the row locks it took, and
 the others go on. A failure is then written in the batch
 transaction, outside the wake's savepoint and in a savepoint of its own (ruling 4e9d24be), with
@@ -2685,7 +2685,9 @@ commit fails, or an error leaves the transaction unusable, it is rolled back too
 wake that completed in it fails with `could not commit the job transaction`, as a job alone whose
 commit fails (its attempt counts and it retries), and every failure written in it is settled again
 after it, on a lease the rollback left as it was. A completed wake's heartbeat beats on until the
-delete, so its lease does not run out while the later wakes run, and a failed wake's written
+commit or the rollback, so its lease runs out neither while the later wakes run nor while the
+delete waits behind a lock on a job row (the reaper would replace the token and the batch would
+roll back), and a failed wake's written
 failure holds its job row until the commit, so the reaper waits for the batch instead of returning
 that job meanwhile. On 0.231.0, with a completion, a decision append and a clock read per wake, a
 batch of 32 timer wakes made 490 round trips; it makes 397 (12.4 a wake). Since 0090 no index

@@ -4412,6 +4412,75 @@ pub(super) mod tests {
         .await;
     }
 
+    /// A completed wake's heartbeat beats until the batch ends: the batch's fenced delete, held
+    /// behind a lock on a job row past the lease while the reaper runs, still finds every lease
+    /// its own once the lock goes, and the batch commits.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_batch_whose_completion_waits_past_the_lease_keeps_its_wakes(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            let enrolled = due_visits(&env, 2).await;
+            let lease = Duration::from_secs(2);
+            let jobs = zirv_flow_store::claim_jobs(
+                &env.pool,
+                "test",
+                &[STEP_JOB_KIND],
+                lease,
+                None,
+                crate::worker::CLAIM_BATCH,
+            )
+            .await
+            .unwrap();
+            env.release().await;
+            assert_eq!(jobs.len(), 2, "the wakes that are due");
+            // A key-share lock on the first job row in id order: the delete waits for it before
+            // it takes any row, and neither a heartbeat nor the reaper does.
+            let first = jobs.iter().map(|job| job.id).min().unwrap();
+            let mut blocker = zirv_flow_store::begin(&env.pool).await.unwrap();
+            sqlx::query("SELECT 1 FROM jobs WHERE id = $1 FOR KEY SHARE")
+                .bind(first)
+                .execute(&mut *blocker)
+                .await
+                .unwrap();
+            let mut config = batch_config(&env);
+            config.lease = lease;
+            let (pool, ws, claimed) = (env.pool.clone(), env.ws, jobs.clone());
+            let batch =
+                tokio::spawn(
+                    async move { crate::worker::run_wakes(&pool, config, ws, claimed).await },
+                );
+            until_waiting(&env, 1).await;
+            tokio::time::sleep(lease + Duration::from_millis(1500)).await;
+            let reaped = zirv_flow_store::reap_expired(&env.pool).await.unwrap();
+            blocker.rollback().await.unwrap();
+            let outcomes = batch.await.unwrap();
+
+            assert_eq!(
+                outcomes_of(&jobs, &outcomes),
+                [crate::metrics::Outcome::Completed; 2]
+            );
+            assert_eq!(
+                (reaped.requeued, reaped.dead, reaped.purged),
+                (0, 0, 0),
+                "the reaper took a lease the delete waited with"
+            );
+            let left: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE id = ANY($1)")
+                .bind(jobs.iter().map(|job| job.id).collect::<Vec<_>>())
+                .fetch_one(&env.pool)
+                .await
+                .unwrap();
+            assert_eq!(left, 0);
+            for enrolled in &enrolled {
+                assert_eq!(
+                    env.enrollment(enrolled.enrollment).await.status,
+                    EnrollmentStatus::Completed
+                );
+            }
+        })
+        .await;
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_failed_wake_keeps_its_own_failure_when_its_lease_runs_out_before_the_batch_ends(

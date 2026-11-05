@@ -914,7 +914,8 @@ async fn process_wakes(shared: &Arc<Shared>, wakes: Wakes) -> Vec<(Uuid, Outcome
 ///
 /// A wake runs as a job alone does, its lease check and handler beside its heartbeat, in its
 /// savepoint, which is released when the handler succeeds; its heartbeat beats on until the
-/// batch's completion. A wake that fails or loses its lease rolls back to its savepoint, which
+/// batch ends, through the fenced delete, which can wait behind a lock on a job row. A wake that
+/// fails or loses its lease rolls back to its savepoint, which
 /// undoes its writes, drops its decisions and frees its locks, and the next wake goes on. A
 /// failure is then written in the transaction ([`record_failure`]), with the attempt counted as a
 /// job alone's is, and commits with the batch. A wake begins only before the deadline and while
@@ -1000,25 +1001,27 @@ async fn execute_wakes(shared: Arc<Shared>, wakes: Wakes) -> Vec<Ran> {
             span,
         });
     }
-    // Stopped before the completion: once a job row is deleted, a beat would wait for the commit.
-    drop(beating);
     let lost = if usable {
         complete_wakes(&mut tx, &mut batch, &ran).await
     } else {
         None
     };
-    match lost {
-        Some(ref lost) if lost.is_empty() => {
-            if tx.commit().await.is_ok() {
-                return ran;
-            }
-        }
+    let committed = match lost {
+        Some(ref lost) if lost.is_empty() => tx.commit().await.is_ok(),
         _ => {
             if tx.rollback().await.is_err() {
                 // The connection is broken; the server ends the transaction when it goes.
                 warn!("could not roll back a batch transaction");
             }
+            false
         }
+    };
+    // The heartbeats beat until here: a delete that waits behind a lock on a job row past the
+    // lease would otherwise find the reaper's token on it. A beat on a row the delete took waits
+    // for the transaction, which has ended now.
+    drop(beating);
+    if committed {
+        return ran;
     }
     let lost = lost.unwrap_or_default();
     // Rolled back before the failures are settled, so its row locks are gone by then, and so are
