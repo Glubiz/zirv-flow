@@ -228,7 +228,7 @@ async fn count_slice(
 /// The goal step rows of a slice, by flow. Only rows of a goal node id are read, inside the
 /// slice's time range, from `step_executions_started_idx`, which carries the enrollment; the
 /// outcome of those rows is read from the table, since no index holds it (0090, so the settle of a
-/// wait stays a HOT update), and the enrollment is read for the matches, for its flow and version.
+/// wait can be a HOT update), and the enrollment is read for the matches, for its flow and version.
 /// A graph goal counts when it ended `done` and the node is a goal of the version the enrollment
 /// entered by; the settings goal counts whatever the version.
 const GOALS_BY_FLOW: &str = "SELECT e.flow_id, count(*) \

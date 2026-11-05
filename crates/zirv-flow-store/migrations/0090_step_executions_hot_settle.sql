@@ -1,6 +1,7 @@
--- The settle of a wait step (`settle_wait_step`, `waiting` to `done`) becomes a HOT update when no
--- index holds `outcome` (#397): the row is rewritten on its own page and no index gets an entry.
--- Two indexes held it:
+-- The settle of a wait step (`settle_wait_step`, `waiting` to `done`) can be a HOT update once no
+-- index holds `outcome` (#397): when its page has room, the row is rewritten on that page and no
+-- index gets an entry. A settle on a full page is not HOT (the table keeps the default
+-- fillfactor); a bench-shaped run measured 59% of settles HOT. Two indexes held it:
 --
 -- - `step_executions_workspace_idx` (workspace_id, node_id, outcome) has no reader. The per-node
 --   counts of a flow join the step rows to the enrollments of the version through the primary key

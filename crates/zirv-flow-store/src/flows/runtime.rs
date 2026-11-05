@@ -1149,10 +1149,12 @@ mod tests {
         assert_eq!(settled_again, None);
     }
 
-    /// No index covers `outcome` (#397), so the settle of a wait writes no index entry.
+    /// No index holds `outcome` (#397), so the settle of a wait whose page has room, as this one
+    /// has, is a HOT update and writes no index entry. On a full page it is not: the table keeps
+    /// the default fillfactor, and a bench-shaped run measured 59% of settles HOT.
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn settling_a_wait_step_is_a_hot_update(pool: PgPool) {
+    async fn settling_a_wait_step_on_a_page_with_room_is_a_hot_update(pool: PgPool) {
         let ws = workspace(&pool, "hot-settle").await;
         let flow = create(&pool, ws, "Flow").await;
         publish(&pool, ws, flow.id).await.unwrap();
