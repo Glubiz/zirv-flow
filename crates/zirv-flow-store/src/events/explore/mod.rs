@@ -593,11 +593,16 @@ pub async fn explore_rows(
 ) -> Result<RowsPage, ExploreError> {
     let mut tx = begin_snapshot_for(pool, limits.timeout).await?;
     let prepared = prepare(&mut tx, workspace, scope, reveal).await?;
-    rows_page(tx, workspace, scope, &prepared, after, limit, limits).await
+    let page = PageRequest {
+        after,
+        limit,
+        with_decisions: true,
+    };
+    rows_page(tx, workspace, scope, &prepared, page, limits).await
 }
 
 /// Like [`explore_rows`], for a scope [`explore_start`] already checked: the page does not
-/// repeat the checks.
+/// repeat the checks. It skips the decision lookup, so its rows report `has_decisions: false`.
 pub async fn explore_rows_prepared(
     pool: &PgPool,
     workspace: WorkspaceId,
@@ -608,7 +613,18 @@ pub async fn explore_rows_prepared(
     limits: ExploreLimits,
 ) -> Result<RowsPage, ExploreError> {
     let tx = begin_snapshot_for(pool, limits.timeout).await?;
-    rows_page(tx, workspace, scope, prepared, after, limit, limits).await
+    let page = PageRequest {
+        after,
+        limit,
+        with_decisions: false,
+    };
+    rows_page(tx, workspace, scope, prepared, page, limits).await
+}
+
+struct PageRequest {
+    after: Option<RowCursor>,
+    limit: u32,
+    with_decisions: bool,
 }
 
 async fn rows_page(
@@ -616,10 +632,14 @@ async fn rows_page(
     workspace: WorkspaceId,
     scope: &ExploreScope<'_>,
     prepared: &PreparedScope,
-    after: Option<RowCursor>,
-    limit: u32,
+    page: PageRequest,
     limits: ExploreLimits,
 ) -> Result<RowsPage, ExploreError> {
+    let PageRequest {
+        after,
+        limit,
+        with_decisions,
+    } = page;
     let limit = i64::from(limit.clamp(1, limits.row_limit.max(1)));
     let mut qb: Builder = QueryBuilder::new(
         "SELECT e.id, e.occurred_at, e.name, e.source, e.person_id, e.validation_state, \
@@ -667,14 +687,18 @@ async fn rows_page(
         }
     }
     let traces: Vec<Uuid> = rows.iter().map(|row| row.trace_id).collect();
-    let traced: HashSet<Uuid> = sqlx::query_scalar(TRACES_WITH_DECISIONS)
-        .bind(workspace.as_uuid())
-        .bind(&traces)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(bounded)?
-        .into_iter()
-        .collect();
+    let traced: HashSet<Uuid> = if with_decisions {
+        sqlx::query_scalar(TRACES_WITH_DECISIONS)
+            .bind(workspace.as_uuid())
+            .bind(&traces)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(bounded)?
+            .into_iter()
+            .collect()
+    } else {
+        HashSet::new()
+    };
     drop(tx);
 
     let next = if more {
@@ -804,6 +828,18 @@ mod tests {
         };
         assert!(flag("first_seen"), "it created the person");
         assert!(!flag("seen_again"), "it changed nothing");
+
+        let (_, prepared) = explore_start(&pool, ws, &scope, LIMITS, true)
+            .await
+            .unwrap();
+        let export = explore_rows_prepared(&pool, ws, &scope, &prepared, None, 100, LIMITS)
+            .await
+            .unwrap();
+        assert_eq!(export.rows.len(), page.rows.len());
+        assert!(
+            export.rows.iter().all(|row| !row.has_decisions),
+            "export pages skip the decision lookup"
+        );
 
         sqlx::query(
             "INSERT INTO decision_records \
@@ -1525,8 +1561,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(total, 2);
-        assert_eq!(first.rows[0], plain.rows[0]);
-        assert_eq!(second.rows[0], plain.rows[1]);
+        let undecided = |row: &ExploreRow| ExploreRow {
+            has_decisions: false,
+            ..row.clone()
+        };
+        assert_eq!(first.rows[0], undecided(&plain.rows[0]));
+        assert_eq!(second.rows[0], undecided(&plain.rows[1]));
         assert!(second.next.is_none());
     }
 }
