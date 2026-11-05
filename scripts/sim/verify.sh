@@ -286,7 +286,7 @@ g_ingest() {
 
 t_consistency_search() {
   local n id_a id_b email wrong=0
-  for i in $(seq 1 20); do
+  for _ in $(seq 1 20); do
     n=$(((RANDOM * 32768 + RANDOM) % $(env_value SIM_PEOPLE) + 1))
     id_a=$(person_by external:customer_id "$(printf 'C%07d' "$n")")
     [[ -n "$id_a" ]] || { wrong=$((wrong + 1)); continue; }
