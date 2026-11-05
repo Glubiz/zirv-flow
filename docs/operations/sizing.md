@@ -70,8 +70,8 @@ scheduler 4, 10 M people), in the [M8 validation report](../benchmarks/m8-valida
   messages/s, so set 12 to 16 to reach 300 messages/s. At 16 the worker used its whole
   4-core budget and a queue still stood, so more send rate needs more worker cores.
 - **Job claims.** Uncapped, 16 slots claimed and completed about 9,900 jobs/s. With
-  `worker.max_running_per_workspace` set the claims serialise: 1,215 jobs/s at cap 4 and
-  2,316 jobs/s at cap 16.
+  `worker.max_running_per_workspace` set the claims serialise: 1,215 jobs/s at cap 4
+  with 16 slots and 2,316 jobs/s at cap 16 with 32 slots.
 - **One export at a time.** `explorer.max_exports` (default 1) keeps ingest at 2,000/s while
   CSV exports run; before it, exports alone collapsed ingest. With 16 explorer clients
   about 83 % of requests answer `explorer_busy`, and an admitted 1 M-row export can
@@ -80,7 +80,8 @@ scheduler 4, 10 M people), in the [M8 validation report](../benchmarks/m8-valida
 - **Timer wakes at 10 M.** A mass wake of waiting enrollments drained at about 2,600 to
   3,000 wakes/s; waking 10 M enrollments over 40 minutes needs about 4,200/s. The p99
   lateness at 10 M was 1,401 s with no load and 2,304 s with 2,000 events/s running. The
-  60 s target is met at 1 million waiting enrollments only ([M5](../benchmarks/m5-flows.md)).
+  60 s target is met only at 1 million waiting enrollments with no ingest load
+  ([M5](../benchmarks/m5-flows.md)).
 - **Burst drain.** A 10-minute burst at 10,000 events/s is accepted without rejection
   (API p99 153.7 ms), but its 4.04 M row backlog took 1,506 s to drain, against the 900 s
   target. Sustained 2,000 events/s kept inbox-to-applied p95 at 65 ms.
