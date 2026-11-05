@@ -23,8 +23,11 @@ usage: sim.sh <command>
   reset                     remove the stack, its volumes and .state/ (this project only)
   logs <service> [args]     docker compose logs
   credentials               print the generated users, passwords and keys
-  status                    container health and fixture counters
-Later groups add: provision, start, verify, rate, burst, pause, resume, sync-all, export-now, blast.
+  status                    container health, fixture counters and traffic
+  seed [sources|ingest-people|all] [--people N]  load the company sources and/or the people backbone
+  traffic [on|off]          start or stop the four generators
+  rate N | burst [factor] [seconds] | pause | resume | export-now   traffic controls
+Later groups add: provision, start, verify, sync-all, blast.
 TEXT
 }
 
@@ -128,9 +131,73 @@ cmd_status() {
   metric smtp-sink 8025 sim_smtp_messages_total || true
   metric mailer 8000 sim_mailer_messages_total || true
   metric receiver 8000 sim_receiver_accepted_total || true
+  status_traffic
   echo '-- database'
   compose exec -T zf-db psql -XqAt -U zirv -d zirv_flow \
     -c "SELECT 'size ' || pg_size_pretty(pg_database_size('zirv_flow'))" 2> /dev/null || true
+}
+
+control_set() {
+  # Atomic: write a temp file in the same directory, then rename over control.json.
+  local tmp="$STATE/control.json.tmp"
+  jq "$@" "$STATE/control.json" > "$tmp" && mv "$tmp" "$STATE/control.json"
+}
+
+cmd_rate() {
+  [[ ${1:-} =~ ^[0-9]+$ ]] || die 'usage: sim.sh rate <events per second, daily mean>'
+  # shellcheck disable=SC2016  # $r is a jq variable
+  control_set --argjson r "$1" '.rate = $r'
+  say "daily mean rate set to $1 events/s"
+}
+
+cmd_burst() {
+  local factor=${1:-3} seconds=${2:-60}
+  [[ $factor =~ ^[0-9]+([.][0-9]+)?$ && $seconds =~ ^[0-9]+$ ]] || die 'usage: sim.sh burst [factor] [seconds]'
+  # shellcheck disable=SC2016  # jq variables
+  control_set --argjson f "$factor" --argjson until "$(($(date +%s) + seconds))" \
+    '.burst_factor = $f | .burst_until = $until'
+  say "burst x$factor for ${seconds}s"
+}
+
+cmd_pause() { control_set '.paused = true | .paused_reason = "operator"'; say 'generators paused'; }
+cmd_resume() { control_set '.paused = false | del(.paused_reason)'; say 'generators resumed'; }
+
+cmd_export_now() {
+  : > "$STATE/export-now"
+  say 'asked gen-changes to regenerate warehouse.csv (it picks the flag up within seconds)'
+}
+
+# seed [sources|ingest-people|all] [seed.py arguments]
+cmd_seed() {
+  local what=${1:-all}
+  [[ $# -eq 0 ]] || shift
+  compose --profile data run --rm seed python -B /gen/seed.py "$what" "$@"
+}
+
+cmd_traffic() {
+  case "${1:-on}" in
+    on) compose --profile traffic up -d --no-deps gen-ingest gen-changes gen-kafka gen-forms ;;
+    off) compose --profile traffic stop gen-ingest gen-changes gen-kafka gen-forms ;;
+    *) die 'usage: sim.sh traffic on|off' ;;
+  esac
+}
+
+zf_sql() { compose exec -T zf-db psql -XqAt -F ' ' -U zirv -d zirv_flow -c "$1" 2> /dev/null; }
+
+status_traffic() {
+  echo '-- traffic'
+  if [[ -f "$STATE/control.json" ]]; then
+    jq -r '"control: rate \(.rate) burst x\(.burst_factor) paused \(.paused)"' "$STATE/control.json"
+  fi
+  local file
+  for file in "$STATE"/stats/*.json; do
+    [[ -f "$file" ]] || continue
+    jq -r '"\(.name): achieved \(.achieved_per_s)/s of target \(.target_per_s)/s, sent \(.sent_total), late \(.late_total), dropped \(.dropped_total), errors \(.errors_total)"' "$file"
+  done
+  zf_sql "SELECT 'people ' || count(*) FROM people WHERE merged_into IS NULL" || true
+  zf_sql "SELECT 'inbox age ' || round(coalesce(extract(epoch FROM now() - min(received_at)), 0)::numeric, 1) || ' s, ' || count(*) || ' queued' FROM ingest_inbox" || true
+  zf_sql "SELECT 'events (estimate) ' || coalesce(sum(n_live_tup), 0) FROM pg_stat_user_tables WHERE relname ~ '^events_(default|y[0-9]{4}m[0-9]{2})\$'" || true
+  zf_sql "WITH e AS (SELECT coalesce(sum(n_live_tup), 0) AS n FROM pg_stat_user_tables WHERE relname ~ '^events_(default|y[0-9]{4}m[0-9]{2})\$') SELECT 'db size ' || pg_size_pretty(pg_database_size('zirv_flow')) || ', bytes per event ' || CASE WHEN n > 0 THEN (pg_database_size('zirv_flow') / n)::bigint::text ELSE 'n/a' END FROM e" || true
 }
 
 later() { die "$1 is added by a later group (A2: traffic and seed, B: provisioning and verify)"; }
@@ -147,7 +214,14 @@ main() {
     logs) compose logs --no-color "$@" ;;
     credentials) cmd_credentials ;;
     status) cmd_status ;;
-    provision | start | verify | rate | burst | pause | resume | sync-all | export-now | blast)
+    rate) cmd_rate "$@" ;;
+    burst) cmd_burst "$@" ;;
+    pause) cmd_pause ;;
+    resume) cmd_resume ;;
+    export-now) cmd_export_now ;;
+    seed) cmd_seed "$@" ;;
+    traffic) cmd_traffic "$@" ;;
+    provision | start | verify | sync-all | blast)
       later "$command" ;;
     *) usage >&2; exit 2 ;;
   esac

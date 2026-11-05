@@ -51,6 +51,13 @@ x-generator: &generator
   pull_policy: never
   networks: [sim]
   restart: unless-stopped
+  environment: &gen-env
+    SIM_PEOPLE: ${SIM_PEOPLE:-100000}
+    SIM_RETENTION_DAYS: ${SIM_RETENTION_DAYS:-5}
+    SIM_MAX_DB_GB: ${SIM_MAX_DB_GB:-120}
+    SIM_COMPANY_PG_PASSWORD: ${SIM_COMPANY_PG_PASSWORD:?run sim.sh init}
+    SIM_MYSQL_ROOT_PASSWORD: ${SIM_MYSQL_ROOT_PASSWORD:?run sim.sh init}
+    SIM_PG_PASSWORD: ${SIM_PG_PASSWORD:?run sim.sh init}
   volumes:
     - ./gen:/gen:ro
     - ${SIM_STATE:?run sim.sh}:/sim
@@ -379,6 +386,10 @@ services:
     <<: *generator
     profiles: [data]
     restart: "no"
+    volumes:
+      - ./gen:/gen:ro
+      - ${SIM_STATE:?run sim.sh}:/sim
+      - billing-data:/data
     command: ["python", "-B", "/gen/seed.py"]
     mem_limit: 1536m
     cpus: 1
@@ -393,6 +404,10 @@ services:
   gen-changes:
     <<: *generator
     profiles: [traffic]
+    volumes:
+      - ./gen:/gen:ro
+      - ${SIM_STATE:?run sim.sh}:/sim
+      - billing-data:/data
     command: ["python", "-B", "/gen/changes.py"]
     mem_limit: 256m
     cpus: 0.5

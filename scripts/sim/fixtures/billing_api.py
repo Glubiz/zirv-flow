@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""The "billing API" skeleton: cursor-paginated accounts and payments out of SQLite.
+"""The "billing API": cursor-paginated accounts and payments out of SQLite.
 
 GET /v1/accounts and /v1/payments take `limit`, `cursor` and `updated_since` and answer
 {"data": [...], "next_cursor": <string or null>}. Every call needs the X-API-Key header when
 /sim/keys/billing.json holds {"api_key": "..."}; without that file the API is open. The world
-generator (group A2) fills /data/billing.db; this skeleton creates the empty tables.
+generator (gen/seed.py) fills /data/billing.db and gen/changes.py keeps writing to it; closed accounts stay
+in the feed with status "closed" (the source maps that to a delete).
 """
 
 import json
