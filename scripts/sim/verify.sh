@@ -460,12 +460,33 @@ t_suppressed_send_skipped() {
 }
 second_send_skipped() { [[ $(zf_sql "SELECT count(*) FROM messages WHERE person_id = '$1' AND status = 'skipped'") -ge 1 ]]; }
 
+# A recipient the SMTP relay refuses with an enhanced 5.1.1 code (the sink does so for "bounce"
+# local parts) is a hard bounce over SMTP too: the order confirmation, sent through the SMTP
+# destination, ends failed/hard_bounce and the address is suppressed for the organization.
+SMTP_BOUNCE_ADDRESS="bounce-smtp-$RUN@example.org"
+smtp_bounce_person() { person_by email "$SMTP_BOUNCE_ADDRESS"; }
+smtp_bounce_check() { post "$P/suppressions/check" "$(jq -nc --arg v "$SMTP_BOUNCE_ADDRESS" '{kind:"email",value:$v}')" | jq -r '"\(.suppressed) \(.scope)"'; }
+smtp_bounce_message() { zf_sql "SELECT string_agg(status || '/' || coalesce(reason, ''), ', ') FROM messages WHERE NOT test AND person_id = '$(smtp_bounce_person)'"; }
+t_delivery_smtp_hard_bounce() {
+  local user="verify-smtp-bounce-$RUN"
+  ingest /ingest/identify "$(jq -nc --arg e "$SMTP_BOUNCE_ADDRESS" --arg u "$user" '{userId:$u, identifiers:{email:$e}, traits:{first_name:"Bounce"}}')" > /dev/null
+  eventually 60 smtp_bounce_person_exists
+  ingest /ingest/track "$(jq -nc --arg u "$user" --arg id "verify-smtp-bounce-order-$RUN" \
+    '{userId:$u, event:"order_placed", properties:{order_id:$id, amount:20, currency:"EUR", category:"verify", items:1}, messageId:$id}')" > /dev/null
+  eventually 300 smtp_bounce_suppressed
+  MESSAGE="messages of the address: $(smtp_bounce_message); the API check says $(smtp_bounce_check)"
+  smtp_bounce_suppressed
+}
+smtp_bounce_person_exists() { [[ -n "$(smtp_bounce_person)" ]]; }
+smtp_bounce_suppressed() { [[ $(smtp_bounce_message) == 'failed/hard_bounce' && $(smtp_bounce_check) == 'true organization' ]]; }
+
 g_delivery() {
   check delivery_blast_started t_delivery_start
   check delivery_messages_sent t_delivery_sent
   check delivery_feedback_delivered t_delivery_delivered
   check delivery_open_and_click_seen t_delivery_open_click
   check delivery_hard_bounce_suppresses t_hard_bounce_suppresses
+  check delivery_smtp_hard_bounce_suppresses t_delivery_smtp_hard_bounce
   check delivery_suppressed_send_skipped t_suppressed_send_skipped
 }
 
