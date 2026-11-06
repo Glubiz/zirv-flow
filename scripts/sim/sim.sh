@@ -2,17 +2,8 @@
 # The simulated production environment (design #513). See `sim.sh help`.
 set -euo pipefail
 umask 022
-# Git Bash would rewrite /CN=... and container paths in arguments otherwise.
-export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
-
-SIM_PROJECT=zirv-flow-sim
-SIM_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-SIM_DIR=$(
-  if command -v cygpath > /dev/null 2>&1; then cygpath -m "$SIM_DIR"; else printf '%s' "$SIM_DIR"; fi
-)
-STATE="$SIM_DIR/.state"
 # shellcheck source=scripts/sim/lib.sh
-source "$SIM_DIR/lib.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 usage() {
   cat <<'TEXT'
@@ -89,7 +80,10 @@ DO $$ BEGIN
 END $$;
 GRANT pg_monitor TO sim_monitor;
 SQL
-  if [[ -f "$SIM_DIR/gen/seed.py" ]]; then
+  # Seeding drops and reloads the company tables and the Kafka backlog: once per set of volumes.
+  if [[ -f "$STATE/seeded-sources" ]]; then
+    say 'the company sources are already seeded (sim.sh reset to start over)'
+  else
     say 'seeding the company sources'
     cmd_seed sources
   fi
@@ -177,6 +171,7 @@ cmd_seed() {
   local what=${1:-all}
   [[ $# -eq 0 ]] || shift
   compose --profile data run --rm seed python -B /gen/seed.py "$what" "$@"
+  [[ $what == ingest-people ]] || : > "$STATE/seeded-sources"
 }
 
 cmd_traffic() {
@@ -186,8 +181,6 @@ cmd_traffic() {
     *) die 'usage: sim.sh traffic on|off' ;;
   esac
 }
-
-zf_sql() { compose exec -T zf-db psql -XqAt -F ' ' -U zirv -d zirv_flow -c "$1" 2> /dev/null; }
 
 status_traffic() {
   echo '-- traffic'
@@ -226,20 +219,15 @@ cmd_start() {
   if [[ -n "${SIM_TRAFFIC_AFTER_BACKFILL:-}" ]]; then
     # Under the CPU cap the inbox cannot drain while the first syncs run (B findings); start traffic last.
     bash "$SIM_DIR/provision.sh" flows
-    stamp_event traffic
+    stamp traffic
     cmd_traffic on
   else
-    stamp_event traffic
+    stamp traffic
     cmd_traffic on
     bash "$SIM_DIR/provision.sh" flows
   fi
   print_timeline
 }
-
-stamp_event() { grep -q "^$1 " "$STATE/timeline" 2> /dev/null || echo "$1 $(date +%s)" >> "$STATE/timeline"; }
-
-cmd_sync_all() { bash "$SIM_DIR/provision.sh" sync-all; }
-cmd_blast() { bash "$SIM_DIR/provision.sh" blast; }
 
 main() {
   local command=${1:-help}
@@ -263,8 +251,8 @@ main() {
     provision) bash "$SIM_DIR/provision.sh" "$@" ;;
     start) cmd_start "$@" ;;
     verify) bash "$SIM_DIR/verify.sh" "$@" ;;
-    sync-all) cmd_sync_all ;;
-    blast) cmd_blast ;;
+    sync-all) bash "$SIM_DIR/provision.sh" sync-all ;;
+    blast) bash "$SIM_DIR/provision.sh" blast ;;
     *) usage >&2; exit 2 ;;
   esac
 }

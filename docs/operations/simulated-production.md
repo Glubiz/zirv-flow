@@ -40,7 +40,8 @@ scripts/sim/sim.sh down                     # stop, keep the volumes
 scripts/sim/sim.sh reset                    # remove the stack, its volumes and .state/ (this project only)
 ```
 
-`start` runs `up` (TLS material, the tools image, every service, the company databases' seed), then
+`start` runs `up` (TLS material, the tools image, every service, the company databases' seed, the
+first time only), then
 `provision` (owner, users, workspace, registry, the people backbone, credentials, sources, sending,
 templates, the first syncs), waits for the ready gate, turns the generators on, and finally waits
 for the backfill before it publishes the flows that react to events. Every stage is idempotent, so
@@ -187,4 +188,8 @@ the disk fills.
 ## Reset
 
 `sim.sh reset` removes this project's containers, volumes and `scripts/sim/.state/`, and nothing
-else. A Kafka offset cannot be reset from the app, so a re-seed needs `reset`, not a new topic.
+else. `up` and `start` seed the company sources once: a marker, `scripts/sim/.state/seeded-sources`,
+records it, so `down` followed by `up` or `start` resumes the same world and does not load the Kafka
+backlog again. A Kafka offset cannot be reset from the app, so seeding on purpose (a fresh world)
+needs `reset` and a new `start`, not a new topic. `sim.sh seed sources` still reloads the sources by
+hand, and the Kafka backlog with them.
