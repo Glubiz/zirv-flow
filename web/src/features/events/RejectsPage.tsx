@@ -172,7 +172,7 @@ interface RejectRowProps {
 
 function RejectRow({ workspaceId, reject, selectable, selected, onSelect }: RejectRowProps) {
   const sample = reject.sample as { properties?: Record<string, unknown>; masked?: string[] };
-  // The server replays only event rejects that are still open; a record reject was not refused whole.
+  // The server replays only event rejects that are still open.
   const replayable = reject.kind === "event";
   const subject = replayable ? `${reject.name ?? "rejected"} event` : "record";
   return (
