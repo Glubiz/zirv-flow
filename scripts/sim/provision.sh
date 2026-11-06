@@ -5,15 +5,10 @@
 # Every stage is idempotent: it looks a thing up by name before it creates it.
 set -euo pipefail
 umask 022
-export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
 
-SIM_PROJECT=zirv-flow-sim
-SIM_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-SIM_DIR=$(if command -v cygpath > /dev/null 2>&1; then cygpath -m "$SIM_DIR"; else printf '%s' "$SIM_DIR"; fi)
-STATE="$SIM_DIR/.state"
-DEFS="$SIM_DIR/defs"
 # shellcheck source=scripts/sim/lib.sh
-source "$SIM_DIR/lib.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+DEFS="$SIM_DIR/defs"
 
 STEP=start
 WS=
@@ -241,8 +236,6 @@ stage_forms() {
 }
 
 # json_list <jq-array-or-wrapper-key>: reads a list response as a plain array.
-as_array() { jq -c --arg k "$1" 'if type == "array" then . else .[$k] end'; }
-
 stage_people() {
   step 'people backbone'
   compose --profile data run --rm seed python -B /gen/seed.py ingest-people
@@ -409,11 +402,6 @@ publish_flows() {
 
 PULL_SOURCES=(postgres mysql billing warehouse)
 
-stamp() { # stamp <event>: records when a phase was reached, once per fresh start
-  mkdir -p "$STATE"
-  grep -q "^$1 " "$STATE/timeline" 2> /dev/null || echo "$1 $(date +%s)" >> "$STATE/timeline"
-}
-
 people_count() { zf_sql "SELECT count(*) FROM people WHERE merged_into IS NULL"; }
 
 # pending_streams: the pull streams that have not finished a first run yet, one per line.
@@ -496,8 +484,6 @@ stage_flows() {
   publish_flows late
   stamp flows
 }
-
-zf_sql() { compose exec -T zf-db psql -XqAt -F ' ' -U zirv -d zirv_flow -c "$1" 2> /dev/null | tr -d '\r'; }
 
 # dest_ensure <name> <existing-array> <body>: the id of the destination, created when missing.
 dest_ensure() {

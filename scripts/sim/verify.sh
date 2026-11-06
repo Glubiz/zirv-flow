@@ -6,15 +6,10 @@
 #   --provision runs the quick structural subset that provisioning ends with.
 set -uo pipefail
 umask 022
-export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
 
-SIM_PROJECT=zirv-flow-sim
-SIM_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-SIM_DIR=$(if command -v cygpath > /dev/null 2>&1; then cygpath -m "$SIM_DIR"; else printf '%s' "$SIM_DIR"; fi)
-STATE="$SIM_DIR/.state"
-KEYS="$STATE/keys"
 # shellcheck source=scripts/sim/lib.sh
-source "$SIM_DIR/lib.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+KEYS="$STATE/keys"
 
 WS=
 CSRF=
@@ -29,8 +24,6 @@ P="/workspaces/$WS"
 
 # ---------------------------------------------------------------- helpers
 
-as_array() { jq -c --arg k "$1" 'if type == "array" then . else .[$k] end'; }
-zf_sql() { compose exec -T zf-db psql -XqAt -F ' ' -U zirv -d zirv_flow -c "$1" 2> /dev/null | tr -d '\r'; }
 get() { local out; out=$(api GET "$1" 2> /dev/null) || return 1; [[ ${out##*$'\n'} =~ ^2 ]] || return 1; printf '%s' "${out%$'\n'*}"; }
 post() { local out; out=$(api POST "$1" "${2:-\{\}}" 2> /dev/null) || return 1; [[ ${out##*$'\n'} =~ ^2 ]] || return 1; printf '%s' "${out%$'\n'*}"; }
 source_id() { cat "$KEYS/source-$1.id"; }

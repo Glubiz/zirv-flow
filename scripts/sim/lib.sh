@@ -1,13 +1,17 @@
 # shellcheck shell=bash
-# Sourced helpers of the simulated production environment. The caller sets SIM_DIR and STATE.
+# Sourced helpers of the simulated production environment. Sets SIM_PROJECT, SIM_DIR and STATE.
+
+# Git Bash would rewrite /CN=... and container paths in arguments otherwise.
+export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
+
+SIM_PROJECT=zirv-flow-sim
+# A path both bash and the Windows docker.exe accept: C:/a/b on Git Bash, unchanged elsewhere.
+SIM_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+if command -v cygpath > /dev/null 2>&1; then SIM_DIR=$(cygpath -m "$SIM_DIR"); fi
+STATE="$SIM_DIR/.state"
 
 die() { echo "sim: $*" >&2; exit 1; }
 say() { echo "sim: $*"; }
-
-# A path both bash and the Windows docker.exe accept: C:/a/b on Git Bash, unchanged elsewhere.
-native_path() {
-  if command -v cygpath > /dev/null 2>&1; then cygpath -m "$1"; else printf '%s\n' "$1"; fi
-}
 
 need_tools() {
   local tool
@@ -109,6 +113,17 @@ sign_in() {
   OWNER_ID=$(jq -er .user.id <<< "$session")
   # shellcheck disable=SC2034
   [[ ! -f "$STATE/keys/workspace.id" ]] || WS=$(cat "$STATE/keys/workspace.id")
+}
+
+# as_array <key>: the input as an array, taking .<key> when the API wrapped it in an object.
+as_array() { jq -c --arg k "$1" 'if type == "array" then . else .[$k] end'; }
+
+zf_sql() { compose exec -T zf-db psql -XqAt -F ' ' -U zirv -d zirv_flow -c "$1" 2> /dev/null | tr -d '\r'; }
+
+# stamp <event>: records when a phase was reached, once per fresh start.
+stamp() {
+  mkdir -p "$STATE"
+  grep -q "^$1 " "$STATE/timeline" 2> /dev/null || echo "$1 $(date +%s)" >> "$STATE/timeline"
 }
 
 # The Windows jq prints CRLF line ends, which end up inside ids captured with $(...).
