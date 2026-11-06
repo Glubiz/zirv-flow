@@ -2471,13 +2471,13 @@ mod tests {
     async fn batches_of_two_streams_over_the_same_people_in_opposite_orders_both_commit(
         pool: PgPool,
     ) {
-        use std::sync::Arc;
-
-        use tokio::sync::Barrier;
-
-        use super::super::testing::{source_with_stream, started_run, workspace};
-
         crate::decision_testing::checked(pool, |pool| async move {
+            use std::sync::Arc;
+
+            use tokio::sync::Barrier;
+
+            use super::super::testing::{source_with_stream, started_run, workspace};
+
             const PEOPLE: usize = 300;
             let ws = workspace(&pool, "one").await;
             let (crm, crm_stream) = source_with_stream(&pool, ws, "crm", "full_refresh").await;
