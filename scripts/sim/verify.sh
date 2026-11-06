@@ -362,7 +362,7 @@ owner_mail_seq() {
 import json, urllib.request
 m = json.load(urllib.request.urlopen('http://127.0.0.1:8025/messages.json', timeout=3))
 print(max([x['seq'] for x in m if 'owner@sim.example.com' in x['recipients']] or [0]))
-" 2> /dev/null | tr -d ''
+" 2> /dev/null | tr -d '\r'
 }
 owner_mail_newer() { [[ $(owner_mail_seq) -gt $1 ]]; }
 sink_increased() { [[ $(counter "$2" "$3" "$4") -gt $1 ]]; }
@@ -436,13 +436,15 @@ open_and_click() { [[ $(engaged email.opened) -ge 1 && $(engaged email.clicked) 
 
 t_hard_bounce_suppresses() {
   eventually 300 bounce_suppressed
-  MESSAGE="hard-bounce events of the address: $(bounce_events), organization suppressions +$(( $(org_suppressions) - ORG_BEFORE )); the API check says $(post "$P/suppressions/check" "$(jq -nc --arg v "$BOUNCE_ADDRESS" '{kind:"email",value:$v}')" | jq -r .suppressed) (B findings: it reads workspace scope only)"
+  MESSAGE="hard-bounce events of the address: $(bounce_events), organization suppressions +$(( $(org_suppressions) - ORG_BEFORE )); the API check says $(bounce_check)"
   bounce_suppressed
 }
-# A hard bounce suppresses the address for the whole organization, a scope the suppressions API does not show.
+# A hard bounce suppresses the address for the whole organization: GET /suppressions lists workspace
+# rows only, and the check answers with the scope.
+bounce_check() { post "$P/suppressions/check" "$(jq -nc --arg v "$BOUNCE_ADDRESS" '{kind:"email",value:$v}')" | jq -r '"\(.suppressed) \(.scope)"'; }
 org_suppressions() { zf_sql "SELECT count(*) FROM suppressions WHERE scope = 'organization'"; }
 bounce_events() { zf_sql "SELECT count(*) FROM events WHERE name = 'email.bounced' AND person_id = '$(person_by email "$BOUNCE_ADDRESS")' AND properties->>'kind' = 'hard'"; }
-bounce_suppressed() { [[ $(bounce_events) -ge 1 && $(org_suppressions) -gt $ORG_BEFORE ]]; }
+bounce_suppressed() { [[ $(bounce_events) -ge 1 && $(org_suppressions) -gt $ORG_BEFORE && $(bounce_check) == 'true organization' ]]; }
 
 t_suppressed_send_skipped() {
   local person list
