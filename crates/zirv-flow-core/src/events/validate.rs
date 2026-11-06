@@ -9,7 +9,11 @@ use super::property::{EventMode, PropertyType, SchemaProperty, is_name};
 
 const MAX_INFERRED_PROPERTIES: usize = 200;
 
-/// Why a property failed.
+/// Why a property failed, or why a trait was left out of a record.
+///
+/// Event validation produces the first four. The rest are the codes of `DropReason` that a
+/// `traits_dropped` reject stores (`wrong_type` is shared); the rejects list reads them back, so
+/// every stored code must be a variant here.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasonCode {
@@ -17,6 +21,10 @@ pub enum ReasonCode {
     WrongType,
     NotInEnum,
     UnplannedProperty,
+    InvalidKey,
+    ArchivedKey,
+    TooLong,
+    NotInferable,
 }
 
 impl ReasonCode {
@@ -26,6 +34,10 @@ impl ReasonCode {
             Self::WrongType => "wrong_type",
             Self::NotInEnum => "not_in_enum",
             Self::UnplannedProperty => "unplanned_property",
+            Self::InvalidKey => "invalid_key",
+            Self::ArchivedKey => "archived_key",
+            Self::TooLong => "too_long",
+            Self::NotInferable => "not_inferable",
         }
     }
 }
@@ -335,5 +347,30 @@ mod tests {
         assert_eq!(ValidationState::Flagged.as_str(), "flagged");
         assert_eq!(ValidationState::Unplanned.as_str(), "unplanned");
         assert_eq!(ReasonCode::UnplannedProperty.as_str(), "unplanned_property");
+    }
+
+    #[test]
+    fn every_code_a_dropped_trait_stores_is_a_readable_reason_code() {
+        for dropped in crate::people::DropReason::ALL {
+            let read: ReasonCode = serde_json::from_value(Value::from(dropped.as_str()))
+                .unwrap_or_else(|_| panic!("{} is not a ReasonCode", dropped.as_str()));
+            assert_eq!(read.as_str(), dropped.as_str());
+        }
+    }
+
+    #[test]
+    fn validating_properties_never_yields_a_trait_drop_code() {
+        let schema = [declared("tier", PropertyType::String, true)];
+        let properties = json!({"tier": 5, "extra": 1});
+        let reasons = check_properties(&map(properties), &schema);
+        let produced: Vec<_> = reasons.iter().map(|reason| reason.reason).collect();
+        for code in [
+            ReasonCode::InvalidKey,
+            ReasonCode::ArchivedKey,
+            ReasonCode::TooLong,
+            ReasonCode::NotInferable,
+        ] {
+            assert!(!produced.contains(&code), "{code:?}");
+        }
     }
 }

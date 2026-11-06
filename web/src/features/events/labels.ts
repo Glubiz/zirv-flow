@@ -31,7 +31,10 @@ export const REASONS: Record<string, string> = {
   wrong_type: "A property has the wrong type",
   not_in_enum: "A property is not one of the allowed values",
   unplanned_property: "A property is not in the schema",
+  invalid_key: "The field name is not valid",
   archived_key: "The field is archived",
+  too_long: "The value is too long",
+  not_inferable: "The field has no type to infer from this value",
 };
 
 export const REJECT_REASONS: Record<string, string> = {
