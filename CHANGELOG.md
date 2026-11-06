@@ -15,3 +15,23 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.245.0 (2026-11-06)
+
+### Fixes
+
+- the archive guard also covers active forwarding rules (#537)
+- refuse archiving a destination a published flow uses (#537)
+
+### Documentation
+
+- correct the SMTP hard-bounce, failed-delivery and Retry-After sentences, document the destination guard (#537)
+
+### Chores
+
+- mark the new forwarding guard tests as needing PostgreSQL (#537)
+- share the destination URI helper between the archive tests (#537)
+
+### Other
+
+- sim: the SMTP sink answers 5.1.1 for bounce recipients and verify checks the SMTP hard bounce (#537)
+
