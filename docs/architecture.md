@@ -1414,6 +1414,7 @@ envelope stays. Raw-URL webhooks have no rate bucket.
   `frequency_cap` (both #221), `render` (the pool; every failure is `failed: render_error`),
   `rate_limit` and `delivery`. The sender check comes before the gates that read the person
   because it needs nothing about them.
+- **Archive guard (#537).** `DELETE /destinations/{id}` is refused with 409 `destination_in_use` and the flows (`flows`: `{flow_id, flow_name}`) while a `published` flow's running version has a node naming the destination, by the rule of the template guard (`active_published_flows_using_destination`); a draft, paused or archived flow does not block. A flow publish share-locks the destinations it names (`lock_destinations_shared`) before it validates them, so an archive and a flow publish cannot both commit.
 - **Rate limit.** The destination is loaded again for every message, and an archived one is
   refused whatever a held block of tokens says (`failed: destination_unavailable`). With no token
   the job ends and a copy runs at the instant the bucket will hold one, under the key

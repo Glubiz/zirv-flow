@@ -296,6 +296,7 @@ A test reads the sources and fails when a code used there is missing from this l
 | `sample_not_supported` | Only a webhook stream takes a sample payload |
 | `domain_status_unsupported` | The destination declares no domain-status request |
 | `destination_archived` | The destination is archived |
+| `destination_in_use` | A published flow uses the destination; `flows` lists them |
 | `destination_kind_unavailable` | The destination type is not available in this build |
 | `destination_unsupported` | The destination type cannot forward events |
 | `credential_archived` | The credential is archived |

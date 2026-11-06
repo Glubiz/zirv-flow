@@ -45,12 +45,20 @@ verifies TLS against the configured host, authenticates, and signs the message
 with the verified domain's DKIM key. It sends HTML and plain text together, with
 unsubscribe headers for marketing mail. Its message id and idempotency header
 stay the same on retries, but SMTP cannot guarantee the relay deduplicates a
-message accepted just before the connection fails. Temporary replies retry;
-a permanent recipient failure is a hard bounce.
+message accepted just before the connection fails. Temporary replies retry.
+A permanent refusal of the recipient that carries an enhanced status code 5.1.x at
+RCPT or DATA (for example `550 5.1.1 user unknown`; not 5.1.7 or 5.1.8) is a hard
+bounce: the message fails as `hard_bounce` and the address is suppressed in the
+whole organization. Any other permanent reply, including a bare `550` with no
+enhanced code, fails the message as `smtp_rejected` and suppresses nobody.
 
 An HTTP email API instead uses a [provider destination](#email-provider-destinations).
 Both use workspace [credentials](sources.md#workspace-credentials), which can be
 rotated without replacing the destination.
+
+Archiving a destination is refused with 409 `destination_in_use`, listing the flows, while a
+published flow's running version has a step that uses it. Archive the flow or publish a
+version without the destination first; a draft, paused or archived flow does not block.
 
 ## Sending domains
 
@@ -212,7 +220,7 @@ none. With no active rule the cost is one indexed lookup per batch. An `event.fo
 destination delivers the rows with the webhook's signing, the guarded client and the destination's
 rate limit, under the idempotency key `sha256(event id:destination id)`, which every retry and
 re-drive reuses (the webhook sends it as `X-Zirv-Idempotency-Key`), so delivery is at least once.
-A retryable answer backs off (5 s doubling to an hour, or the `Retry-After`); a terminal answer, or
+A retryable answer backs off (5 s doubling to an hour, or the `Retry-After` when that is longer); a terminal answer, or
 the eighth attempt, makes the row a dead letter. Each retry and each dead letter appends a decision
 (`event.forward`) with ids and a fixed code. Delivered rows lose their payload at once and are
 removed after seven days.

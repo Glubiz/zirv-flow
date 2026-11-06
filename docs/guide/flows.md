@@ -207,7 +207,11 @@ The send worker reads the newest published template when it handles the
 message. A template fix can therefore reach later sends without a new flow version.
 Queuing a message does not pin the template version.
 Sending checks the current sender, address and [send gates](#send-gates).
-A skipped message continues the flow; a failed delivery can leave a failed step.
+A skipped or failed message does not stop the flow: the person moves on and the
+enrollment can finish as completed. Read the outcome on the message (the
+person's Messages view) and as "send failed" on the step in Results. A failed step is
+a different thing: it comes from the flow itself (for example a wait that cannot
+be computed or a split with no weight) and can be retried or skipped.
 
 **Common mistake:** assuming a template draft is what the flow sends.
 **Fix:** publish the template and inspect the message's version and result.
