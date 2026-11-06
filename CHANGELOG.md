@@ -15,3 +15,18 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.244.0 (2026-11-06)
+
+### Fixes
+
+- keep the replay comment true of every record reject
+- keep issues on the segment read only; read dropped-trait rejects as records (#535, #534)
+- refuse archiving a trait a live segment reads (#535)
+- a merge never stamps an exit before the row's entry (#536)
+- leave a reject naming the traits an identify dropped (#534)
+
+### Chores
+
+- merge the ingest imports and wrap the merge close statement and comment (#536)
+- keep the dropped-traits test body inside the decision wrapper (#534)
+
