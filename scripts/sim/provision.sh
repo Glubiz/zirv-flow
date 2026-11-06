@@ -418,15 +418,16 @@ people_count() { zf_sql "SELECT count(*) FROM people WHERE merged_into IS NULL";
 
 # pending_streams: the pull streams that have not finished a first run yet, one per line.
 pending_streams() {
-  local file id
+  local file id streams
   for file in "${PULL_SOURCES[@]}"; do
     id=$(< "$KEYS/source-$file.id")
-    ws GET "/sources/$id/streams" | as_array streams |
+    streams=$(ws GET "/sources/$id/streams") || return 1
+    as_array streams <<< "$streams" |
       jq -r --arg f "$file" '.[] | select(.enabled and .sync_mode != "stream" and .freshness.last_success_at == null) | "\($f)/\(.name)"'
   done
 }
 
-backfill_done() { [[ -z "$(pending_streams)" ]]; }
+backfill_done() { local pending; pending=$(pending_streams) || return 1; [[ -z "$pending" ]]; }
 
 destinations_ok() {
   local id out

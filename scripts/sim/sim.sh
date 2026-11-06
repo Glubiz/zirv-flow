@@ -223,9 +223,16 @@ cmd_start() {
   cmd_up "$@"
   say "start: provisioning"
   bash "$SIM_DIR/provision.sh" base registry people connections sending templates syncs gate
-  stamp_event traffic
-  cmd_traffic on
-  bash "$SIM_DIR/provision.sh" flows
+  if [[ -n "${SIM_TRAFFIC_AFTER_BACKFILL:-}" ]]; then
+    # Under the CPU cap the inbox cannot drain while the first syncs run (B findings); start traffic last.
+    bash "$SIM_DIR/provision.sh" flows
+    stamp_event traffic
+    cmd_traffic on
+  else
+    stamp_event traffic
+    cmd_traffic on
+    bash "$SIM_DIR/provision.sh" flows
+  fi
   print_timeline
 }
 
