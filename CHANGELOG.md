@@ -15,3 +15,15 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.241.0 (2026-11-06)
+
+### Fixes
+
+- the test-send outcome check waits for the row to say sent
+- Kafka keeps its logs on the volume, so down then up keeps the topics
+
+### Chores
+
+- version 0.241.0
+- the stop test waits for the gated job to start before it stops the worker
+
