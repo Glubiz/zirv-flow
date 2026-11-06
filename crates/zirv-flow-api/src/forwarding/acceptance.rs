@@ -838,6 +838,7 @@ mod tests {
     }
 
     #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_active_rule_blocks_the_destination_archive_until_it_is_switched_off(pool: PgPool) {
         let fx = fixture(&pool).await;
         let rule = fx.create_rule("Paid orders").await;
@@ -874,6 +875,7 @@ mod tests {
     }
 
     #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_inactive_rule_does_not_block_the_destination_archive(pool: PgPool) {
         let fx = fixture(&pool).await;
         let mut body = fx.rule("Parked");
@@ -894,6 +896,7 @@ mod tests {
     }
 
     #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_rule_cannot_be_switched_on_for_an_archived_destination(pool: PgPool) {
         let fx = fixture(&pool).await;
         let mut body = fx.rule("Parked");
@@ -933,6 +936,7 @@ mod tests {
     }
 
     #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_archive_waits_for_a_rule_create_in_progress_and_then_answers_destination_in_use(
         pool: PgPool,
     ) {
