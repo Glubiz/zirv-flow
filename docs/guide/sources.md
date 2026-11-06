@@ -277,7 +277,7 @@ scans rejects without a person id for matching identifier values; see the
 **Settings are checked again.** Before reading, a run checks the stream's settings against the
 descriptor discovery last reported, and fails with `stream_settings_invalid` when they no longer
 fit (a cursor field that disappeared, say). A stream without a mapping fails with
-`stream_not_mapped`; other codes are `source_error` and `job_failed` (the last attempt failed),
+`stream_not_mapped`; other codes are `source_error` (a bad setting ends the run at once, any other failure ends it on the last attempt), `job_failed` (the last attempt failed),
 `mapping_invalid`, `list_missing`, `stream_not_keyed`, `event_key_unavailable`, `file_changed` and the other file codes (see the file source), `source_missing`, `stream_missing` and `source_kind_unavailable`.
 
 **Schedules.** A source's cron schedule (UTC) is mirrored to a `schedules` row, kept in step in

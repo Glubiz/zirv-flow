@@ -144,7 +144,7 @@ export function runErrorText(code: string, threshold: number): string {
     mapping_invalid: "The stream's mapping could not be read. Save the mapping again.",
     stream_settings_invalid:
       "The stream's settings no longer fit what the source offers. Discover the streams again, set the stream up, then run it again.",
-    source_error: "The source could not be read after several tries. Test the connection, then run it again.",
+    source_error: "The source could not be read. Test the connection, then run it again.",
     job_failed: "The run could not finish after several tries. Run it again; if it keeps failing, look at the jobs page.",
     file_changed: "The file changed while it was being read, so the run stopped. Records read before that were kept. Run it again.",
     file_range_unsupported:
