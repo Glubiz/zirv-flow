@@ -124,9 +124,19 @@ pub(crate) struct EventBatch {
     /// The decisions of the batch, appended in one statement by `finish`. A drain batch queues the
     /// decisions of its profile records here too, so a trace keeps the order they were made in.
     pub(crate) decisions: DecisionBuffer,
+    /// Every accepted event is flagged `no_triggers`: the batch is the first sync of a stream.
+    no_triggers: bool,
 }
 
 impl EventBatch {
+    /// A batch whose accepted events are all flagged `no_triggers`, as a replay's are.
+    pub(crate) fn without_triggers() -> Self {
+        Self {
+            no_triggers: true,
+            ..Self::default()
+        }
+    }
+
     /// Ends the batch: one statement appends its decisions, one query matches the accepted events
     /// against the event waits of enrollments (a `flow.step` job per match), and one notification
     /// goes to the debugger if it wrote feed rows. Call it once after the last record, in the transaction that holds them.
@@ -373,12 +383,15 @@ async fn judge_event_record(
         }
     };
 
-    let timing = apply_time_rules(
+    let mut timing = apply_time_rules(
         record.timestamp,
         record.received_at,
         i64::from(policy.future_skew_seconds),
         i64::from(policy.lateness_seconds),
     );
+    if batch.no_triggers {
+        timing.flags.push(EventFlag::NoTriggers);
+    }
     let event_id = Uuid::now_v7();
 
     // Only an accepted event creates or attaches anything. If a concurrent batch claims the

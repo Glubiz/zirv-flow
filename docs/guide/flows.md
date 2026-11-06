@@ -40,9 +40,17 @@ Choose **Starts when** in **Flow settings → Trigger**:
   **When a person**: **Enters the segment** or **Leaves the segment**. **Also
   enroll the people already in the segment when the flow is published** adds
   the current members at publish time. Leave it clear to use changes only.
+  People who enter the segment because a first sync brought in their data do
+  enter by a change, so a flow published before that sync enrolls them.
 - **An event happens** (`event`). Choose **Event** and any property filters.
   Matching incoming events can enroll their person; this does not replay the
-  event history. For email opens, the picker starts with a filter excluding
+  event history. The first sync of a source stream is no trigger either: the
+  records it brings in until the stream's first run succeeds are marked "no
+  triggers", so connecting a source does not enroll everyone in its history.
+  Changes in later syncs, and old events they bring, do enroll. A new Kafka
+  stream is the exception, because it has no sync runs: it starts at the
+  earliest offset the topic still holds and its backlog does trigger flows. For
+  email opens, the picker starts with a filter excluding
   machine opens; keep it if you mean a person's open.
 - **On a schedule** (`schedule`). Set **Cron expression**, **Time zone**, and
   **Enrolls** to **Everyone** or **The members of a segment**. For the latter,
