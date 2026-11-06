@@ -13,3 +13,4 @@
 
 # The simulated production environment keeps its keys, certificates and seed data here.
 /scripts/sim/.state/
+__pycache__/
