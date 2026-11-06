@@ -2597,6 +2597,13 @@ mod tests {
             "SELECT EXISTS (SELECT 1 FROM jobs WHERE kind = 'test.effect' AND state = 'running')",
         )
         .await;
+        // Both are claimed together: a stop before the gated job starts gives both back.
+        wait_until(
+            &pool,
+            "the gated job to poll its gate",
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database()              AND query LIKE 'SELECT EXISTS (SELECT 1 FROM gate)%')",
+        )
+        .await;
 
         stop.send(true).unwrap();
         wait_until(

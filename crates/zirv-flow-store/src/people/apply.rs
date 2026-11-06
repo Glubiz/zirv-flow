@@ -431,6 +431,38 @@ pub(crate) async fn apply_profile_record_into(
     record: &ProfileRecord,
     decisions: &mut DecisionBuffer,
 ) -> Result<ProfileOutcome, StoreError> {
+    apply_record(connection, workspace, record, decisions, None).await
+}
+
+/// How a native contact write differs from a source's record: its traits are the contact's
+/// whole state, so the content hash covers the state the write leaves and a removal of an
+/// absent key changes nothing; and a patch observes only the keys it names.
+#[derive(Clone, Copy)]
+pub(crate) struct NativeWrite<'a> {
+    /// The keys the write observed again; `None` means every key it sends.
+    pub observed: Option<&'a [String]>,
+}
+
+/// [`apply_profile_record`] for a native contact write.
+pub(crate) async fn apply_native_record(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    record: &ProfileRecord,
+    native: NativeWrite<'_>,
+) -> Result<ProfileOutcome, StoreError> {
+    let mut decisions = DecisionBuffer::default();
+    let outcome = apply_record(connection, workspace, record, &mut decisions, Some(native)).await?;
+    decisions.flush(connection).await?;
+    Ok(outcome)
+}
+
+async fn apply_record(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    record: &ProfileRecord,
+    decisions: &mut DecisionBuffer,
+    native: Option<NativeWrite<'_>>,
+) -> Result<ProfileOutcome, StoreError> {
     crate::changes::cache_change_readers(connection, workspace).await?;
     // After the segment guard, before any row lock: see the lock order in `slots`.
     lock_slots_shared(connection, workspace).await?;
@@ -446,7 +478,7 @@ pub(crate) async fn apply_profile_record_into(
         .source
         .starts_with("flow:")
         .then_some(record.observed_at);
-    let hash = content_hash(&identifiers, &updates, stamp);
+    let hash = content_hash(&identifiers, &updates, stamp, native.is_some());
 
     let existing = find_ledger_row(connection, workspace, record).await?;
     if let Some(row) = &existing
@@ -483,6 +515,7 @@ pub(crate) async fn apply_profile_record_into(
             identifiers: &identifiers,
             updates: &updates,
             hash: &hash,
+            observed: native.and_then(|native| native.observed),
         },
     )
     .await?;
@@ -734,11 +767,13 @@ fn to_json(value: &TraitValue) -> Value {
 
 /// SHA-256 of the canonical JSON of the normalized identifiers and trait values. Times are
 /// left out so a replay with a new `observed_at` is still a no-op, unless the caller passes
-/// `written_at` (a flow write, which is a new contribution each time).
+/// `written_at` (a flow write, which is a new contribution each time). With
+/// `state_only` the removals are left out too: the hash covers the state the write leaves.
 fn content_hash(
     identifiers: &[Identifier],
     updates: &[(String, Option<Value>)],
     written_at: Option<OffsetDateTime>,
+    state_only: bool,
 ) -> Vec<u8> {
     let identifiers: Vec<[String; 2]> = identifiers
         .iter()
@@ -746,6 +781,7 @@ fn content_hash(
         .collect();
     let traits: BTreeMap<&str, &Option<Value>> = updates
         .iter()
+        .filter(|(_, value)| !state_only || value.is_some())
         .map(|(key, value)| (key.as_str(), value))
         .collect();
     let mut canonical = serde_json::json!({ "identifiers": identifiers, "traits": traits });
@@ -799,11 +835,13 @@ fn decode_error(what: &'static str) -> StoreError {
 }
 
 /// A record after validation: the normalized identifiers, the accepted trait changes and the
-/// content hash of both.
+/// content hash of both. `observed` limits the keys stamped with the record's time to those
+/// named; a key the row already holds with the same value keeps its stamp.
 struct Normalized<'a> {
     identifiers: &'a [Identifier],
     updates: &'a [(String, Option<Value>)],
     hash: &'a [u8],
+    observed: Option<&'a [String]>,
 }
 
 async fn upsert_ledger_row(
@@ -818,6 +856,7 @@ async fn upsert_ledger_row(
         identifiers,
         updates,
         hash,
+        observed,
     } = normalized;
     let at = record
         .observed_at
@@ -832,7 +871,14 @@ async fn upsert_ledger_row(
     for (key, value) in *updates {
         match value {
             Some(value) => {
-                traits.insert(key.clone(), serde_json::json!({ "v": value, "at": at }));
+                let kept = observed.is_some_and(|observed| !observed.contains(key))
+                    && traits
+                        .get(key)
+                        .and_then(|entry| entry.get("v"))
+                        .is_some_and(|held| same_value(held, value));
+                if !kept {
+                    traits.insert(key.clone(), serde_json::json!({ "v": value, "at": at }));
+                }
             }
             None => {
                 traits.remove(key);
@@ -1464,12 +1510,12 @@ mod tests {
         let other = vec![("a".to_owned(), Some(json!(2))), ("b".to_owned(), None)];
 
         assert_eq!(
-            content_hash(&identifiers, &one, None),
-            content_hash(&identifiers, &swapped, None)
+            content_hash(&identifiers, &one, None, false),
+            content_hash(&identifiers, &swapped, None, false)
         );
         assert_ne!(
-            content_hash(&identifiers, &one, None),
-            content_hash(&identifiers, &other, None)
+            content_hash(&identifiers, &one, None, false),
+            content_hash(&identifiers, &other, None, false)
         );
     }
 

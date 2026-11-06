@@ -370,12 +370,14 @@ sink_increased() { [[ $(counter "$2" "$3" "$4") -gt $1 ]]; }
 t_testsend_smtp() { test_send 'Transactional SMTP' 'Order confirmation' orders smtp-sink 8025 sim_smtp_messages_total; }
 t_testsend_mailer() { test_send 'Marketing mailer' 'Welcome 1' news mailer 8000 sim_mailer_messages_total; }
 
+# A message reaches the sink before its test send's row says sent.
 t_testsend_outcomes() {
-  local outcomes
-  outcomes=$(get "$P/test-sends" | jq -c '[.test_sends[:2][] | .outcome]')
-  MESSAGE="latest outcomes $outcomes"
-  jq -e 'length > 0 and all(.[]; . == "sent")' <<< "$outcomes" > /dev/null
+  eventually 60 testsends_sent
+  MESSAGE="latest outcomes $(testsend_outcomes)"
+  testsends_sent
 }
+testsend_outcomes() { get "$P/test-sends" | jq -c '[.test_sends[:2][] | .outcome]'; }
+testsends_sent() { jq -e 'length > 0 and all(.[]; . == "sent")' <<< "$(testsend_outcomes)" > /dev/null; }
 
 g_destinations() {
   check destinations_check_ok t_destinations_check
