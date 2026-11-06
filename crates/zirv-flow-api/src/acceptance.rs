@@ -2835,6 +2835,89 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_source_order_naming_an_import_label_is_accepted_and_that_source_wins(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let workspace_id: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
+        // The import row is inserted directly, as the store tests do: the label is what counts.
+        sqlx::query(
+            "INSERT INTO imports \
+                (id, workspace_id, name, source, stream, file_name, file_sha256, size_bytes, \
+                 delimiter, header, rows_total, status, trace_id) \
+             VALUES ($1, $2, 'n', 'csv', 's', 'f.csv', decode(repeat('00', 32), 'hex'), 0, ',', \
+                     '[]', 0, 'uploaded', $1)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(workspace_id.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let newer = connector_source(&pool, &ws, "shop").await;
+        call(
+            &router,
+            "POST",
+            &traits_uri(&ws),
+            Some(json!({"key": "country", "type": "string"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        for (source, key, value, at) in [
+            (
+                "csv",
+                "1",
+                "DK",
+                time::macros::datetime!(2026-01-01 00:00 UTC),
+            ),
+            (
+                newer.as_str(),
+                "2",
+                "US",
+                time::macros::datetime!(2026-02-01 00:00 UTC),
+            ),
+        ] {
+            let mut record = profile(key, &[("email", "ada@example.com")]);
+            record.source = source.into();
+            record.observed_at = at;
+            record.traits = json!({"country": value}).as_object().cloned().unwrap();
+            zirv_flow_store::apply_profile_batch(&pool, workspace_id, &[record])
+                .await
+                .unwrap();
+        }
+
+        let reply = call(
+            &router,
+            "PATCH",
+            &format!("{}/country", traits_uri(&ws)),
+            Some(json!({"precedence": "source_priority", "source_order": ["csv"]})),
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+        zirv_flow_store::recompute_trait_batch(
+            &mut tx,
+            workspace_id,
+            "country",
+            None,
+            &zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("test")),
+            None,
+        )
+        .await
+        .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+
+        let country: Option<String> =
+            sqlx::query_scalar("SELECT traits->>'country' FROM people WHERE workspace_id = $1")
+                .bind(workspace_id.as_uuid())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(country.as_deref(), Some("DK"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_source_order_entry_must_be_a_source_of_the_workspace_or_a_fixed_name(pool: PgPool) {
         let router = app(&pool).await;
         let owner = owner(&pool, &router).await;
