@@ -249,7 +249,7 @@ stage_syncs() {
 
 # start_runs [missing|all]: a sync for every enabled pull stream that has no run waiting or running
 # (missing: only where the last run failed or none exists; all: also after a success). A stream whose
-# last run failed is started again (concurrent first syncs deadlock now and then, B findings).
+# last run failed is started again.
 start_runs() {
   local mode=${1:-missing} file id stream runs state started=0
   for file in "${PULL_SOURCES[@]}"; do
@@ -468,8 +468,10 @@ stage_gate() {
 }
 
 # stage_flows: flows that fire on events, on a segment change or on a schedule are published only
-# once the first syncs are complete, because a backfilled record arrives as an ordinary event
-# (design 9.5, B findings). The ones a form post starts, and the manual ones, go out at once.
+# once the first syncs are complete. A first sync no longer triggers event flows (its events are
+# flagged no_triggers), but a segment created or a flow published earlier would still see the
+# people the first syncs bring in enter its segments, so segments stay out of the first syncs.
+# The ones a form post starts, and the manual ones, go out at once.
 stage_flows() {
   publish_flows early
   step 'waiting for the backfill before the event-driven flows'

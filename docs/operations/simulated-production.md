@@ -173,9 +173,8 @@ and clicked.
 
 | Symptom | Cause and action |
 |---|---|
-| A first sync run shows `failed` with `job_failed` | Concurrent first syncs deadlock on the same people now and then (PostgreSQL logs `deadlock detected`). The schedule starts the stream again within ten minutes; `provision.sh` also restarts failed streams while it waits. |
-| Event flows are not published | They wait for the backfill on purpose: a backfilled record starts a flow like a live one (it enrolled 34 900 people in a test). `provision.sh flows` publishes them once every pull stream has a first success. |
-| `suppressions/check` says an address is not suppressed after a hard bounce | The API reads workspace-scope suppressions only; a hard bounce is organization-wide. The send is still skipped. |
+| A first sync run shows `failed` with `job_failed` | Read the run's error and `sim.sh logs zf-worker-1`. A batch that keeps conflicting gives up after its attempts (PostgreSQL logs `deadlock detected`); this is rare since first-sync batches lock in one fixed order. The schedule starts the stream again within ten minutes, and `provision.sh` also restarts failed streams while it waits. |
+| Event flows are not published | They wait for the backfill on purpose, to keep segments out of the first syncs: people who enter a segment because of first-sync data enroll in a segment-triggered flow. A first sync flags its own events `no_triggers`, so event flows would not enroll on the backfill itself. `provision.sh flows` publishes them once every pull stream has a first success. |
 | `up` stalls on a service | `sim.sh status`, then `sim.sh logs <service>`. Memory is the usual cause: stop other stacks. |
 | The generators stopped | `status` shows `paused true (disk)`: `disk` means `SIM_MAX_DB_GB` was passed. |
 | Mail never arrives in the viewer | Only the transactional flows use SMTP; marketing mail goes to the mail fixture (`sim.sh status` shows both counters). |
