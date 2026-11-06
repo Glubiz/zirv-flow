@@ -328,7 +328,7 @@ pub(super) async fn read_stream(
     let config = StreamConfig {
         name: stream.name.clone(),
         sync_mode: SyncMode::parse(&stream.sync_mode).unwrap_or(SyncMode::FullRefresh),
-        cursor_field: None,
+        cursor_field: stream.cursor_field.clone(),
         primary_key: stream.primary_key.clone(),
     };
     read_sample(&call, &call.source.config, &config, limit).await

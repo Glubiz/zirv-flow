@@ -556,7 +556,7 @@ different orders wait for each other at the start instead of deadlocking. A CSV 
 and `apply_profile_batch` take the same locks.
 An expired lease does not return the run to `queued`: the row stays `running`, the job system
 re-delivers the job, `attempt` counts it, and the next attempt resumes from the run's
-checkpoint; only the last failed attempt marks the run `failed` (`source_error` for a read error,
+checkpoint; only the last failed attempt marks the run `failed` (the connector's fixed code for a read error that has one, else `source_error`,
 else `job_failed`); the scheduler leader fails, with `job_failed`, a run whose job is dead or
 gone. A lost lease also cannot end a run: the end-of-run writes lock the lease like a batch. An incremental stream also keeps `streams.checkpoint`, written in the same
 transaction except for a batch that fails the run on its rejects. The reject check applies from

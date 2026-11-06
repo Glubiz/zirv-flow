@@ -144,7 +144,7 @@ export function runErrorText(code: string, threshold: number): string {
     mapping_invalid: "The stream's mapping could not be read. Save the mapping again.",
     stream_settings_invalid:
       "The stream's settings no longer fit what the source offers. Discover the streams again, set the stream up, then run it again.",
-    source_error: "The source could not be read after several tries. Test the connection, then run it again.",
+    source_error: "The source could not be read. Test the connection, then run it again.",
     job_failed: "The run could not finish after several tries. Run it again; if it keeps failing, look at the jobs page.",
     file_changed: "The file changed while it was being read, so the run stopped. Records read before that were kept. Run it again.",
     file_range_unsupported:
@@ -152,8 +152,11 @@ export function runErrorText(code: string, threshold: number): string {
     file_range_invalid:
       "The file's server answered a byte range that does not add up, so the run stopped. Records read before that were kept. Run it again.",
     record_too_large: "One record is over 1 MiB, so the file could not be read.",
-    csv_invalid: "The file is not valid CSV text.",
+    csv_invalid: "The file is not valid CSV text. Save it as UTF-8 CSV, then run it again.",
     json_invalid: "The file is not valid JSON.",
+    json_not_an_array: "The file is JSON, but not a list of records. Export it as a list, then run it again.",
+    json_trailing_data: "The JSON list is followed by other text, so the file could not be read.",
+    checkpoint_invalid: "The saved position does not fit this file. Run it as a full refresh.",
     list_missing: "A list the mapping adds people to has been deleted. Map the stream again, then run it again.",
     stream_not_keyed: "The mapping has an event, but the stream has no primary key. Set one up, then run it again.",
     event_key_unavailable: "The server has no key to protect event properties with, so events cannot be kept.",

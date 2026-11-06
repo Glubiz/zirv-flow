@@ -101,6 +101,14 @@ impl Source for Fake {
                 required: false,
                 secret: false,
             },
+            FieldSpec {
+                key: "fail_with",
+                label: "Fail with",
+                help: "The text of that read error.",
+                kind: FieldKind::Text,
+                required: false,
+                secret: false,
+            },
         ],
         credential_fields: &[FieldSpec {
             key: "token",
@@ -200,6 +208,10 @@ impl Source for Fake {
         let invalid = id_set(&config["invalid"]);
         let soft_deleted = id_set(&config["soft_deleted"]);
         let fail_after = config["fail_after_batches"].as_u64();
+        let fail_with = config["fail_with"]
+            .as_str()
+            .filter(|text| !text.is_empty())
+            .unwrap_or("the fake source failed");
         let note = config["note"].as_str().filter(|text| !text.is_empty());
         let start = checkpoint
             .and_then(|checkpoint| checkpoint.0["offset"].as_u64())
@@ -209,7 +221,7 @@ impl Source for Fake {
         let mut offset = start;
         while offset < records {
             if fail_after == Some(batches.len() as u64) {
-                batches.push(Err(SourceError::Other("the fake source failed".into())));
+                batches.push(Err(SourceError::Other(fail_with.to_owned())));
                 break;
             }
             let end = (offset + batch).min(records);
@@ -431,5 +443,11 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert!(results[0].is_ok());
         assert!(results[1].is_err());
+        let coded = json!({"fail_after_batches": 0, "fail_with": "csv_invalid"});
+        let results: Vec<_> = Fake
+            .read(&ctx, &coded, &credential, &stream, None)
+            .collect()
+            .await;
+        assert!(matches!(&results[0], Err(SourceError::Other(text)) if text == "csv_invalid"));
     }
 }
