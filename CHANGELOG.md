@@ -15,3 +15,15 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.243.0 (2026-11-06)
+
+### Fixes
+
+- a re-evaluation request never waits on the job key (#531)
+- a trait's source order holds source ids, and the dialog lists them (#530)
+
+### Chores
+
+- a source order naming an import label is accepted and wins (#530)
+- tidy blank lines in the #530 and #531 changes (#530)
+
