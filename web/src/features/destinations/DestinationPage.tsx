@@ -344,17 +344,23 @@ function ArchivePanel({ workspaceId, destination }: { workspaceId: string; desti
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
+  const [flows, setFlows] = useState<string[]>([]);
 
   async function archive() {
     setBusy(true);
     setFailure(null);
+    setFlows([]);
     try {
       await unwrapEmpty(
         client.DELETE("/api/v1/workspaces/{ws}/destinations/{id}", { params: { path: { ws: workspaceId, id: destination.id } } }),
       );
       void navigate(`/w/${workspaceId}/destinations`);
     } catch (error) {
-      setFailure(describeError(error));
+      if (error instanceof ApiError && error.code === "destination_in_use") {
+        setFlows(error.flows.map((flow) => flow.name));
+      } else {
+        setFailure(describeError(error));
+      }
       setBusy(false);
     }
   }
@@ -374,6 +380,11 @@ function ArchivePanel({ workspaceId, destination }: { workspaceId: string; desti
         <Dialog title={`Archive ${destination.name}?`} onClose={() => setOpen(false)}>
           <div className="stack">
             <p className="muted">It stops delivering. Its history stays.</p>
+            {flows.length > 0 ? (
+              <p role="alert" className="field-error">
+                Used by {flows.join(", ")}. Remove it from the flows first.
+              </p>
+            ) : null}
             {failure ? <InlineError title={failure.title} detail={failure.detail} traceId={failure.traceId} /> : null}
             <div className="dialog-actions">
               <Button onClick={() => setOpen(false)}>Cancel</Button>

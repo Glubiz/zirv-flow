@@ -177,6 +177,21 @@ fn named_templates(graph: &FlowGraph) -> Vec<Uuid> {
     named.into_iter().collect()
 }
 
+/// The destinations a graph's send and sync nodes name, once each.
+fn named_destinations(graph: &FlowGraph) -> Vec<Uuid> {
+    let named: BTreeSet<Uuid> = graph
+        .nodes
+        .iter()
+        .filter_map(|node| match &node.kind {
+            NodeKind::ActionSend { destination, .. } | NodeKind::ActionSync { destination, .. } => {
+                Some(*destination)
+            }
+            _ => None,
+        })
+        .collect();
+    named.into_iter().collect()
+}
+
 /// Validates the draft under the flow's lock and publishes it as the next version, or changes
 /// nothing.
 async fn publish_now(
@@ -194,6 +209,8 @@ async fn publish_now(
     // and this publish cannot both commit: see `lock_templates_shared`.
     let (graph, _) = draft_of(locked.flow())?;
     zirv_flow_store::lock_templates_shared(&mut tx, workspace, &named_templates(&graph)).await?;
+    zirv_flow_store::lock_destinations_shared(&mut tx, workspace, &named_destinations(&graph))
+        .await?;
     let (checked, _) = check_flow(state, &mut tx, workspace, locked.flow()).await?;
     if !checked.issues.is_empty() {
         // Dropping the transaction writes nothing.

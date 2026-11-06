@@ -23,7 +23,7 @@ use crate::AppState;
 use crate::admin::{self, Context};
 use crate::auth::{Need, Principal, authorize, path_id};
 use crate::json::ApiJson;
-use crate::problem::{ApiError, Problem};
+use crate::problem::{ApiError, FlowRefProblem, Problem};
 use crate::sources::crud::check_name;
 use crate::sources::{field_problems, invalid};
 use crate::workspace_credentials::resolve::{
@@ -393,6 +393,20 @@ pub(crate) async fn archive_destination(
             );
         }
     };
+    // Nothing is written while a published flow still uses the destination.
+    let blocking =
+        zirv_flow_store::active_published_flows_using_destination(&mut *tx, workspace, id).await?;
+    if !blocking.is_empty() {
+        return Err(ApiError::destination_in_use(
+            blocking
+                .into_iter()
+                .map(|used| FlowRefProblem {
+                    flow_id: used.flow_id,
+                    flow_name: used.flow_name,
+                })
+                .collect(),
+        ));
+    }
     admin::audit(
         &mut tx,
         context,
@@ -608,7 +622,7 @@ pub(crate) async fn update(
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a missing scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or destination, or no access", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "The destination is already archived (`code` is `destination_archived`)", body = Problem, content_type = "application/problem+json")
+        (status = 409, description = "The destination is already archived (`code` is `destination_archived`), or a published flow still uses it (`code` is `destination_in_use`, with the flows in `flows`)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]

@@ -10,6 +10,7 @@
 mod attempts;
 mod bucket;
 mod crud;
+mod where_used;
 
 pub use attempts::{
     AttemptOutcome, AttemptStats, DeliveryAttempt, DestinationStat, NewDeliveryAttempt,
@@ -24,4 +25,7 @@ pub use crud::{
     Destination, DestinationUpdate, NewDestination, archive_destination, create_destination,
     find_destination, find_destination_for_update, find_destination_workspace, list_destinations,
     update_destination,
+};
+pub use where_used::{
+    DestinationFlowUse, active_published_flows_using_destination, lock_destinations_shared,
 };

@@ -60,7 +60,8 @@ pub struct Problem {
     /// How many templates `templates` is the first of.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<u32>,
-    /// The active flows whose running version sends a template (`template_in_use`).
+    /// The active flows whose running version sends a template (`template_in_use`) or uses a
+    /// destination (`destination_in_use`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flows: Option<Vec<FlowRefProblem>>,
     /// The draft's current revision (`template_draft_revision_mismatch`), to load it with.
@@ -166,7 +167,8 @@ struct SegmentExtra {
     snippet_themes: Option<Vec<SegmentRefProblem>>,
     /// The templates a new snippet or theme version would break, and how many there are.
     templates: Option<(Vec<BrokenTemplateProblem>, u32)>,
-    /// The active flows that send a template (`template_in_use`).
+    /// The active flows that send a template (`template_in_use`) or use a destination
+    /// (`destination_in_use`).
     flows: Option<Vec<FlowRefProblem>>,
     /// The current revision of the draft a stale write named (`template_draft_revision_mismatch`).
     current_revision: Option<i32>,
@@ -1169,6 +1171,21 @@ impl ApiError {
         }
     }
 
+    /// An archive of a destination that published flows still use, with those flows.
+    pub(crate) fn destination_in_use(flows: Vec<FlowRefProblem>) -> Self {
+        Self {
+            code: Some("destination_in_use"),
+            segment: Some(Box::new(SegmentExtra {
+                flows: Some(flows),
+                ..SegmentExtra::default()
+            })),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "published flows still use the destination; remove it from them first",
+            )
+        }
+    }
+
     /// A template that already keeps the most saved preview people.
     pub(crate) fn preview_people_limit() -> Self {
         Self {
@@ -1479,6 +1496,22 @@ mod tests {
 
         assert_eq!(error.status, StatusCode::CONFLICT);
         assert_eq!(error.code(), Some("template_in_use"));
+        let flows = error
+            .segment
+            .as_ref()
+            .and_then(|extra| extra.flows.as_ref());
+        assert_eq!(flows.map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn a_destination_in_use_is_a_409_that_lists_the_flows() {
+        let error = ApiError::destination_in_use(vec![FlowRefProblem {
+            flow_id: uuid::Uuid::nil(),
+            flow_name: "Welcome".into(),
+        }]);
+
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert_eq!(error.code(), Some("destination_in_use"));
         let flows = error
             .segment
             .as_ref()

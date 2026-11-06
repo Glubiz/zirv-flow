@@ -8608,7 +8608,10 @@ export interface components {
              *     concerns, never a value from the flow.
              */
             flow_issues?: components["schemas"]["FlowIssueProblem"][] | null;
-            /** @description The active flows whose running version sends a template (`template_in_use`). */
+            /**
+             * @description The active flows whose running version sends a template (`template_in_use`) or uses a
+             *     destination (`destination_in_use`).
+             */
             flows?: components["schemas"]["FlowRefProblem"][] | null;
             /**
              * @description What is wrong with a segment definition (`segment_invalid`): a JSON pointer into the
@@ -16582,7 +16585,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The destination is already archived (`code` is `destination_archived`) */
+            /** @description The destination is already archived (`code` is `destination_archived`), or a published flow still uses it (`code` is `destination_in_use`, with the flows in `flows`) */
             409: {
                 headers: {
                     [name: string]: unknown;

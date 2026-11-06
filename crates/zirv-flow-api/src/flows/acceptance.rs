@@ -2716,14 +2716,15 @@ mod tests {
         (f.create("Sends a hook", graph, manual()).await, template)
     }
 
-    /// Waits until a statement on the templates table is waiting for a lock.
-    async fn blocked_on_templates(pool: &PgPool) -> bool {
+    /// Waits until a statement on `table` is waiting for a lock.
+    async fn blocked_on_table(pool: &PgPool, table: &str) -> bool {
         for _ in 0..200 {
             let waiting: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM pg_stat_activity \
                  WHERE datname = current_database() AND pid <> pg_backend_pid() \
-                   AND wait_event_type = 'Lock' AND query ILIKE '%FROM templates%'",
+                   AND wait_event_type = 'Lock' AND query ILIKE '%' || $1 || '%'",
             )
+            .bind(table)
             .fetch_one(pool)
             .await
             .unwrap();
@@ -2761,7 +2762,7 @@ mod tests {
                 })
             };
             assert!(
-                blocked_on_templates(&pool).await,
+                blocked_on_table(&pool, "templates").await,
                 "the publish should wait for the template row"
             );
             zirv_flow_store::commit(archiving).await.unwrap();
@@ -2820,7 +2821,7 @@ mod tests {
                 })
             };
             assert!(
-                blocked_on_templates(&pool).await,
+                blocked_on_table(&pool, "templates").await,
                 "the archive should wait for the share lock"
             );
             zirv_flow_store::commit(publishing).await.unwrap();
@@ -2830,6 +2831,259 @@ mod tests {
             assert_eq!(reply.body["code"], "template_in_use");
             assert_eq!(
                 f.count("SELECT count(*) FROM templates WHERE archived_at IS NOT NULL")
+                    .await,
+                0
+            );
+        })
+        .await;
+    }
+
+    /// A published email template and a live fake destination, and a graph that sends the one
+    /// through the other.
+    async fn send_graph(f: &Fixture, pool: &PgPool) -> (Uuid, Value) {
+        let sender =
+            zirv_flow_store::sending_fixtures::plant_verified_sender(pool, f.ws, "example.com")
+                .await
+                .unwrap();
+        let template = Uuid::now_v7();
+        let mut connection = pool.acquire().await.unwrap();
+        zirv_flow_store::create_template(
+            &mut connection,
+            f.ws,
+            &zirv_flow_store::NewTemplate {
+                id: template,
+                name: "Mail".to_owned(),
+                channel: "email".to_owned(),
+                category: "transactional".to_owned(),
+                document: json!({"schema": 1, "channel": "email", "mode": "code", "email": {
+                    "subject": "s", "sender": sender, "lang": "en",
+                    "category": "transactional", "html": "<p>x</p>"}}),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let locked = zirv_flow_store::lock_template(&mut connection, f.ws, template)
+            .await
+            .unwrap();
+        zirv_flow_store::publish_template(
+            &mut connection,
+            f.ws,
+            &locked,
+            &json!([]),
+            None,
+            None,
+            &zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("t")),
+        )
+        .await
+        .unwrap();
+        drop(connection);
+        let destination = new_fake_destination(f, pool, "Fake").await;
+        let graph = json!({"v": 1, "nodes": [
+            {"id": "send", "type": "action.send", "template": template,
+             "destination": destination},
+            {"id": "end", "type": "exit"}
+        ], "edges": [{"id": "e1", "from": "send", "port": "next", "to": "end"}]});
+        (destination, graph)
+    }
+
+    async fn new_fake_destination(f: &Fixture, pool: &PgPool, name: &str) -> Uuid {
+        let id = Uuid::now_v7();
+        zirv_flow_store::create_destination(
+            pool,
+            f.ws,
+            &zirv_flow_store::NewDestination {
+                id,
+                kind: "fake",
+                name,
+                config: &json!({}),
+                credential_id: None,
+                rate: 10,
+                burst: 10,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+        id
+    }
+
+    async fn archive_destination_request(f: &Fixture, destination: Uuid) -> Reply {
+        let uri = format!(
+            "/api/v1/workspaces/{}/destinations/{destination}",
+            f.ws.as_uuid()
+        );
+        f.call("DELETE", &uri, None, Auth::Session(&f.lead)).await
+    }
+
+    async fn publish_flow_named(f: &Fixture, name: &str, graph: Value) -> String {
+        let flow = f.create(name, graph, manual()).await;
+        let reply = f.lead("POST", &format!("/{flow}/publish"), None).await;
+        assert_eq!(reply.status, StatusCode::CREATED, "{:?}", reply.body);
+        flow
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_destination_a_published_flow_sends_through_cannot_be_archived_until_the_flow_lets_go(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let f = fixture(&pool).await;
+            let (destination, graph) = send_graph(&f, &pool).await;
+            let flow = publish_flow_named(&f, "Welcome", graph).await;
+
+            let refused = archive_destination_request(&f, destination).await;
+
+            assert_eq!(refused.status, StatusCode::CONFLICT, "{:?}", refused.body);
+            assert_eq!(refused.body["code"], "destination_in_use");
+            assert_eq!(refused.body["flows"][0]["flow_id"], flow.as_str());
+            assert_eq!(refused.body["flows"][0]["flow_name"], "Welcome");
+            assert_eq!(
+                f.count("SELECT count(*) FROM destinations WHERE archived_at IS NOT NULL")
+                    .await,
+                0
+            );
+            assert_eq!(
+                f.count("SELECT count(*) FROM audit_log WHERE action = 'destination.archived'")
+                    .await,
+                0
+            );
+
+            let archived_flow = f.lead("POST", &format!("/{flow}/archive"), None).await;
+            assert_eq!(archived_flow.status, StatusCode::OK);
+            let accepted = archive_destination_request(&f, destination).await;
+            assert_eq!(
+                accepted.status,
+                StatusCode::NO_CONTENT,
+                "{:?}",
+                accepted.body
+            );
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_destination_can_be_archived_once_the_running_version_no_longer_uses_it(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let f = fixture(&pool).await;
+            let (destination, graph) = send_graph(&f, &pool).await;
+            let other = new_fake_destination(&f, &pool, "Other").await;
+            let flow = publish_flow_named(&f, "Welcome", graph.clone()).await;
+            let mut moved = graph;
+            moved["nodes"][0]["destination"] = json!(other);
+            let edited = f
+                .lead("PATCH", &format!("/{flow}"), Some(json!({"graph": moved})))
+                .await;
+            assert_eq!(edited.status, StatusCode::OK, "{:?}", edited.body);
+
+            // The draft names the other destination, but version 1 still runs this one.
+            let still = archive_destination_request(&f, destination).await;
+            assert_eq!(still.status, StatusCode::CONFLICT, "{:?}", still.body);
+            let published = f.lead("POST", &format!("/{flow}/publish"), None).await;
+            assert_eq!(
+                published.status,
+                StatusCode::CREATED,
+                "{:?}",
+                published.body
+            );
+
+            let accepted = archive_destination_request(&f, destination).await;
+            assert_eq!(
+                accepted.status,
+                StatusCode::NO_CONTENT,
+                "{:?}",
+                accepted.body
+            );
+            let in_use = archive_destination_request(&f, other).await;
+            assert_eq!(in_use.status, StatusCode::CONFLICT);
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_destination_no_flow_uses_and_one_only_a_paused_flow_uses_archive_as_before(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let f = fixture(&pool).await;
+            let (destination, graph) = send_graph(&f, &pool).await;
+            let unused = new_fake_destination(&f, &pool, "Unused").await;
+            let flow = publish_flow_named(&f, "Welcome", graph).await;
+            let paused = f.lead("POST", &format!("/{flow}/pause"), None).await;
+            assert_eq!(paused.status, StatusCode::OK, "{:?}", paused.body);
+
+            let free = archive_destination_request(&f, unused).await;
+            let from_paused = archive_destination_request(&f, destination).await;
+
+            assert_eq!(free.status, StatusCode::NO_CONTENT, "{:?}", free.body);
+            assert_eq!(
+                from_paused.status,
+                StatusCode::NO_CONTENT,
+                "{:?}",
+                from_paused.body
+            );
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_archive_waits_for_a_publish_in_progress_and_then_answers_destination_in_use(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let f = fixture(&pool).await;
+            let (destination, graph) = send_graph(&f, &pool).await;
+            let flow = f.create("Welcome", graph, manual()).await;
+            let flow_id: Uuid = flow.parse().unwrap();
+            let mut publishing = zirv_flow_store::begin(&pool).await.unwrap();
+            let locked = zirv_flow_store::lock_flow(&mut publishing, f.ws, flow_id)
+                .await
+                .unwrap();
+            zirv_flow_store::lock_destinations_shared(&mut publishing, f.ws, &[destination])
+                .await
+                .unwrap();
+            zirv_flow_store::publish_flow(
+                &mut publishing,
+                &zirv_flow_store::Clock::default(),
+                f.ws,
+                &locked,
+                None,
+                &zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("t")),
+            )
+            .await
+            .unwrap();
+
+            let archive = {
+                let router = f.router.clone();
+                let uri = format!(
+                    "/api/v1/workspaces/{}/destinations/{destination}",
+                    f.ws.as_uuid()
+                );
+                let login = Login {
+                    cookie: f.lead.cookie.clone(),
+                    csrf: f.lead.csrf.clone(),
+                };
+                tokio::spawn(async move {
+                    send(&router, "DELETE", &uri, None, Auth::Session(&login)).await
+                })
+            };
+            assert!(
+                blocked_on_table(&pool, "destinations").await,
+                "the archive should wait for the share lock"
+            );
+            zirv_flow_store::commit(publishing).await.unwrap();
+
+            let reply = archive.await.unwrap();
+            assert_eq!(reply.status, StatusCode::CONFLICT, "{:?}", reply.body);
+            assert_eq!(reply.body["code"], "destination_in_use");
+            assert_eq!(
+                f.count("SELECT count(*) FROM destinations WHERE archived_at IS NOT NULL")
                     .await,
                 0
             );

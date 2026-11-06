@@ -7192,7 +7192,7 @@
             }
           },
           "409": {
-            "description": "The destination is already archived (`code` is `destination_archived`)",
+            "description": "The destination is already archived (`code` is `destination_archived`), or a published flow still uses it (`code` is `destination_in_use`, with the flows in `flows`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -38147,7 +38147,7 @@
             "items": {
               "$ref": "#/components/schemas/FlowRefProblem"
             },
-            "description": "The active flows whose running version sends a template (`template_in_use`)."
+            "description": "The active flows whose running version sends a template (`template_in_use`) or uses a\ndestination (`destination_in_use`)."
           },
           "issues": {
             "type": [
