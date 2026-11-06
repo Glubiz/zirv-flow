@@ -22673,7 +22673,7 @@
         },
         "responses": {
           "200": {
-            "description": "Whether it is suppressed, and why",
+            "description": "Whether a send from the workspace would be suppressed, why, and in which scope",
             "content": {
               "application/json": {
                 "schema": {
@@ -29894,6 +29894,14 @@
               "null"
             ],
             "description": "The reason it is suppressed."
+          },
+          "scope": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`workspace` when this workspace suppresses it, `organization` when an organization-wide\nsuppression, such as a hard bounce, does; the list shows workspace entries only.",
+            "example": "organization"
           },
           "suppressed": {
             "type": "boolean"
