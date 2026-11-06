@@ -20,7 +20,10 @@ changes: to use another type, archive the field and create a new key. A value th
 for a key nobody registered registers it, with the type inferred from the value (never
 `timestamp` or `date`), `latest` precedence and `inferred` set. A value that does not fit
 the registered type, or that belongs to an archived field, is left out of the record with a
-reason; the rest of the record still applies.
+reason; the rest of the record still applies. An identify that left traits out also leaves one reject, reason
+`traits_dropped`, under **Rejects**: it names the person and each key with its code
+(`wrong_type` or `archived_key`), never a value, and tells "the rest applied" from a
+reject that applied nothing.
 
 **Identifier kinds.** A person is recognised by `email` (trimmed, lowercased), `phone`
 (international format only: spaces, dashes, dots and brackets are removed, a leading `00`
@@ -623,7 +626,8 @@ buffer, so retry.
 
 **What 202 means.** `{"accepted": n}` is returned after the items have been appended to a
 durable inbox in PostgreSQL. It means durable, not applied: workers, woken at once, apply the
-inbox in order, normally within moments. The request's trace id (the `x-trace-id` response
+inbox in order, normally within moments. An identify whose traits are partly left out still applies; the
+`traits_dropped` reject names the keys. The request's trace id (the `x-trace-id` response
 header) is carried into the decisions the items cause, so
 `GET /api/v1/workspaces/{ws}/traces/{trace_id}` shows what became of them.
 

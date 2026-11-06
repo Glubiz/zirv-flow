@@ -22,10 +22,10 @@ use zirv_flow_core::{Cause, HmacKey, TraceContext, TraceId, WorkspaceId};
 
 use crate::contacts::{lock_contacts, replace_stored_fields};
 use crate::decisions::DecisionBuffer;
+use crate::events::{DroppedTraits, Refusal, insert_dropped_traits_reject, insert_record_rejects};
 use crate::events::{
     EventBatch, EventOutcome, EventRecord, FailedItem, apply_event_record, reject_apply_failed,
 };
-use crate::events::{Refusal, insert_record_rejects};
 use crate::jobs::{bind_job, enqueue_ctes};
 use crate::people::{
     ProfileOutcome, ProfileRecord, apply_profile_record, apply_profile_record_into,
@@ -632,6 +632,43 @@ fn dropped_fields(result: &ProfileOutcome) -> Map<String, Value> {
     }
 }
 
+/// Leaves a reject for the traits an applied identify dropped (keys and codes only), so the
+/// reason can be read while the rest of the record stays applied.
+async fn record_dropped_traits(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    row: &InboxRow,
+    result: &ProfileOutcome,
+) -> Result<(), StoreError> {
+    let (ProfileOutcome::Applied {
+        person_id, dropped, ..
+    }
+    | ProfileOutcome::Unchanged { person_id, dropped }) = result
+    else {
+        return Ok(());
+    };
+    if dropped.is_empty() {
+        return Ok(());
+    }
+    let dropped: Vec<(String, &'static str)> = dropped
+        .iter()
+        .map(|dropped| (dropped.key.clone(), dropped.reason))
+        .collect();
+    insert_dropped_traits_reject(
+        connection,
+        workspace,
+        &DroppedTraits {
+            source: SOURCE,
+            trace: &row.trace(),
+            received_at: row.received_at,
+            message_id: &row.message_id,
+            person_id: *person_id,
+            dropped: &dropped,
+        },
+    )
+    .await
+}
+
 fn tally_profile(outcome: &mut DrainOutcome, kind: &'static str, result: &ProfileOutcome) {
     let label = match result {
         ProfileOutcome::Applied { .. } => "valid",
@@ -734,6 +771,7 @@ pub async fn drain_batch(
                 let result =
                     apply_profile_record_into(&mut tx, workspace, &record, &mut events.decisions)
                         .await?;
+                record_dropped_traits(&mut tx, workspace, row, &result).await?;
                 tally_profile(&mut outcome, "identify", &result);
             }
             Mapped::Contact(record) => {
@@ -794,9 +832,13 @@ pub async fn drain_batch_singly(
         let mut unstorable = Map::new();
         let applied = match &mapped {
             Some(Mapped::Profile(record)) => {
-                apply_profile_record(&mut savepoint, workspace, record)
-                    .await
-                    .map(|result| tally_profile(&mut outcome, "identify", &result))
+                match apply_profile_record(&mut savepoint, workspace, record).await {
+                    Ok(result) => {
+                        tally_profile(&mut outcome, "identify", &result);
+                        record_dropped_traits(&mut savepoint, workspace, row, &result).await
+                    }
+                    Err(error) => Err(error),
+                }
             }
             Some(Mapped::Contact(record)) => apply_contact(&mut savepoint, workspace, record)
                 .await
@@ -2346,6 +2388,121 @@ mod tests {
                 json!({"reject": reject}),
             )
             .await;
+        })
+        .await;
+    }
+
+    async fn register_trait(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        key: &str,
+        trait_type: zirv_flow_core::people::TraitType,
+    ) {
+        crate::people::create_trait_definition(
+            pool,
+            ws,
+            &crate::people::NewTraitDefinition {
+                key: key.to_owned(),
+                trait_type,
+                precedence: zirv_flow_core::people::Precedence::Latest,
+                source_order: Vec::new(),
+                pii: false,
+                channel_address: false,
+                inferred: false,
+                description: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_identify_that_drops_traits_applies_the_rest_and_leaves_one_reject_naming_them(
+        pool: PgPool,
+    ) {
+        use zirv_flow_core::people::TraitType;
+
+        crate::decision_testing::checked(pool, |pool| async move {
+            for singly in [false, true] {
+                let ws = workspace(&pool, if singly { "singly" } else { "batch" }).await;
+                register_trait(&pool, ws, "age", TraitType::Number).await;
+                register_trait(&pool, ws, "old", TraitType::String).await;
+                crate::people::update_trait_definition(
+                    &pool,
+                    ws,
+                    "old",
+                    &crate::people::TraitDefinitionUpdate {
+                        archived: Some(true),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+                let trace = TraceContext::root(Cause::api("req"));
+                let items = [identify(
+                    "u1",
+                    "identify-1",
+                    json!({"age": "forty-secret", "old": "gone-secret", "plan": "pro"}),
+                )];
+                // The same message sent twice leaves the one reject.
+                for _ in 0..2 {
+                    append(&pool, ws, &trace, &items).await;
+                    let outcome = if singly {
+                        drain_batch_singly(&pool, ws, Shard::ALL, &key(), 500).await
+                    } else {
+                        drain_batch(&pool, ws, Shard::ALL, &key(), 500).await
+                    }
+                    .unwrap();
+                    assert_eq!(outcome.rows, 1);
+                }
+
+                let plan: Option<Value> = sqlx::query_scalar(
+                    "SELECT traits -> 'plan' FROM people WHERE workspace_id = $1",
+                )
+                .bind(ws.as_uuid())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                assert_eq!(plan, Some(json!("pro")));
+
+                let rows: Vec<(String, String, Option<String>, Value, Value, bool)> =
+                    sqlx::query_as(
+                        "SELECT kind, reason, message_id, reasons, sample, person_id IS NOT NULL \
+                         FROM ingest_rejects WHERE workspace_id = $1",
+                    )
+                    .bind(ws.as_uuid())
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+                assert_eq!(rows.len(), 1);
+                let (kind, reason, message_id, reasons, sample, has_person) = &rows[0];
+                assert_eq!(kind, "record");
+                assert_eq!(reason, "traits_dropped");
+                assert_eq!(message_id.as_deref(), Some("identify-1"));
+                assert!(has_person);
+                let mut reasons: Vec<(String, String)> = reasons
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|entry| {
+                        (
+                            entry["property"].as_str().unwrap().to_owned(),
+                            entry["reason"].as_str().unwrap().to_owned(),
+                        )
+                    })
+                    .collect();
+                reasons.sort();
+                assert_eq!(
+                    reasons,
+                    [
+                        ("age".to_owned(), "wrong_type".to_owned()),
+                        ("old".to_owned(), "archived_key".to_owned()),
+                    ]
+                );
+                let kept = format!("{sample}");
+                assert!(!kept.contains("secret"), "{kept}");
+            }
         })
         .await;
     }
