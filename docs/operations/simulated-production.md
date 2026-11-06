@@ -44,9 +44,11 @@ scripts/sim/sim.sh reset                    # remove the stack, its volumes and 
 first time only), then
 `provision` (owner, users, workspace, registry, the people backbone, credentials, sources, sending,
 templates, the first syncs), waits for the ready gate, turns the generators on, and finally waits
-for the backfill before it publishes the flows that react to events. Every stage is idempotent, so
-`sim.sh provision <stage>` can be repeated (stages: `base registry people connections sending
-segments templates syncs gate flows`).
+for the backfill before it creates the segments and publishes the flows that react to events. It waits
+up to `SIM_BACKFILL_TIMEOUT` seconds (4 h in the small profile, 18 h in the full one). Every stage is
+idempotent, so `sim.sh provision <stage>` can be repeated (stages: `base registry people connections
+sending segments templates syncs gate flows`; with no stage it runs all but `segments`, which the
+`flows` stage runs after the backfill).
 
 Measured fresh starts, with the CPU quotas of the profiles (A2 capped them on 2026-11-05):
 

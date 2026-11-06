@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Provisions the simulated production environment through the API (design section 5).
 # usage: provision.sh [stage...]   stages: base registry people connections sending segments
-#        templates syncs gate flows (default: all of them, in that order)
+#        templates syncs gate flows (default: all but segments, in that order; the flows stage creates
+#        the segments after the backfill, B1)
 # Every stage is idempotent: it looks a thing up by name before it creates it.
 set -euo pipefail
 umask 022
@@ -472,7 +473,7 @@ stage_gate() {
 stage_flows() {
   publish_flows early
   step 'waiting for the backfill before the event-driven flows'
-  local waited=0 limit=${SIM_BACKFILL_TIMEOUT:-14400}
+  local waited=0 limit=${SIM_BACKFILL_TIMEOUT:-$(env_value SIM_BACKFILL_TIMEOUT)}
   until backfill_done; do
     ((waited < limit)) || die "backfill: not complete after ${limit}s (pending: $(pending_streams | tr '\n' ' '))"
     start_runs missing > /dev/null
@@ -495,7 +496,7 @@ dest_ensure() {
 
 main() {
   local stages=("$@")
-  [[ ${#stages[@]} -gt 0 ]] || stages=(base registry people connections sending segments templates syncs gate flows)
+  [[ ${#stages[@]} -gt 0 ]] || stages=(base registry people connections sending templates syncs gate flows)
   [[ -f "$STATE/profile" ]] || die 'run sim.sh up first'
   [[ ! -f "$KEYS/workspace.id" ]] || sign_in
   local stage
