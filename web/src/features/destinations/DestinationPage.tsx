@@ -344,12 +344,12 @@ function ArchivePanel({ workspaceId, destination }: { workspaceId: string; desti
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
-  const [flows, setFlows] = useState<string[]>([]);
+  const [usedBy, setUsedBy] = useState("");
 
   async function archive() {
     setBusy(true);
     setFailure(null);
-    setFlows([]);
+    setUsedBy("");
     try {
       await unwrapEmpty(
         client.DELETE("/api/v1/workspaces/{ws}/destinations/{id}", { params: { path: { ws: workspaceId, id: destination.id } } }),
@@ -357,7 +357,7 @@ function ArchivePanel({ workspaceId, destination }: { workspaceId: string; desti
       void navigate(`/w/${workspaceId}/destinations`);
     } catch (error) {
       if (error instanceof ApiError && error.code === "destination_in_use") {
-        setFlows(error.flows.map((flow) => flow.name));
+        setUsedBy(usedByLine(error.flows.map((flow) => flow.name), error.forwardingRules.map((rule) => rule.name)));
       } else {
         setFailure(describeError(error));
       }
@@ -380,9 +380,9 @@ function ArchivePanel({ workspaceId, destination }: { workspaceId: string; desti
         <Dialog title={`Archive ${destination.name}?`} onClose={() => setOpen(false)}>
           <div className="stack">
             <p className="muted">It stops delivering. Its history stays.</p>
-            {flows.length > 0 ? (
+            {usedBy ? (
               <p role="alert" className="field-error">
-                Used by {flows.join(", ")}. Remove it from the flows first.
+                {usedBy}
               </p>
             ) : null}
             {failure ? <InlineError title={failure.title} detail={failure.detail} traceId={failure.traceId} /> : null}
@@ -397,4 +397,10 @@ function ArchivePanel({ workspaceId, destination }: { workspaceId: string; desti
       ) : null}
     </Panel>
   );
+}
+
+/** "Used by flows A, B and forwarding rules C. Remove it from them first." */
+function usedByLine(flows: readonly string[], rules: readonly string[]): string {
+  const parts = [flows.length > 0 ? `flows ${flows.join(", ")}` : "", rules.length > 0 ? `forwarding rules ${rules.join(", ")}` : ""];
+  return `Used by ${parts.filter(Boolean).join(" and ")}. Remove it from them first.`;
 }

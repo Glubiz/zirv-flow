@@ -33,6 +33,8 @@ export interface ProblemDetails {
   snippetThemes?: NamedRef[];
   /** The active flows that send a template (`template_in_use`), by id and name. */
   flows?: NamedRef[];
+  /** The active forwarding rules that deliver to a destination (`destination_in_use`), by id and name. */
+  forwardingRules?: NamedRef[];
   /** The live templates a snippet or theme version would stop from sending (`snippet_breaks_templates`, `theme_breaks_templates`). */
   templates?: BrokenTemplate[];
   /** How many templates there are in all; `templates` lists the first few. */
@@ -85,6 +87,7 @@ export class ApiError extends Error {
   readonly templates: BrokenTemplate[];
   readonly total: number;
   readonly flows: NamedRef[];
+  readonly forwardingRules: NamedRef[];
 
   constructor(problem: ProblemDetails) {
     super(problem.detail || problem.title);
@@ -104,6 +107,7 @@ export class ApiError extends Error {
     this.templates = problem.templates ?? [];
     this.total = problem.total ?? this.templates.length;
     this.flows = problem.flows ?? [];
+    this.forwardingRules = problem.forwardingRules ?? [];
   }
 }
 
@@ -133,6 +137,7 @@ export function problemFrom(body: unknown, response: Response): ApiError {
       templates: brokenTemplates(body["templates"]),
       ...(typeof body["total"] === "number" ? { total: body["total"] } : {}),
       flows: flowRefs(body["flows"]),
+      forwardingRules: ruleRefs(body["forwarding_rules"]),
     });
   }
   return new ApiError({
@@ -216,6 +221,15 @@ function flowRefs(value: unknown): NamedRef[] {
   return value.flatMap((entry: unknown) => {
     if (!isRecord(entry)) return [];
     const { flow_id: id, flow_name: name } = entry;
+    return typeof id === "string" && typeof name === "string" ? [{ id, name }] : [];
+  });
+}
+
+function ruleRefs(value: unknown): NamedRef[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry: unknown) => {
+    if (!isRecord(entry)) return [];
+    const { rule_id: id, rule_name: name } = entry;
     return typeof id === "string" && typeof name === "string" ? [{ id, name }] : [];
   });
 }

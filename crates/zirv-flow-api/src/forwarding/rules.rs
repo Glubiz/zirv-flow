@@ -16,7 +16,7 @@ use zirv_flow_core::segment::{Issue, parse};
 use zirv_flow_core::{UserId, WorkspaceId};
 use zirv_flow_segments::validate;
 use zirv_flow_store::{
-    ForwardingRule, NewRule, PgConnection, PgPool, RuleUpdate, RuleWrite, segment_catalog,
+    ForwardingRule, NewRule, PgConnection, RuleUpdate, RuleWrite, segment_catalog,
 };
 
 use super::{destination_unsupported, issues_problem, too_many_rules};
@@ -103,11 +103,11 @@ pub(crate) struct UpdateRuleRequest {
 
 /// Checks the destination of a rule: live, and of a type that declares the `event` channel.
 async fn check_destination(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     workspace: WorkspaceId,
     id: Uuid,
 ) -> Result<(), ApiError> {
-    let destination = zirv_flow_store::find_destination(pool, workspace, id)
+    let destination = zirv_flow_store::find_destination(&mut *connection, workspace, id)
         .await?
         .filter(|destination| destination.archived_at.is_none())
         .ok_or_else(|| {
@@ -191,8 +191,8 @@ pub(crate) async fn create_rule(
         .await
         .map_err(|_| ApiError::internal())?;
     check_filter(&mut connection, workspace, &request.event_name, &filter).await?;
+    check_destination(&mut connection, workspace, request.destination_id).await?;
     drop(connection);
-    check_destination(&state.pool, workspace, request.destination_id).await?;
     crate::destinations::actions::check_destination(
         state,
         context,
@@ -202,6 +202,11 @@ pub(crate) async fn create_rule(
     .await?;
 
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
+    // The destination is share-locked and checked again under the lock, so an archive of it and
+    // this create cannot both commit: see `lock_destinations_shared`.
+    zirv_flow_store::lock_destinations_shared(&mut tx, workspace, &[request.destination_id])
+        .await?;
+    check_destination(&mut tx, workspace, request.destination_id).await?;
     let written = zirv_flow_store::create_rule(
         &mut tx,
         workspace,
@@ -289,6 +294,12 @@ pub(crate) async fn update_rule(
     let current = zirv_flow_store::lock_rule(&mut tx, workspace, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
+    // Turning a rule on needs a live destination, held against an archive until this commits.
+    if request.active == Some(true) && !current.active {
+        zirv_flow_store::lock_destinations_shared(&mut tx, workspace, &[current.destination_id])
+            .await?;
+        check_destination(&mut tx, workspace, current.destination_id).await?;
+    }
     // A changed event name or filter is checked against the rule as it will be.
     if request.filter.is_some() || request.event_name.is_some() {
         let event_name = request.event_name.as_deref().unwrap_or(&current.event_name);

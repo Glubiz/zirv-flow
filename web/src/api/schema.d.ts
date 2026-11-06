@@ -7588,6 +7588,12 @@ export interface components {
             type: "wait.until_time";
             when: components["schemas"]["FlowUntilTime"];
         };
+        /** @description A forwarding rule named in a problem. */
+        ForwardingRuleRefProblem: {
+            /** Format: uuid */
+            rule_id: string;
+            rule_name: string;
+        };
         ForwardingStatusBody: {
             destinations: components["schemas"]["QueueStatusBody"][];
         };
@@ -8613,6 +8619,8 @@ export interface components {
              *     destination (`destination_in_use`).
              */
             flows?: components["schemas"]["FlowRefProblem"][] | null;
+            /** @description The active forwarding rules that deliver to a destination (`destination_in_use`). */
+            forwarding_rules?: components["schemas"]["ForwardingRuleRefProblem"][] | null;
             /**
              * @description What is wrong with a segment definition (`segment_invalid`): a JSON pointer into the
              *     definition and a fixed code for each issue, never a value from it.
@@ -16585,7 +16593,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The destination is already archived (`code` is `destination_archived`), or a published flow still uses it (`code` is `destination_in_use`, with the flows in `flows`) */
+            /** @description The destination is already archived (`code` is `destination_archived`), or a published flow or an active forwarding rule still uses it (`code` is `destination_in_use`, with the flows in `flows` and the rules in `forwarding_rules`) */
             409: {
                 headers: {
                     [name: string]: unknown;

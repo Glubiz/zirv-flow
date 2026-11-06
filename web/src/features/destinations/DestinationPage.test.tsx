@@ -247,12 +247,13 @@ describe("one destination", () => {
               type: "about:blank",
               title: "Conflict",
               status: 409,
-              detail: "published flows still use the destination; remove it from them first",
+              detail: "published flows or active forwarding rules still use the destination",
               code: "destination_in_use",
               flows: [
                 { flow_id: "f1", flow_name: "Welcome" },
                 { flow_id: "f2", flow_name: "Win-back" },
               ],
+              forwarding_rules: [{ rule_id: "r1", rule_name: "Paid orders" }],
             }),
             { status: 409, headers: { "content-type": "application/problem+json" } },
           ),
@@ -265,7 +266,7 @@ describe("one destination", () => {
     const dialog = await screen.findByRole("dialog");
     await user.click(within(dialog).getByRole("button", { name: "Archive" }));
 
-    expect(await within(dialog).findByRole("alert")).toHaveTextContent("Used by Welcome, Win-back. Remove it from the flows first.");
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("Used by flows Welcome, Win-back and forwarding rules Paid orders. Remove it from them first.");
     expect(calls.filter((call) => call.method === "DELETE")).toHaveLength(1);
     expect(within(dialog).queryByText("Conflict")).not.toBeInTheDocument();
   });

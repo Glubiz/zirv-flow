@@ -265,6 +265,7 @@ fn replayed(resource_id: Uuid) -> Response {
         templates: None,
         total: None,
         flows: None,
+        forwarding_rules: None,
         current_revision: None,
     };
     let mut response = (

@@ -27,5 +27,6 @@ pub use crud::{
     update_destination,
 };
 pub use where_used::{
-    DestinationFlowUse, active_published_flows_using_destination, lock_destinations_shared,
+    DestinationFlowUse, DestinationRuleUse, active_published_flows_using_destination,
+    active_rules_using_destination, lock_destinations_shared,
 };

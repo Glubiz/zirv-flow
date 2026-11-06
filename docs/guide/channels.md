@@ -56,7 +56,8 @@ An HTTP email API instead uses a [provider destination](#email-provider-destinat
 Both use workspace [credentials](sources.md#workspace-credentials), which can be
 rotated without replacing the destination.
 
-Archiving a destination is refused with 409 `destination_in_use`, listing the flows, while a
+Archiving a destination is refused with 409 `destination_in_use`, listing the flows (and any active
+[forwarding rules](#event-forwarding)), while a
 published flow's running version has a step that uses it. Archive the flow or publish a
 version without the destination first; a draft, paused or archived flow does not block.
 
@@ -200,6 +201,10 @@ retries. A destination without it, including `webhook` and SMTP, gets none.
 A forwarding rule sends the events of one name to a destination, mapped to the payload you choose.
 Only a destination type that carries events accepts a rule (`webhook` does; an email provider does
 not: `422 destination_unsupported`). A workspace has at most 20 active rules (`422 too_many_rules`).
+A rule needs a live destination: creating one, or switching one on, for an archived destination is a
+`422` on `destination_id`, and archiving a destination while an active rule delivers to it is a
+`409 destination_in_use` that lists the rules (`forwarding_rules`). Switch the rule off or delete it
+first; an inactive rule does not block.
 
 A rule has an exact `event_name`, an optional `filter` and a `mapping`:
 
@@ -220,7 +225,7 @@ none. With no active rule the cost is one indexed lookup per batch. An `event.fo
 destination delivers the rows with the webhook's signing, the guarded client and the destination's
 rate limit, under the idempotency key `sha256(event id:destination id)`, which every retry and
 re-drive reuses (the webhook sends it as `X-Zirv-Idempotency-Key`), so delivery is at least once.
-A retryable answer backs off (5 s doubling to an hour, or the `Retry-After` when that is longer); a terminal answer, or
+A retryable answer backs off (5 s doubling to an hour, or the `Retry-After` when that is longer, never past an hour); a terminal answer, or
 the eighth attempt, makes the row a dead letter. Each retry and each dead letter appends a decision
 (`event.forward`) with ids and a fixed code. Delivered rows lose their payload at once and are
 removed after seven days.

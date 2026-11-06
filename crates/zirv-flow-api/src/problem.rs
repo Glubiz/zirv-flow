@@ -64,6 +64,9 @@ pub struct Problem {
     /// destination (`destination_in_use`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flows: Option<Vec<FlowRefProblem>>,
+    /// The active forwarding rules that deliver to a destination (`destination_in_use`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forwarding_rules: Option<Vec<ForwardingRuleRefProblem>>,
     /// The draft's current revision (`template_draft_revision_mismatch`), to load it with.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_revision: Option<i32>,
@@ -124,6 +127,13 @@ pub struct FlowRefProblem {
     pub flow_name: String,
 }
 
+/// A forwarding rule named in a problem.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct ForwardingRuleRefProblem {
+    pub rule_id: uuid::Uuid,
+    pub rule_name: String,
+}
+
 /// One issue of a segment definition.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct SegmentIssueProblem {
@@ -170,6 +180,8 @@ struct SegmentExtra {
     /// The active flows that send a template (`template_in_use`) or use a destination
     /// (`destination_in_use`).
     flows: Option<Vec<FlowRefProblem>>,
+    /// The active forwarding rules that deliver to a destination (`destination_in_use`).
+    forwarding_rules: Option<Vec<ForwardingRuleRefProblem>>,
     /// The current revision of the draft a stale write named (`template_draft_revision_mismatch`).
     current_revision: Option<i32>,
 }
@@ -1171,17 +1183,22 @@ impl ApiError {
         }
     }
 
-    /// An archive of a destination that published flows still use, with those flows.
-    pub(crate) fn destination_in_use(flows: Vec<FlowRefProblem>) -> Self {
+    /// An archive of a destination that published flows or active forwarding rules still use,
+    /// with those flows and rules.
+    pub(crate) fn destination_in_use(
+        flows: Vec<FlowRefProblem>,
+        rules: Vec<ForwardingRuleRefProblem>,
+    ) -> Self {
         Self {
             code: Some("destination_in_use"),
             segment: Some(Box::new(SegmentExtra {
-                flows: Some(flows),
+                flows: Some(flows).filter(|flows| !flows.is_empty()),
+                forwarding_rules: Some(rules).filter(|rules| !rules.is_empty()),
                 ..SegmentExtra::default()
             })),
             ..Self::new(
                 StatusCode::CONFLICT,
-                "published flows still use the destination; remove it from them first",
+                "published flows or active forwarding rules still use the destination; remove it from them first",
             )
         }
     }
@@ -1400,6 +1417,10 @@ impl IntoResponse for ApiError {
             total: templates.as_ref().map(|(_, total)| *total),
             templates: templates.map(|(listed, _)| listed),
             flows: self.segment.as_mut().and_then(|extra| extra.flows.take()),
+            forwarding_rules: self
+                .segment
+                .as_mut()
+                .and_then(|extra| extra.forwarding_rules.take()),
             current_revision: self
                 .segment
                 .as_ref()
@@ -1504,19 +1525,26 @@ mod tests {
     }
 
     #[test]
-    fn a_destination_in_use_is_a_409_that_lists_the_flows() {
-        let error = ApiError::destination_in_use(vec![FlowRefProblem {
+    fn a_destination_in_use_is_a_409_that_lists_the_flows_and_the_rules() {
+        let flow = FlowRefProblem {
             flow_id: uuid::Uuid::nil(),
             flow_name: "Welcome".into(),
-        }]);
+        };
+        let rule = ForwardingRuleRefProblem {
+            rule_id: uuid::Uuid::nil(),
+            rule_name: "Paid orders".into(),
+        };
 
-        assert_eq!(error.status, StatusCode::CONFLICT);
-        assert_eq!(error.code(), Some("destination_in_use"));
-        let flows = error
-            .segment
-            .as_ref()
-            .and_then(|extra| extra.flows.as_ref());
-        assert_eq!(flows.map(Vec::len), Some(1));
+        let both = ApiError::destination_in_use(vec![flow.clone()], vec![rule]);
+        let only_flows = ApiError::destination_in_use(vec![flow], Vec::new());
+
+        assert_eq!(both.status, StatusCode::CONFLICT);
+        assert_eq!(both.code(), Some("destination_in_use"));
+        let extra = both.segment.as_ref().unwrap();
+        assert_eq!(extra.flows.as_ref().map(Vec::len), Some(1));
+        assert_eq!(extra.forwarding_rules.as_ref().map(Vec::len), Some(1));
+        let extra = only_flows.segment.as_ref().unwrap();
+        assert!(extra.forwarding_rules.is_none());
     }
 
     #[test]

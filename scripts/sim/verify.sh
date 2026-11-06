@@ -44,14 +44,19 @@ eventually() {
   "$@" > /dev/null 2>&1
 }
 
-# check <name> <function>: runs the function, prints PASS or FAIL (with its last message).
+# check <name> <function>: runs the function, prints PASS, FAIL or SKIP (with its last message).
 MESSAGE=
+# A check that cannot run yet (a precondition the stack has not reached) returns SKIP_STATUS and says why.
+SKIP_STATUS=77
 check() {
-  local name=$1 started=$SECONDS
+  local name=$1 started=$SECONDS status=0
   MESSAGE=
-  if "$2"; then
+  "$2" || status=$?
+  if [[ $status -eq 0 ]]; then
     printf 'PASS %-34s %3ss %s\n' "$name" "$((SECONDS - started))" "$MESSAGE"
     PASSED=$((PASSED + 1))
+  elif [[ $status -eq $SKIP_STATUS ]]; then
+    printf 'SKIP %-34s %3ss %s\n' "$name" "$((SECONDS - started))" "$MESSAGE"
   else
     printf 'FAIL %-34s %3ss %s\n' "$name" "$((SECONDS - started))" "$MESSAGE"
     FAILED+=("$name")
@@ -469,6 +474,10 @@ smtp_bounce_check() { post "$P/suppressions/check" "$(jq -nc --arg v "$SMTP_BOUN
 smtp_bounce_message() { zf_sql "SELECT string_agg(status || '/' || coalesce(reason, ''), ', ') FROM messages WHERE NOT test AND person_id = '$(smtp_bounce_person)'"; }
 t_delivery_smtp_hard_bounce() {
   local user="verify-smtp-bounce-$RUN"
+  # Its flow starts on an event and is created only after the backfill; before that nothing would
+  # enroll the person and the check would wait out its 300 s.
+  [[ -n "$(get "$P/flows" | as_array flows | jq -r '[.[] | select(.name == "Order confirmation" and .state == "published")][0].id // empty')" ]] \
+    || { MESSAGE='the Order confirmation flow is not published yet (backfill not done)'; return "$SKIP_STATUS"; }
   ingest /ingest/identify "$(jq -nc --arg e "$SMTP_BOUNCE_ADDRESS" --arg u "$user" '{userId:$u, identifiers:{email:$e}, traits:{first_name:"Bounce"}}')" > /dev/null
   eventually 60 smtp_bounce_person_exists
   ingest /ingest/track "$(jq -nc --arg u "$user" --arg id "verify-smtp-bounce-order-$RUN" \
