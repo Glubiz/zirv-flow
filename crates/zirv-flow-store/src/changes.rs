@@ -521,6 +521,7 @@ mod tests {
         commit(tx).await.unwrap();
         assert_eq!(reevaluate_jobs(&pool, ws).await, 1);
     }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn marking_without_an_initialized_reader_cache_is_a_programming_error(pool: PgPool) {

@@ -30,7 +30,6 @@ export function precedenceLabel(value: string): string {
   return PRECEDENCES.find((precedence) => precedence.value === value)?.label ?? value;
 }
 
-
 interface TraitDialogProps {
   workspaceId: string;
   /** The trait being edited; absent when creating. */
