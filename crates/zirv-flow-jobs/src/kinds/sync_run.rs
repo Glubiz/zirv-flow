@@ -3261,7 +3261,7 @@ mod tests {
                     ..job
                 };
                 let result = db.attempt(&last, &Probe::default(), loopback()).await;
-                assert!(result.is_err());
+                assert!(result.is_ok(), "a bad setting ends the run at once");
                 let failed = env.run(stale.id).await;
                 assert_eq!(failed.state, "failed");
                 assert_eq!(failed.error_code.as_deref(), Some("source_error"));
@@ -4722,7 +4722,7 @@ mod tests {
             assert!(result.is_err());
             let failed = env.run(run.id).await;
             assert_eq!(failed.state, "failed");
-            assert_eq!(failed.error_code.as_deref(), Some("source_error"));
+            assert_eq!(failed.error_code.as_deref(), Some("file_changed"));
             let applied = env.count("SELECT count(*) FROM source_records").await;
             assert!(applied > 0 && applied < 700, "{applied}");
             assert_eq!(failed.records_applied, applied);
@@ -5618,10 +5618,13 @@ mod tests {
                     .attempt(&job, &Probe::default(), &Arc::default())
                     .await;
 
-                assert!(result.is_err());
+                assert!(result.is_ok(), "a bad setting ends the run at once");
+                assert_eq!(
+                    account.env.run(run.id).await.error_code.as_deref(),
+                    Some("source_error")
+                );
                 assert_eq!(account.api.data_requests.load(Ordering::SeqCst), 0);
                 assert_eq!(account.api.refreshes.load(Ordering::SeqCst), 0);
-                let _ = run;
             })
             .await;
         }
