@@ -344,17 +344,23 @@ function ArchivePanel({ workspaceId, destination }: { workspaceId: string; desti
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
+  const [usedBy, setUsedBy] = useState("");
 
   async function archive() {
     setBusy(true);
     setFailure(null);
+    setUsedBy("");
     try {
       await unwrapEmpty(
         client.DELETE("/api/v1/workspaces/{ws}/destinations/{id}", { params: { path: { ws: workspaceId, id: destination.id } } }),
       );
       void navigate(`/w/${workspaceId}/destinations`);
     } catch (error) {
-      setFailure(describeError(error));
+      if (error instanceof ApiError && error.code === "destination_in_use") {
+        setUsedBy(usedByLine(error.flows.map((flow) => flow.name), error.forwardingRules.map((rule) => rule.name)));
+      } else {
+        setFailure(describeError(error));
+      }
       setBusy(false);
     }
   }
@@ -374,6 +380,11 @@ function ArchivePanel({ workspaceId, destination }: { workspaceId: string; desti
         <Dialog title={`Archive ${destination.name}?`} onClose={() => setOpen(false)}>
           <div className="stack">
             <p className="muted">It stops delivering. Its history stays.</p>
+            {usedBy ? (
+              <p role="alert" className="field-error">
+                {usedBy}
+              </p>
+            ) : null}
             {failure ? <InlineError title={failure.title} detail={failure.detail} traceId={failure.traceId} /> : null}
             <div className="dialog-actions">
               <Button onClick={() => setOpen(false)}>Cancel</Button>
@@ -386,4 +397,10 @@ function ArchivePanel({ workspaceId, destination }: { workspaceId: string; desti
       ) : null}
     </Panel>
   );
+}
+
+/** "Used by flows A, B and forwarding rules C. Remove it from them first." */
+function usedByLine(flows: readonly string[], rules: readonly string[]): string {
+  const parts = [flows.length > 0 ? `flows ${flows.join(", ")}` : "", rules.length > 0 ? `forwarding rules ${rules.join(", ")}` : ""];
+  return `Used by ${parts.filter(Boolean).join(" and ")}. Remove it from them first.`;
 }

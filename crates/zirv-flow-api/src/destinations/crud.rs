@@ -23,7 +23,7 @@ use crate::AppState;
 use crate::admin::{self, Context};
 use crate::auth::{Need, Principal, authorize, path_id};
 use crate::json::ApiJson;
-use crate::problem::{ApiError, Problem};
+use crate::problem::{ApiError, FlowRefProblem, ForwardingRuleRefProblem, Problem};
 use crate::sources::crud::check_name;
 use crate::sources::{field_problems, invalid};
 use crate::workspace_credentials::resolve::{
@@ -393,6 +393,29 @@ pub(crate) async fn archive_destination(
             );
         }
     };
+    // Nothing is written while a published flow or an active forwarding rule still uses the
+    // destination.
+    let flows =
+        zirv_flow_store::active_published_flows_using_destination(&mut *tx, workspace, id).await?;
+    let rules = zirv_flow_store::active_rules_using_destination(&mut *tx, workspace, id).await?;
+    if !flows.is_empty() || !rules.is_empty() {
+        return Err(ApiError::destination_in_use(
+            flows
+                .into_iter()
+                .map(|used| FlowRefProblem {
+                    flow_id: used.flow_id,
+                    flow_name: used.flow_name,
+                })
+                .collect(),
+            rules
+                .into_iter()
+                .map(|used| ForwardingRuleRefProblem {
+                    rule_id: used.rule_id,
+                    rule_name: used.rule_name,
+                })
+                .collect(),
+        ));
+    }
     admin::audit(
         &mut tx,
         context,
@@ -608,7 +631,7 @@ pub(crate) async fn update(
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a missing scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or destination, or no access", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "The destination is already archived (`code` is `destination_archived`)", body = Problem, content_type = "application/problem+json")
+        (status = 409, description = "The destination is already archived (`code` is `destination_archived`), or a published flow or an active forwarding rule still uses it (`code` is `destination_in_use`, with the flows in `flows` and the rules in `forwarding_rules`)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]

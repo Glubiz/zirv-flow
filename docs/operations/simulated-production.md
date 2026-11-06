@@ -155,7 +155,9 @@ sink arrivals.
    customers (enrollment begins about five minutes later; the warm-up ramp spreads the entries).
    The mail fixture bounces 1.2% of recipients, reports 0.3% complaints and opens about 35% and
    clicks about 8% of delivered mail within a few minutes; the Results tab and the counters in
-   `sim.sh status` show it.
+   `sim.sh status` show it. The SMTP sink answers `550 5.1.1` for recipients whose local part starts with
+   `bounce` (a hard bounce that suppresses the address) and a bare `550` for about 0.5% of the others (a
+   rejection that suppresses nobody).
 6. **Kill something.** `docker compose -p zirv-flow-sim stop receiver` and place an order of 400 or
    more: the forwarding queue depth rises (Prometheus: `zirv_flow_destination_forwarding_depth`) and
    drains after `start receiver`. `stop zf-worker-1` shows the other worker taking its jobs.

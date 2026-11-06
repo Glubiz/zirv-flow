@@ -237,4 +237,37 @@ describe("one destination", () => {
     await waitFor(() => expect(router.state.location.pathname).toBe("/w/ws1/members"));
     expect(screen.queryByRole("heading", { name: "Order hook" })).not.toBeInTheDocument();
   });
+
+  it("names the flows when the archive is refused because published flows still use the destination", async () => {
+    const calls = mockApi(
+      base({
+        [`DELETE ${WS}/destinations/${DEST_ID}`]: () =>
+          new Response(
+            JSON.stringify({
+              type: "about:blank",
+              title: "Conflict",
+              status: 409,
+              detail: "published flows or active forwarding rules still use the destination",
+              code: "destination_in_use",
+              flows: [
+                { flow_id: "f1", flow_name: "Welcome" },
+                { flow_id: "f2", flow_name: "Win-back" },
+              ],
+              forwarding_rules: [{ rule_id: "r1", rule_name: "Paid orders" }],
+            }),
+            { status: 409, headers: { "content-type": "application/problem+json" } },
+          ),
+      }),
+    );
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "Archive the destination" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Archive" }));
+
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("Used by flows Welcome, Win-back and forwarding rules Paid orders. Remove it from them first.");
+    expect(calls.filter((call) => call.method === "DELETE")).toHaveLength(1);
+    expect(within(dialog).queryByText("Conflict")).not.toBeInTheDocument();
+  });
 });

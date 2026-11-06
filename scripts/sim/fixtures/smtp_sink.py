@@ -3,7 +3,9 @@
 
 Derived from the SMTP half of scripts/drill/upgrade-fixture.py. Accepts the credential
 sim/sim (SIM_SMTP_USER and SIM_SMTP_PASSWORD override). A recipient whose local part starts with
-"bounce", and about 0.5% of all others by hash, get 550. The last 500 messages are kept.
+"bounce" gets `550 5.1.1` (an enhanced code, so a hard bounce that suppresses the address); about
+0.5% of all others by hash get a bare `550`, which is a rejection that suppresses nobody. The last
+500 messages are kept.
 """
 
 import base64
@@ -29,19 +31,22 @@ KEEP = 500
 
 counters = Counters("sim_smtp")
 counters.declare("messages_total", "Messages accepted.")
-counters.declare("recipients_refused_total", "Recipients answered 550.")
+counters.declare("recipients_refused_total", "Recipients answered 550 (bare or 5.1.1).")
 counters.declare("auth_failed_total", "Refused AUTH attempts.")
 messages = deque(maxlen=KEEP)
 sequence = [0]  # the number of the last captured message, so a reader can tell new from old
 lock = threading.Lock()
 
 
-def refuses(recipient):
+def refusal(recipient):
+    """The RCPT reply that refuses `recipient`, or None to accept it."""
     local = recipient.split("@")[0].lower().lstrip("<")
     if local.startswith("bounce"):
-        return True
+        return b"550 5.1.1 mailbox unavailable"
     digest = hashlib.sha256(recipient.lower().encode()).digest()
-    return int.from_bytes(digest[:4], "big") % 1000 < REFUSE_PER_MILLE
+    if int.from_bytes(digest[:4], "big") % 1000 < REFUSE_PER_MILLE:
+        return b"550 mailbox unavailable"
+    return None
 
 
 def captured(data, recipients):
@@ -97,9 +102,10 @@ def smtp_handler(context):
                         elif command == b"RCPT":
                             address = line.decode("ascii", "replace").split(":", 1)[-1].strip()
                             address = address.strip("<> \r\n")
-                            if refuses(address):
+                            refused = refusal(address)
+                            if refused:
                                 counters.inc("recipients_refused_total")
-                                reply(b"550 mailbox unavailable")
+                                reply(refused)
                             else:
                                 accepted.append(address)
                                 reply(b"250 ok")

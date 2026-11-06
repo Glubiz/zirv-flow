@@ -7192,7 +7192,7 @@
             }
           },
           "409": {
-            "description": "The destination is already archived (`code` is `destination_archived`)",
+            "description": "The destination is already archived (`code` is `destination_archived`), or a published flow or an active forwarding rule still uses it (`code` is `destination_in_use`, with the flows in `flows` and the rules in `forwarding_rules`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -35701,6 +35701,23 @@
         },
         "additionalProperties": false
       },
+      "ForwardingRuleRefProblem": {
+        "type": "object",
+        "description": "A forwarding rule named in a problem.",
+        "required": [
+          "rule_id",
+          "rule_name"
+        ],
+        "properties": {
+          "rule_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "rule_name": {
+            "type": "string"
+          }
+        }
+      },
       "ForwardingStatusBody": {
         "type": "object",
         "required": [
@@ -38147,7 +38164,17 @@
             "items": {
               "$ref": "#/components/schemas/FlowRefProblem"
             },
-            "description": "The active flows whose running version sends a template (`template_in_use`)."
+            "description": "The active flows whose running version sends a template (`template_in_use`) or uses a\ndestination (`destination_in_use`)."
+          },
+          "forwarding_rules": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ForwardingRuleRefProblem"
+            },
+            "description": "The active forwarding rules that deliver to a destination (`destination_in_use`)."
           },
           "issues": {
             "type": [

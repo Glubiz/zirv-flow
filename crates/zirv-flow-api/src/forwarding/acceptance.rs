@@ -817,4 +817,169 @@ mod tests {
             "no payload in the audit"
         );
     }
+
+    /// Waits until a statement on `destinations` is waiting for a lock.
+    async fn blocked_on_destinations(pool: &PgPool) -> bool {
+        for _ in 0..200 {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity \
+                 WHERE datname = current_database() AND pid <> pg_backend_pid() \
+                   AND wait_event_type = 'Lock' AND query ILIKE '%destinations%'",
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            if waiting > 0 {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        false
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_active_rule_blocks_the_destination_archive_until_it_is_switched_off(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let rule = fx.create_rule("Paid orders").await;
+        let uri = format!("/destinations/{}", fx.destination);
+
+        let refused = fx.as_admin("DELETE", &uri, None).await;
+
+        assert_eq!(refused.status, StatusCode::CONFLICT, "{:?}", refused.body);
+        assert_eq!(refused.body["code"], "destination_in_use");
+        assert_eq!(
+            refused.body["forwarding_rules"][0]["rule_id"],
+            rule.as_str()
+        );
+        assert_eq!(
+            refused.body["forwarding_rules"][0]["rule_name"],
+            "Paid orders"
+        );
+        assert!(refused.body.get("flows").is_none());
+        let off = fx
+            .as_admin(
+                "PATCH",
+                &format!("/forwarding/rules/{rule}"),
+                Some(json!({"active": false})),
+            )
+            .await;
+        assert_eq!(off.status, StatusCode::OK, "{:?}", off.body);
+        let accepted = fx.as_admin("DELETE", &uri, None).await;
+        assert_eq!(
+            accepted.status,
+            StatusCode::NO_CONTENT,
+            "{:?}",
+            accepted.body
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_inactive_rule_does_not_block_the_destination_archive(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let mut body = fx.rule("Parked");
+        body["active"] = json!(false);
+        let created = fx.as_admin("POST", "/forwarding/rules", Some(body)).await;
+        assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+
+        let archived = fx
+            .as_admin("DELETE", &format!("/destinations/{}", fx.destination), None)
+            .await;
+
+        assert_eq!(
+            archived.status,
+            StatusCode::NO_CONTENT,
+            "{:?}",
+            archived.body
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_rule_cannot_be_switched_on_for_an_archived_destination(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let mut body = fx.rule("Parked");
+        body["active"] = json!(false);
+        let created = fx.as_admin("POST", "/forwarding/rules", Some(body)).await;
+        let rule = created.body["id"].as_str().unwrap().to_owned();
+        let archived = fx
+            .as_admin("DELETE", &format!("/destinations/{}", fx.destination), None)
+            .await;
+        assert_eq!(archived.status, StatusCode::NO_CONTENT);
+        let on_create = fx
+            .as_admin("POST", "/forwarding/rules", Some(fx.rule("Late")))
+            .await;
+
+        let on_activate = fx
+            .as_admin(
+                "PATCH",
+                &format!("/forwarding/rules/{rule}"),
+                Some(json!({"active": true})),
+            )
+            .await;
+
+        assert_eq!(on_create.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            on_activate.status, on_create.status,
+            "{:?}",
+            on_activate.body
+        );
+        assert_eq!(on_activate.body["errors"], on_create.body["errors"]);
+        let still_off: bool =
+            sqlx::query_scalar("SELECT active FROM forwarding_rules WHERE id = $1")
+                .bind(rule.parse::<Uuid>().unwrap())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(!still_off);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_archive_waits_for_a_rule_create_in_progress_and_then_answers_destination_in_use(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        // A create that has share-locked the destination and inserted the rule, and has not
+        // committed yet.
+        let mut creating = zirv_flow_store::begin(&pool).await.unwrap();
+        zirv_flow_store::lock_destinations_shared(&mut creating, fx.ws, &[fx.destination])
+            .await
+            .unwrap();
+        let written = zirv_flow_store::create_rule(
+            &mut creating,
+            fx.ws,
+            &zirv_flow_store::NewRule {
+                id: Uuid::now_v7(),
+                destination_id: fx.destination,
+                name: "Racing",
+                event_name: "order.completed",
+                filter: &json!([]),
+                mapping: &json!({"id": {"from": "event.id"}}),
+                active: true,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(written, zirv_flow_store::RuleWrite::Saved(_)));
+        let archive = {
+            let router = fx.router.clone();
+            let uri = fx.path(&format!("/destinations/{}", fx.destination));
+            let key = fx.admin.clone();
+            tokio::spawn(async move { call(&router, "DELETE", &uri, None, Auth::Key(&key)).await })
+        };
+        assert!(
+            blocked_on_destinations(&pool).await,
+            "the archive should wait for the share lock"
+        );
+        zirv_flow_store::commit(creating).await.unwrap();
+
+        let reply = archive.await.unwrap();
+
+        assert_eq!(reply.status, StatusCode::CONFLICT, "{:?}", reply.body);
+        assert_eq!(reply.body["code"], "destination_in_use");
+        assert_eq!(reply.body["forwarding_rules"][0]["rule_name"], "Racing");
+    }
 }
