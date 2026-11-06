@@ -15,3 +15,21 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.239.0 (2026-11-06)
+
+### Fixes
+
+- strip the carriage return, not the newline, from the sink's sequence number (#522)
+- a stream's first sync flags its events no_triggers (#522)
+
+### Documentation
+
+- the first-sync exception for event triggers (#522)
+
+### Chores
+
+- drop a committed Python cache file and ignore __pycache__ (#522)
+- the guide and verify match the first-sync, batch-lock and suppression-check fixes (#522)
+- the first-sync tests run under the decision invariant (#522)
+- bump the version to 0.239.0 (#522)
+
