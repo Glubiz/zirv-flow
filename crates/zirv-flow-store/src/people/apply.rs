@@ -5,7 +5,7 @@
 //! Decision records carry static strings and ids only, never trait keys or values and never
 //! identifiers.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use serde_json::{Map, Value};
 use sqlx::{Connection, PgConnection};
@@ -146,17 +146,18 @@ async fn lock_records(
     records: &[ProfileRecord],
     retracted: &[LedgerKey<'_>],
 ) -> Result<(), StoreError> {
-    let mut identities: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut identities: Vec<Vec<(String, String)>> = Vec::with_capacity(records.len());
     let mut ledger: Vec<LedgerKey<'_>> = Vec::with_capacity(records.len() + retracted.len());
     for record in records {
         // A record whose identifiers do not parse is rejected before it locks anything.
         let Ok(parsed) = normalize_identifiers(&record.identifiers) else {
             continue;
         };
-        identities.extend(
+        identities.push(
             parsed
                 .iter()
-                .map(|identifier| (identifier.kind().as_text(), identifier.value().to_owned())),
+                .map(|identifier| (identifier.kind().as_text(), identifier.value().to_owned()))
+                .collect(),
         );
         ledger.push(LedgerKey {
             source: &record.source,
@@ -165,7 +166,6 @@ async fn lock_records(
         });
     }
     ledger.extend_from_slice(retracted);
-    let identities: Vec<(String, String)> = identities.into_iter().collect();
     lock_batch(connection, workspace, &identities, &ledger).await
 }
 
