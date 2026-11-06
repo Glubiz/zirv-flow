@@ -547,9 +547,11 @@ lease (`store::lock_lease`) and the run row, so a lost lease or a cancel writes 
 Before its first record a unit takes what its records would otherwise lock one at a time in
 source order (`store::people::lock_batch`, #518): the advisory lock of each of the
 workspace's 64 identity buckets that holds an identity of the unit nobody owns yet, by bucket;
-the unit's existing ledger rows, including those of its deleted keys, by id; then every person
-those identities or rows name, and the people they were merged into, `FOR UPDATE` by id. A
-record then waits only on what it creates, so two streams' units over the same people in
+the unit's existing ledger rows, including those of its deleted keys, and every ledger row, of
+any stream, of the owners of a record whose identities name more than one person (a merge moves
+the rows of the people it merges away), by id; then every person those identities or the unit's
+rows name, and the people they were merged into, `FOR UPDATE` by id. A record then waits only on
+what it creates, so two streams' units over the same people in
 different orders wait for each other at the start instead of deadlocking. A CSV import batch
 and `apply_profile_batch` take the same locks.
 An expired lease does not return the run to `queued`: the row stays `running`, the job system
