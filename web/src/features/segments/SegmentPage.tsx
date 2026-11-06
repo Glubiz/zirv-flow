@@ -23,7 +23,7 @@ import { useSegmentAccess } from "./access";
 import { fromDefinition } from "./ast";
 import { useCatalog } from "./catalog";
 import { namesOf } from "./describe";
-import { cadenceLabel, causeLabel } from "./labels";
+import { cadenceLabel, causeLabel, issueMessage } from "./labels";
 import { builtFrom, describeDefinition, usedBy } from "./overview";
 import { DataAgeNote, personLabel } from "./LiveCount";
 import { SegmentSizePanel } from "./SegmentSize";
@@ -112,6 +112,15 @@ function SegmentView({ workspaceId, segmentId }: { workspaceId: string; segmentI
         secondary={canWrite ? <RefreshButton workspaceId={workspaceId} segmentId={segmentId} onReload={segment.reload} /> : null}
         actions={assistantOn ? <AssistantToggle open={dock.open && tab === "rules"} onToggle={toggleAssistant} /> : null}
       />
+      {data.issues && data.issues.length > 0 ? (
+        <div className="form-error" role="alert">
+          <span className="strong">Not updating</span>
+          <span>
+            The saved rules no longer match your data, so the people stay as they were until you edit the rules.{" "}
+            {Array.from(new Set(data.issues.map((issue) => issueMessage(issue.code)))).join(" ")}
+          </span>
+        </div>
+      ) : null}
       <dl className="facts">
         <div>
           <dt>People</dt>

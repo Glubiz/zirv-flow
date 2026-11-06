@@ -27382,7 +27382,7 @@
             }
           },
           "409": {
-            "description": "`trait_indexed`: the type of a trait that holds a slot cannot change",
+            "description": "`trait_indexed`: the type of a trait that holds a slot cannot change; `trait_referenced`: archiving a trait that the current version of a live segment reads, with the segment names in the detail",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -40441,6 +40441,16 @@
             "properties": {
               "current": {
                 "$ref": "#/components/schemas/SegmentVersionBody"
+              },
+              "issues": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/components/schemas/SegmentIssueProblem"
+                },
+                "description": "Set by the read of one segment when the saved definition no longer passes against what\nthe workspace defines now (a field archived, a list deleted, an event property removed):\nthe members then stay as they were. Absent otherwise."
               }
             }
           }
@@ -40701,6 +40711,16 @@
           "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "issues": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/SegmentIssueProblem"
+            },
+            "description": "Present when the saved definition no longer passes against what the workspace defines\nnow; the members then stay as they were."
           },
           "member_count": {
             "type": "integer",

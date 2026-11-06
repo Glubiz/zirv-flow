@@ -79,6 +79,12 @@ members: `GET .../segments/{id}/members` and `.../history` read them, and
 - **Archive.** `POST .../segments/{id}/archive` is refused with 409 `segment_referenced` while a
   current version of another live segment references it. The list hides archived segments
   unless `?archived=true`.
+- **Fields in use.** Archiving a field (`PATCH .../traits/{key}` with `archived: true`) is
+  refused with 409 `trait_referenced` while the current version of a live segment reads it; the
+  detail names the segments. An archived segment or an older version does not block it. A
+  segment whose saved rules no longer match the workspace for another reason (a deleted list, a
+  removed event property) keeps its members as they were and carries `issues` on
+  `GET .../segments/{id}` and in the list; the segment page shows a banner.
 - **Preview.** `POST .../segments/preview` with `{definition, sample_size?}` (20 by default,
   100 at most) runs an unsaved definition on the primary and returns `{count, sample,
   data_age, compiled_at}`. It reads in one read-only snapshot and stops at 20 seconds with 503

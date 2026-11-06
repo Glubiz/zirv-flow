@@ -347,6 +347,31 @@ pub async fn archive_segment(
     .map_err(|error| SegmentError::Store(StoreError::query(error)))
 }
 
+/// The live segments whose current version reads the trait `key`, by name. An archived segment
+/// and an older version do not count: neither is evaluated again. Call it after
+/// [`lock_segments`] when the answer decides a write.
+pub async fn segments_reading_trait(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    key: &str,
+) -> Result<Vec<SegmentRef>, StoreError> {
+    let rows: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT s.id, s.name FROM segments s \
+         JOIN segment_versions v ON v.segment_id = s.id AND v.version = s.current_version \
+         WHERE s.workspace_id = $1 AND s.archived_at IS NULL AND v.deps -> 'traits' ? $2 \
+         ORDER BY lower(s.name), s.id",
+    )
+    .bind(workspace.as_uuid())
+    .bind(key)
+    .fetch_all(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, name)| SegmentRef { id, name })
+        .collect())
+}
+
 /// The workspace's segments by name; archived ones only when asked for.
 pub async fn list_segments<'e>(
     executor: impl PgExecutor<'e>,
@@ -794,5 +819,49 @@ mod tests {
         .await;
 
         assert!(refused.is_err());
+    }
+
+    fn reading(traits: &[&str]) -> NewSegmentVersion {
+        NewSegmentVersion {
+            deps: json!({"traits": traits, "segments": []}),
+            ..content(&[])
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn only_live_segments_whose_current_version_reads_the_trait_are_listed(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let other = workspace(&pool, "two").await;
+        let mut tx = crate::begin(&pool).await.unwrap();
+        lock_segments(&mut tx, ws).await.unwrap();
+        let mut ids = Vec::new();
+        for (name, workspace, traits) in [
+            ("Reader", ws, ["plan"]),
+            ("Other trait", ws, ["tier"]),
+            ("Edited", ws, ["plan"]),
+            ("Archived", ws, ["plan"]),
+            ("Elsewhere", other, ["plan"]),
+        ] {
+            let new = new_segment(name, DEFAULT_CADENCE_MINUTES);
+            create_segment(&mut tx, workspace, &new, &reading(&traits), None, &trace())
+                .await
+                .unwrap();
+            ids.push(new.id);
+        }
+        let patch = SegmentPatch {
+            version: Some(reading(&["tier"])),
+            ..SegmentPatch::default()
+        };
+        update_segment(&mut tx, ws, ids[2], &patch, None, &trace())
+            .await
+            .unwrap();
+        archive_segment(&mut tx, ws, ids[3]).await.unwrap();
+
+        let readers = segments_reading_trait(&mut tx, ws, "plan").await.unwrap();
+        let none = segments_reading_trait(&mut tx, ws, "absent").await.unwrap();
+
+        assert_eq!(names(&readers), ["Reader"]);
+        assert!(none.is_empty());
     }
 }

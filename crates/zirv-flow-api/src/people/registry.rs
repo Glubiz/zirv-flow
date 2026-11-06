@@ -305,6 +305,17 @@ pub(crate) async fn update_trait(
     }
 
     let mut tx = zirv_flow_store::begin(pool).await?;
+    if request.archived == Some(true) {
+        // The segments lock orders this check against a save that reads the trait: a save that
+        // comes first is seen here, and one that comes later no longer finds the trait.
+        zirv_flow_store::lock_segments(&mut tx, workspace).await?;
+        let readers = zirv_flow_store::segments_reading_trait(&mut tx, workspace, key).await?;
+        if !readers.is_empty() {
+            return Err(AdminError::TraitReferenced(
+                readers.into_iter().map(|segment| segment.name).collect(),
+            ));
+        }
+    }
     // Locked until commit: an overlapping update waits, then compares against this one.
     let before = zirv_flow_store::find_trait_definition_for_update(&mut *tx, workspace, key)
         .await?
@@ -425,7 +436,7 @@ pub(crate) async fn create(
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a missing scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or trait, or no access", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "`trait_indexed`: the type of a trait that holds a slot cannot change", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "`trait_indexed`: the type of a trait that holds a slot cannot change; `trait_referenced`: archiving a trait that the current version of a live segment reads, with the segment names in the detail", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "An invalid field (a `source_order` entry that matches no source included), no field at all, or an attempt to change the type", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))

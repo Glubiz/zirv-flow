@@ -188,4 +188,23 @@ describe("fields", () => {
     const patches = calls.filter((call) => call.method === "PATCH").map((call) => call.body);
     expect(patches).toEqual([{ archived: true }, { archived: false }]);
   });
+
+  it("shows which segments read a field when archiving it is refused", async () => {
+    mockApi({
+      "GET /api/v1/session": () => json(session(OWNER, "csrf-traits")),
+      "GET /api/v1/workspaces/ws1/members": () => json(members("admin", OWNER.id)),
+      "GET /api/v1/workspaces/ws1/traits": () => json([PLAN]),
+      "PATCH /api/v1/workspaces/ws1/traits/plan_tier": () =>
+        problem(409, "Conflict", "segments read this field: Pro customers, Trials. Edit or archive them first", undefined, "trait_referenced"),
+    });
+    const user = userEvent.setup();
+    renderRoute("/w/ws1/traits", "/w/:ws/traits", <TraitsPage />);
+
+    await user.click(await screen.findByRole("button", { name: "Archive plan_tier" }));
+    const confirm = within(screen.getByRole("dialog", { name: "Archive plan_tier?" }));
+    await user.click(confirm.getByRole("button", { name: "Archive plan_tier" }));
+
+    expect(await screen.findByText(/Pro customers, Trials/)).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
 });

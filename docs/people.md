@@ -69,7 +69,12 @@ Sending `null` for a field removes that source's value, and the next source's va
 
 Changing a field's precedence, source order or archived flag also re-evaluates the people
 who already hold a value for it, through a background job. An archived field is no longer
-shown on people; unarchiving brings its values back.
+shown on people; unarchiving brings its values back. Archiving is refused with 409
+`trait_referenced`, naming the segments, while the current version of a live segment reads the
+field: edit or archive those segments first. A segment whose saved rules stop matching the
+workspace for another reason (a deleted list, a removed event property) keeps its members as
+they were and reports `issues` on `GET .../segments/{id}` and in the list; the segment page
+shows a banner.
 
 ## People
 

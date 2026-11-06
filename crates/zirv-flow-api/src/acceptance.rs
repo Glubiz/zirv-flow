@@ -13293,6 +13293,134 @@ email,b@example.com,
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn archiving_a_trait_a_live_segment_reads_is_refused_naming_the_segment(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        define_plan(&pool, &ws).await;
+        zirv_flow_store::create_trait_definition(
+            &pool,
+            ws.parse().unwrap(),
+            &zirv_flow_store::NewTraitDefinition {
+                key: "tier".into(),
+                trait_type: zirv_flow_core::people::TraitType::String,
+                precedence: zirv_flow_core::people::Precedence::Latest,
+                source_order: Vec::new(),
+                pii: false,
+                channel_address: false,
+                inferred: false,
+                description: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+        let who = || Auth::Session(&owner);
+        let set_archived = |key: &'static str, archived: bool| {
+            let router = router.clone();
+            let uri = format!("/api/v1/workspaces/{ws}/traits/{key}");
+            let owner = &owner;
+            async move {
+                call(
+                    &router,
+                    "PATCH",
+                    &uri,
+                    Some(json!({"archived": archived})),
+                    Auth::Session(owner),
+                )
+                .await
+            }
+        };
+        let segment = make_segment(&router, who(), &ws, "Plan watchers", plan_is("a"))
+            .await
+            .body["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let seg_uri = format!("{}/{segment}", segments_uri(&ws));
+
+        let refused = set_archived("plan", true).await;
+        let unread = set_archived("tier", true).await;
+        let restored = set_archived("tier", false).await;
+        // The edit moves the segment to a version that no longer reads the trait.
+        let edited = call(
+            &router,
+            "PATCH",
+            &seg_uri,
+            Some(json!({"definition": {"v": 1, "trait": "tier", "op": "eq", "value": "x"}})),
+            who(),
+        )
+        .await;
+        let after_edit = set_archived("plan", true).await;
+        let back = set_archived("plan", false).await;
+        let archived_segment =
+            call(&router, "POST", &format!("{seg_uri}/archive"), None, who()).await;
+        let after_archive = set_archived("tier", true).await;
+        let unarchived = set_archived("tier", false).await;
+
+        assert_eq!(refused.status, StatusCode::CONFLICT, "{:?}", refused.body);
+        assert_eq!(refused.body["code"], "trait_referenced");
+        assert!(
+            refused.body["detail"]
+                .as_str()
+                .unwrap()
+                .contains("Plan watchers")
+        );
+        assert_eq!(unread.status, StatusCode::OK, "{:?}", unread.body);
+        assert_eq!(restored.status, StatusCode::OK, "{:?}", restored.body);
+        assert_eq!(edited.status, StatusCode::OK, "{:?}", edited.body);
+        assert_eq!(after_edit.status, StatusCode::OK, "{:?}", after_edit.body);
+        assert_eq!(back.status, StatusCode::OK, "{:?}", back.body);
+        assert_eq!(archived_segment.status, StatusCode::OK);
+        assert_eq!(
+            after_archive.status,
+            StatusCode::OK,
+            "{:?}",
+            after_archive.body
+        );
+        assert_eq!(unarchived.status, StatusCode::OK, "{:?}", unarchived.body);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_trait_no_segment_reads_archives_and_a_frozen_segment_reports_its_issues(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        define_plan(&pool, &ws).await;
+        let who = || Auth::Session(&owner);
+        let segment = make_segment(&router, who(), &ws, "Plan watchers", plan_is("a"))
+            .await
+            .body["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let seg_uri = format!("{}/{segment}", segments_uri(&ws));
+        let healthy = call(&router, "GET", &seg_uri, None, who()).await;
+        // A write that bypasses the API check, as a path other than the trait archive would.
+        zirv_flow_store::update_trait_definition(
+            &pool,
+            ws.parse().unwrap(),
+            "plan",
+            &zirv_flow_store::TraitDefinitionUpdate {
+                archived: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let frozen = call(&router, "GET", &seg_uri, None, who()).await;
+        let listed = call(&router, "GET", &segments_uri(&ws), None, who()).await;
+
+        assert!(healthy.body.get("issues").is_none(), "{:?}", healthy.body);
+        assert_eq!(frozen.body["issues"][0]["code"], "unknown_trait");
+        assert_eq!(listed.body[0]["issues"][0]["code"], "unknown_trait");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_list_counts_live_flows_and_where_used_names_flows_and_segments(pool: PgPool) {
         let router = app(&pool).await;
         let owner = owner(&pool, &router).await;

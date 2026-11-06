@@ -50,6 +50,7 @@ function TraitList({ workspaceId, canManage }: { workspaceId: string; canManage:
       traits.reload();
     } catch (error) {
       setFailure(describeError(error));
+      setArchiving(null);
     } finally {
       setBusyKey(null);
     }

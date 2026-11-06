@@ -309,6 +309,7 @@ A test reads the sources and fails when a code used there is missing from this l
 | `segment_invalid` | A segment definition fails its checks; `issues` lists them |
 | `segment_cycle` | The segment references itself through other segments |
 | `segment_referenced` | Other segments or flows reference the segment |
+| `trait_referenced` | A live segment reads the trait you tried to archive |
 | `segment_archived` | The segment is archived |
 | `segment_preview_timeout` | A segment preview ran over its time limit |
 | `search_timeout` | A search ran over its time limit |

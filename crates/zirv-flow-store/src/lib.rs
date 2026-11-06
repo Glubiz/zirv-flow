@@ -286,7 +286,7 @@ pub use segments::{
     reconcile_segment_schedules, reevaluation_order, run_person_batch, run_segment_preview,
     segment_catalog, segment_catalog_details, segment_cron, segment_data_age, segment_history_page,
     segment_list_stats, segment_members_page, segment_size_per_day, segment_where_used,
-    snapshot_now, update_segment,
+    segments_reading_trait, snapshot_now, update_segment,
 };
 pub use send_limits::{
     CAP_LOCK_CLASS, CapMode, CapVerdict, FrequencyCap, NewFrequencyCap, QuietHours, SendLimits,
