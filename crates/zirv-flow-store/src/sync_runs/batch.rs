@@ -23,7 +23,7 @@ use crate::events::{
 };
 use crate::lists::{ListSource, MAX_PEOPLE_PER_CALL, MembershipError, add_members};
 use crate::people::{
-    ProfileOutcome, ProfileRecord, apply_profile_records, apply_profile_records_singly,
+    LedgerKey, ProfileOutcome, ProfileRecord, apply_profile_records, apply_profile_records_singly,
     remove_contribution_in,
 };
 use crate::stream_offsets::PartitionOffset;
@@ -497,7 +497,9 @@ pub(crate) async fn write_offsets(
 }
 
 /// Applies the accepted records, all together or, with `singly`, each in a savepoint. A record
-/// the store cannot apply is `None`.
+/// the store cannot apply is `None`. The records' people and those of the deleted keys are
+/// locked first, in one order, so two batches over the same people never wait on each other in
+/// a cycle.
 async fn apply_upserts(
     tx: &mut crate::Tx,
     batch: &SyncBatch<'_>,
@@ -507,10 +509,19 @@ async fn apply_upserts(
         .iter()
         .map(|upsert| upsert.record.clone())
         .collect();
+    let deleted: Vec<LedgerKey<'_>> = batch
+        .deleted
+        .iter()
+        .map(|(key, _)| LedgerKey {
+            source: batch.source,
+            stream: batch.stream,
+            record_key: key,
+        })
+        .collect();
     if batch.singly {
-        return apply_profile_records_singly(tx, batch.workspace, &records).await;
+        return apply_profile_records_singly(tx, batch.workspace, &records, &deleted).await;
     }
-    let outcomes = apply_profile_records(tx, batch.workspace, &records).await?;
+    let outcomes = apply_profile_records(tx, batch.workspace, &records, &deleted).await?;
     Ok(outcomes.into_iter().map(Some).collect())
 }
 
@@ -2451,6 +2462,92 @@ mod tests {
             assert_eq!((progress.batch.deleted, progress.batch.unchanged), (1, 1));
             assert_eq!(count(&pool, "SELECT count(*) FROM events").await, 0);
             assert_eq!(stored_offsets(&pool).await, [(0, 3, Some(3))]);
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn batches_of_two_streams_over_the_same_people_in_opposite_orders_both_commit(
+        pool: PgPool,
+    ) {
+        use std::sync::Arc;
+
+        use tokio::sync::Barrier;
+
+        use super::super::testing::{source_with_stream, started_run, workspace};
+
+        crate::decision_testing::checked(pool, |pool| async move {
+            const PEOPLE: usize = 300;
+            let ws = workspace(&pool, "one").await;
+            let (crm, crm_stream) = source_with_stream(&pool, ws, "crm", "full_refresh").await;
+            let (billing, billing_stream) =
+                source_with_stream(&pool, ws, "billing", "full_refresh").await;
+            let orders = started_run(&pool, ws, crm, crm_stream).await;
+            let payments = started_run(&pool, ws, billing, billing_stream).await;
+            let email = |i: usize| format!("p{i}@example.com");
+            // Every other person exists already; the others are new to both runs.
+            let known: Vec<SyncUpsert> = (0..PEOPLE)
+                .step_by(2)
+                .map(|i| upsert(&orders, &format!("k{i}"), &email(i)))
+                .collect();
+            let source = orders.source_id.to_string();
+            let cp = json!({"offset": 0});
+            commit_sync_batch(&pool, &batch(&orders, &source, &known, &cp))
+                .await
+                .unwrap();
+            // One run reads the people in ascending order and the other in descending order, so
+            // each holds a person or a new identity that the other one reaches later.
+            let ascending: Vec<SyncUpsert> = (0..PEOPLE)
+                .map(|i| upsert(&orders, &format!("o{i}"), &email(i)))
+                .collect();
+            let descending: Vec<SyncUpsert> = (0..PEOPLE)
+                .rev()
+                .map(|i| upsert(&payments, &format!("p{i}"), &email(i)))
+                .collect();
+            let start = Arc::new(Barrier::new(2));
+            let run = |fixture: Fixture, upserts: Vec<SyncUpsert>| {
+                let (pool, start) = (pool.clone(), Arc::clone(&start));
+                tokio::spawn(async move {
+                    let source = fixture.source_id.to_string();
+                    let cp = json!({"offset": PEOPLE});
+                    start.wait().await;
+                    commit_sync_batch(&pool, &batch(&fixture, &source, &upserts, &cp)).await
+                })
+            };
+            let first = run(orders, ascending);
+            let second = run(payments, descending);
+
+            let (first, second) = (first.await.unwrap(), second.await.unwrap());
+
+            assert!(matches!(first, Ok(BatchOutcome::Committed(_))), "{first:?}");
+            assert!(
+                matches!(second, Ok(BatchOutcome::Committed(_))),
+                "{second:?}"
+            );
+            // One person and one identity per address, whichever run met it first, and every
+            // ledger row on the person that owns its address.
+            let people = i64::try_from(PEOPLE).unwrap();
+            assert_eq!(count(&pool, "SELECT count(*) FROM people").await, people);
+            assert_eq!(
+                count(&pool, "SELECT count(*) FROM identities").await,
+                people
+            );
+            assert_eq!(
+                count(&pool, "SELECT count(*) FROM source_records").await,
+                people / 2 + 2 * people
+            );
+            assert_eq!(
+                count(
+                    &pool,
+                    "SELECT count(*) FROM source_records s JOIN identities i \
+                       ON s.identifiers @> jsonb_build_array( \
+                          jsonb_build_object('kind', i.kind, 'value', i.value)) \
+                     WHERE s.person_id <> i.person_id"
+                )
+                .await,
+                0
+            );
         })
         .await;
     }

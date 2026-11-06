@@ -128,9 +128,9 @@ pub async fn commit_import_batch(
 
     let mut tally = Tally::default();
     let outcomes = if singly {
-        apply_profile_records_singly(&mut tx, batch.workspace, batch.records).await?
+        apply_profile_records_singly(&mut tx, batch.workspace, batch.records, &[]).await?
     } else {
-        apply_profile_records(&mut tx, batch.workspace, batch.records)
+        apply_profile_records(&mut tx, batch.workspace, batch.records, &[])
             .await?
             .into_iter()
             .map(Some)
