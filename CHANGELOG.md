@@ -15,3 +15,18 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.242.0 (2026-11-06)
+
+### Fixes
+
+- a file source's failed read ends the run with its own code (#529)
+- a preview of an incremental stream passes its cursor field (#528)
+
+### Documentation
+
+- source_error no longer always means several tries (#529)
+
+### Chores
+
+- a bad setting and a changed file end a run at once with their code (#529)
+
