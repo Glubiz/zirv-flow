@@ -235,7 +235,8 @@ async fn size_per_day_until(
 
 /// Closes the open rows of a merged person, in the caller's transaction: `exited_at` is the
 /// merge time (never before the row's own entry), the cause is `data_change` and the trace is the
-/// merge's. No event is written; the survivor enters at the next refresh if they belong. The segments' counts drop with the rows.
+/// merge's. No event is written; the survivor enters at the next refresh if they belong. The
+/// segments' counts drop with the rows.
 pub(crate) async fn close_on_merge(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -245,7 +246,8 @@ pub(crate) async fn close_on_merge(
     sqlx::query(
         "WITH closed AS ( \
              UPDATE segment_members SET exited_version = version, \
-                 exited_at = GREATEST(now(), entered_at), exited_trace_id = $3, exited_cause = 'data_change' \
+                 exited_at = GREATEST(now(), entered_at), exited_trace_id = $3, \
+                 exited_cause = 'data_change' \
              WHERE workspace_id = $1 AND person_id = $2 AND exited_at IS NULL \
              RETURNING segment_id), \
          counts AS (SELECT segment_id, count(*) AS n FROM closed GROUP BY segment_id) \

@@ -22,9 +22,9 @@ use zirv_flow_core::{Cause, HmacKey, TraceContext, TraceId, WorkspaceId};
 
 use crate::contacts::{lock_contacts, replace_stored_fields};
 use crate::decisions::DecisionBuffer;
-use crate::events::{DroppedTraits, Refusal, insert_dropped_traits_reject, insert_record_rejects};
 use crate::events::{
-    EventBatch, EventOutcome, EventRecord, FailedItem, apply_event_record, reject_apply_failed,
+    DroppedTraits, EventBatch, EventOutcome, EventRecord, FailedItem, Refusal, apply_event_record,
+    insert_dropped_traits_reject, insert_record_rejects, reject_apply_failed,
 };
 use crate::jobs::{bind_job, enqueue_ctes};
 use crate::people::{
