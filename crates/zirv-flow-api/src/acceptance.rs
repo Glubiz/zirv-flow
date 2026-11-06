@@ -5786,11 +5786,11 @@ mod tests {
         };
         assert_eq!(
             check("ADA@example.com").await.body,
-            json!({"suppressed": true, "reason": "manual"})
+            json!({"suppressed": true, "reason": "manual", "scope": "workspace"})
         );
         assert_eq!(
             check("bob@example.com").await.body,
-            json!({"suppressed": false, "reason": null})
+            json!({"suppressed": false, "reason": null, "scope": null})
         );
 
         let list = call(
@@ -6010,6 +6010,57 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_check_reports_an_organization_suppression_with_its_scope(pool: PgPool) {
+        let router = keyed_app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let key = zirv_flow_core::HmacRoot::bootstrap_from(
+            &zirv_flow_core::MasterKey::parse(SUPPRESSION_KEY).unwrap(),
+        )
+        .hmac_key(zirv_flow_core::HmacPurpose::Identifier);
+        let identifier =
+            zirv_flow_core::people::Identifier::parse("email", "ada@example.com").unwrap();
+        zirv_flow_store::add_organization_suppression(
+            &pool,
+            &zirv_flow_store::NewSuppression {
+                identifier_hash: zirv_flow_core::people::identifier_hash(&key, &identifier),
+                kind: "email",
+                reason: zirv_flow_core::consent::SuppressionReason::HardBounce,
+                source: "feedback",
+                note: None,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let check = call(
+            &router,
+            "POST",
+            &suppressions_uri(&ws, "/check"),
+            Some(json!({"kind": "email", "value": "ada@example.com"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let list = call(
+            &router,
+            "GET",
+            &suppressions_uri(&ws, ""),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(check.status, StatusCode::OK, "{:?}", check.body);
+        assert_eq!(
+            check.body,
+            json!({"suppressed": true, "reason": "hard_bounce", "scope": "organization"})
+        );
+        assert_eq!(list.body["suppressions"].as_array().unwrap().len(), 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_erased_suppression_cannot_be_removed_or_replaced(pool: PgPool) {
         let router = keyed_app(&pool).await;
         let owner = owner(&pool, &router).await;
@@ -6065,7 +6116,7 @@ mod tests {
         assert_eq!(added.body, json!({"added": false}));
         assert_eq!(
             checked.body,
-            json!({"suppressed": true, "reason": "erased"})
+            json!({"suppressed": true, "reason": "erased", "scope": "workspace"})
         );
     }
 

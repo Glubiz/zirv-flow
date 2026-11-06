@@ -338,8 +338,8 @@ pub use summary::{
 pub use suppressions::{
     AddOutcome, BatchEntry, NewSuppression, RemoveOutcome, SUPPRESSION_KINDS, Suppression,
     SuppressionCursor, SuppressionScope, add_organization_suppression, add_suppression,
-    add_suppressions, count_suppressed, find_suppression, is_suppressed, list_suppressions,
-    remove_suppression, suppressing_scope,
+    add_suppressions, count_suppressed, find_suppressing, find_suppression, is_suppressed,
+    list_suppressions, remove_suppression, suppressing_scope,
 };
 pub use sync_runs::{
     BatchOutcome as SyncBatchOutcome, BatchProgress as SyncBatchProgress,
