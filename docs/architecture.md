@@ -610,8 +610,8 @@ endpoint, the editor, the source's own `read` and `check`, and the assistant too
 depends on `core` only (5.1), and the spec-level `config_check` makes `validate_config` run it on
 create and update. The checkpoint is `{"since": ...}` and moves only with the last batch of a stream
 (to the highest cursor value seen), because an API may return records in any order; a lost lease
-re-reads from the run's start, which the idempotent apply makes harmless (OQ-2 keeps ascending-order
-resume open). A delete signal sets `Record.deleted` and nothing else: the batch path and the sweep
+re-reads from the run's start, which the idempotent apply makes harmless. A delete
+signal sets `Record.deleted` and nothing else: the batch path and the sweep
 are unchanged. Discovery makes no request; a stream's mapping in the manifest is a seed written to
 `streams.mapping` once, after the checks a saved mapping gets. `Source::rate_limit(config)` lets a
 source type take its rate from its settings.
