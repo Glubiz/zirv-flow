@@ -307,16 +307,17 @@ pub async fn add_organization_suppression<'e>(
     })
 }
 
-/// The scope that suppresses the hash for a send from `workspace`: the workspace's own, else the
-/// organization's; `None` when neither does. One statement over the two unique indexes (one per
-/// scope), so a send pays a single lookup for both.
-pub async fn suppressing_scope<'e>(
+/// The suppression that applies to a send from `workspace`, with its scope: the workspace's own,
+/// else the organization's; `None` when neither suppresses. One statement over the two unique
+/// indexes (one per scope), so a send pays a single lookup for both. The send gate and the
+/// suppression check both read through it, so they cannot disagree.
+pub async fn find_suppressing<'e>(
     executor: impl PgExecutor<'e>,
     workspace: WorkspaceId,
     identifier_hash: &[u8; 32],
-) -> Result<Option<SuppressionScope>, StoreError> {
-    let scope: Option<String> = sqlx::query_scalar(
-        "SELECT scope FROM suppressions \
+) -> Result<Option<(SuppressionScope, SuppressionReason)>, StoreError> {
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT scope, reason FROM suppressions \
          WHERE identifier_hash = $2 \
            AND ((scope = 'workspace' AND workspace_id = $1) OR scope = 'organization') \
          ORDER BY scope = 'workspace' DESC LIMIT 1",
@@ -326,12 +327,27 @@ pub async fn suppressing_scope<'e>(
     .fetch_optional(executor)
     .await
     .map_err(StoreError::query)?;
-    match scope.as_deref() {
-        None => Ok(None),
-        Some("workspace") => Ok(Some(SuppressionScope::Workspace)),
-        Some("organization") => Ok(Some(SuppressionScope::Organization)),
-        Some(_) => Err(corrupt("unknown suppression scope")),
-    }
+    let Some((scope, reason)) = row else {
+        return Ok(None);
+    };
+    let scope = match scope.as_str() {
+        "workspace" => SuppressionScope::Workspace,
+        "organization" => SuppressionScope::Organization,
+        _ => return Err(corrupt("unknown suppression scope")),
+    };
+    let reason = reason.parse().map_err(|_| corrupt("unknown reason"))?;
+    Ok(Some((scope, reason)))
+}
+
+/// The scope that suppresses the hash for a send from `workspace`; `None` when none does.
+pub async fn suppressing_scope<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    identifier_hash: &[u8; 32],
+) -> Result<Option<SuppressionScope>, StoreError> {
+    Ok(find_suppressing(executor, workspace, identifier_hash)
+        .await?
+        .map(|(scope, _)| scope))
 }
 
 /// Whether the hash is suppressed for a send from the workspace, in either scope and for any
@@ -568,6 +584,16 @@ mod tests {
             Some(SuppressionScope::Workspace)
         );
         assert!(!is_suppressed(&pool, two, &bob).await.unwrap());
+        assert_eq!(
+            find_suppressing(&pool, one, &ada).await.unwrap(),
+            Some((SuppressionScope::Organization, bounce.reason))
+        );
+        assert!(
+            find_suppressing(&pool, one, &[9; 32])
+                .await
+                .unwrap()
+                .is_none()
+        );
         // The organization's rows are not in any workspace's list, lookup or count.
         assert!(find_suppression(&pool, one, &ada).await.unwrap().is_none());
         assert_eq!(count_suppressed(&pool, one, &[ada]).await.unwrap(), 0);

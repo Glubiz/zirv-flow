@@ -5184,6 +5184,12 @@ export interface components {
         CheckBody: {
             /** @description The reason it is suppressed. */
             reason?: string | null;
+            /**
+             * @description `workspace` when this workspace suppresses it, `organization` when an organization-wide
+             *     suppression, such as a hard bounce, does; the list shows workspace entries only.
+             * @example organization
+             */
+            scope?: string | null;
             suppressed: boolean;
         };
         ColumnRuleBody: {
@@ -26810,7 +26816,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Whether it is suppressed, and why */
+            /** @description Whether a send from the workspace would be suppressed, why, and in which scope */
             200: {
                 headers: {
                     [name: string]: unknown;

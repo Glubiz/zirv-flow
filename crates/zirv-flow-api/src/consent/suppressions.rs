@@ -115,6 +115,10 @@ pub(crate) struct CheckBody {
     suppressed: bool,
     /// The reason it is suppressed.
     reason: Option<String>,
+    /// `workspace` when this workspace suppresses it, `organization` when an organization-wide
+    /// suppression, such as a hard bounce, does; the list shows workspace entries only.
+    #[schema(example = "organization")]
+    scope: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -493,7 +497,7 @@ pub(crate) async fn list(
     params(("ws" = Uuid, Path, description = "Workspace id")),
     request_body = IdentifierRequest,
     responses(
-        (status = 200, description = "Whether it is suppressed, and why", body = CheckBody),
+        (status = 200, description = "Whether a send from the workspace would be suppressed, why, and in which scope", body = CheckBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the read scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
@@ -511,7 +515,7 @@ pub(crate) async fn check(
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Read).await?;
     let key = identifier_key(&state)?;
     let identifier = parse_for_request(&body.kind, &body.value)?;
-    let found = zirv_flow_store::find_suppression(
+    let found = zirv_flow_store::find_suppressing(
         &state.pool,
         workspace.id,
         &identifier_hash(key, &identifier),
@@ -519,7 +523,8 @@ pub(crate) async fn check(
     .await?;
     Ok(Json(CheckBody {
         suppressed: found.is_some(),
-        reason: found.map(|found| found.reason.as_str().to_owned()),
+        reason: found.map(|(_, reason)| reason.as_str().to_owned()),
+        scope: found.map(|(scope, _)| scope.as_str().to_owned()),
     }))
 }
 
