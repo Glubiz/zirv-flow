@@ -1,0 +1,41 @@
+{
+  "create": {
+    "kind": "kafka", "name": "Product events", "schedule": "*/5 * * * *",
+    "config": {"brokers": "kafka:9092", "topics": "app-feature-used,app-license-activated",
+               "security": "plaintext", "sasl": "none", "max_lag": 20000}
+  },
+  "streams": {
+    "app-feature-used": {
+      "enabled": true, "sync_mode": "stream", "primary_key": ["_key"],
+      "mapping": {
+        "key_column": "_key",
+        "columns": [
+          {"column": "customer_id", "target": {"type": "identifier", "kind": "external:customer_id"}}
+        ],
+        "event": {
+          "name": "feature_used", "timestamp": {"column": "_timestamp"},
+          "properties": [
+            {"property": "feature", "column": "feature"},
+            {"property": "duration_ms", "column": "duration_ms"}
+          ]
+        }
+      }
+    },
+    "app-license-activated": {
+      "enabled": true, "sync_mode": "stream", "primary_key": ["_key"],
+      "mapping": {
+        "key_column": "_key",
+        "columns": [
+          {"column": "customer_id", "target": {"type": "identifier", "kind": "external:customer_id"}}
+        ],
+        "event": {
+          "name": "license_activated", "timestamp": {"column": "_timestamp"},
+          "properties": [
+            {"property": "plan", "column": "plan"},
+            {"property": "seats", "column": "seats"}
+          ]
+        }
+      }
+    }
+  }
+}

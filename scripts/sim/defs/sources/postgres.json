@@ -1,0 +1,66 @@
+{
+  "create": {
+    "kind": "postgres", "name": "Company PostgreSQL", "credential": "company-pg reader",
+    "schedule": "*/10 * * * *",
+    "config": {"host": "company-pg", "database": "shop", "schema": "public", "tls": "off",
+               "statement_timeout_seconds": 120}
+  },
+  "streams": {
+    "customers": {
+      "enabled": true, "sync_mode": "incremental", "cursor_field": "updated_at",
+      "primary_key": ["customer_id"], "staleness_threshold_seconds": 1800,
+      "mapping": {
+        "key_column": "customer_id",
+        "columns": [
+          {"column": "customer_id", "target": {"type": "identifier", "kind": "external:customer_id"}},
+          {"column": "email", "target": {"type": "identifier", "kind": "email"},
+           "transforms": [{"op": "trim"}, {"op": "lower"}]},
+          {"column": "first_name", "target": {"type": "trait", "key": "first_name"}},
+          {"column": "last_name", "target": {"type": "trait", "key": "last_name"}},
+          {"column": "country", "target": {"type": "trait", "key": "country"}},
+          {"column": "city", "target": {"type": "trait", "key": "city"}},
+          {"column": "signup_at", "target": {"type": "trait", "key": "signup_at"}},
+          {"column": "last_order_at", "target": {"type": "trait", "key": "last_order_at"}},
+          {"column": "lifetime_orders", "target": {"type": "trait", "key": "lifetime_orders"},
+           "transforms": [{"op": "cast", "to": "number"}]}
+        ],
+        "delete_when": {"column": "deleted_at", "rule": "present"}
+      }
+    },
+    "subscriptions": {
+      "enabled": true, "sync_mode": "incremental", "cursor_field": "updated_at",
+      "primary_key": ["subscription_id"], "staleness_threshold_seconds": 1800,
+      "mapping": {
+        "key_column": "subscription_id",
+        "columns": [
+          {"column": "customer_id", "target": {"type": "identifier", "kind": "external:customer_id"}},
+          {"column": "plan", "target": {"type": "trait", "key": "plan"}},
+          {"column": "plan_status", "target": {"type": "trait", "key": "plan_status"}},
+          {"column": "mrr", "target": {"type": "trait", "key": "mrr"},
+           "transforms": [{"op": "cast", "to": "number"}]},
+          {"column": "renewal_at", "target": {"type": "trait", "key": "renewal_at"}}
+        ]
+      }
+    },
+    "orders": {
+      "enabled": true, "sync_mode": "incremental", "cursor_field": "updated_at",
+      "primary_key": ["order_id"], "staleness_threshold_seconds": 1800,
+      "mapping": {
+        "key_column": "order_id",
+        "columns": [
+          {"column": "customer_id", "target": {"type": "identifier", "kind": "external:customer_id"}}
+        ],
+        "event": {
+          "name": "order_placed", "timestamp": {"column": "placed_at"},
+          "properties": [
+            {"property": "order_id", "column": "order_id"},
+            {"property": "amount", "column": "amount", "transforms": [{"op": "cast", "to": "number"}]},
+            {"property": "currency", "column": "currency"},
+            {"property": "category", "column": "category"},
+            {"property": "items", "column": "items"}
+          ]
+        }
+      }
+    }
+  }
+}

@@ -23,3 +23,6 @@
 # Benchmark scripts are run with bash on any platform.
 /scripts/bench/** text eol=lf
 /scripts/check-bench-features.sh text eol=lf
+
+# Simulated production scripts and fixtures are mounted into Linux containers.
+/scripts/sim/** text eol=lf

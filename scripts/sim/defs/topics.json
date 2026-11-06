@@ -1,0 +1,4 @@
+[
+  {"key": "newsletter", "name": "Newsletter", "channel": "email", "policy": "opt_out"},
+  {"key": "product_updates", "name": "Product updates", "channel": "email", "policy": "opt_in"}
+]

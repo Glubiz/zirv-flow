@@ -1,0 +1,66 @@
+[
+  {"name": "Welcome series", "warmup": false, "after_backfill": false,
+   "settings": {
+     "trigger": {"type": "event", "event": "form_submitted",
+                 "filters": [{"prop": "form", "op": "eq", "value": "newsletter"}]},
+     "reentry": {"mode": "once"},
+     "goal": {"type": "event", "event": "order_placed"}, "exit_on_goal": true},
+   "graph": {"v": 1,
+     "nodes": [
+       {"id": "send1", "type": "action.send", "template": "{{TPL_WELCOME_1}}", "destination": "{{DEST_MAILER}}", "topic": "{{TOPIC_NEWSLETTER}}"},
+       {"id": "pause", "type": "wait.duration", "seconds": {{DAY}}},
+       {"id": "ordered", "type": "wait.until_event", "event": "order_placed", "timeout_seconds": {{DAYS3}}},
+       {"id": "send2", "type": "action.send", "template": "{{TPL_WELCOME_2}}", "destination": "{{DEST_MAILER}}", "topic": "{{TOPIC_NEWSLETTER}}"},
+       {"id": "done_ordered", "type": "goal", "exit": true},
+       {"id": "done", "type": "exit"}],
+     "edges": [
+       {"id": "e1", "from": "send1", "port": "next", "to": "pause"},
+       {"id": "e2", "from": "pause", "port": "next", "to": "ordered"},
+       {"id": "e3", "from": "ordered", "port": "event", "to": "done_ordered"},
+       {"id": "e4", "from": "ordered", "port": "timeout", "to": "send2"},
+       {"id": "e5", "from": "send2", "port": "next", "to": "done"}]}},
+
+  {"name": "Re-engagement", "warmup": true, "after_backfill": true,
+   "settings": {
+     "trigger": {"type": "schedule", "cron": "0 10 * * *", "timezone": "Europe/Copenhagen",
+                 "audience": {"type": "segment", "segment_id": "{{SEG_LAPSED}}"}},
+     "reentry": {"mode": "always", "min_interval_seconds": {{DAYS14}}}},
+   "graph": {"v": 1,
+     "nodes": [
+       {"id": "send", "type": "action.send", "template": "{{TPL_WE_MISS_YOU}}", "destination": "{{DEST_MAILER}}", "topic": "{{TOPIC_NEWSLETTER}}"},
+       {"id": "reply", "type": "wait.until_event", "event": "order_placed", "timeout_seconds": {{DAYS7}}},
+       {"id": "mark", "type": "action.list", "list_id": "{{LIST_WINBACK}}", "change": "add"},
+       {"id": "done_ordered", "type": "goal", "exit": true},
+       {"id": "done", "type": "exit"}],
+     "edges": [
+       {"id": "e1", "from": "send", "port": "next", "to": "reply"},
+       {"id": "e2", "from": "reply", "port": "event", "to": "done_ordered"},
+       {"id": "e3", "from": "reply", "port": "timeout", "to": "mark"},
+       {"id": "e4", "from": "mark", "port": "next", "to": "done"}]}},
+
+  {"name": "Re-engagement blast", "warmup": true, "after_backfill": false,
+   "settings": {"trigger": {"type": "manual"}, "reentry": {"mode": "always", "min_interval_seconds": 0}},
+   "graph": {"v": 1,
+     "nodes": [
+       {"id": "send", "type": "action.send", "template": "{{TPL_WE_MISS_YOU}}", "destination": "{{DEST_MAILER}}", "topic": "{{TOPIC_NEWSLETTER}}"},
+       {"id": "done", "type": "exit"}],
+     "edges": [{"id": "e1", "from": "send", "port": "next", "to": "done"}]}},
+
+  {"name": "Order confirmation", "warmup": false, "after_backfill": true,
+   "settings": {"trigger": {"type": "event", "event": "order_placed"},
+                "reentry": {"mode": "always", "min_interval_seconds": 0}},
+   "graph": {"v": 1,
+     "nodes": [
+       {"id": "send", "type": "action.send", "template": "{{TPL_ORDER_CONFIRMATION}}", "destination": "{{DEST_SMTP}}"},
+       {"id": "done", "type": "exit"}],
+     "edges": [{"id": "e1", "from": "send", "port": "next", "to": "done"}]}},
+
+  {"name": "Past-due nudge", "warmup": false, "after_backfill": true,
+   "settings": {"trigger": {"type": "segment", "segment_id": "{{SEG_PAST_DUE}}", "on": "entered", "enroll_current": false},
+                "reentry": {"mode": "always", "min_interval_seconds": {{DAYS7}}}},
+   "graph": {"v": 1,
+     "nodes": [
+       {"id": "send", "type": "action.send", "template": "{{TPL_PAYMENT_FAILED}}", "destination": "{{DEST_SMTP}}"},
+       {"id": "done", "type": "exit"}],
+     "edges": [{"id": "e1", "from": "send", "port": "next", "to": "done"}]}}
+]
