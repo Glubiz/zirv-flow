@@ -25,7 +25,7 @@ use crate::changes::mark_person;
 const MAX_ATTEMPTS: u32 = 3;
 
 /// The longest chain of merges a lookup follows.
-const MAX_MERGE_HOPS: u32 = 8;
+pub(super) const MAX_MERGE_HOPS: u32 = 8;
 
 /// An identifier that points at a person other than the one the record attached to.
 #[derive(Clone, Debug, PartialEq)]

@@ -544,6 +544,16 @@ As built (M3): `sync_runs` holds the state, trigger, counters, per-run checkpoin
 trace id and error code; a partial unique index allows one `queued` or `running` run per
 stream. A unit of at least 500 records takes the shared segment guard, then locks the job's
 lease (`store::lock_lease`) and the run row, so a lost lease or a cancel writes nothing.
+Before its first record a unit takes what its records would otherwise lock one at a time in
+source order (`store::people::lock_batch`, #518): the advisory lock of each of the
+workspace's 64 identity buckets that holds an identity of the unit nobody owns yet, by bucket;
+the unit's existing ledger rows, including those of its deleted keys, and every ledger row, of
+any stream, of the owners of a record whose identities name more than one person (a merge moves
+the rows of the people it merges away), by id; then every person those identities or the unit's
+rows name, and the people they were merged into, `FOR UPDATE` by id. A record then waits only on
+what it creates, so two streams' units over the same people in
+different orders wait for each other at the start instead of deadlocking. A CSV import batch
+and `apply_profile_batch` take the same locks.
 An expired lease does not return the run to `queued`: the row stays `running`, the job system
 re-delivers the job, `attempt` counts it, and the next attempt resumes from the run's
 checkpoint; only the last failed attempt marks the run `failed` (`source_error` for a read error,
@@ -602,8 +612,8 @@ endpoint, the editor, the source's own `read` and `check`, and the assistant too
 depends on `core` only (5.1), and the spec-level `config_check` makes `validate_config` run it on
 create and update. The checkpoint is `{"since": ...}` and moves only with the last batch of a stream
 (to the highest cursor value seen), because an API may return records in any order; a lost lease
-re-reads from the run's start, which the idempotent apply makes harmless (OQ-2 keeps ascending-order
-resume open). A delete signal sets `Record.deleted` and nothing else: the batch path and the sweep
+re-reads from the run's start, which the idempotent apply makes harmless. A delete
+signal sets `Record.deleted` and nothing else: the batch path and the sweep
 are unchanged. Discovery makes no request; a stream's mapping in the manifest is a seed written to
 `streams.mapping` once, after the checks a saved mapping gets. `Source::rate_limit(config)` lets a
 source type take its rate from its settings.
@@ -963,7 +973,10 @@ current members should enroll rather than only new entries.
 **Claim and pass.** `segment.reevaluate` claims a batch with
 `DELETE ... WHERE (workspace_id, person_id) IN (SELECT ... FOR UPDATE SKIP LOCKED LIMIT n) RETURNING`,
 so concurrent jobs take disjoint people. A mark made later re-inserts a row, and a failed pass
-rolls the claim back. In that one transaction it evaluates every segment whose dependency
+rolls the claim back. The claim also locks each person `FOR KEY SHARE SKIP LOCKED`, the lock the
+pass's membership rows and events take through their foreign keys, so the mark of a person a
+writer holds `FOR UPDATE` is left for a later pass: the pass never waits on a writer that waits
+on the pass for the mark (#518). In that one transaction it evaluates every segment whose dependency
 classes intersect the batch's combined classes, plus their transitive segment dependents, in
 topological order, with `person_id = ANY(batch)`. Name-level filtering (event names, trait
 keys) is an optimization, made only if the M4 benchmark misses.
