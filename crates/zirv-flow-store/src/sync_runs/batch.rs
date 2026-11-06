@@ -589,7 +589,15 @@ async fn apply_events(
     // The job fails a run with events and no key before it reads; a batch never gets here
     // without one.
     let key = batch.redaction_key.ok_or_else(StoreError::poison)?;
-    let mut events = EventBatch::default();
+    let first_sync = is_first_sync(tx, batch).await?;
+    let new_events = || {
+        if first_sync {
+            EventBatch::without_triggers()
+        } else {
+            EventBatch::default()
+        }
+    };
+    let mut events = new_events();
     for (upsert, result) in batch.upserts.iter().zip(results) {
         let current = matches!(
             result,
@@ -613,7 +621,8 @@ async fn apply_events(
             source_record_id: seen.get(upsert.record.record_key.as_str()).copied(),
         };
         let outcome = if batch.singly {
-            let outcome = apply_event_singly(tx, batch, key, &record, &message_id).await?;
+            let outcome =
+                apply_event_singly(tx, batch, key, &record, &message_id, new_events()).await?;
             if outcome.is_none() {
                 applied.failed_messages.push(message_id);
             }
@@ -646,6 +655,21 @@ async fn apply_events(
     Ok(applied)
 }
 
+/// Whether the batch belongs to the first sync of a pull stream: no earlier run of the stream
+/// has succeeded. A retried first attempt, whose earlier batches already moved the cursor, is
+/// still the first sync. A reconcile run applies no events, and a consumer (stream-mode) run
+/// has no first sync: neither counts.
+async fn is_first_sync(tx: &mut crate::Tx, batch: &SyncBatch<'_>) -> Result<bool, StoreError> {
+    sqlx::query_scalar(
+        "SELECT r.run_kind = 'sync' AND r.sync_mode <> 'stream' AND NOT EXISTS (              SELECT 1 FROM sync_runs p              WHERE p.workspace_id = r.workspace_id AND p.stream_id = r.stream_id                AND p.id <> r.id AND p.run_kind = 'sync' AND p.state = 'succeeded')          FROM sync_runs r WHERE r.workspace_id = $1 AND r.id = $2",
+    )
+    .bind(batch.workspace.as_uuid())
+    .bind(batch.run_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(StoreError::query)
+}
+
 /// One event in a savepoint of its own. `None` when it cannot be stored: it is rejected as
 /// `apply_failed` and the batch goes on.
 async fn apply_event_singly(
@@ -654,9 +678,9 @@ async fn apply_event_singly(
     key: &HmacKey,
     record: &EventRecord,
     message_id: &str,
+    mut single: EventBatch,
 ) -> Result<Option<EventOutcome>, StoreError> {
     let mut savepoint = tx.begin().await.map_err(StoreError::query)?;
-    let mut single = EventBatch::default();
     let done =
         match apply_event_record(&mut savepoint, batch.workspace, key, &mut single, record).await {
             Ok(outcome) => single
@@ -795,8 +819,9 @@ mod tests {
     use serde_json::json;
     use sqlx::PgPool;
 
+    use super::super::model::{Lease, fail_run};
     use super::super::model::{cancel_run, find_run};
-    use super::super::testing::{Fixture, batch, fixture, upsert};
+    use super::super::testing::{Fixture, batch, fixture, next_run, started_run, upsert};
     use super::*;
 
     type DecisionTuple = (
@@ -1525,6 +1550,193 @@ mod tests {
         ] {
             assert_eq!(count(pool, sql).await, 0, "{table}");
         }
+    }
+
+    /// Publishes a flow whose event trigger names `order_placed`.
+    async fn publish_order_flow(pool: &PgPool, ws: WorkspaceId) {
+        use crate::flows::tests_support::{create, publish};
+        use crate::flows::{FlowPatch, update_flow_draft};
+        let flow = create(pool, ws, "Order flow").await;
+        let mut connection = pool.acquire().await.unwrap();
+        update_flow_draft(
+            &mut connection,
+            ws,
+            flow.id,
+            &FlowPatch {
+                settings: Some(json!({
+                    "trigger": {"type": "event", "event": "order_placed"},
+                    "reentry": {"mode": "once"}
+                })),
+                ..FlowPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        drop(connection);
+        publish(pool, ws, flow.id).await.unwrap();
+    }
+
+    async fn jobs_of(pool: &PgPool, kind: &str) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = $1")
+            .bind(kind)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// The flags of every stored event, one list per event.
+    async fn event_flags(pool: &PgPool) -> Vec<Vec<String>> {
+        sqlx::query_scalar("SELECT flags FROM events ORDER BY id")
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    fn no_triggers(flags: &[String]) -> bool {
+        flags.contains(&"no_triggers".to_owned())
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_first_sync_flags_its_events_and_enrolls_and_wakes_nobody(pool: PgPool) {
+        let fx = fixture(&pool, "one", "incremental").await;
+        let source = fx.source_id.to_string();
+        let key = key();
+        block_order_placed(&pool, &fx).await;
+        publish_order_flow(&pool, fx.ws).await;
+        // A person the stream already knows, with an enrollment waiting for `order_placed`.
+        let cp = json!({"offset": 1});
+        let profiles = [upsert(&fx, "k0", "a0@example.com")];
+        commit_sync_batch(&pool, &keyed(&fx, &source, &profiles, &cp, &key))
+            .await
+            .unwrap();
+        let person: Uuid = sqlx::query_scalar("SELECT id FROM people")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let waiting = crate::flows::tests_support::create(&pool, fx.ws, "Waiting").await;
+        crate::flows::tests_support::publish(&pool, fx.ws, waiting.id)
+            .await
+            .unwrap();
+        crate::flows::tests_support::waiting_enrollment(
+            &pool,
+            fx.ws,
+            waiting.id,
+            person,
+            "order_placed",
+        )
+        .await;
+        let upserts = [
+            with_event(&fx, "k0", "a0@example.com", json!(10), &[]),
+            with_event(&fx, "k1", "a1@example.com", json!(20), &[]),
+        ];
+        let cp = json!({"offset": 3});
+
+        let outcome = commit_sync_batch(&pool, &keyed(&fx, &source, &upserts, &cp, &key))
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, BatchOutcome::Committed(_)));
+        let flags = event_flags(&pool).await;
+        assert_eq!(flags.len(), 2);
+        assert!(flags.iter().all(|f| no_triggers(f)));
+        assert_eq!(jobs_of(&pool, "flow.enroll").await, 0);
+        assert_eq!(jobs_of(&pool, "flow.step").await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_record_new_in_the_next_sync_enrolls_its_person(pool: PgPool) {
+        let first = fixture(&pool, "one", "incremental").await;
+        let source = first.source_id.to_string();
+        let key = key();
+        block_order_placed(&pool, &first).await;
+        publish_order_flow(&pool, first.ws).await;
+        let upserts = [with_event(&first, "k0", "a0@example.com", json!(10), &[])];
+        let cp = json!({"offset": 1});
+        commit_sync_batch(&pool, &keyed(&first, &source, &upserts, &cp, &key))
+            .await
+            .unwrap();
+        let second = next_run(&pool, &first).await;
+        let changed = [with_event(&second, "k1", "a1@example.com", json!(99), &[])];
+        let cp = json!({"offset": 2});
+
+        let outcome = commit_sync_batch(&pool, &keyed(&second, &source, &changed, &cp, &key))
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, BatchOutcome::Committed(_)));
+        let flags = event_flags(&pool).await;
+        assert_eq!(flags.len(), 2, "one event per sync");
+        assert_eq!(
+            flags.iter().filter(|f| no_triggers(f)).count(),
+            1,
+            "only the event of the first sync is flagged"
+        );
+        assert_eq!(jobs_of(&pool, "flow.enroll").await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_retried_first_sync_is_still_a_first_sync(pool: PgPool) {
+        let first = fixture(&pool, "one", "incremental").await;
+        let source = first.source_id.to_string();
+        let key = key();
+        block_order_placed(&pool, &first).await;
+        publish_order_flow(&pool, first.ws).await;
+        // The first attempt moved the cursor of the stream with a batch, then failed.
+        let upserts = [with_event(&first, "k0", "a0@example.com", json!(10), &[])];
+        let cp = json!({"offset": 1});
+        let moved = SyncBatch {
+            incremental: true,
+            ..keyed(&first, &source, &upserts, &cp, &key)
+        };
+        commit_sync_batch(&pool, &moved).await.unwrap();
+        let cursor: Option<Value> =
+            sqlx::query_scalar("SELECT checkpoint FROM streams WHERE id = $1")
+                .bind(first.stream_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(cursor.is_some(), "the cursor moved");
+        let lease = Lease {
+            job_id: first.job.id,
+            token: first.job.lease_token,
+        };
+        fail_run(&pool, first.ws, first.run.id, lease, "unavailable")
+            .await
+            .unwrap();
+        let retry = started_run(&pool, first.ws, first.source_id, first.stream_id).await;
+        let rest = [with_event(&retry, "k1", "a1@example.com", json!(20), &[])];
+        let cp = json!({"offset": 2});
+
+        commit_sync_batch(&pool, &keyed(&retry, &source, &rest, &cp, &key))
+            .await
+            .unwrap();
+
+        let flags = event_flags(&pool).await;
+        assert_eq!(flags.len(), 2);
+        assert!(flags.iter().all(|f| no_triggers(f)));
+        assert_eq!(jobs_of(&pool, "flow.enroll").await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_events_of_a_consumer_run_are_never_a_first_sync(pool: PgPool) {
+        let fx = fixture(&pool, "one", "stream").await;
+        let source = fx.source_id.to_string();
+        let key = key();
+        block_order_placed(&pool, &fx).await;
+        let upserts = [with_event(&fx, "k0", "a0@example.com", json!(10), &[])];
+        let cp = json!({"offset": 1});
+
+        commit_sync_batch(&pool, &keyed(&fx, &source, &upserts, &cp, &key))
+            .await
+            .unwrap();
+
+        let flags = event_flags(&pool).await;
+        assert_eq!(flags.len(), 1);
+        assert!(!no_triggers(&flags[0]));
     }
 
     #[test]
