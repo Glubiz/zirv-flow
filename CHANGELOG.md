@@ -15,3 +15,9 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.238.0 (2026-11-06)
+
+### Fixes
+
+- the suppression check reads both scopes, as the send gate does, and reports the scope (#521)
+
