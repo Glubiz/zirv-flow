@@ -15,3 +15,14 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.240.0 (2026-11-06)
+
+### Fixes
+
+- a contact patch observes only the fields it names, and a removal leaves a stable hash (#520)
+
+### Chores
+
+- roll back explicitly, so the next claim does not skip rows the dropped transaction still holds (#520)
+- drop the cache files main dropped (#520)
+
