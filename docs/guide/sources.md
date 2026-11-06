@@ -89,7 +89,12 @@ fails with `file_changed`, keeping the units already committed. A record over 1 
 `record_too_large`; text that is not valid CSV or JSON fails with `csv_invalid` or
 `json_invalid`. A byte-range answer whose `Content-Range`, length or total contradicts itself or the
 request fails with `file_range_invalid`, so a short body is never taken for the end of the file.
-These codes never quote the file or its address.
+A run with `csv_invalid`, `json_invalid`, `json_not_an_array`, `json_trailing_data`,
+`record_too_large`, `file_range_unsupported` or `checkpoint_invalid` ends at once, because another
+attempt would read the same bytes; `file_changed` and `file_range_invalid` are tried again, up to
+the last attempt, and the run then ends with that code. Any other read failure ends as `source_error`
+after the last attempt. The run keeps the units already committed. These codes never quote the file
+or its address.
 
 **Fields and keys.** For CSV the fields are the header names (blank or repeated names are
 refused), all text. For JSON they are the top-level keys of the first 100 records, typed from
@@ -272,7 +277,7 @@ scans rejects without a person id for matching identifier values; see the
 **Settings are checked again.** Before reading, a run checks the stream's settings against the
 descriptor discovery last reported, and fails with `stream_settings_invalid` when they no longer
 fit (a cursor field that disappeared, say). A stream without a mapping fails with
-`stream_not_mapped`; other codes are `source_error` and `job_failed` (the last attempt failed),
+`stream_not_mapped`; other codes are `source_error` (a bad setting ends the run at once, any other failure ends it on the last attempt), `job_failed` (the last attempt failed),
 `mapping_invalid`, `list_missing`, `stream_not_keyed`, `event_key_unavailable`, `file_changed` and the other file codes (see the file source), `source_missing`, `stream_missing` and `source_kind_unavailable`.
 
 **Schedules.** A source's cron schedule (UTC) is mirrored to a `schedules` row, kept in step in

@@ -33,8 +33,8 @@ use zirv_flow_store::{
 
 use super::import_rows::Probe;
 use super::sync_run::{
-    Failure, Gathered, Ids, LEASE_LOST, Pass, Prep, Prepared, Unit, end_failed, id_in,
-    open_credential, prepare, source_failure,
+    Failure, Gathered, Ids, LEASE_LOST, Pass, Prep, Prepared, ReadFailure, Unit, coded, end_failed,
+    id_in, open_credential, prepare, read_failure as sync_read_failure, source_failure,
 };
 use crate::metrics::{RunOutcome, record_sync_run};
 use crate::{JobContext, JobError, JobKind};
@@ -124,15 +124,8 @@ pub(super) async fn run_consume(
     }
 }
 
-/// What a failed read means for the run.
-enum ReadFailure {
-    /// No attempt can succeed: the run ends with this code and the job is done.
-    Final(&'static str),
-    /// Another attempt may succeed; the run ends with this code if none is left.
-    Retry(Failure),
-}
-
-/// The static run code of a source error, never its text.
+/// The static run code of a source error, never its text. The kafka codes are this source's own;
+/// anything else is judged as for any source.
 fn read_failure(error: &SourceError) -> ReadFailure {
     match error {
         SourceError::Other(code) => match code.as_str() {
@@ -143,17 +136,9 @@ fn read_failure(error: &SourceError) -> ReadFailure {
             "kafka_compression_unsupported" => ReadFailure::Final("kafka_compression_unsupported"),
             "kafka_connect_failed" => ReadFailure::Retry(coded("kafka_connect_failed")),
             "kafka_timeout" => ReadFailure::Retry(coded("kafka_connect_failed")),
-            _ => ReadFailure::Retry(source_failure("the source could not be read")),
+            _ => sync_read_failure(error),
         },
-        SourceError::Config { .. } => ReadFailure::Final("source_error"),
-        _ => ReadFailure::Retry(source_failure("the source could not be read")),
-    }
-}
-
-fn coded(code: &'static str) -> Failure {
-    Failure {
-        error: JobError::new("the source could not be read"),
-        code,
+        _ => sync_read_failure(error),
     }
 }
 

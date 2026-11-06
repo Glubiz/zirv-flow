@@ -32,8 +32,9 @@ use tracing::{info, warn};
 use uuid::Uuid;
 use zirv_flow_connectors::http::HttpLimits;
 use zirv_flow_connectors::sources::{
-    Checkpoint, Credential, ErasedSource, Record, Refused, Registry, SourceContext, StreamConfig,
-    StreamDescriptor, StreamSettingsInput, SyncMode, validate_config, validate_stream_settings,
+    Checkpoint, Credential, ErasedSource, Record, Refused, Registry, SourceContext, SourceError,
+    StreamConfig, StreamDescriptor, StreamSettingsInput, SyncMode, validate_config,
+    validate_stream_settings,
 };
 use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::mapping::{
@@ -935,7 +936,10 @@ async fn run_pass(
             }
             Some(Err(error)) => {
                 warn!(run_id = %ids.run, error = %error, "a sync read failed");
-                return Err(source_failure("the source could not be read"));
+                return match read_failure(&error) {
+                    ReadFailure::Final(code) => end_failed(pool, ids, code).await,
+                    ReadFailure::Retry(failure) => Err(failure),
+                };
             }
             None => break,
         }
@@ -969,6 +973,43 @@ pub(super) fn source_failure(message: &'static str) -> Failure {
     Failure {
         error: JobError::new(message),
         code: "source_error",
+    }
+}
+
+/// What a failed read means for the run.
+pub(super) enum ReadFailure {
+    /// No attempt can succeed: the run ends with this code and the job is done.
+    Final(&'static str),
+    /// Another attempt may succeed; the run ends with this code if none is left.
+    Retry(Failure),
+}
+
+/// A retried failure that ends the run with `code` when no attempt is left.
+pub(super) fn coded(code: &'static str) -> Failure {
+    Failure {
+        error: JobError::new("the source could not be read"),
+        code,
+    }
+}
+
+/// The static run code of a source error, never its text: a code is chosen by exact match on a
+/// connector's own literal, so any other text, such as a database message, is `source_error`.
+pub(super) fn read_failure(error: &SourceError) -> ReadFailure {
+    match error {
+        SourceError::Other(code) => match code.as_str() {
+            "csv_invalid" => ReadFailure::Final("csv_invalid"),
+            "json_invalid" => ReadFailure::Final("json_invalid"),
+            "json_not_an_array" => ReadFailure::Final("json_not_an_array"),
+            "json_trailing_data" => ReadFailure::Final("json_trailing_data"),
+            "record_too_large" => ReadFailure::Final("record_too_large"),
+            "file_range_unsupported" => ReadFailure::Final("file_range_unsupported"),
+            "checkpoint_invalid" => ReadFailure::Final("checkpoint_invalid"),
+            "file_changed" => ReadFailure::Retry(coded("file_changed")),
+            "file_range_invalid" => ReadFailure::Retry(coded("file_range_invalid")),
+            _ => ReadFailure::Retry(source_failure("the source could not be read")),
+        },
+        SourceError::Config { .. } => ReadFailure::Final("source_error"),
+        _ => ReadFailure::Retry(source_failure("the source could not be read")),
     }
 }
 
@@ -1935,6 +1976,141 @@ mod tests {
             assert_eq!(failed.error_code.as_deref(), Some("source_error"));
         })
         .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_final_read_code_ends_the_run_at_once_with_that_code(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = setup(
+                &pool,
+                json!({"records": 600, "batch": 100, "fail_after_batches": 1,
+                    "fail_with": "csv_invalid"}),
+                "full_refresh",
+            )
+            .await;
+            let (run, job) = env.queue().await;
+
+            let result = attempt(&env, &job, &Probe::default()).await;
+
+            assert!(result.is_ok(), "the job is done, not retried");
+            let failed = env.run(run.id).await;
+            assert_eq!(failed.state, "failed");
+            assert_eq!(failed.error_code.as_deref(), Some("csv_invalid"));
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_retried_read_code_runs_every_attempt_and_ends_with_its_own_code(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = setup(
+                &pool,
+                json!({"records": 600, "batch": 100, "fail_after_batches": 1,
+                    "fail_with": "file_changed"}),
+                "full_refresh",
+            )
+            .await;
+            let (run, job) = env.queue().await;
+
+            let first = attempt(&env, &job, &Probe::default()).await;
+
+            assert!(first.is_err());
+            assert_eq!(env.run(run.id).await.state, "running");
+            let last = ClaimedJob {
+                attempts: job.max_attempts,
+                ..env.reclaim(&job).await
+            };
+            let result = attempt(&env, &last, &Probe::default()).await;
+            assert!(result.is_err());
+            let failed = env.run(run.id).await;
+            assert_eq!(failed.state, "failed");
+            assert_eq!(failed.error_code.as_deref(), Some("file_changed"));
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_database_error_text_is_retried_and_never_becomes_a_run_code(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = setup(
+                &pool,
+                json!({"records": 600, "batch": 100, "fail_after_batches": 1,
+                    "fail_with": "relation \"people\" does not exist"}),
+                "full_refresh",
+            )
+            .await;
+            let (run, job) = env.queue().await;
+
+            let first = attempt(&env, &job, &Probe::default()).await;
+
+            assert!(first.is_err());
+            assert_eq!(env.run(run.id).await.state, "running");
+            let last = ClaimedJob {
+                attempts: job.max_attempts,
+                ..env.reclaim(&job).await
+            };
+            assert!(attempt(&env, &last, &Probe::default()).await.is_err());
+            let failed = env.run(run.id).await;
+            assert_eq!(failed.error_code.as_deref(), Some("source_error"));
+        })
+        .await;
+    }
+
+    #[test]
+    fn a_source_error_becomes_a_static_run_code_and_says_whether_to_retry() {
+        let other = |code: &str| SourceError::Other(code.to_owned());
+        let finals = [
+            "csv_invalid",
+            "json_invalid",
+            "json_not_an_array",
+            "json_trailing_data",
+            "record_too_large",
+            "file_range_unsupported",
+            "checkpoint_invalid",
+        ];
+        for code in finals {
+            assert!(
+                matches!(read_failure(&other(code)), ReadFailure::Final(found) if found == code),
+                "{code}"
+            );
+        }
+        for code in ["file_changed", "file_range_invalid"] {
+            assert!(
+                matches!(read_failure(&other(code)), ReadFailure::Retry(failure) if failure.code == code),
+                "{code}"
+            );
+        }
+        for code in finals.iter().chain(&["file_changed", "file_range_invalid"]) {
+            assert!(
+                code.len() <= 64
+                    && code.bytes().all(|byte| byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || byte == b'_'),
+                "{code} could carry content"
+            );
+        }
+        for text in [
+            "the database query failed",
+            "csv_invalid: row 3",
+            "CSV_INVALID",
+            "",
+        ] {
+            assert!(
+                matches!(read_failure(&other(text)), ReadFailure::Retry(failure) if failure.code == "source_error"),
+                "{text}"
+            );
+        }
+        let config = SourceError::Config {
+            field: "primary_key".into(),
+            reason: "is required".into(),
+        };
+        assert!(matches!(
+            read_failure(&config),
+            ReadFailure::Final("source_error")
+        ));
     }
 
     #[sqlx::test]
@@ -3085,7 +3261,7 @@ mod tests {
                     ..job
                 };
                 let result = db.attempt(&last, &Probe::default(), loopback()).await;
-                assert!(result.is_err());
+                assert!(result.is_ok(), "a bad setting ends the run at once");
                 let failed = env.run(stale.id).await;
                 assert_eq!(failed.state, "failed");
                 assert_eq!(failed.error_code.as_deref(), Some("source_error"));
@@ -4546,7 +4722,7 @@ mod tests {
             assert!(result.is_err());
             let failed = env.run(run.id).await;
             assert_eq!(failed.state, "failed");
-            assert_eq!(failed.error_code.as_deref(), Some("source_error"));
+            assert_eq!(failed.error_code.as_deref(), Some("file_changed"));
             let applied = env.count("SELECT count(*) FROM source_records").await;
             assert!(applied > 0 && applied < 700, "{applied}");
             assert_eq!(failed.records_applied, applied);
@@ -5442,10 +5618,13 @@ mod tests {
                     .attempt(&job, &Probe::default(), &Arc::default())
                     .await;
 
-                assert!(result.is_err());
+                assert!(result.is_ok(), "a bad setting ends the run at once");
+                assert_eq!(
+                    account.env.run(run.id).await.error_code.as_deref(),
+                    Some("source_error")
+                );
                 assert_eq!(account.api.data_requests.load(Ordering::SeqCst), 0);
                 assert_eq!(account.api.refreshes.load(Ordering::SeqCst), 0);
-                let _ = run;
             })
             .await;
         }
