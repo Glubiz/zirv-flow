@@ -55,6 +55,37 @@ describe("rejects", () => {
     expect(within(table).queryByText("null")).not.toBeInTheDocument();
   });
 
+  it("reads a dropped-traits record as an applied record: no replay choice, no event name, a person link", async () => {
+    const record = {
+      ...REJECT,
+      id: "r2",
+      kind: "record",
+      name: null,
+      reason: "traits_dropped",
+      reasons: [{ property: "age", reason: "wrong_type" }],
+      sample: { properties: {}, masked: [] },
+      person_id: "p1",
+    };
+    mockApi({
+      "GET /api/v1/session": () => json(session(OWNER)),
+      "GET /api/v1/workspaces/ws1/members": () =>
+        json([{ user_id: OWNER.id, email: "someone@example.test", role: "admin", added_at: "2026-10-01T09:00:00Z" }]),
+      [`GET ${URI}`]: () => json({ rejects: [REJECT, record], next_cursor: null }),
+    });
+    open();
+
+    const table = await screen.findByRole("table", { name: "Rejected events" });
+    await screen.findAllByRole("checkbox");
+    const rows = within(table).getAllByRole("row");
+    const row = rows[2] as HTMLElement;
+    expect(within(row).queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(within(row).queryByText("invalid name")).not.toBeInTheDocument();
+    expect(within(row).getByText("Record")).toBeInTheDocument();
+    expect(within(row).getByText("Some fields left out, the rest applied")).toBeInTheDocument();
+    expect(within(row).getByRole("link", { name: "Open the person" })).toHaveAttribute("href", "/w/ws1/people/p1");
+    expect(within(rows[1] as HTMLElement).getByRole("checkbox")).toBeInTheDocument();
+  });
+
   it("shows an empty state and a retry", async () => {
     mountWith(() => json({ rejects: [], next_cursor: null }));
     const first = open();

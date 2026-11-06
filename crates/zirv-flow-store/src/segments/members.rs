@@ -234,8 +234,9 @@ async fn size_per_day_until(
 }
 
 /// Closes the open rows of a merged person, in the caller's transaction: `exited_at` is the
-/// merge time, the cause is `data_change` and the trace is the merge's. No event is written; the
-/// survivor enters at the next refresh if they belong. The segments' counts drop with the rows.
+/// merge time (never before the row's own entry), the cause is `data_change` and the trace is the
+/// merge's. No event is written; the survivor enters at the next refresh if they belong. The
+/// segments' counts drop with the rows.
 pub(crate) async fn close_on_merge(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -244,8 +245,9 @@ pub(crate) async fn close_on_merge(
 ) -> Result<(), StoreError> {
     sqlx::query(
         "WITH closed AS ( \
-             UPDATE segment_members SET exited_version = version, exited_at = now(), \
-                 exited_trace_id = $3, exited_cause = 'data_change' \
+             UPDATE segment_members SET exited_version = version, \
+                 exited_at = GREATEST(now(), entered_at), exited_trace_id = $3, \
+                 exited_cause = 'data_change' \
              WHERE workspace_id = $1 AND person_id = $2 AND exited_at IS NULL \
              RETURNING segment_id), \
          counts AS (SELECT segment_id, count(*) AS n FROM closed GROUP BY segment_id) \
@@ -505,6 +507,31 @@ mod tests {
         assert_eq!(one.days, [(today, 1)]);
         assert_eq!((one.from, one.to, one.current), (today, today, 1));
         assert!(foreign.is_none() && unknown.is_none());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_merge_never_stamps_an_exit_before_the_rows_entry(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let seg = segment(&pool, ws, "Pros", 60).await;
+        let ada = person(&pool, ws, "ada@example.com", "pro").await;
+        // A pass that committed after the merge began opened the row ahead of the merge's now().
+        let ahead = OffsetDateTime::now_utc() + Duration::seconds(1);
+        enter(&pool, ws, seg.id, ada, ahead).await;
+        let trace = TraceContext::root(Cause::api("merge"));
+
+        let mut tx = begin(&pool).await.unwrap();
+        close_on_merge(&mut tx, ws, ada, &trace).await.unwrap();
+        commit(tx).await.unwrap();
+
+        let ordered: bool = sqlx::query_scalar(
+            "SELECT exited_at >= entered_at FROM segment_members WHERE person_id = $1",
+        )
+        .bind(ada)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(ordered);
     }
 
     #[sqlx::test]

@@ -12,7 +12,7 @@ use utoipa::openapi::schema::{ObjectBuilder, SchemaType, Type};
 use utoipa::openapi::{Ref, RefOr, Schema};
 use uuid::Uuid;
 use zirv_flow_core::{UserId, ValidationError, WorkspaceId};
-use zirv_flow_segments::{compile, normalize, parse_and_validate};
+use zirv_flow_segments::{Catalog, TraitStorage, compile, normalize, parse_and_validate};
 use zirv_flow_store::{
     CADENCE_MINUTES, DEFAULT_CADENCE_MINUTES, NewSegment, NewSegmentVersion, PgPool, Segment,
     SegmentPatch, SegmentVersion,
@@ -24,7 +24,7 @@ use crate::admin::{self, Context};
 use crate::auth::{Need, Principal, authorize, path_id};
 use crate::consent::bool_param;
 use crate::json::ApiJson;
-use crate::problem::{ApiError, Problem};
+use crate::problem::{ApiError, Problem, SegmentIssueProblem};
 use crate::trace::request_trace;
 
 const MAX_NAME_CHARS: usize = 100;
@@ -132,6 +132,11 @@ pub(crate) struct SegmentDetailBody {
     #[serde(flatten)]
     segment: SegmentBody,
     current: SegmentVersionBody,
+    /// Set by the read of one segment when the saved definition no longer passes against what
+    /// the workspace defines now (a field archived, a list deleted, an event property removed):
+    /// the members then stay as they were. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    issues: Option<Vec<SegmentIssueProblem>>,
 }
 
 impl SegmentDetailBody {
@@ -139,7 +144,31 @@ impl SegmentDetailBody {
         Self {
             segment: SegmentBody::from(segment),
             current: SegmentVersionBody::from(version),
+            issues: None,
         }
+    }
+}
+
+/// What a saved definition fails against the catalog as it is now, or `None` when it still
+/// compiles. A live segment with issues keeps its members as they were.
+fn current_issues(
+    definition: &Value,
+    catalog: &Catalog,
+    storage: &TraitStorage,
+    now: OffsetDateTime,
+) -> Option<Vec<SegmentIssueProblem>> {
+    let named = |issues: Vec<zirv_flow_segments::Issue>| {
+        issues
+            .into_iter()
+            .map(|issue| SegmentIssueProblem {
+                pointer: issue.pointer,
+                code: issue.code.to_owned(),
+            })
+            .collect()
+    };
+    match parse_and_validate(definition, catalog) {
+        Err(issues) => Some(named(issues)),
+        Ok(parsed) => compile(&parsed, catalog, storage, now).err().map(named),
     }
 }
 
@@ -574,7 +603,15 @@ pub(crate) async fn get(
     )
     .await?
     .ok_or_else(ApiError::internal)?;
-    Ok(Json(SegmentDetailBody::new(&segment, &version)))
+    let mut body = SegmentDetailBody::new(&segment, &version);
+    if segment.archived_at.is_none() {
+        let mut connection = zirv_flow_store::begin(&state.pool).await?;
+        let (catalog, storage) =
+            catalog_of(zirv_flow_store::segment_catalog(&mut connection, workspace.id).await?);
+        let now = zirv_flow_store::database_now(&mut *connection).await?;
+        body.issues = current_issues(&version.definition, &catalog, &storage, now);
+    }
+    Ok(Json(body))
 }
 
 /// Changes a segment. A definition is saved as the next version and becomes the current one,

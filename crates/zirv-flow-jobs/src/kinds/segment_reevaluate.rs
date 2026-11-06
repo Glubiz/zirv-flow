@@ -131,6 +131,10 @@ impl Run {
                 let compiled = parse_and_validate(&version.definition, &catalog)
                     .and_then(|parsed| compile(&parsed, &catalog, &storage, now));
                 let Ok(compiled) = compiled else {
+                    tracing::warn!(
+                        segment = %segment_id,
+                        "segment definition no longer compiles; members left as they were"
+                    );
                     // Something the definition reads was archived since the save: the members
                     // stay as they were, and the other segments still get their pass.
                     append_decision(

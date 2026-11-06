@@ -31,6 +31,7 @@ export const REASONS: Record<string, string> = {
   wrong_type: "A property has the wrong type",
   not_in_enum: "A property is not one of the allowed values",
   unplanned_property: "A property is not in the schema",
+  archived_key: "The field is archived",
 };
 
 export const REJECT_REASONS: Record<string, string> = {
@@ -40,6 +41,7 @@ export const REJECT_REASONS: Record<string, string> = {
   invalid_event_name: "Invalid event name",
   invalid_message_id: "Invalid message id",
   apply_failed: "Could not be applied",
+  traits_dropped: "Some fields left out, the rest applied",
   no_person: "Names no person",
   not_replayable: "Cannot be replayed",
 };
