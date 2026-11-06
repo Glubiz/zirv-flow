@@ -21,6 +21,7 @@ use zirv_flow_core::segment::ChangeClasses;
 use zirv_flow_core::token::sha256;
 use zirv_flow_core::{OrphanPolicy, TraceContext, WorkspaceId};
 
+use super::lock::{LedgerKey, lock_batch};
 use super::registry::{TraitDefinition, find_trait_definition, insert_inferred_definition};
 use super::resolve::{Resolution, resolve_person};
 use super::slots::{lock_and_read_writer_slots, lock_slots_shared, slot_assignments_sql};
@@ -80,21 +81,25 @@ pub async fn apply_profile_batch(
     records: &[ProfileRecord],
 ) -> Result<Vec<ProfileOutcome>, StoreError> {
     let mut tx = begin(pool).await?;
-    let outcomes = apply_profile_records(&mut tx, workspace, records).await?;
+    let outcomes = apply_profile_records(&mut tx, workspace, records, &[]).await?;
     crate::changes::request_reevaluation(&mut tx, workspace).await?;
     commit(tx).await?;
     Ok(outcomes)
 }
 
 /// [`apply_profile_batch`] inside the caller's transaction, which the caller commits.
+/// `retracted` names the ledger rows the caller removes in the same transaction after these
+/// records: they are locked with the records' own, before the first record is applied.
 pub(crate) async fn apply_profile_records(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     records: &[ProfileRecord],
+    retracted: &[LedgerKey<'_>],
 ) -> Result<Vec<ProfileOutcome>, StoreError> {
     crate::changes::cache_change_readers(connection, workspace).await?;
     // Before any row lock; see `slots` for the order.
     lock_slots_shared(connection, workspace).await?;
+    lock_records(connection, workspace, records, retracted).await?;
     let mut outcomes = Vec::with_capacity(records.len());
     for record in records {
         outcomes.push(apply_profile_record(connection, workspace, record).await?);
@@ -109,9 +114,12 @@ pub(crate) async fn apply_profile_records_singly(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     records: &[ProfileRecord],
+    retracted: &[LedgerKey<'_>],
 ) -> Result<Vec<Option<ProfileOutcome>>, StoreError> {
     crate::changes::cache_change_readers(connection, workspace).await?;
     lock_slots_shared(connection, workspace).await?;
+    // Outside the savepoints, so a record rolled back keeps the batch's locks.
+    lock_records(connection, workspace, records, retracted).await?;
     let mut outcomes = Vec::with_capacity(records.len());
     for record in records {
         let mut savepoint = connection.begin().await.map_err(StoreError::query)?;
@@ -128,6 +136,37 @@ pub(crate) async fn apply_profile_records_singly(
         }
     }
     Ok(outcomes)
+}
+
+/// [`lock_batch`] for the identities and ledger rows of `records` and the ledger rows
+/// `retracted`.
+async fn lock_records(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    records: &[ProfileRecord],
+    retracted: &[LedgerKey<'_>],
+) -> Result<(), StoreError> {
+    let mut identities: Vec<Vec<(String, String)>> = Vec::with_capacity(records.len());
+    let mut ledger: Vec<LedgerKey<'_>> = Vec::with_capacity(records.len() + retracted.len());
+    for record in records {
+        // A record whose identifiers do not parse is rejected before it locks anything.
+        let Ok(parsed) = normalize_identifiers(&record.identifiers) else {
+            continue;
+        };
+        identities.push(
+            parsed
+                .iter()
+                .map(|identifier| (identifier.kind().as_text(), identifier.value().to_owned()))
+                .collect(),
+        );
+        ledger.push(LedgerKey {
+            source: &record.source,
+            stream: &record.stream,
+            record_key: &record.record_key,
+        });
+    }
+    ledger.extend_from_slice(retracted);
+    lock_batch(connection, workspace, &identities, &ledger).await
 }
 
 /// Retracts one source record's contribution, in one transaction:

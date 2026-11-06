@@ -4,12 +4,172 @@
 //! plan never depends on planner statistics: a filter on `workspace_id` beside `id = ANY(..)`
 //! lets a table without statistics (after a crash or a restore) choose `people_workspace_idx`
 //! and walk the workspace's people to find the few that were asked for.
+//!
+//! A batch of records takes what its records will lock before the first one ([`lock_batch`]).
 
+use std::collections::{BTreeMap, BTreeSet};
+
+use sha2::{Digest, Sha256};
 use sqlx::PgConnection;
 use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
 
+use super::resolve::MAX_MERGE_HOPS;
 use crate::StoreError;
+
+/// How many advisory locks a workspace's unowned identities are spread over. A batch takes at
+/// most this many, whatever its size: advisory locks share the lock table with every other lock.
+const IDENTITY_BUCKETS: u8 = 64;
+
+/// A ledger row by its key.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LedgerKey<'a> {
+    pub(crate) source: &'a str,
+    pub(crate) stream: &'a str,
+    pub(crate) record_key: &'a str,
+}
+
+/// The bucket of an identity: the first byte of the SHA-256 of its kind and value, modulo
+/// [`IDENTITY_BUCKETS`].
+fn identity_bucket(kind: &str, value: &str) -> i32 {
+    let mut hash = Sha256::new();
+    hash.update(kind.as_bytes());
+    hash.update([0]);
+    hash.update(value.as_bytes());
+    i32::from(hash.finalize()[0] % IDENTITY_BUCKETS)
+}
+
+/// Takes, before a batch applies its first record, the locks its records would otherwise take one
+/// at a time in the batch's order, which two batches over the same people take in opposite
+/// orders (#518). In this order, until the transaction ends:
+///
+/// 1. the advisory lock of the bucket of each identity in `identities` (each record's normalized
+///    `(kind, value)` pairs) that nobody owns yet, by bucket: a record inserts those, and another
+///    batch inserting one of them waits here instead of on the identity's unique key;
+/// 2. the existing ledger rows of `ledger`, and every ledger row, of any stream, of the owners of
+///    a record whose identities have more than one owner, in id order: the record may merge
+///    those owners, and a merge moves every ledger row of the people it merges away;
+/// 3. every person who owns one of the identities or one of the ledger rows of `ledger`, and every
+///    person one of them was merged into, in id order.
+///
+/// What a record locks afterwards is held already, or a person it creates.
+pub(super) async fn lock_batch(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    identities: &[Vec<(String, String)>],
+    ledger: &[LedgerKey<'_>],
+) -> Result<(), StoreError> {
+    let mut records: Vec<i32> = Vec::new();
+    let mut kinds: Vec<&str> = Vec::new();
+    let mut values: Vec<&str> = Vec::new();
+    for (record, pairs) in identities.iter().enumerate() {
+        let record = i32::try_from(record).unwrap_or(i32::MAX);
+        for (kind, value) in pairs {
+            records.push(record);
+            kinds.push(kind);
+            values.push(value);
+        }
+    }
+    let unowned: Vec<(String, String)> = sqlx::query_as(
+        "SELECT t.kind, t.value FROM unnest($2::text[], $3::text[]) AS t(kind, value) \
+         WHERE NOT EXISTS (SELECT 1 FROM identities i \
+                           WHERE i.workspace_id = $1 AND i.kind = t.kind AND i.value = t.value)",
+    )
+    .bind(workspace.as_uuid())
+    .bind(&kinds)
+    .bind(&values)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    let buckets: Vec<i32> = unowned
+        .iter()
+        .map(|(kind, value)| identity_bucket(kind, value))
+        .collect::<BTreeSet<i32>>()
+        .into_iter()
+        .collect();
+    if !buckets.is_empty() {
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock( \
+                 hashtextextended('identities/' || $1::text || '/' || t.bucket::text, 0)) \
+             FROM unnest($2::int4[]) WITH ORDINALITY AS t(bucket, n) ORDER BY t.n",
+        )
+        .bind(workspace.as_uuid())
+        .bind(&buckets)
+        .execute(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
+    }
+    let owned: Vec<(i32, Uuid)> = sqlx::query_as(
+        "SELECT t.record, i.person_id \
+         FROM unnest($2::int4[], $3::text[], $4::text[]) AS t(record, kind, value) \
+         JOIN identities i ON i.workspace_id = $1 AND i.kind = t.kind AND i.value = t.value",
+    )
+    .bind(workspace.as_uuid())
+    .bind(&records)
+    .bind(&kinds)
+    .bind(&values)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    let mut owners: BTreeMap<i32, BTreeSet<Uuid>> = BTreeMap::new();
+    for (record, person) in owned {
+        owners.entry(record).or_default().insert(person);
+    }
+    let mergeable: Vec<Uuid> = owners
+        .values()
+        .filter(|people| people.len() > 1)
+        .flatten()
+        .copied()
+        .collect::<BTreeSet<Uuid>>()
+        .into_iter()
+        .collect();
+    let sources: Vec<&str> = ledger.iter().map(|key| key.source).collect();
+    let streams: Vec<&str> = ledger.iter().map(|key| key.stream).collect();
+    let keys: Vec<&str> = ledger.iter().map(|key| key.record_key).collect();
+    let recorded: Vec<(Uuid, bool)> = sqlx::query_as(
+        "WITH named AS MATERIALIZED ( \
+             SELECT s.id FROM source_records s \
+             JOIN unnest($2::text[], $3::text[], $4::text[]) AS l(source, stream, record_key) \
+               ON s.source = l.source AND s.stream = l.stream AND s.record_key = l.record_key \
+             WHERE s.workspace_id = $1), \
+         targets AS MATERIALIZED ( \
+             SELECT id FROM named \
+             UNION \
+             SELECT id FROM source_records WHERE workspace_id = $1 AND person_id = ANY($5)) \
+         SELECT s.person_id, s.id IN (SELECT id FROM named) FROM source_records s \
+         JOIN targets t ON t.id = s.id ORDER BY s.id FOR UPDATE OF s",
+    )
+    .bind(workspace.as_uuid())
+    .bind(&sources)
+    .bind(&streams)
+    .bind(&keys)
+    .bind(&mergeable)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    let mut wanted: Vec<Uuid> = owners.into_values().flatten().collect();
+    wanted.extend(
+        recorded
+            .into_iter()
+            .filter_map(|(person, named)| named.then_some(person)),
+    );
+    let mut locked: BTreeSet<Uuid> = BTreeSet::new();
+    for _ in 0..MAX_MERGE_HOPS {
+        wanted.retain(|person| !locked.contains(person));
+        wanted.sort_unstable();
+        wanted.dedup();
+        if wanted.is_empty() {
+            break;
+        }
+        let rows = lock_people_in_order(connection, workspace, &wanted, PersonLock::Update).await?;
+        locked.extend(wanted.iter().copied());
+        wanted = rows
+            .into_iter()
+            .filter_map(|(_, merged_into)| merged_into)
+            .collect();
+    }
+    Ok(())
+}
 
 /// The row-level lock a caller takes on the people it names.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -200,6 +360,128 @@ mod tests {
                 (ids[1], None, None)
             ]
         );
+    }
+
+    #[test]
+    fn an_identity_always_falls_in_the_same_one_of_the_buckets() {
+        let bucket = identity_bucket("email", "a@example.com");
+
+        assert!((0..i32::from(IDENTITY_BUCKETS)).contains(&bucket));
+        assert_eq!(bucket, identity_bucket("email", "a@example.com"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_batch_holds_the_owners_its_ledger_rows_and_the_buckets_of_its_new_identities(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "mine").await;
+        let mut ids: Vec<Uuid> = (0..5).map(|_| Uuid::now_v7()).collect();
+        ids.sort_unstable();
+        let [owner, recorded, merged, survivor, unrelated] =
+            <[Uuid; 5]>::try_from(ids.clone()).unwrap();
+        insert_people(&pool, ws, &ids).await;
+        sqlx::query("UPDATE people SET merged_into = $2 WHERE id = $1")
+            .bind(merged)
+            .bind(survivor)
+            .execute(&pool)
+            .await
+            .unwrap();
+        for (person, value) in [(owner, "known@example.com"), (merged, "stale@example.com")] {
+            sqlx::query(
+                "INSERT INTO identities (id, workspace_id, person_id, kind, value) \
+                 VALUES ($1, $2, $3, 'email', $4)",
+            )
+            .bind(Uuid::now_v7())
+            .bind(ws.as_uuid())
+            .bind(person)
+            .bind(value)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        // The record naming both emails may merge their owners, so the ledger rows of the owner
+        // are held whatever their stream; those of a person no record can merge are not.
+        for (stream, key, person) in [
+            ("contacts", "k1", recorded),
+            ("invoices", "of-the-owner", owner),
+            ("invoices", "of-the-unrelated", unrelated),
+        ] {
+            sqlx::query(
+                "INSERT INTO source_records \
+                    (id, workspace_id, source, stream, record_key, person_id, content_hash) \
+                 VALUES ($1, $2, 'crm', $3, $4, $5, '\\x00')",
+            )
+            .bind(Uuid::now_v7())
+            .bind(ws.as_uuid())
+            .bind(stream)
+            .bind(key)
+            .bind(person)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let known = identity_bucket("email", "known@example.com");
+        let fresh = (0..)
+            .map(|n| format!("new{n}@example.com"))
+            .find(|value| identity_bucket("email", value) != known)
+            .unwrap();
+        let identities = [
+            vec![
+                ("email".to_owned(), "known@example.com".to_owned()),
+                ("email".to_owned(), "stale@example.com".to_owned()),
+            ],
+            vec![("email".to_owned(), fresh.clone())],
+        ];
+        let ledger = [
+            LedgerKey {
+                source: "crm",
+                stream: "contacts",
+                record_key: "k1",
+            },
+            LedgerKey {
+                source: "crm",
+                stream: "contacts",
+                record_key: "never-seen",
+            },
+        ];
+        let mut batch = pool.begin().await.unwrap();
+
+        lock_batch(&mut batch, ws, &identities, &ledger)
+            .await
+            .unwrap();
+
+        let mut other = pool.begin().await.unwrap();
+        let free: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM people WHERE id = ANY($1) ORDER BY id FOR UPDATE SKIP LOCKED",
+        )
+        .bind(&ids)
+        .fetch_all(&mut *other)
+        .await
+        .unwrap();
+        assert_eq!(free, [unrelated]);
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT record_key FROM source_records ORDER BY id FOR UPDATE SKIP LOCKED",
+        )
+        .fetch_all(&mut *other)
+        .await
+        .unwrap();
+        assert_eq!(rows, ["of-the-unrelated"]);
+        let acquired = |bucket: i32| {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT pg_try_advisory_xact_lock( \
+                     hashtextextended('identities/' || $1::text || '/' || $2::text, 0))",
+            )
+            .bind(ws.as_uuid())
+            .bind(bucket)
+        };
+        let new_bucket = acquired(identity_bucket("email", &fresh))
+            .fetch_one(&mut *other)
+            .await
+            .unwrap();
+        let owned_bucket = acquired(known).fetch_one(&mut *other).await.unwrap();
+        assert!(!new_bucket, "the bucket of the new identity is held");
+        assert!(owned_bucket, "an owned identity takes no bucket");
     }
 
     #[sqlx::test]
