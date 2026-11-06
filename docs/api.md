@@ -233,6 +233,7 @@ A test reads the sources and fails when a code used there is missing from this l
 | `secrets_unavailable` | Secrets cannot be stored until the master key is configured |
 | `egress_denied` | The egress policy refuses the address a destination or source names |
 | `retention_out_of_bounds` | A retention window is outside the deployment's bounds |
+| `source_order_invalid` | A trait source order lists an entry that matches no source of the workspace |
 | `utm_pattern_invalid` | A UTM parameter pattern is not valid |
 | `utm_domain_invalid` | A UTM domain is not a valid domain |
 | `utm_domains_required` | UTM parameters are on and no domain is listed |

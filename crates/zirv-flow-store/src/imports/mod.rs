@@ -16,8 +16,8 @@ pub use batch::{
 pub use job::{DRY_RUN_JOB_KIND, RUN_JOB_KIND, enqueue_import_job};
 pub use model::{
     Import, ImportStatus, TransitionError, cancel_import, fail_import, find_import,
-    finish_import_dry_run, finish_import_run, list_imports, set_import_mapping,
-    start_import_dry_run, start_import_run,
+    finish_import_dry_run, finish_import_run, import_source_labels, list_imports,
+    set_import_mapping, start_import_dry_run, start_import_run,
 };
 pub use rejects::{
     ImportPhase, ImportReject, RejectReason, RejectedRow, StoredReason, list_import_rejects,

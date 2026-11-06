@@ -10,7 +10,7 @@ const PLAN = {
   key: "plan_tier",
   type: "string",
   precedence: "source_priority",
-  source_order: ["crm", "shop"],
+  source_order: ["api", "native"],
   pii: false,
   channel_address: false,
   inferred: false,
@@ -40,7 +40,7 @@ describe("fields", () => {
 
     const table = await screen.findByRole("table", { name: "Fields of this workspace" });
     expect(within(table).getByText("plan_tier")).toBeInTheDocument();
-    expect(within(table).getByText("crm > shop")).toBeInTheDocument();
+    expect(within(table).getByText("API > Contacts")).toBeInTheDocument();
     expect(within(table).getByText("Personal data")).toBeInTheDocument();
     expect(within(table).getByText("Channel address")).toBeInTheDocument();
     expect(within(table).getByText("Inferred")).toBeInTheDocument();
@@ -87,6 +87,7 @@ describe("fields", () => {
       "GET /api/v1/session": () => json(session(OWNER, "csrf-traits")),
       "GET /api/v1/workspaces/ws1/members": () => json(members("admin", OWNER.id)),
       "GET /api/v1/workspaces/ws1/traits": () => json(created ? [PLAN] : []),
+      "GET /api/v1/workspaces/ws1/sources": () => json([]),
       "POST /api/v1/workspaces/ws1/traits": () => {
         created = true;
         return json(PLAN, 201);
@@ -100,7 +101,8 @@ describe("fields", () => {
     expect(form.getByRole("button", { name: "Add field" })).toBeDisabled();
     await user.type(form.getByLabelText("Key"), "plan_tier");
     await user.selectOptions(form.getByLabelText("When sources disagree"), "source_priority");
-    await user.type(form.getByLabelText("Source order"), "crm, shop");
+    await user.selectOptions(form.getByLabelText("Add a source"), "api");
+    await user.selectOptions(form.getByLabelText("Add a source"), "native");
     await user.click(form.getByLabelText(/Personal data/));
     await user.click(form.getByRole("button", { name: "Add field" }));
 
@@ -111,7 +113,7 @@ describe("fields", () => {
       key: "plan_tier",
       type: "string",
       precedence: "source_priority",
-      source_order: ["crm", "shop"],
+      source_order: ["api", "native"],
       pii: true,
       channel_address: false,
       description: "",

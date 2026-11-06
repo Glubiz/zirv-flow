@@ -5759,7 +5759,11 @@ export interface components {
             pii?: boolean;
             /** @description One of `latest` (the default), `source_priority`, `first`. */
             precedence?: string | null;
-            /** @description Source names in priority order, for `source_priority`. */
+            /**
+             * @description Source ids in priority order, for `source_priority`: the id of a source of the
+             *     workspace, an import's source label, `api`, `native` or `flow:<id>`. Another entry,
+             *     a source name included, is refused with 422 (`source_order_invalid`).
+             */
             source_order?: string[];
             /**
              * @description One of `string`, `number`, `boolean`, `timestamp`, `date`, `string_list`. It cannot
@@ -11121,7 +11125,10 @@ export interface components {
              * @example latest
              */
             precedence: string;
-            /** @description Source names in priority order; used by `source_priority`. */
+            /**
+             * @description Source ids in priority order, used by `source_priority`: the id of a source of the
+             *     workspace, an import's source label, `api`, `native` or `flow:<id>`.
+             */
             source_order: string[];
             /**
              * @description One of `string`, `number`, `boolean`, `timestamp`, `date`, `string_list`.
@@ -11319,6 +11326,10 @@ export interface components {
             description?: string | null;
             pii?: boolean | null;
             precedence?: string | null;
+            /**
+             * @description Source ids in priority order, as on create. Another entry, a source name included, is
+             *     refused with 422 (`source_order_invalid`). Left out, the stored list is not checked.
+             */
             source_order?: string[] | null;
         };
         UpdateWebhookRequest: {
@@ -29915,7 +29926,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Invalid key, type, precedence or other field */
+            /** @description Invalid key, type, precedence or other field, or a `source_order` entry that is not a source id, import source, `api`, `native` or `flow:<id>` */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -29989,7 +30000,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description An invalid field, no field at all, or an attempt to change the type */
+            /** @description An invalid field (a `source_order` entry that matches no source included), no field at all, or an attempt to change the type */
             422: {
                 headers: {
                     [name: string]: unknown;

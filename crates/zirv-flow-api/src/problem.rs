@@ -1310,6 +1310,10 @@ impl From<crate::admin::AdminError> for ApiError {
                 code: Some(code),
                 ..Self::unprocessable(detail)
             },
+            AdminError::SourceOrder(detail) => Self {
+                code: Some("source_order_invalid"),
+                ..Self::unprocessable(detail)
+            },
             AdminError::RetentionBounds(detail) => Self {
                 code: Some("retention_out_of_bounds"),
                 ..Self::unprocessable(detail)

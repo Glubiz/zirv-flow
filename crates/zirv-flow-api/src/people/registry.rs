@@ -3,10 +3,12 @@
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use hashbrown::HashSet;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use time::OffsetDateTime;
 use utoipa::ToSchema;
+use uuid::Uuid;
 use zirv_flow_core::people::{Precedence, TraitType, validate_key};
 use zirv_flow_core::{ValidationError, WorkspaceId};
 use zirv_flow_store::{NewJob, NewTraitDefinition, PgPool, TraitDefinition, TraitDefinitionUpdate};
@@ -31,7 +33,8 @@ pub(crate) struct TraitBody {
     /// One of `latest`, `source_priority`, `first`.
     #[schema(example = "latest")]
     precedence: String,
-    /// Source names in priority order; used by `source_priority`.
+    /// Source ids in priority order, used by `source_priority`: the id of a source of the
+    /// workspace, an import's source label, `api`, `native` or `flow:<id>`.
     source_order: Vec<String>,
     pii: bool,
     channel_address: bool,
@@ -82,7 +85,9 @@ pub(crate) struct CreateTraitRequest {
     /// One of `latest` (the default), `source_priority`, `first`.
     #[serde(default)]
     precedence: Option<String>,
-    /// Source names in priority order, for `source_priority`.
+    /// Source ids in priority order, for `source_priority`: the id of a source of the
+    /// workspace, an import's source label, `api`, `native` or `flow:<id>`. Another entry,
+    /// a source name included, is refused with 422 (`source_order_invalid`).
     #[serde(default)]
     source_order: Vec<String>,
     #[serde(default)]
@@ -97,6 +102,8 @@ pub(crate) struct CreateTraitRequest {
 #[derive(Deserialize, ToSchema)]
 pub(crate) struct UpdateTraitRequest {
     precedence: Option<String>,
+    /// Source ids in priority order, as on create. Another entry, a source name included, is
+    /// refused with 422 (`source_order_invalid`). Left out, the stored list is not checked.
     source_order: Option<Vec<String>>,
     pii: Option<bool>,
     channel_address: Option<bool>,
@@ -124,7 +131,18 @@ fn parse_precedence(text: &str) -> Result<Precedence, AdminError> {
         .ok_or_else(|| invalid("precedence", "must be latest, source_priority or first"))
 }
 
-fn check_source_order(order: &[String]) -> Result<(), AdminError> {
+/// The source names a ledger row can carry besides a connector source's id: the ingest API's
+/// `api`, the contact writes' `native` and a flow's `flow:<id>`.
+const FIXED_SOURCES: [&str; 2] = ["api", zirv_flow_core::contacts::SOURCE];
+
+fn is_fixed_source(entry: &str) -> bool {
+    FIXED_SOURCES.contains(&entry)
+        || entry
+            .strip_prefix("flow:")
+            .is_some_and(|flow| flow.parse::<Uuid>().is_ok())
+}
+
+fn check_source_order_shape(order: &[String]) -> Result<(), AdminError> {
     let valid = order.len() <= MAX_SOURCES
         && order
             .iter()
@@ -134,9 +152,44 @@ fn check_source_order(order: &[String]) -> Result<(), AdminError> {
     } else {
         Err(invalid(
             "source_order",
-            "must list at most 50 non-empty source names of at most 64 characters",
+            "must list at most 50 non-empty source entries of at most 64 characters",
         ))
     }
+}
+
+/// Every entry must be what a ledger row's source holds: the id of a source of this workspace,
+/// an import's source label, or a fixed name. Names of sources are refused, since a record
+/// carries its source's id and a name would never match.
+async fn check_source_order(
+    pool: &PgPool,
+    workspace: WorkspaceId,
+    order: &[String],
+) -> Result<(), AdminError> {
+    check_source_order_shape(order)?;
+    if order.iter().all(|entry| is_fixed_source(entry)) {
+        return Ok(());
+    }
+    let sources: HashSet<String> = zirv_flow_store::list_sources(pool, workspace)
+        .await?
+        .into_iter()
+        .map(|source| source.id.to_string())
+        .collect();
+    let imports: HashSet<String> = zirv_flow_store::import_source_labels(pool, workspace)
+        .await?
+        .into_iter()
+        .collect();
+    for entry in order {
+        let known = is_fixed_source(entry)
+            || sources.contains(entry)
+            || (imports.contains(entry) && entry.parse::<Uuid>().is_err());
+        if !known {
+            return Err(AdminError::SourceOrder(format!(
+                "source_order: \"{entry}\" is not the id of a source of this workspace, an \
+                 import source, api, native or flow:<id>"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn check_description(description: &str) -> Result<(), AdminError> {
@@ -160,7 +213,7 @@ pub(crate) async fn create_trait(
         .precedence
         .as_deref()
         .map_or(Ok(Precedence::Latest), parse_precedence)?;
-    check_source_order(&request.source_order)?;
+    check_source_order(pool, workspace, &request.source_order).await?;
     check_description(&request.description)?;
 
     let mut tx = zirv_flow_store::begin(pool).await?;
@@ -226,7 +279,7 @@ pub(crate) async fn update_trait(
         fields.push("precedence");
     }
     if let Some(order) = &request.source_order {
-        check_source_order(order)?;
+        check_source_order(pool, workspace, order).await?;
         update.source_order = Some(order.clone());
         fields.push("source_order");
     }
@@ -341,7 +394,7 @@ pub(crate) async fn list(
         (status = 403, description = "Not a workspace admin, a missing scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "The key already exists", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "Invalid key, type, precedence or other field", body = Problem, content_type = "application/problem+json")
+        (status = 422, description = "Invalid key, type, precedence or other field, or a `source_order` entry that is not a source id, import source, `api`, `native` or `flow:<id>`", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]
@@ -373,7 +426,7 @@ pub(crate) async fn create(
         (status = 403, description = "Not a workspace admin, a missing scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or trait, or no access", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "`trait_indexed`: the type of a trait that holds a slot cannot change", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "An invalid field, no field at all, or an attempt to change the type", body = Problem, content_type = "application/problem+json")
+        (status = 422, description = "An invalid field (a `source_order` entry that matches no source included), no field at all, or an attempt to change the type", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]
@@ -422,11 +475,18 @@ mod tests {
             parse_precedence("newest"),
             Err(AdminError::Invalid(error)) if error.field() == "precedence"
         ));
-        assert!(check_source_order(&["crm".into()]).is_ok());
-        assert!(check_source_order(&["".into()]).is_err());
-        assert!(check_source_order(&vec!["x".to_owned(); 51]).is_err());
+        assert!(check_source_order_shape(&["crm".into()]).is_ok());
+        assert!(check_source_order_shape(&["".into()]).is_err());
+        assert!(check_source_order_shape(&vec!["x".to_owned(); 51]).is_err());
         assert!(check_description(&"a".repeat(500)).is_ok());
         assert!(check_description(&"a".repeat(501)).is_err());
+    }
+
+    #[test]
+    fn fixed_source_names_are_told_from_other_entries() {
+        assert!(is_fixed_source("api") && is_fixed_source("native"));
+        assert!(is_fixed_source(&format!("flow:{}", Uuid::nil())));
+        assert!(!is_fixed_source("flow:x") && !is_fixed_source("crm") && !is_fixed_source("web"));
     }
 
     #[test]

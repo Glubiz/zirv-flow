@@ -216,6 +216,21 @@ pub async fn find_import<'e>(
     fetch_import(executor, workspace, id).await
 }
 
+/// The distinct source labels the workspace's imports write records under, sorted. A trait's
+/// source order may name one, since an import's records carry its label as their source.
+pub async fn import_source_labels<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+) -> Result<Vec<String>, StoreError> {
+    sqlx::query_scalar(
+        "SELECT DISTINCT source FROM imports WHERE workspace_id = $1 ORDER BY source",
+    )
+    .bind(workspace.as_uuid())
+    .fetch_all(executor)
+    .await
+    .map_err(StoreError::query)
+}
+
 /// The workspace's imports, newest first, at most `limit`, after the import `before` when
 /// given. The flag is true when more existed.
 pub async fn list_imports<'e>(
@@ -554,5 +569,55 @@ mod tests {
         assert!(ImportStatus::Succeeded.is_final());
         assert!(ImportStatus::Cancelled.is_final());
         assert!(!ImportStatus::DryRunDone.is_final());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_source_labels_are_the_distinct_labels_of_one_workspace(pool: sqlx::PgPool) {
+        use zirv_flow_core::{Slug, WorkspaceName};
+
+        let mut ids = Vec::new();
+        for slug in ["one", "two"] {
+            let name = WorkspaceName::parse(slug).unwrap();
+            let slug = Slug::parse(slug).unwrap();
+            ids.push(
+                crate::create_workspace(&pool, &name, &slug)
+                    .await
+                    .unwrap()
+                    .id,
+            );
+        }
+        for (workspace, source) in [
+            (ids[0], "csv"),
+            (ids[0], "csv"),
+            (ids[0], "crm"),
+            (ids[1], "other"),
+        ] {
+            let id = Uuid::now_v7();
+            sqlx::query(
+                "INSERT INTO imports \
+                    (id, workspace_id, name, source, stream, file_name, file_sha256, size_bytes, \
+                     delimiter, header, rows_total, status, trace_id) \
+                 VALUES ($1, $2, 'n', $3, 's', 'f.csv', decode(repeat('00', 32), 'hex'), 0, ',', \
+                         '[]', 0, 'uploaded', $1)",
+            )
+            .bind(id)
+            .bind(workspace.as_uuid())
+            .bind(source)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        assert_eq!(
+            import_source_labels(&pool, ids[0]).await.unwrap(),
+            ["crm", "csv"]
+        );
+        assert!(
+            import_source_labels(&pool, WorkspaceId::new())
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

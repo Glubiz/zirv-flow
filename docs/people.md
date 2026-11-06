@@ -54,7 +54,11 @@ policy picks the value, and the person shows which source it came from:
   A contact patch observes only the fields it names; the fields it leaves out keep the time
   they were last observed, so a newer value from another source still wins over them.
 - `source_priority`: the first source in the field's source order that has a value wins;
-  sources not listed rank after the list, by `latest`.
+  sources not listed rank after the list, by `latest`. The source order holds source ids, never
+  names: the id of one of the workspace's sources, an import's source label, `api` (the ingest
+  API), `native` (contact edits) or `flow:<id>` (a flow's update). An entry that matches none
+  of them is a 422 (`source_order_invalid`) naming it. A list saved before this check that
+  holds names is kept and ignored until it is edited.
 - `first`: the earliest observed value wins.
 
 Sending `null` for a field removes that source's value, and the next source's value
