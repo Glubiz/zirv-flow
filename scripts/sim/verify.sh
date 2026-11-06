@@ -362,8 +362,7 @@ owner_mail_seq() {
 import json, urllib.request
 m = json.load(urllib.request.urlopen('http://127.0.0.1:8025/messages.json', timeout=3))
 print(max([x['seq'] for x in m if 'owner@sim.example.com' in x['recipients']] or [0]))
-" 2> /dev/null | tr -d '
-'
+" 2> /dev/null | tr -d '\r'
 }
 owner_mail_newer() { [[ $(owner_mail_seq) -gt $1 ]]; }
 sink_increased() { [[ $(counter "$2" "$3" "$4") -gt $1 ]]; }
