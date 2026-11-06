@@ -14,7 +14,7 @@ use zirv_flow_core::{Cause, CauseKind, TraceContext, TraceId, WorkspaceId};
 use super::control::enqueue_event_settles;
 use super::runtime::{StepJobInput, StepJobPayload};
 use super::triggers::enqueue_event_enrolls;
-use crate::{StoreError, enqueue};
+use crate::{StoreError, enqueue, find_enrollment};
 
 /// An accepted event, as far as the waits care.
 #[derive(Clone, Debug)]
@@ -127,6 +127,27 @@ pub async fn find_event_of_person(
         occurred_at,
         properties,
     }))
+}
+
+/// The event that started `enrollment`, read at send time: the event its cause names, if it is an
+/// event of the enrollment's own person. None for an enrollment another trigger started, one that
+/// is gone, and an event that was deleted or expired.
+pub async fn find_trigger_event(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    enrollment: Uuid,
+) -> Result<Option<StoredEvent>, StoreError> {
+    let Some(found) = find_enrollment(&mut *connection, workspace, enrollment).await? else {
+        return Ok(None);
+    };
+    let cause = found.trace.cause;
+    if cause.kind != CauseKind::Event {
+        return Ok(None);
+    }
+    let Ok(event) = cause.id.parse::<Uuid>() else {
+        return Ok(None);
+    };
+    find_event_of_person(connection, workspace, found.person_id, event).await
 }
 
 #[cfg(test)]
@@ -258,5 +279,69 @@ mod tests {
             .unwrap();
 
         assert_eq!(enqueued, 0);
+    }
+
+    async fn event_of(pool: &PgPool, ws: WorkspaceId, person: Uuid) -> Uuid {
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO events (id, workspace_id, person_id, name, occurred_at, received_at, \
+                properties, source, trace_id, validation_state) \
+             VALUES ($1, $2, $3, 'order', now(), now(), '{\"n\": 1}', 'api', gen_random_uuid(), \
+                'valid')",
+        )
+        .bind(id)
+        .bind(ws.as_uuid())
+        .bind(person)
+        .execute(pool)
+        .await
+        .unwrap();
+        id
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_trigger_event_is_the_events_cause_of_the_enrollments_own_person(pool: PgPool) {
+        let ws = workspace(&pool, "trigger").await;
+        let flow = create(&pool, ws, "Flow").await;
+        publish(&pool, ws, flow.id).await.unwrap();
+        let (enrollment, person) = waiting(&pool, ws, flow.id, "order").await;
+        let (_, other) = waiting(&pool, ws, flow.id, "order").await;
+        let own = event_of(&pool, ws, person).await;
+        let foreign = event_of(&pool, ws, other).await;
+        let mut connection = pool.acquire().await.unwrap();
+        let cause = |id: String| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query(
+                    "UPDATE enrollments SET cause_kind = 'event', cause_id = $2 WHERE id = $1",
+                )
+                .bind(enrollment)
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+        };
+
+        let api = find_trigger_event(&mut connection, ws, enrollment)
+            .await
+            .unwrap();
+        cause(own.to_string()).await;
+        let found = find_trigger_event(&mut connection, ws, enrollment)
+            .await
+            .unwrap();
+        cause(foreign.to_string()).await;
+        let wrong_person = find_trigger_event(&mut connection, ws, enrollment)
+            .await
+            .unwrap();
+        cause("not-a-uuid".into()).await;
+        let malformed = find_trigger_event(&mut connection, ws, enrollment)
+            .await
+            .unwrap();
+
+        assert_eq!(api, None, "an api enrollment has no trigger event");
+        assert_eq!(found.map(|event| event.name).as_deref(), Some("order"));
+        assert_eq!(wrong_person, None);
+        assert_eq!(malformed, None);
     }
 }
