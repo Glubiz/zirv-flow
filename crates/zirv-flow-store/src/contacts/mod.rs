@@ -1457,4 +1457,154 @@ mod tests {
         kept.sort();
         assert_eq!(kept, ["1427", "2026-10-27T11:42", "42-retry", "x42y"]);
     }
+
+    async fn native_row(pool: &PgPool) -> (Value, Vec<u8>, time::OffsetDateTime) {
+        sqlx::query_as(
+            "SELECT traits, content_hash, updated_at FROM source_records WHERE source <> 'crm'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn crm_plan(pool: &PgPool, ws: WorkspaceId, plan: &str) -> Uuid {
+        let outcomes = apply_profile_batch(
+            pool,
+            ws,
+            &[ProfileRecord {
+                source: "crm".into(),
+                stream: "people".into(),
+                record_key: "9".into(),
+                identifiers: vec![("email".into(), "a@example.com".into())],
+                traits: object(json!({"plan": plan})),
+                observed_at: time::OffsetDateTime::now_utc(),
+                trace: trace(),
+            }],
+        )
+        .await
+        .unwrap();
+        let crate::ProfileOutcome::Applied { person_id, .. } = outcomes[0] else {
+            panic!("not applied");
+        };
+        person_id
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_patch_does_not_re_observe_the_fields_it_does_not_name(pool: PgPool) {
+        let ws = defined(&pool, "one").await;
+        write(
+            &pool,
+            ws,
+            "c-1",
+            ContactChange::Create(object(
+                json!({"email": "a@example.com", "plan": "native-old"}),
+            )),
+            None,
+        )
+        .await
+        .unwrap();
+        let person = crm_plan(&pool, ws, "crm-new").await;
+        let (before, ..) = native_row(&pool).await;
+
+        write(
+            &pool,
+            ws,
+            "c-1",
+            ContactChange::Patch(object(json!({"age": 5}))),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let (after, ..) = native_row(&pool).await;
+        assert_eq!(person_traits(&pool, ws, person).await["plan"], "crm-new");
+        assert_eq!(after["plan"], before["plan"]);
+        assert_eq!(after["email"], before["email"]);
+        assert_eq!(after["age"]["v"], 5);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_patch_re_observes_the_field_it_names(pool: PgPool) {
+        let ws = defined(&pool, "one").await;
+        write(
+            &pool,
+            ws,
+            "c-1",
+            ContactChange::Create(object(
+                json!({"email": "a@example.com", "plan": "native-old"}),
+            )),
+            None,
+        )
+        .await
+        .unwrap();
+        let person = crm_plan(&pool, ws, "crm-new").await;
+        let (before, ..) = native_row(&pool).await;
+
+        write(
+            &pool,
+            ws,
+            "c-1",
+            ContactChange::Patch(object(json!({"plan": "native-newer"}))),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let (after, ..) = native_row(&pool).await;
+        assert_ne!(after["plan"]["at"], before["plan"]["at"]);
+        assert_eq!(after["email"], before["email"]);
+        assert_eq!(
+            person_traits(&pool, ws, person).await["plan"],
+            "native-newer"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_write_identical_to_the_state_a_removal_left_is_a_no_op(pool: PgPool) {
+        let ws = defined(&pool, "one").await;
+        write(
+            &pool,
+            ws,
+            "c-1",
+            ContactChange::Create(object(json!({"email": "a@example.com", "plan": "free"}))),
+            None,
+        )
+        .await
+        .unwrap();
+        write(
+            &pool,
+            ws,
+            "c-1",
+            ContactChange::Patch(object(json!({"age": 37, "plan": null}))),
+            None,
+        )
+        .await
+        .unwrap();
+        let left = native_row(&pool).await;
+
+        write(
+            &pool,
+            ws,
+            "c-1",
+            ContactChange::Patch(object(json!({"age": 37}))),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(native_row(&pool).await, left);
+
+        write(
+            &pool,
+            ws,
+            "c-1",
+            ContactChange::Replace(object(json!({"email": "a@example.com", "age": 37}))),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(native_row(&pool).await, left);
+    }
 }

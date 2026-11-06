@@ -30,7 +30,9 @@ use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use super::definition::{contact_registry, find_contact_definition, typed_definition};
 use super::records::{Contact, find_contact};
-use crate::people::{ProfileOutcome, ProfileRecord, apply_profile_record, remove_contribution_in};
+use crate::people::{
+    NativeWrite, ProfileOutcome, ProfileRecord, apply_native_record, remove_contribution_in,
+};
 use crate::{PgPool, StoreError};
 
 /// How long an idempotency key is remembered.
@@ -352,6 +354,10 @@ pub async fn write_contact(
         .map(|contact| live_fields(&contact.fields, &registry));
     let definition = typed_definition(&mut savepoint, workspace).await?;
     let is_patch = matches!(&change, ContactChange::Patch(_));
+    let named: Option<Vec<String>> = match &change {
+        ContactChange::Patch(patch) => Some(patch.keys().cloned().collect()),
+        _ => None,
+    };
     // The stored fields the write retracts: a replacement retracts all of them, a patch only
     // those the definition still lists, so it leaves the others as they are.
     let (status, fields, retracted) = match change {
@@ -397,7 +403,10 @@ pub async fn write_contact(
         observed_at: OffsetDateTime::now_utc(),
         trace: trace.clone(),
     };
-    match apply_profile_record(&mut savepoint, workspace, &record).await? {
+    let native = NativeWrite {
+        observed: named.as_deref(),
+    };
+    match apply_native_record(&mut savepoint, workspace, &record, native).await? {
         ProfileOutcome::Rejected { reason } => return Err(invalid("", reason)),
         ProfileOutcome::Applied { dropped, .. } | ProfileOutcome::Unchanged { dropped, .. } => {
             if !dropped.is_empty() {

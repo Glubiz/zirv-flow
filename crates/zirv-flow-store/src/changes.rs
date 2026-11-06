@@ -775,7 +775,7 @@ mod tests {
         // A failed pass restores its batch.
         let mut tx = begin(&pool).await.unwrap();
         assert_eq!(claim_dirty(&mut tx, ws, 10).await.unwrap().len(), 2);
-        drop(tx);
+        tx.rollback().await.unwrap();
         assert_eq!(dirty_backlog(&pool).await.unwrap(), 2);
 
         // A mark made after the claim re-inserts its row, and the claim does not remove it.

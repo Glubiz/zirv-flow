@@ -51,6 +51,8 @@ recorded as a decision.
 policy picks the value, and the person shows which source it came from:
 
 - `latest`: the most recently observed value wins (the default).
+  A contact patch observes only the fields it names; the fields it leaves out keep the time
+  they were last observed, so a newer value from another source still wins over them.
 - `source_priority`: the first source in the field's source order that has a value wins;
   sources not listed rank after the list, by `latest`.
 - `first`: the earliest observed value wins.
@@ -183,7 +185,10 @@ code `idempotency_key_reused`. Keys are remembered for 24 hours and then forgott
 scheduler leader. The table that remembers them (`contact_idempotency`) holds the key, a
 hash of the request and the status, and no field value, person id or contact key, so
 normal deletion has no person reference to follow there. Live erasure also checks these keys by identifier value. Without the header an identical repeat of a
-replace or patch still writes nothing, because a write that changes nothing is a no-op.
+replace or patch still writes nothing, because a write that changes nothing is a no-op. A patch
+observes only the fields it names: the others keep the time they were last observed, which
+matters under `latest` precedence. A replace observes every field it sends. A write that leaves
+the contact in the state it already holds is a no-op even after a field was removed.
 
 **Bulk upsert is asynchronous.** `POST .../contacts/bulk` takes
 `{"contacts": [{"key": "...", "fields": {...}}]}`, at most `ingest.max_batch_items` of them. Every item
