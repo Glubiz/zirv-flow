@@ -1936,6 +1936,84 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_preview_of_an_incremental_database_stream_reads_from_the_top(pool: PgPool) {
+        let fx = fixture_with_loopback_egress(&pool).await;
+        sqlx::query(
+            "CREATE TABLE preview_people (id bigint PRIMARY KEY, updated_at timestamptz NOT NULL, \
+             email text NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO preview_people \
+             SELECT n, '2026-01-01T00:00:00Z'::timestamptz + n * interval '1 hour', \
+                    'p' || n || '@example.com' FROM generate_series(1, 5) n",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let options = pool.connect_options();
+        let url = url::Url::parse(&std::env::var("DATABASE_URL").unwrap()).unwrap();
+        let created = fx
+            .as_admin(
+                "POST",
+                "/sources",
+                Some(json!({
+                    "kind": "postgres",
+                    "name": "warehouse",
+                    "config": {
+                        "host": options.get_host(),
+                        "port": options.get_port(),
+                        "database": options.get_database().unwrap(),
+                        "tls": "off"
+                    },
+                    "credential": {"username": url.username(), "password": url.password().unwrap()}
+                })),
+            )
+            .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+        let id = created.body["id"].as_str().unwrap().to_owned();
+        let discovered = fx
+            .as_admin("POST", &format!("/sources/{id}/discover"), None)
+            .await;
+        assert_eq!(discovered.status, StatusCode::OK, "{:?}", discovered.body);
+        let stream = format!("/sources/{id}/streams/preview_people");
+        let saved = fx
+            .as_admin(
+                "PUT",
+                &stream,
+                Some(json!({"enabled": true, "sync_mode": "incremental",
+                    "cursor_field": "updated_at", "primary_key": ["id"]})),
+            )
+            .await;
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+
+        let reply = fx
+            .send(
+                "POST",
+                &format!("{stream}/preview"),
+                Some(json!({"limit": 3, "mapping": {"columns": [email_rule()]}})),
+                Auth::Key(&fx.admin),
+            )
+            .await;
+
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+        assert_eq!(reply.body["read"], 3);
+        assert_eq!(reply.body["truncated"], true);
+        assert_eq!(
+            reply.body["records"][0]["identifiers"][0]["value"],
+            "p1@example.com"
+        );
+        let runs: i64 = sqlx::query_scalar("SELECT count(*) FROM sync_runs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(runs, 0, "a preview starts no run and stores no checkpoint");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_preview_refuses_what_a_save_refuses_and_what_it_cannot_find(pool: PgPool) {
         let fx = fixture(&pool).await;
         let id = fx.keyed_source().await;
