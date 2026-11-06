@@ -5,6 +5,7 @@ import { client, describeError, unwrap, useResource, type ErrorSummary } from ".
 import { Button, Dialog, EmptyState, InlineError, PageHeader, Panel, Pill, ResourceView } from "../../ui";
 import { useWorkspaceAccess } from "../members";
 import { precedenceLabel, TraitDialog, typeLabel, type Trait } from "./TraitDialog";
+import { entryLabel, useWorkspaceSources } from "./sourceOrder";
 
 export function TraitsPage() {
   const { ws = "" } = useParams();
@@ -27,6 +28,8 @@ function TraitList({ workspaceId, canManage }: { workspaceId: string; canManage:
     () => unwrap(client.GET("/api/v1/workspaces/{ws}/traits", { params: { path: { ws: workspaceId } } })),
     [workspaceId],
   );
+  const sourceList = useWorkspaceSources(workspaceId);
+  const sources = sourceList.status === "ready" ? sourceList.data : null;
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<Trait | null>(null);
   const [archiving, setArchiving] = useState<Trait | null>(null);
@@ -103,7 +106,7 @@ function TraitList({ workspaceId, canManage }: { workspaceId: string; canManage:
                       <td>
                         {precedenceLabel(trait.precedence)}
                         {trait.precedence === "source_priority" && trait.source_order.length > 0 ? (
-                          <div className="faint mono">{trait.source_order.join(" > ")}</div>
+                          <div className="faint">{trait.source_order.map((entry) => entryLabel(entry, sources)).join(" > ")}</div>
                         ) : null}
                       </td>
                       <td>

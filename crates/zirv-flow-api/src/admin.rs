@@ -119,6 +119,9 @@ pub enum AdminError {
     /// A retention window outside the deployment bounds; the problem carries the code
     /// `retention_out_of_bounds` and the detail names the field and the bounds.
     RetentionBounds(String),
+    /// A trait source order with an entry that matches no source; the problem carries the code
+    /// `source_order_invalid` and the detail names the entry.
+    SourceOrder(String),
 }
 
 impl fmt::Display for AdminError {
@@ -133,7 +136,9 @@ impl fmt::Display for AdminError {
             Self::Merge(message) => formatter.write_str(message),
             Self::Slot(error) => write!(formatter, "{error:?}"),
             Self::Secret(error) => error.fmt(formatter),
-            Self::Utm { detail, .. } | Self::RetentionBounds(detail) => formatter.write_str(detail),
+            Self::Utm { detail, .. }
+            | Self::RetentionBounds(detail)
+            | Self::SourceOrder(detail) => formatter.write_str(detail),
         }
     }
 }
@@ -151,7 +156,8 @@ impl Error for AdminError {
             | Self::Merge(_)
             | Self::Slot(_)
             | Self::Utm { .. }
-            | Self::RetentionBounds(_) => None,
+            | Self::RetentionBounds(_)
+            | Self::SourceOrder(_) => None,
         }
     }
 }

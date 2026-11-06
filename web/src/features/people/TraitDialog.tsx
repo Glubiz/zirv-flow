@@ -2,6 +2,7 @@ import { useState, type SyntheticEvent } from "react";
 
 import { client, describeError, unwrap, type components, type ErrorSummary } from "../../api";
 import { Button, Dialog, InlineError, SelectField, TextField } from "../../ui";
+import { SourceOrderList } from "./SourceOrderList";
 
 export type Trait = components["schemas"]["TraitBody"];
 type UpdateBody = components["schemas"]["UpdateTraitRequest"];
@@ -29,12 +30,6 @@ export function precedenceLabel(value: string): string {
   return PRECEDENCES.find((precedence) => precedence.value === value)?.label ?? value;
 }
 
-function parseSources(text: string): string[] {
-  return text
-    .split(",")
-    .map((source) => source.trim())
-    .filter((source) => source !== "");
-}
 
 interface TraitDialogProps {
   workspaceId: string;
@@ -48,14 +43,14 @@ export function TraitDialog({ workspaceId, trait, onClose, onSaved }: TraitDialo
   const [key, setKey] = useState("");
   const [type, setType] = useState("string");
   const [precedence, setPrecedence] = useState(trait?.precedence ?? "latest");
-  const [sources, setSources] = useState((trait?.source_order ?? []).join(", "));
+  const [sources, setSources] = useState<string[]>(trait?.source_order ?? []);
   const [pii, setPii] = useState(trait?.pii ?? false);
   const [channelAddress, setChannelAddress] = useState(trait?.channel_address ?? false);
   const [description, setDescription] = useState(trait?.description ?? "");
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
 
-  const sourceOrder = precedence === "source_priority" ? parseSources(sources) : (trait?.source_order ?? []);
+  const sourceOrder = precedence === "source_priority" ? sources : (trait?.source_order ?? []);
 
   function changes(): UpdateBody {
     if (!trait) {
@@ -95,7 +90,7 @@ export function TraitDialog({ workspaceId, trait, onClose, onSaved }: TraitDialo
               key: key.trim(),
               type,
               precedence,
-              source_order: precedence === "source_priority" ? parseSources(sources) : [],
+              source_order: precedence === "source_priority" ? sources : [],
               pii,
               channel_address: channelAddress,
               description,
@@ -156,13 +151,7 @@ export function TraitDialog({ workspaceId, trait, onClose, onSaved }: TraitDialo
           ))}
         </SelectField>
         {precedence === "source_priority" ? (
-          <TextField
-            label="Source order"
-            hint="Source names, highest priority first, separated by commas."
-            value={sources}
-            onChange={(event) => setSources(event.target.value)}
-            autoComplete="off"
-          />
+          <SourceOrderList workspaceId={workspaceId} value={sources} onChange={setSources} />
         ) : null}
         <fieldset className="checks">
           <legend>Handling</legend>

@@ -2351,7 +2351,7 @@ mod tests {
             &traits_uri(&ws),
             Some(
                 json!({"key": "plan", "type": "string", "precedence": "source_priority",
-                        "source_order": ["crm", "shop"], "pii": true,
+                        "source_order": ["api", "native"], "pii": true,
                         "description": "secret plan text"}),
             ),
             Auth::Session(&owner),
@@ -2360,7 +2360,7 @@ mod tests {
         assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
         assert_eq!(created.body["type"], "string");
         assert_eq!(created.body["precedence"], "source_priority");
-        assert_eq!(created.body["source_order"], json!(["crm", "shop"]));
+        assert_eq!(created.body["source_order"], json!(["api", "native"]));
         assert_eq!(created.body["inferred"], false);
         let duplicate = call(
             &router,
@@ -2708,7 +2708,7 @@ mod tests {
             &router,
             "POST",
             &traits_uri(&ws),
-            Some(json!({"key": "age", "type": "number", "source_order": ["crm"]})),
+            Some(json!({"key": "age", "type": "number", "source_order": ["api"]})),
             Auth::Session(&owner),
         )
         .await;
@@ -2718,7 +2718,7 @@ mod tests {
             &router,
             "PATCH",
             &uri,
-            Some(json!({"precedence": "latest", "source_order": ["crm"], "archived": false})),
+            Some(json!({"precedence": "latest", "source_order": ["api"], "archived": false})),
             Auth::Session(&owner),
         )
         .await;
@@ -2730,6 +2730,167 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(queued, 0);
+    }
+
+    async fn connector_source(pool: &PgPool, ws: &str, name: &str) -> String {
+        let config = json!({});
+        zirv_flow_store::create_source(
+            pool,
+            ws.parse().unwrap(),
+            &zirv_flow_store::NewSource {
+                id: Uuid::now_v7(),
+                kind: "fake",
+                name,
+                config: &config,
+                credential_id: None,
+                schedule: None,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap()
+        .id
+        .to_string()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_source_order_of_source_ids_makes_the_listed_source_win(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let workspace_id: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
+        let older = connector_source(&pool, &ws, "crm").await;
+        let newer = connector_source(&pool, &ws, "shop").await;
+        call(
+            &router,
+            "POST",
+            &traits_uri(&ws),
+            Some(json!({"key": "country", "type": "string"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let mut person = None;
+        for (source, key, value, at) in [
+            (
+                &older,
+                "1",
+                "DK",
+                time::macros::datetime!(2026-01-01 00:00 UTC),
+            ),
+            (
+                &newer,
+                "2",
+                "US",
+                time::macros::datetime!(2026-02-01 00:00 UTC),
+            ),
+        ] {
+            let mut record = profile(key, &[("email", "ada@example.com")]);
+            record.source = source.clone();
+            record.observed_at = at;
+            record.traits = json!({"country": value}).as_object().cloned().unwrap();
+            zirv_flow_store::apply_profile_batch(&pool, workspace_id, &[record])
+                .await
+                .unwrap();
+            person = Some(
+                sqlx::query_scalar::<_, Uuid>("SELECT id FROM people WHERE workspace_id = $1")
+                    .bind(workspace_id.as_uuid())
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap(),
+            );
+        }
+        let person = person.unwrap();
+
+        let reply = call(
+            &router,
+            "PATCH",
+            &format!("{}/country", traits_uri(&ws)),
+            Some(json!({"precedence": "source_priority", "source_order": [older]})),
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+        zirv_flow_store::recompute_trait_batch(
+            &mut tx,
+            workspace_id,
+            "country",
+            None,
+            &zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("test")),
+            None,
+        )
+        .await
+        .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+
+        let country: Option<String> =
+            sqlx::query_scalar("SELECT traits->>'country' FROM people WHERE id = $1")
+                .bind(person)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(country.as_deref(), Some("DK"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_source_order_entry_must_be_a_source_of_the_workspace_or_a_fixed_name(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let other = workspace(&router, &owner, "Beta").await;
+        let own = connector_source(&pool, &ws, "crm").await;
+        let foreign = connector_source(&pool, &other, "crm").await;
+        let flow = format!("flow:{}", Uuid::now_v7());
+        call(
+            &router,
+            "POST",
+            &traits_uri(&ws),
+            Some(json!({"key": "plan", "type": "string"})),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        for bad in ["crm", "no such source", foreign.as_str(), "flow:nope"] {
+            let created = call(
+                &router,
+                "POST",
+                &traits_uri(&ws),
+                Some(json!({"key": "other", "type": "string", "source_order": [own, bad]})),
+                Auth::Session(&owner),
+            )
+            .await;
+            assert_eq!(created.status, StatusCode::UNPROCESSABLE_ENTITY, "{bad}");
+            assert!(
+                created.body["detail"]
+                    .as_str()
+                    .unwrap()
+                    .contains("source_order"),
+                "{:?}",
+                created.body
+            );
+            let updated = call(
+                &router,
+                "PATCH",
+                &format!("{}/plan", traits_uri(&ws)),
+                Some(json!({"source_order": [bad]})),
+                Auth::Session(&owner),
+            )
+            .await;
+            assert_eq!(updated.status, StatusCode::UNPROCESSABLE_ENTITY, "{bad}");
+        }
+        let good = json!([own, "api", "native", flow]);
+        let updated = call(
+            &router,
+            "PATCH",
+            &format!("{}/plan", traits_uri(&ws)),
+            Some(json!({"source_order": good})),
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(updated.status, StatusCode::OK, "{:?}", updated.body);
+        assert_eq!(updated.body["source_order"], good);
     }
 
     fn conflicts_uri(ws: &str) -> String {

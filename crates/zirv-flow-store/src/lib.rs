@@ -197,8 +197,8 @@ pub use imports::{
     UPLOAD_ABANDONED_AFTER_DAYS, UploadScan, UploadStart, cancel_import, commit_dry_run_batch,
     commit_import_batch, delete_expired_import_data, discard_unfinished_import, enqueue_import_job,
     erase_import_values, fail_import, find_import, finish_import_dry_run, finish_import_run,
-    list_import_rejects, list_imports, read_import_chunk, set_import_mapping, start_import_dry_run,
-    start_import_run,
+    import_source_labels, list_import_rejects, list_imports, read_import_chunk, set_import_mapping,
+    start_import_dry_run, start_import_run,
 };
 pub use ingest::{
     DRAIN_JOB_KIND, DrainOutcome, InboxHead, IngestItem, IngestPayload, Shard, append_inbox,
