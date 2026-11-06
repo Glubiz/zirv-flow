@@ -1,0 +1,64 @@
+{
+  "create": {
+    "kind": "http", "name": "Billing API", "credential": "billing key", "schedule": "*/15 * * * *",
+    "config": {"manifest": {
+      "version": "v1",
+      "base_url": "https://billing-api.sim.example.com/v1",
+      "auth": {"type": "api_key", "in": "header", "name": "X-API-Key", "credential": {"kind": "api_key"}},
+      "rate_limit": {"requests": 600, "per_seconds": 60},
+      "streams": [
+        {"name": "accounts", "path": "/accounts", "query": {"limit": 1000}, "records_path": "/data",
+         "pagination": {"type": "cursor", "param": "cursor", "next": "/next_cursor"},
+         "fields": [
+           {"name": "account_id", "type": "string"}, {"name": "customer_id", "type": "string"},
+           {"name": "status", "type": "string"}, {"name": "balance_due", "type": "number"},
+           {"name": "payment_method", "type": "string"}, {"name": "last_payment_at", "type": "timestamp"},
+           {"name": "updated_at", "type": "timestamp"}],
+         "primary_key": ["account_id"],
+         "incremental": {"cursor_field": "updated_at", "request_param": "updated_since", "cursor_type": "timestamp"},
+         "delete_signal": {"path": "status", "equals": "closed"}},
+        {"name": "payments", "path": "/payments", "query": {"limit": 1000}, "records_path": "/data",
+         "pagination": {"type": "cursor", "param": "cursor", "next": "/next_cursor"},
+         "fields": [
+           {"name": "payment_id", "type": "string"}, {"name": "customer_id", "type": "string"},
+           {"name": "amount", "type": "number"}, {"name": "currency", "type": "string"},
+           {"name": "received_at", "type": "timestamp"}, {"name": "updated_at", "type": "timestamp"}],
+         "primary_key": ["payment_id"],
+         "incremental": {"cursor_field": "updated_at", "request_param": "updated_since", "cursor_type": "timestamp"}}
+      ]
+    }}
+  },
+  "streams": {
+    "accounts": {
+      "enabled": true, "sync_mode": "incremental", "cursor_field": "updated_at",
+      "primary_key": ["account_id"], "staleness_threshold_seconds": 1800,
+      "mapping": {
+        "key_column": "account_id",
+        "columns": [
+          {"column": "customer_id", "target": {"type": "identifier", "kind": "external:customer_id"}},
+          {"column": "status", "target": {"type": "trait", "key": "billing_status"}},
+          {"column": "balance_due", "target": {"type": "trait", "key": "balance_due"}},
+          {"column": "payment_method", "target": {"type": "trait", "key": "payment_method"}},
+          {"column": "last_payment_at", "target": {"type": "trait", "key": "last_payment_at"}}
+        ]
+      }
+    },
+    "payments": {
+      "enabled": true, "sync_mode": "incremental", "cursor_field": "updated_at",
+      "primary_key": ["payment_id"], "staleness_threshold_seconds": 1800,
+      "mapping": {
+        "key_column": "payment_id",
+        "columns": [
+          {"column": "customer_id", "target": {"type": "identifier", "kind": "external:customer_id"}}
+        ],
+        "event": {
+          "name": "payment_received", "timestamp": {"column": "received_at"},
+          "properties": [
+            {"property": "amount", "column": "amount"},
+            {"property": "currency", "column": "currency"}
+          ]
+        }
+      }
+    }
+  }
+}

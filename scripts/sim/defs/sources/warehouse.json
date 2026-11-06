@@ -1,0 +1,24 @@
+{
+  "create": {
+    "kind": "file", "name": "Warehouse export", "credential": "exports token", "schedule": "0 4 * * *",
+    "config": {"url": "https://exports.sim.example.com/exports/warehouse.csv", "format": "csv"}
+  },
+  "streams": {
+    "records": {
+      "enabled": true, "sync_mode": "full_refresh", "primary_key": ["customer_id"], "sweep_limit": 0.25,
+      "mapping": {
+        "key_column": "customer_id",
+        "columns": [
+          {"column": "customer_id", "target": {"type": "identifier", "kind": "external:customer_id"}},
+          {"column": "email", "target": {"type": "identifier", "kind": "email"},
+           "transforms": [{"op": "trim"}, {"op": "lower"}]},
+          {"column": "newsletter_opt_in", "target": {"type": "trait", "key": "newsletter_opt_in"},
+           "transforms": [{"op": "cast", "to": "boolean"}]},
+          {"column": "ltv_band", "target": {"type": "trait", "key": "ltv_band"}},
+          {"column": "preferred_language", "target": {"type": "trait", "key": "preferred_language"}},
+          {"column": "rfm_segment", "target": {"type": "trait", "key": "rfm_segment"}}
+        ]
+      }
+    }
+  }
+}

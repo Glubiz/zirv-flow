@@ -1,0 +1,22 @@
+[
+  {"name": "Welcome 1", "category": "marketing", "sender": "news",
+   "subject": "Welcome, {{ person.first_name }}",
+   "html": "<p>Hello {{ person.first_name }}, thanks for joining.</p><p><a href=\"https://www.sim.example.com/start\">Get started</a></p><p><a href=\"{{ system.unsubscribe_url }}\">Unsubscribe</a></p>",
+   "text": "Hello {{ person.first_name }}, thanks for joining. Get started: https://www.sim.example.com/start Unsubscribe: {{ system.unsubscribe_url }}"},
+  {"name": "Welcome 2", "category": "marketing", "sender": "news",
+   "subject": "Ideas for your first week",
+   "html": "<p>Hello {{ person.first_name }}, three ways to get more out of it.</p><p><a href=\"https://www.sim.example.com/tips\">Read the tips</a></p><p><a href=\"{{ system.unsubscribe_url }}\">Unsubscribe</a></p>",
+   "text": "Hello {{ person.first_name }}, three ways to get more out of it: https://www.sim.example.com/tips Unsubscribe: {{ system.unsubscribe_url }}"},
+  {"name": "We miss you", "category": "marketing", "sender": "news",
+   "subject": "We miss you, {{ person.first_name }}",
+   "html": "<p>Hello {{ person.first_name }}, it has been a while.</p><p><a href=\"https://www.sim.example.com/offers\">See what is new</a></p><p><a href=\"{{ system.unsubscribe_url }}\">Unsubscribe</a></p>",
+   "text": "Hello {{ person.first_name }}, it has been a while: https://www.sim.example.com/offers Unsubscribe: {{ system.unsubscribe_url }}"},
+  {"name": "Order confirmation", "category": "transactional", "sender": "orders",
+   "subject": "Your order {{ event.order_id }}",
+   "html": "<p>Thank you for your order {{ event.order_id }}.</p>",
+   "text": "Thank you for your order {{ event.order_id }}."},
+  {"name": "Payment failed", "category": "transactional", "sender": "orders",
+   "subject": "Your payment failed",
+   "html": "<p>Hello {{ person.first_name }}, your last payment did not go through.</p>",
+   "text": "Hello {{ person.first_name }}, your last payment did not go through."}
+]
