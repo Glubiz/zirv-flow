@@ -2908,11 +2908,15 @@ mod tests {
         id
     }
 
-    async fn archive_destination_request(f: &Fixture, destination: Uuid) -> Reply {
-        let uri = format!(
+    fn destination_uri(f: &Fixture, destination: Uuid) -> String {
+        format!(
             "/api/v1/workspaces/{}/destinations/{destination}",
             f.ws.as_uuid()
-        );
+        )
+    }
+
+    async fn archive_destination_request(f: &Fixture, destination: Uuid) -> Reply {
+        let uri = destination_uri(f, destination);
         f.call("DELETE", &uri, None, Auth::Session(&f.lead)).await
     }
 
@@ -3061,10 +3065,7 @@ mod tests {
 
             let archive = {
                 let router = f.router.clone();
-                let uri = format!(
-                    "/api/v1/workspaces/{}/destinations/{destination}",
-                    f.ws.as_uuid()
-                );
+                let uri = destination_uri(&f, destination);
                 let login = Login {
                     cookie: f.lead.cookie.clone(),
                     csrf: f.lead.csrf.clone(),
