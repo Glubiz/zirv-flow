@@ -289,8 +289,9 @@ and no personal data). A rule that no longer compiles, because something it read
 since it was published, denies the send. A transactional message skips the gate. Admins edit and evaluate the policy in the web UI.
 
 **Suppressions** block an email address or phone number whatever anyone has consented to.
-Each reason is one of `hard_bounce`, `complaint`, `manual` or `erased`, and suppression is
-per workspace. The value is never stored: a suppression is kept under an HMAC-SHA256 of
+Each reason is one of `hard_bounce`, `complaint`, `manual` or `erased`, and a suppression is
+per workspace, except that a hard bounce suppresses the address for the whole organization. The
+value is never stored: a suppression is kept under an HMAC-SHA256 of
 `<kind>:<normalized value>`, keyed from the master key (the `identifier` purpose), so it
 survives the erasure of the person it came from. This needs the master key; without one the
 suppression endpoints answer 503.
@@ -300,7 +301,9 @@ suppression endpoints answer 503.
 - `POST .../suppressions/check`, `POST .../suppressions` (add) and `POST .../suppressions/remove`
   take `{"kind": "email", "value": "..."}`; they are POSTs so a value never sits in a URL. Checking
   is open to anyone who can read the workspace, changing needs an admin. Notes are at most
-  500 characters and must not contain the address.
+  500 characters and must not contain the address. The check answers what a send would: it
+  returns `suppressed`, the `reason` and the `scope` (`workspace` or `organization`), so an
+  organization-wide suppression, which the list does not show, is explained.
 - `GET .../suppressions?limit&cursor&reason` lists newest first as the first 8 hex characters
   of the hash, never the full hash or the value.
 - `POST .../suppressions/import` takes `text/csv` (at most 10 MiB and 100,000 rows) with the
