@@ -32,6 +32,7 @@ counters.declare("messages_total", "Messages accepted.")
 counters.declare("recipients_refused_total", "Recipients answered 550.")
 counters.declare("auth_failed_total", "Refused AUTH attempts.")
 messages = deque(maxlen=KEEP)
+sequence = [0]  # the number of the last captured message, so a reader can tell new from old
 lock = threading.Lock()
 
 
@@ -121,6 +122,8 @@ def smtp_handler(context):
                                 entry = {"subject": "", "from": "", "recipients": accepted,
                                          "body": ""}
                             with lock:
+                                sequence[0] += 1
+                                entry["seq"] = sequence[0]
                                 messages.append(entry)
                             counters.inc("messages_total")
                             reply(b"250 accepted")

@@ -495,7 +495,7 @@ dest_ensure() {
 
 main() {
   local stages=("$@")
-  [[ ${#stages[@]} -gt 0 ]] || stages=(base registry)
+  [[ ${#stages[@]} -gt 0 ]] || stages=(base registry people connections sending segments templates syncs gate flows)
   [[ -f "$STATE/profile" ]] || die 'run sim.sh up first'
   [[ ! -f "$KEYS/workspace.id" ]] || sign_in
   local stage

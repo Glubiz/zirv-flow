@@ -129,7 +129,7 @@ t_sources_cursor_moves() {
     stream=${key#*/}
     id=$(source_id "$file")
     eventually 240 run_finished "$id" "$stream"
-    read=$(get "$P/sources/$id/runs?limit=50" | jq -r --arg s "$stream" '[.runs[] | select(.stream == $s and (.state == "succeeded"))][0].records_read // 0')
+    read=$(get "$P/sources/$id/runs?limit=50" | jq -r --arg s "$stream" --arg b "${started[$key]}" '[.runs[] | select(.stream == $s and .state == "succeeded" and .id != $b)][0].records_read // 0')
     total=$((total + read))
     [[ $read -gt 0 ]] || bad+=("$key")
   done
@@ -181,6 +181,7 @@ kafka_applied() { [[ $(zf_sql "SELECT count(*) FROM source_records WHERE stream 
 
 t_kafka_tombstone() {
   compose --profile data run --rm -v "$SIM_DIR/defs:/defs:ro" seed python -B /defs/kafka_probe.py tombstone "$KAFKA_PREFIX-0" > /dev/null 2>&1 || return 1
+  [[ $(zf_sql "SELECT count(*) FROM source_records WHERE stream = 'app-feature-used' AND record_key = '$KAFKA_PREFIX-0'") -ge 1 ]] || { MESSAGE='the key was never applied'; return 1; }
   eventually 120 kafka_removed
   MESSAGE="record $KAFKA_PREFIX-0: $(zf_sql "SELECT CASE WHEN count(*) = 0 THEN 'gone' WHEN bool_and(deleted_at IS NOT NULL) THEN 'deleted' ELSE 'live' END FROM source_records WHERE stream = 'app-feature-used' AND record_key = '$KAFKA_PREFIX-0'")"
   kafka_removed
@@ -197,7 +198,9 @@ g_kafka() {
 # ---------------------------------------------------------------- webhooks
 
 HOOK_ID="verify-$RUN"
-hook_body() { jq -nc --arg id "$HOOK_ID" '{id:$id, email:"p5@mail.example.com", customer_id:"C0000005", name:"Verify", form:"newsletter", utm_source:"verify", consent:{newsletter:true}}'; }
+# A new person per run, so the list membership below can only come from this run's post.
+HOOK_EMAIL="verify-hook-$RUN@mail.example.org"
+hook_body() { jq -nc --arg id "$HOOK_ID" --arg e "$HOOK_EMAIL" '{id:$id, email:$e, name:"Verify", form:"newsletter", utm_source:"verify", consent:{newsletter:true}}'; }
 
 t_webhook_accepted() {
   local status
@@ -208,11 +211,17 @@ t_webhook_accepted() {
 
 t_webhook_applied() {
   local person list
-  person=$(person_by external:customer_id C0000005)
   list=$(get "$P/lists" | as_array lists | jq -r '[.[] | select(.name == "Newsletter subscribers")][0].id')
-  eventually 60 hook_applied "$person" "$list"
+  eventually 60 hook_person_applied "$list"
+  person=$(person_by email "$HOOK_EMAIL")
   MESSAGE="person ${person:0:8}"
-  hook_applied "$person" "$list"
+  hook_person_applied "$list"
+}
+hook_person_applied() {
+  local person
+  person=$(person_by email "$HOOK_EMAIL")
+  [[ -n "$person" ]] || return 1
+  hook_applied "$person" "$1"
 }
 hook_applied() {
   [[ $(zf_sql "SELECT count(*) FROM events WHERE person_id = '$1' AND name = 'form_submitted' AND message_id LIKE 'wh:%:$HOOK_ID'") -ge 1 ]] &&
@@ -267,7 +276,7 @@ t_ingest_inbox_age() {
   local age
   age=$(prom 'max(zirv_flow_ingest_inbox_age_seconds)')
   MESSAGE="max inbox age ${age:-none} s (alert threshold 30 s)"
-  [[ -z "$age" ]] || awk -v a="$age" 'BEGIN { exit !(a < 30) }'
+  [[ -n "$age" ]] && awk -v a="$age" 'BEGIN { exit !(a < 30) }'
 }
 
 g_ingest() {
@@ -329,21 +338,37 @@ template_id() { get "$P/templates" | as_array templates | jq -r --arg n "$1" '[.
 sender_id() { get "$P/sender-identities" | as_array sender_identities | jq -r --arg a "$1@mail.sim.example.com" '[.[] | select(.from_address == $a)][0].id'; }
 
 # test_send <destination name> <template name> <sender> <service> <port> <metric>
-# The mailer also carries flow mail, so its counter may rise by more than one; the SMTP sink only by this one.
+# The sinks also carry flow mail, so a counter may rise by more than this one message: the check is
+# at-least on the counter, and for the SMTP sink also a new message to the owner (only test sends go there).
 test_send() {
-  local before after body exact=${7:-exact}
+  local before after body owner_before
+  owner_before=$(owner_mail_seq)
   before=$(counter "$4" "$5" "$6")
   body=$(jq -nc --arg d "$(dest_id "$1")" --arg s "$(sender_id "$3")" --arg m "$OWNER_ID" '{version:1,destination_id:$d,sender_identity_id:$s,to:{member:$m}}')
   post "$P/templates/$(template_id "$2")/test-send" "$body" > /dev/null || { MESSAGE='the test send was refused'; return 1; }
   eventually 90 sink_increased "$before" "$4" "$5" "$6"
   after=$(counter "$4" "$5" "$6")
   MESSAGE="sink counter $before -> $after"
-  if [[ $exact == exact ]]; then [[ $after -eq $((before + 1)) ]]; else [[ $after -ge $((before + 1)) ]]; fi
+  [[ $after -ge $((before + 1)) ]] || return 1
+  [[ $4 != smtp-sink ]] || {
+    eventually 30 owner_mail_newer "$owner_before"
+    MESSAGE="$MESSAGE; owner mail $owner_before -> $(owner_mail_seq)"
+    owner_mail_newer "$owner_before"
+  }
 }
+# The sequence number of the newest message the SMTP sink holds for the owner (0: none).
+owner_mail_seq() {
+  compose exec -T smtp-sink python -c "
+import json, urllib.request
+m = json.load(urllib.request.urlopen('http://127.0.0.1:8025/messages.json', timeout=3))
+print(max([x['seq'] for x in m if 'owner@sim.example.com' in x['recipients']] or [0]))
+" 2> /dev/null | tr -d ''
+}
+owner_mail_newer() { [[ $(owner_mail_seq) -gt $1 ]]; }
 sink_increased() { [[ $(counter "$2" "$3" "$4") -gt $1 ]]; }
 
 t_testsend_smtp() { test_send 'Transactional SMTP' 'Order confirmation' orders smtp-sink 8025 sim_smtp_messages_total; }
-t_testsend_mailer() { test_send 'Marketing mailer' 'Welcome 1' news mailer 8000 sim_mailer_messages_total atleast; }
+t_testsend_mailer() { test_send 'Marketing mailer' 'Welcome 1' news mailer 8000 sim_mailer_messages_total; }
 
 t_testsend_outcomes() {
   local outcomes
@@ -354,8 +379,8 @@ t_testsend_outcomes() {
 
 g_destinations() {
   check destinations_check_ok t_destinations_check
-  check testsend_smtp_sink_plus_one t_testsend_smtp
-  check testsend_mailer_plus_one t_testsend_mailer
+  check testsend_smtp_sink_receives t_testsend_smtp
+  check testsend_mailer_receives t_testsend_mailer
   check testsend_outcome_sent t_testsend_outcomes
 }
 

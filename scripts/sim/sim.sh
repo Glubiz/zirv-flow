@@ -96,9 +96,10 @@ cmd_down() {
 }
 
 cmd_reset() {
+  mkdir -p "$STATE"
   [[ -f "$STATE/profile" ]] || say 'no state; removing project resources only'
   [[ -f "$STATE/profile" ]] || echo small > "$STATE/profile"
-  [[ -f "$STATE/env" ]] || { mkdir -p "$STATE"; : > "$STATE/env"; }
+  [[ -f "$STATE/env" ]] || : > "$STATE/env"
   # Placeholder values satisfy the compose file's required variables while removing.
   SIM_PG_PASSWORD=x SIM_COMPANY_PG_PASSWORD=x SIM_MYSQL_ROOT_PASSWORD=x SIM_FLOW_READER_PASSWORD=x \
     compose --profile '*' down -v --remove-orphans
@@ -185,7 +186,7 @@ cmd_traffic() {
 status_traffic() {
   echo '-- traffic'
   if [[ -f "$STATE/control.json" ]]; then
-    jq -r '"control: rate \(.rate) burst x\(.burst_factor) paused \(.paused)"' "$STATE/control.json"
+    jq -r '"control: rate \(.rate) burst x\(.burst_factor) paused \(.paused)\(if .paused_reason then " (\(.paused_reason))" else "" end)"' "$STATE/control.json"
   fi
   local file
   for file in "$STATE"/stats/*.json; do

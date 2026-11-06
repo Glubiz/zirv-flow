@@ -3,7 +3,7 @@
 A local environment that looks like a small company's production: one million people spread over
 a PostgreSQL database, a MySQL database, an HTTP billing API, a daily CSV export, a Kafka topic pair
 and three signed web forms, with web traffic, a daily curve, bursts, real mail delivery (with
-bounces, opens and clicks) and three flows running on top. Use it to see Zirv Flow under a
+bounces, opens and clicks) and five flows running on top. Use it to see Zirv Flow under a
 believable load, to try a scenario by hand, or to check a change against a populated system.
 
 It is not a benchmark. The CPU quotas are capped for a developer machine, so the numbers below say
@@ -175,7 +175,7 @@ and clicked.
 | Event flows are not published | They wait for the backfill on purpose: a backfilled record starts a flow like a live one (it enrolled 34 900 people in a test). `provision.sh flows` publishes them once every pull stream has a first success. |
 | `suppressions/check` says an address is not suppressed after a hard bounce | The API reads workspace-scope suppressions only; a hard bounce is organization-wide. The send is still skipped. |
 | `up` stalls on a service | `sim.sh status`, then `sim.sh logs <service>`. Memory is the usual cause: stop other stacks. |
-| The generators stopped | `status` shows `paused` with a reason: `disk` means `SIM_MAX_DB_GB` was passed. |
+| The generators stopped | `status` shows `paused true (disk)`: `disk` means `SIM_MAX_DB_GB` was passed. |
 | Mail never arrives in the viewer | Only the transactional flows use SMTP; marketing mail goes to the mail fixture (`sim.sh status` shows both counters). |
 
 ## Cost
