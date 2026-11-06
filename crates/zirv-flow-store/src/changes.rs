@@ -201,6 +201,12 @@ type ClaimedRow = (
 /// Rows another claim holds are skipped, so concurrent claims take disjoint people. The marks
 /// stay deleted only if the caller's transaction commits; a mark made after the claim inserts
 /// its row afresh.
+///
+/// Each claimed person is also locked `FOR KEY SHARE`, the lock the pass's membership rows and
+/// events take through their foreign keys, and a person a writer holds `FOR UPDATE` is skipped
+/// with its mark. Otherwise the pass would hold the mark and wait on the writer for the person,
+/// while the writer, marking the person, waits on the pass for the mark (#518). The writer's
+/// mark is claimed by a later pass.
 pub async fn claim_dirty(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -208,8 +214,11 @@ pub async fn claim_dirty(
 ) -> Result<Vec<DirtyPerson>, StoreError> {
     let rows: Vec<ClaimedRow> = sqlx::query_as(
         "DELETE FROM person_changes WHERE (workspace_id, person_id) IN ( \
-             SELECT workspace_id, person_id FROM person_changes WHERE workspace_id = $1 \
-             ORDER BY changed_at, person_id FOR UPDATE SKIP LOCKED LIMIT $2) \
+             SELECT c.workspace_id, c.person_id FROM person_changes c \
+             JOIN people p ON p.id = c.person_id \
+             WHERE c.workspace_id = $1 \
+             ORDER BY c.changed_at, c.person_id \
+             FOR UPDATE OF c SKIP LOCKED FOR KEY SHARE OF p SKIP LOCKED LIMIT $2) \
          RETURNING person_id, classes, trace_id, cause_kind, cause_id, late_from",
     )
     .bind(workspace.as_uuid())
@@ -814,6 +823,98 @@ mod tests {
         all.sort_unstable();
         all.dedup();
         assert_eq!(all.len(), 6);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_claim_leaves_the_mark_of_a_person_a_writer_holds_so_neither_waits_on_the_other(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "ours").await;
+        let segment = crate::segments::tests_support::segment_reading(
+            &pool,
+            ws,
+            ChangeClasses::TRAITS | ChangeClasses::LISTS,
+        )
+        .await;
+        let one = person(&pool, ws).await;
+        let a = trace(Cause::api("a"));
+        mark(&pool, ws, &[one], ChangeClasses::TRAITS, &a, None).await;
+        // A writer holds the person, as a resolution does, and marks it later on.
+        let mut writer = begin(&pool).await.unwrap();
+        cache_change_readers(&mut writer, ws).await.unwrap();
+        let holder: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *writer)
+            .await
+            .unwrap();
+        sqlx::query("SELECT id FROM people WHERE workspace_id = $1 AND id = $2 FOR UPDATE")
+            .bind(ws.as_uuid())
+            .bind(one)
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+
+        // A pass claims the marks and enters its people into the segment: the membership's
+        // foreign key takes a share lock on each person.
+        let pass = {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                let mut tx = begin(&pool).await?;
+                let claimed = claim_dirty(&mut tx, ws, 10).await?;
+                for person in &claimed {
+                    sqlx::query(
+                        "INSERT INTO segment_members (workspace_id, segment_id, person_id, \
+                            version, entered_at, entered_trace_id, entered_cause) \
+                         VALUES ($1, $2, $3, 1, now(), gen_random_uuid(), 'data_change')",
+                    )
+                    .bind(ws.as_uuid())
+                    .bind(segment.id)
+                    .bind(person.person_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(StoreError::query)?;
+                }
+                commit(tx).await?;
+                Ok::<_, StoreError>(claimed.len())
+            })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_locks \
+                     WHERE NOT granted AND $1 = ANY(pg_blocking_pids(pid)))",
+                )
+                .bind(holder)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                if waiting || pass.is_finished() {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the pass neither finished nor waited on the writer");
+        let marked = mark_people(&mut writer, ws, &[one], ChangeClasses::LISTS, &a, None).await;
+        let committed = match marked {
+            Ok(()) => commit(writer).await,
+            Err(error) => Err(error),
+        };
+
+        let claimed = tokio::time::timeout(std::time::Duration::from_secs(10), pass)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(committed.is_ok(), "{committed:?}");
+        assert_eq!(claimed.unwrap(), 0, "the held person's mark is left alone");
+        let left = claim(&pool, ws, 10).await;
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].person_id, one);
+        assert_eq!(
+            left[0].classes,
+            ChangeClasses::TRAITS | ChangeClasses::LISTS
+        );
     }
 
     #[sqlx::test]
