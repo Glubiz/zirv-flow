@@ -174,6 +174,7 @@ mod tests {
     #[sqlx::test(migrations = false)]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn migrating_an_empty_database_brings_it_up_to_date(pool: PgPool) {
+        crate::reset_database(&pool).await;
         let migrator = fixture("migrations-basic").await;
 
         assert_eq!(migrate_with(&pool, &migrator).await.unwrap(), vec![1, 2]);
@@ -186,6 +187,7 @@ mod tests {
     #[sqlx::test(migrations = false)]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn migrating_twice_is_a_no_op(pool: PgPool) {
+        crate::reset_database(&pool).await;
         let migrator = fixture("migrations-basic").await;
 
         migrate_with(&pool, &migrator).await.unwrap();
@@ -196,6 +198,7 @@ mod tests {
     #[sqlx::test(migrations = false)]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_newer_schema_is_detected_and_migration_is_refused(pool: PgPool) {
+        crate::reset_database(&pool).await;
         let migrator = fixture("migrations-basic").await;
         migrate_with(&pool, &migrator).await.unwrap();
         sqlx::query(
@@ -221,6 +224,7 @@ mod tests {
     #[sqlx::test(migrations = false)]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn pending_migrations_are_counted(pool: PgPool) {
+        crate::reset_database(&pool).await;
         let first = fixture("migrations-first").await;
         let all = fixture("migrations-basic").await;
         migrate_with(&pool, &first).await.unwrap();
@@ -234,6 +238,7 @@ mod tests {
     #[sqlx::test(migrations = false)]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_dirty_migration_is_detected(pool: PgPool) {
+        crate::reset_database(&pool).await;
         let migrator = fixture("migrations-first").await;
         migrate_with(&pool, &migrator).await.unwrap();
         sqlx::query(
@@ -254,6 +259,7 @@ mod tests {
     #[sqlx::test(migrations = false)]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn migrating_a_dirty_schema_is_refused(pool: PgPool) {
+        crate::reset_database(&pool).await;
         let migrator = fixture("migrations-first").await;
         migrate_with(&pool, &migrator).await.unwrap();
         sqlx::query(
@@ -273,6 +279,7 @@ mod tests {
     #[sqlx::test(migrations = false)]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_modified_migration_is_detected_and_migration_is_refused(pool: PgPool) {
+        crate::reset_database(&pool).await;
         let original = fixture("migrations-first").await;
         let modified = fixture("migrations-modified").await;
         migrate_with(&pool, &original).await.unwrap();
@@ -291,6 +298,7 @@ mod tests {
     #[sqlx::test(migrations = false)]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn concurrent_migrators_apply_each_version_once(pool: PgPool) {
+        crate::reset_database(&pool).await;
         let migrator = Arc::new(fixture("migrations-basic").await);
         let first = tokio::spawn({
             let pool = pool.clone();
@@ -321,6 +329,7 @@ mod tests {
     #[sqlx::test(migrations = false)]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_trace_migration_applies_to_a_jobs_table_that_already_has_rows(pool: PgPool) {
+        crate::reset_database(&pool).await;
         for earlier in [
             include_str!("../migrations/0001_accounts.sql"),
             include_str!("../migrations/0002_identities.sql"),
@@ -360,6 +369,7 @@ mod tests {
     #[sqlx::test(migrations = false)]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_view_pii_migration_gives_every_existing_membership_no_grant(pool: PgPool) {
+        crate::reset_database(&pool).await;
         sqlx::raw_sql(include_str!("../migrations/0001_accounts.sql"))
             .execute(&pool)
             .await
@@ -400,6 +410,7 @@ mod tests {
     #[sqlx::test(migrations = false)]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_roles_migration_turns_members_into_editors_and_keeps_admins(pool: PgPool) {
+        crate::reset_database(&pool).await;
         sqlx::raw_sql(include_str!("../migrations/0001_accounts.sql"))
             .execute(&pool)
             .await
@@ -518,6 +529,7 @@ mod tests {
     #[sqlx::test(migrations = false)]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_trait_change_migration_keeps_rows_of_every_other_cause(pool: PgPool) {
+        crate::reset_database(&pool).await;
         let mut connection = pool.acquire().await.unwrap();
         MIGRATOR.run_to(81, &mut *connection).await.unwrap();
         without_foreign_keys(&mut connection).await;
@@ -547,6 +559,7 @@ mod tests {
     #[sqlx::test(migrations = false)]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_trait_change_migration_is_refused_while_a_row_holds_the_cause(pool: PgPool) {
+        crate::reset_database(&pool).await;
         let mut connection = pool.acquire().await.unwrap();
         MIGRATOR.run_to(81, &mut *connection).await.unwrap();
         without_foreign_keys(&mut connection).await;
@@ -568,6 +581,7 @@ mod tests {
     #[sqlx::test(migrations = false)]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn each_of_the_four_checks_refuses_trait_change_and_accepts_the_others(pool: PgPool) {
+        crate::reset_database(&pool).await;
         let mut connection = pool.acquire().await.unwrap();
         MIGRATOR.run(&mut *connection).await.unwrap();
         without_foreign_keys(&mut connection).await;
