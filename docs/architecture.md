@@ -1015,7 +1015,8 @@ batches of 1,000, with the publish as the occurrence.
 **Event triggers.** They are checked in the apply transaction, once per batch. One
 query joins the batch's events with the published, not-paused event-trigger flows, the
 `enrollment_waits` rows, and the event-based goals and exit criteria (9.4). It skips
-events flagged `no_triggers` and forwarding re-drives (12.2). Property filters use the
+events flagged `no_triggers` (a replay's, and those of a stream's first sync) and
+forwarding re-drives (12.2). Property filters use the
 segment AST's event-property filter nodes.
 
 **Schedule, manual and API triggers.** All five triggers end in a `flow.enroll` job that calls
@@ -1967,6 +1968,19 @@ change stands. Duplicates are counted by `zirv_flow_sync_events_total{outcome}`.
   the workspace lateness window are accepted and marked late; affected
   time-window segments are recomputed for that person before downstream
   triggers are evaluated.
+- **First-sync exception.** The events a pull stream's sync produces until that
+  stream's first run succeeds are flagged `no_triggers`, as a replay's are, so a
+  connected source's historical records start no event flow and wake no event
+  wait. "First" means the stream has no earlier succeeded sync run: a retry of a
+  failed first run, even one whose earlier batches already moved the cursor, is
+  still first, and so is a run after failed ones. Every later sync triggers as
+  usual, late events included, and so does a manual re-sync of a stream that
+  has already succeeded. A reconciliation applies no events, and a streaming
+  (Kafka) stream has no sync runs, so neither is covered: a new Kafka stream
+  reads its topic from the earliest offset, and its backlog triggers flows (no
+  setting chooses the start). Segment-entry triggers are not changed: people
+  who enter a segment because of first-sync data enter by `data_change` and
+  enroll in a flow published for it before the sync.
 - An operator may replay rejects after publishing a schema or fixing a mapping,
   or re-drive a failed forwarding destination. A replay records its original
   id and a typed `manual` or `definition_change` cause. It never re-triggers
@@ -1991,8 +2005,11 @@ debugger feed row when the workspace is watched, sets `replayed_at` and `replay_
 appends an `event.replayed` decision (subjects `reject`, `event`, `person`). A second replay
 finds `replayed_at` and does nothing; a `message_id` that is already stored resolves the
 reject as a duplicate. With `emit_triggers` false the event is also flagged `no_triggers`.
-**The M5 event-trigger path must skip an event flagged `no_triggers`**; no flow reads events
-before M5, so nothing consumes the flag yet (`EventFlag::NoTriggers` documents the rule).
+**The event-trigger path skips an event flagged `no_triggers`**, and so does the matching of
+events against event waits (`EventFlag::NoTriggers` documents the rule). Two writers set the
+flag: a replay without `emit_triggers`, and the first sync of a pull stream
+(`sync_runs::batch`, which asks whether the stream has an earlier succeeded sync run and
+builds the batch of the event path with the flag on).
 
 ### 12.3 Debugger, explorer and person timeline
 

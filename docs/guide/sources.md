@@ -233,7 +233,13 @@ in the unit's transaction, so profiles, events, members and the checkpoint commi
 not at all. An event's idempotency key is derived from the source, stream, record key and event
 name, so reading the same file again records nothing twice (the event counts as a duplicate),
 and a record that changed does not rewrite its past events. The event's time is the run's start
-unless the mapping reads one; an old file's events are accepted and flagged late. A refused
+unless the mapping reads one; an old file's events are accepted and flagged late. The events of a
+stream's **first sync** are also flagged `no_triggers`, as a replay's are, so a published event flow
+enrolls no one for the history a new source brings in and no event wait wakes for it. The flag
+holds until the stream has a succeeded run: a retried first run is still the first sync. Every later
+sync triggers as usual, late events included, and so does a manual run of a stream that already
+succeeded. People who enter a segment because of first-sync data still enter it, and enroll in a
+segment-triggered flow published before the sync. A refused
 event is an event reject tied to the run (shown in its detail), and the record counts once under
 its worst outcome: rejected, then applied, then unchanged; its profile change stands. A run
 with an event fails before reading with `stream_not_keyed` (no primary key) or
@@ -538,7 +544,10 @@ transaction that applies the messages they cover, fenced on the job's lease and 
 **each committed batch applies once and an uncommitted batch is read again** after a crash, a lost
 lease or a restart. A partition with no stored offset starts at its earliest offset, and new
 partitions are found at the start of every slice. Order is kept within a partition; a key that
-appears in several partitions has no defined order. Two messages with one key are never merged:
+appears in several partitions has no defined order. A stream has no first sync here: a new stream
+reads its topic from the earliest offset it still holds, no setting chooses another start, and every
+message of that backlog is an event that triggers flows like a live one. Publish event flows after the
+backlog is read if that is not wanted. Two messages with one key are never merged:
 each is its own unit of work, so each yields its own event, and a message replayed after a crash
 yields the same event again, which is dropped as a duplicate. Offsets that hold no record
 (transaction markers, compacted-away batches) are skipped, so compacted topics and transactional
