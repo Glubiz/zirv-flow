@@ -426,7 +426,7 @@ The dirty set is `person_changes`, one row per `(workspace_id, person_id)`. Each
 on conflict, so repeated marks coalesce and keep every class that changed. A mark made after
 `segment.reevaluate` claimed a row re-inserts it (8.4). `segment.*` events never mark a person
 dirty: a membership change reaches dependent segments through topological evaluation, not
-through the dirty set. A mark carries the trace and cause of the latest change, which the entries and exits it causes continue; the writer's transaction enqueues `segment.reevaluate` once, only to cut latency.
+through the dirty set. A mark carries the trace and cause of the latest change, which the entries and exits it causes continue; the writer's transaction enqueues `segment.reevaluate` once, only to cut latency, and skips the enqueue when another open transaction holds the job's key (it never waits for it, #531; the safety net below covers the lost wake).
 The live dependency classes are read once per workspace and transaction, using the
 workspace's segment index, and cached in transaction-local state. With no matching reader,
 the writer adds neither marks nor a re-evaluation request.

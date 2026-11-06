@@ -30,7 +30,8 @@ pub struct DirtyPerson {
 /// Marks `people` changed in `classes`, in the caller's transaction. Marks coalesce per person:
 /// the classes are OR-ed, the latest trace and cause win, `late_from` takes the earliest value
 /// and `changed_at` keeps the first mark's time. Classes no live segment reads are skipped;
-/// the transaction's owner calls [`request_reevaluation`] once before it commits.
+/// the transaction's owner calls [`request_reevaluation`] before it commits. A request that
+/// loses the race for the job key is dropped: the leader's safety net finds the mark.
 pub(crate) async fn mark_people(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -163,8 +164,13 @@ fn unique_key(workspace: WorkspaceId) -> String {
 }
 
 /// [`enqueue_reevaluate`] for a transaction that marked people, on a trace of its own: the
-/// job's trace only names the decisions the job records itself. Call it once, before the
+/// job's trace only names the decisions the job records itself. Call it before the
 /// transaction commits.
+///
+/// It never waits for the job key. The caller may hold person rows, and a transaction that holds
+/// the key uncommitted may be waiting for those rows (#531). When another open transaction
+/// holds the key, the request returns without a job: that transaction's own request, or the
+/// leader's safety net ([`enqueue_reevaluate`] for any mark older than `STALE_DIRTY`), covers it.
 pub(crate) async fn request_reevaluation(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -178,6 +184,20 @@ pub(crate) async fn request_reevaluation(
     .await
     .map_err(StoreError::query)?;
     if !marked {
+        return Ok(());
+    }
+    // Inserting the job waits for an open transaction that holds the unique key. This caller
+    // may hold person rows that transaction needs next, so it would wait in a cycle. The lock
+    // is the key's stand-in: whoever holds it is requesting or has requested, and a wake lost
+    // here is made up by `wake_stale_dirty` (`STALE_DIRTY`, 2 s). Held until commit, so a
+    // rollback releases it; taking it again in one transaction succeeds.
+    let free: bool =
+        sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 0))")
+            .bind(unique_key(workspace))
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(StoreError::query)?;
+    if !free {
         return Ok(());
     }
     let trace = TraceContext::root(Cause::from_stored(
@@ -409,6 +429,98 @@ mod tests {
         .expect("the competing transaction must wait on the advisory lock");
     }
 
+    async fn marked_transaction(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        one: Uuid,
+    ) -> sqlx::PgTransaction<'static> {
+        let mut tx = begin(pool).await.unwrap();
+        cache_change_readers(&mut tx, ws).await.unwrap();
+        mark_people(
+            &mut tx,
+            ws,
+            &[one],
+            ChangeClasses::EVENTS,
+            &trace(Cause::api("t")),
+            None,
+        )
+        .await
+        .unwrap();
+        tx
+    }
+
+    async fn reevaluate_jobs(pool: &PgPool, ws: WorkspaceId) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM jobs WHERE workspace_id = $1 AND kind = $2")
+            .bind(ws.as_uuid())
+            .bind(REEVALUATE_JOB_KIND)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_request_does_not_wait_on_a_key_an_open_transaction_holds(pool: PgPool) {
+        let ws = workspace(&pool, "ours").await;
+        crate::segments::tests_support::segment_reading(&pool, ws, ChangeClasses::EVENTS).await;
+        let (one, two) = (person(&pool, ws).await, person(&pool, ws).await);
+        let mut first = marked_transaction(&pool, ws, one).await;
+        request_reevaluation(&mut first, ws).await.unwrap();
+        let mut second = marked_transaction(&pool, ws, two).await;
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            request_reevaluation(&mut second, ws),
+        )
+        .await
+        .expect("the request must not wait for the open transaction")
+        .unwrap();
+        let own: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = $1")
+            .bind(REEVALUATE_JOB_KIND)
+            .fetch_one(&mut *second)
+            .await
+            .unwrap();
+        assert_eq!(own, 0, "the second transaction inserted no job");
+        commit(second).await.unwrap();
+        assert_eq!(reevaluate_jobs(&pool, ws).await, 0);
+        commit(first).await.unwrap();
+        assert_eq!(reevaluate_jobs(&pool, ws).await, 1);
+
+        // The scheduler's safety net enqueues for the head; the job exists, so it finds it, and
+        // the pass that job runs claims the second transaction's mark.
+        let found = enqueue_reevaluate(&pool, ws, &trace(Cause::api("t")))
+            .await
+            .unwrap();
+        assert!(!found);
+        assert_eq!(reevaluate_jobs(&pool, ws).await, 1);
+        let claimed = claim(&pool, ws, 10).await;
+        let mut people: Vec<Uuid> = claimed.iter().map(|dirty| dirty.person_id).collect();
+        people.sort();
+        let mut expected = [one, two];
+        expected.sort();
+        assert_eq!(people, expected);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_request_that_holds_nothing_else_enqueues_once_and_a_rollback_releases_the_key(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "ours").await;
+        crate::segments::tests_support::segment_reading(&pool, ws, ChangeClasses::EVENTS).await;
+        let one = person(&pool, ws).await;
+
+        let mut rolled_back = marked_transaction(&pool, ws, one).await;
+        request_reevaluation(&mut rolled_back, ws).await.unwrap();
+        rolled_back.rollback().await.unwrap();
+        assert_eq!(reevaluate_jobs(&pool, ws).await, 0);
+
+        let mut tx = marked_transaction(&pool, ws, one).await;
+        request_reevaluation(&mut tx, ws).await.unwrap();
+        request_reevaluation(&mut tx, ws).await.unwrap();
+        commit(tx).await.unwrap();
+        assert_eq!(reevaluate_jobs(&pool, ws).await, 1);
+    }
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn marking_without_an_initialized_reader_cache_is_a_programming_error(pool: PgPool) {
