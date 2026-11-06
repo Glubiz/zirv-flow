@@ -120,6 +120,61 @@ pub(crate) struct Refusal {
     pub(crate) sample: Value,
 }
 
+/// An applied identify and the traits the store left out of it.
+pub(crate) struct DroppedTraits<'a> {
+    pub(crate) source: &'a str,
+    pub(crate) trace: &'a TraceContext,
+    pub(crate) received_at: OffsetDateTime,
+    pub(crate) message_id: &'a str,
+    pub(crate) person_id: Uuid,
+    /// `(key, code)` pairs.
+    pub(crate) dropped: &'a [(String, &'static str)],
+}
+
+/// Keeps the traits of an applied identify that the store left out as one `record` reject of
+/// code `traits_dropped`, with the key and code of each in `reasons`; the rest of the record
+/// applied, and `person_id` names the person it applied to. No value is kept: the sample is
+/// empty. A message that already has an open reject keeps the one.
+pub(crate) async fn insert_dropped_traits_reject(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    item: &DroppedTraits<'_>,
+) -> Result<(), StoreError> {
+    let DroppedTraits {
+        source,
+        trace,
+        received_at,
+        message_id,
+        person_id,
+        dropped,
+    } = item;
+    let reasons: Vec<Value> = dropped
+        .iter()
+        .map(|(key, code)| json!({"property": key, "reason": code}))
+        .collect();
+    sqlx::query(
+        "INSERT INTO ingest_rejects \
+            (id, workspace_id, received_at, source, kind, reason, reasons, sample, payload, \
+             person_id, message_id, trace_id) \
+         VALUES ($1, $2, $3, $4, 'record', 'traits_dropped', $5, \
+                 '{\"properties\": {}, \"masked\": []}'::jsonb, '{}'::jsonb, $6, $7, $8) \
+         ON CONFLICT (workspace_id, message_id) \
+            WHERE message_id IS NOT NULL AND replayed_at IS NULL DO NOTHING",
+    )
+    .bind(Uuid::now_v7())
+    .bind(workspace.as_uuid())
+    .bind(received_at)
+    .bind(source)
+    .bind(Json(reasons))
+    .bind(person_id)
+    .bind(message_id)
+    .bind(trace.trace_id.as_uuid())
+    .execute(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(())
+}
+
 /// Keeps records the mapping or the store refused, as `record` rejects of the stream. A sync
 /// run ties them to the run (`sync_run_id`); a webhook payload has no run. The payload is not
 /// kept, only the masked sample.

@@ -102,6 +102,25 @@ describe("saving a segment", () => {
     expect(options[12]).toHaveTextContent("every week");
   });
 
+  it("warns that the people stay as they were when the saved rules no longer match the data", async () => {
+    mockApi({
+      ...base(),
+      [`GET ${SEGMENT}`]: () => json({ ...detail(), issues: [{ pointer: "/all/0", code: "unknown_trait" }] }),
+    });
+    mountPage();
+
+    const banner = await screen.findByText("Not updating");
+    expect(banner.parentElement).toHaveTextContent("This field does not exist in the workspace.");
+  });
+
+  it("shows no warning while the saved rules still match", async () => {
+    mockApi(base());
+    mountPage();
+
+    await screen.findByLabelText("Re-evaluate");
+    expect(screen.queryByText("Not updating")).not.toBeInTheDocument();
+  });
+
   it("saves a changed definition as a new version and shows its number", async () => {
     const calls = mockApi({
       ...base(),

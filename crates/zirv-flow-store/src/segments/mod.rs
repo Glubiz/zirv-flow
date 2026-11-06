@@ -25,7 +25,8 @@ pub use condition::{CompiledCondition, evaluate_conditions};
 pub use crud::{
     CADENCE_MINUTES, DEFAULT_CADENCE_MINUTES, NewSegment, NewSegmentVersion, Segment, SegmentError,
     SegmentPatch, SegmentVersion, archive_segment, create_segment, find_segment,
-    find_segment_version, list_segment_versions, list_segments, lock_segments, update_segment,
+    find_segment_version, list_segment_versions, list_segments, lock_segments,
+    segments_reading_trait, update_segment,
 };
 pub use cycle::SegmentRef;
 pub use data_age::{DataAge, FeedingSource, segment_data_age};

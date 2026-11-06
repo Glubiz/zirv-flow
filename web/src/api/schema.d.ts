@@ -9531,6 +9531,12 @@ export interface components {
         /** @description A segment with its current version. */
         SegmentDetailBody: components["schemas"]["SegmentBody"] & {
             current: components["schemas"]["SegmentVersionBody"];
+            /**
+             * @description Set by the read of one segment when the saved definition no longer passes against what
+             *     the workspace defines now (a field archived, a list deleted, an event property removed):
+             *     the members then stay as they were. Absent otherwise.
+             */
+            issues?: components["schemas"]["SegmentIssueProblem"][] | null;
         };
         /** @description The person has events of this name that match every `where` filter in the window, and satisfy `agg` when it is given (otherwise at least one). */
         SegmentEventNode: {
@@ -30002,7 +30008,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description `trait_indexed`: the type of a trait that holds a slot cannot change */
+            /** @description `trait_indexed`: the type of a trait that holds a slot cannot change; `trait_referenced`: archiving a trait that the current version of a live segment reads, with the segment names in the detail */
             409: {
                 headers: {
                     [name: string]: unknown;

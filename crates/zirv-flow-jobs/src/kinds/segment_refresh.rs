@@ -76,6 +76,10 @@ impl JobKind for SegmentRefresh {
             // Something the definition reads was archived since the save: the members stay as
             // they were and a retry would fail the same way.
             Err(_) => {
+                tracing::warn!(
+                    segment = %segment_id,
+                    "segment definition no longer compiles; members left as they were"
+                );
                 return ctx
                     .record_decision(
                         &decision_actions::SEGMENT_REFRESH_FAILED,

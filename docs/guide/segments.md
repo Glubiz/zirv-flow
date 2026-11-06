@@ -33,6 +33,10 @@ The builder combines **All of**, **Any of** and **Not** groups with field, event
 segment, consent and identifier conditions. Field and property operators follow
 the registered type. References to other segments cannot form a cycle.
 
+`between` on a number includes both ends; on a date or timestamp it includes the start and
+excludes the end, so a whole day is `[2025-06-15, 2025-06-16]`. The `between` window of event
+conditions works the same way.
+
 Missing values matter: a missing trait or missing/null event property makes a
 comparison false, including `neq` and `not_in`. Only `not_exists` matches absence.
 Negating a condition is different: `not (country eq DK)` includes a person with
@@ -59,7 +63,7 @@ A segment is a named, versioned definition of a group of people, built from trai
 lists, consent and other segments. The definition format is the AST in the OpenAPI document
 (`SegmentDefinition`). You can save and preview, and a `segment.refresh` job computes the
 members: `GET .../segments/{id}/members` and `.../history` read them, and
-`POST .../segments/{id}/refresh` (an editor or a `write` key) queues a refresh now (202).
+`POST .../segments/{id}/refresh` (an editor or a `write` key) queues a refresh now (202). After a merge the survivor's history shows both entries.
 
 - **Create and version.** `POST /api/v1/workspaces/{ws}/segments` with `{name, description?,
   cadence_minutes?, definition}` creates version 1. `PATCH .../segments/{id}` with a
@@ -75,6 +79,12 @@ members: `GET .../segments/{id}/members` and `.../history` read them, and
 - **Archive.** `POST .../segments/{id}/archive` is refused with 409 `segment_referenced` while a
   current version of another live segment references it. The list hides archived segments
   unless `?archived=true`.
+- **Fields in use.** Archiving a field (`PATCH .../traits/{key}` with `archived: true`) is
+  refused with 409 `trait_referenced` while the current version of a live segment reads it; the
+  detail names the segments. An archived segment or an older version does not block it. A
+  segment whose saved rules no longer match the workspace for another reason (a deleted list, a
+  removed event property) keeps its members as they were and carries `issues` on
+  `GET .../segments/{id}`; the segment page shows a banner.
 - **Preview.** `POST .../segments/preview` with `{definition, sample_size?}` (20 by default,
   100 at most) runs an unsaved definition on the primary and returns `{count, sample,
   data_age, compiled_at}`. It reads in one read-only snapshot and stops at 20 seconds with 503

@@ -542,6 +542,20 @@ impl ApiError {
         }
     }
 
+    /// An archive of a trait that the current version of a live segment reads.
+    pub(crate) fn trait_referenced(names: &[String]) -> Self {
+        Self {
+            code: Some("trait_referenced"),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                format!(
+                    "segments read this field: {}. Edit or archive them first",
+                    names.join(", ")
+                ),
+            )
+        }
+    }
+
     /// A flow that does not pass the publish checks: every issue with its code and place.
     pub(crate) fn flow_invalid(issues: Vec<FlowIssueProblem>) -> Self {
         Self {
@@ -1344,6 +1358,7 @@ impl From<crate::admin::AdminError> for ApiError {
                 code: Some(code),
                 ..Self::unprocessable(detail)
             },
+            AdminError::TraitReferenced(names) => Self::trait_referenced(&names),
             AdminError::SourceOrder(detail) => Self {
                 code: Some("source_order_invalid"),
                 ..Self::unprocessable(detail)

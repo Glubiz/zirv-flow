@@ -27,10 +27,12 @@ pub use explore::{
     explore_total,
 };
 pub use partitions::ensure_event_partitions;
+pub(crate) use rejects::{
+    DroppedTraits, Refusal, insert_dropped_traits_reject, insert_record_rejects,
+};
 pub use rejects::{
     IngestReject, RejectCursor, RejectFilter, erase_unattributed_rejects, list_ingest_rejects,
 };
-pub(crate) use rejects::{Refusal, insert_record_rejects};
 pub use replay::{
     MAX_REPLAY, REPLAY_JOB_KIND, ReplayPrediction, ReplaySelection, ReplayTotals, enqueue_replay,
     preview_replay, replay_rejects, select_rejects,

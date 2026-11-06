@@ -122,6 +122,9 @@ pub enum AdminError {
     /// A trait source order with an entry that matches no source; the problem carries the code
     /// `source_order_invalid` and the detail names the entry.
     SourceOrder(String),
+    /// An archive of a trait that live segments read; the problem carries the code
+    /// `trait_referenced` and names the segments.
+    TraitReferenced(Vec<String>),
 }
 
 impl fmt::Display for AdminError {
@@ -139,6 +142,7 @@ impl fmt::Display for AdminError {
             Self::Utm { detail, .. }
             | Self::RetentionBounds(detail)
             | Self::SourceOrder(detail) => formatter.write_str(detail),
+            Self::TraitReferenced(names) => write!(formatter, "read by {}", names.join(", ")),
         }
     }
 }
@@ -157,7 +161,8 @@ impl Error for AdminError {
             | Self::Slot(_)
             | Self::Utm { .. }
             | Self::RetentionBounds(_)
-            | Self::SourceOrder(_) => None,
+            | Self::SourceOrder(_)
+            | Self::TraitReferenced(_) => None,
         }
     }
 }
