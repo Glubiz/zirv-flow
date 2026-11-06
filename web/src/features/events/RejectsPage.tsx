@@ -1,5 +1,5 @@
 import { useState, type SyntheticEvent } from "react";
-import { useParams } from "react-router";
+import { Link, useParams } from "react-router";
 
 import { client, unwrap, useResource, type components } from "../../api";
 import { Button, EmptyState, PageHeader, Panel, Pill, ResourceView, TextField, formatDateTime } from "../../ui";
@@ -140,6 +140,7 @@ function RejectList({ workspaceId, canReplay }: { workspaceId: string; canReplay
                     {data.rejects.map((reject) => (
                       <RejectRow
                         key={reject.id}
+                        workspaceId={workspaceId}
                         reject={reject}
                         selectable={canReplay}
                         selected={selected.has(reject.id)}
@@ -162,19 +163,23 @@ function RejectList({ workspaceId, canReplay }: { workspaceId: string; canReplay
 }
 
 interface RejectRowProps {
+  workspaceId: string;
   reject: Reject;
   selectable: boolean;
   selected: boolean;
   onSelect: (on: boolean) => void;
 }
 
-function RejectRow({ reject, selectable, selected, onSelect }: RejectRowProps) {
+function RejectRow({ workspaceId, reject, selectable, selected, onSelect }: RejectRowProps) {
   const sample = reject.sample as { properties?: Record<string, unknown>; masked?: string[] };
+  // The server replays only event rejects that are still open; a record reject was not refused whole.
+  const replayable = reject.kind === "event";
+  const subject = replayable ? `${reject.name ?? "rejected"} event` : "record";
   return (
     <tr>
       {selectable ? (
         <td>
-          {reject.replayed_at ? (
+          {!replayable ? null : reject.replayed_at ? (
             <span className="faint">Replayed</span>
           ) : (
             <input
@@ -187,10 +192,12 @@ function RejectRow({ reject, selectable, selected, onSelect }: RejectRowProps) {
         </td>
       ) : null}
       <td>{formatDateTime(reject.received_at)}</td>
-      <td className="strong">{reject.name ?? <span className="faint">invalid name</span>}</td>
+      <td className="strong">
+        {!replayable ? "Record" : (reject.name ?? <span className="faint">invalid name</span>)}
+      </td>
       <td>{reject.source}</td>
       <td>
-        <Pill tone="attention">{rejectReasonLabel(reject.reason)}</Pill>
+        <Pill tone={reject.reason === "traits_dropped" ? "neutral" : "attention"}>{rejectReasonLabel(reject.reason)}</Pill>
         {reject.reasons.length > 0 ? (
           <ul className="records list-plain">
             {reject.reasons.map((item, index) => (
@@ -200,11 +207,16 @@ function RejectRow({ reject, selectable, selected, onSelect }: RejectRowProps) {
             ))}
           </ul>
         ) : null}
+        {reject.person_id ? (
+          <div>
+            <Link to={`/w/${workspaceId}/people/${reject.person_id}`}>Open the person</Link>
+          </div>
+        ) : null}
       </td>
       <td>
         <details className="sample">
           <summary>
-            Show sample <span className="visually-hidden">of the {reject.name ?? "rejected"} event</span>
+            Show sample <span className="visually-hidden">of the {subject}</span>
           </summary>
           <PropertyFacts properties={sample.properties ?? {}} masked={sample.masked ?? []} />
         </details>

@@ -13382,9 +13382,7 @@ email,b@example.com,
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_trait_no_segment_reads_archives_and_a_frozen_segment_reports_its_issues(
-        pool: PgPool,
-    ) {
+    async fn a_frozen_segment_reports_its_issues_on_the_read(pool: PgPool) {
         let router = app(&pool).await;
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
@@ -13412,11 +13410,9 @@ email,b@example.com,
         .unwrap();
 
         let frozen = call(&router, "GET", &seg_uri, None, who()).await;
-        let listed = call(&router, "GET", &segments_uri(&ws), None, who()).await;
 
         assert!(healthy.body.get("issues").is_none(), "{:?}", healthy.body);
         assert_eq!(frozen.body["issues"][0]["code"], "unknown_trait");
-        assert_eq!(listed.body[0]["issues"][0]["code"], "unknown_trait");
     }
 
     #[sqlx::test]

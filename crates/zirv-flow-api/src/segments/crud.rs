@@ -447,19 +447,10 @@ pub(crate) struct SegmentListItemBody {
     /// People entered minus people left over the last 7 days; null while the segment is less than
     /// 7 days old.
     change_7d: Option<i64>,
-    /// Present when the saved definition no longer passes against what the workspace defines
-    /// now; the members then stay as they were.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    issues: Option<Vec<SegmentIssueProblem>>,
 }
 
 impl SegmentListItemBody {
-    fn new(
-        segment: &Segment,
-        used_by_flows: i64,
-        change_7d: Option<i64>,
-        issues: Option<Vec<SegmentIssueProblem>>,
-    ) -> Self {
+    fn new(segment: &Segment, used_by_flows: i64, change_7d: Option<i64>) -> Self {
         let SegmentBody {
             id,
             name,
@@ -489,7 +480,6 @@ impl SegmentListItemBody {
             updated_at,
             used_by_flows,
             change_7d,
-            issues,
         }
     }
 }
@@ -526,31 +516,15 @@ pub(crate) async fn list(
     let now = state.clock.now(&mut tx).await?;
     let created: Vec<_> = segments.iter().map(|s| (s.id, s.created_at)).collect();
     let stats = zirv_flow_store::segment_list_stats(&mut tx, workspace.id, &created, now).await?;
-    let (catalog, storage) =
-        catalog_of(zirv_flow_store::segment_catalog(&mut tx, workspace.id).await?);
-    let mut items = Vec::with_capacity(segments.len());
-    for segment in &segments {
-        let stat = stats.get(&segment.id).copied().unwrap_or_default();
-        let issues = if segment.archived_at.is_some() {
-            None
-        } else {
-            zirv_flow_store::find_segment_version(
-                &mut *tx,
-                workspace.id,
-                segment.id,
-                segment.current_version,
-            )
-            .await?
-            .and_then(|version| current_issues(&version.definition, &catalog, &storage, now))
-        };
-        items.push(SegmentListItemBody::new(
-            segment,
-            stat.used_by_flows,
-            stat.change_7d,
-            issues,
-        ));
-    }
-    Ok(Json(items))
+    Ok(Json(
+        segments
+            .iter()
+            .map(|segment| {
+                let stat = stats.get(&segment.id).copied().unwrap_or_default();
+                SegmentListItemBody::new(segment, stat.used_by_flows, stat.change_7d)
+            })
+            .collect(),
+    ))
 }
 
 /// Creates a segment with its first version. The definition is checked against the workspace's

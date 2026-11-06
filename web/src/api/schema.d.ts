@@ -9621,11 +9621,6 @@ export interface components {
             /** Format: uuid */
             id: string;
             /**
-             * @description Present when the saved definition no longer passes against what the workspace defines
-             *     now; the members then stay as they were.
-             */
-            issues?: components["schemas"]["SegmentIssueProblem"][] | null;
-            /**
              * Format: int32
              * @description How many people are members now.
              */

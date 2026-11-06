@@ -40712,16 +40712,6 @@
             "type": "string",
             "format": "uuid"
           },
-          "issues": {
-            "type": [
-              "array",
-              "null"
-            ],
-            "items": {
-              "$ref": "#/components/schemas/SegmentIssueProblem"
-            },
-            "description": "Present when the saved definition no longer passes against what the workspace defines\nnow; the members then stay as they were."
-          },
           "member_count": {
             "type": "integer",
             "format": "int32",

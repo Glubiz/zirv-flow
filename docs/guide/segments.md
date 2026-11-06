@@ -84,7 +84,7 @@ members: `GET .../segments/{id}/members` and `.../history` read them, and
   detail names the segments. An archived segment or an older version does not block it. A
   segment whose saved rules no longer match the workspace for another reason (a deleted list, a
   removed event property) keeps its members as they were and carries `issues` on
-  `GET .../segments/{id}` and in the list; the segment page shows a banner.
+  `GET .../segments/{id}`; the segment page shows a banner.
 - **Preview.** `POST .../segments/preview` with `{definition, sample_size?}` (20 by default,
   100 at most) runs an unsaved definition on the primary and returns `{count, sample,
   data_age, compiled_at}`. It reads in one read-only snapshot and stops at 20 seconds with 503
