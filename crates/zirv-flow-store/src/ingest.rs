@@ -2421,13 +2421,11 @@ mod tests {
     async fn an_identify_that_drops_traits_applies_the_rest_and_leaves_one_reject_naming_them(
         pool: PgPool,
     ) {
-        use zirv_flow_core::people::TraitType;
-
         crate::decision_testing::checked(pool, |pool| async move {
             for singly in [false, true] {
                 let ws = workspace(&pool, if singly { "singly" } else { "batch" }).await;
-                register_trait(&pool, ws, "age", TraitType::Number).await;
-                register_trait(&pool, ws, "old", TraitType::String).await;
+                register_trait(&pool, ws, "age", zirv_flow_core::people::TraitType::Number).await;
+                register_trait(&pool, ws, "old", zirv_flow_core::people::TraitType::String).await;
                 crate::people::update_trait_definition(
                     &pool,
                     ws,
