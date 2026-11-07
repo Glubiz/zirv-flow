@@ -69,6 +69,11 @@ pub(crate) struct SyncRunKind;
 impl JobKind for SyncRunKind {
     const KIND: &'static str = SYNC_RUN_JOB_KIND;
 
+    /// A run commits its units on transactions of its own, fenced on the lease and the run, so
+    /// its job transaction takes no id while it reads (see `kafka.consume`). The two firings
+    /// write in the job transaction and lock the lease themselves first.
+    const LOCKS_LEASE: bool = false;
+
     async fn run(&self, ctx: &mut JobContext<'_>, payload: Value) -> Result<(), JobError> {
         run_sync(ctx, &payload, &Probe::default()).await
     }
@@ -171,6 +176,19 @@ pub(super) async fn run_sync(
     }
 }
 
+/// Locks the job row in the job's transaction, as a kind that does not set `LOCKS_LEASE` leaves
+/// to the handler that writes there: the two firings queue runs, and a late attempt that
+/// overlapped a new one must not. A run reads for long and commits on transactions of its own,
+/// so it never calls this.
+async fn hold_lease(ctx: &mut JobContext<'_>) -> Result<(), JobError> {
+    let (job, token) = (ctx.job_id(), ctx.lease_token());
+    if zirv_flow_store::lock_lease(ctx.conn(), job, token).await? {
+        Ok(())
+    } else {
+        Err(LEASE_LOST)
+    }
+}
+
 /// A schedule fired for a source: queues a run per eligible stream. It re-checks eligibility,
 /// since the source or its streams may have changed since the slot was enqueued. The runs and
 /// their jobs commit with this job, so a retried fan-out queues each run once.
@@ -179,6 +197,7 @@ async fn fan_out(
     workspace: WorkspaceId,
     source_id: Uuid,
 ) -> Result<(), JobError> {
+    hold_lease(ctx).await?;
     let fan = queue_runs_for_source(
         ctx.conn(),
         workspace,
@@ -225,6 +244,7 @@ async fn reconcile_firing(
     source_id: Uuid,
     stream_id: Uuid,
 ) -> Result<(), JobError> {
+    hold_lease(ctx).await?;
     let queued = queue_reconcile_run(
         ctx.conn(),
         workspace,
@@ -2452,6 +2472,28 @@ mod tests {
                 Some(env.source)
             )]
         );
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_schedule_firing_whose_lease_was_taken_over_queues_nothing(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = setup(&pool, json!({}), "full_refresh").await;
+            let mut fire = NewJobFor::new(&env);
+            let fired = fire.claim(&env).await;
+            sqlx::query("UPDATE jobs SET lease_token = gen_random_uuid() WHERE id = $1")
+                .bind(fired.id)
+                .execute(&pool)
+                .await
+                .unwrap();
+
+            let lost = attempt_as(&env, &fired, &Probe::default(), None, true).await;
+
+            assert_eq!(lost, Err(LEASE_LOST));
+            assert_eq!(env.count("SELECT count(*) FROM sync_runs").await, 0);
+            assert_eq!(env.count("SELECT count(*) FROM audit_log").await, 0);
         })
         .await;
     }

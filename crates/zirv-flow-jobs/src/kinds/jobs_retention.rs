@@ -17,6 +17,10 @@ pub(crate) struct JobsRetention;
 impl JobKind for JobsRetention {
     const KIND: &'static str = "jobs.retention";
 
+    /// Each batch commits on the pool and deleting twice is harmless, so the job transaction
+    /// takes no id until its audit write at the end (#397).
+    const LOCKS_LEASE: bool = false;
+
     async fn run(&self, ctx: &mut JobContext<'_>, _payload: Value) -> Result<(), JobError> {
         let Some(pool) = ctx.pool().cloned() else {
             return Err(JobError::new("the worker has no pool to retain jobs on"));

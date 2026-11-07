@@ -9,8 +9,8 @@
 use hashbrown::{HashMap, HashSet};
 
 use serde_json::{Map, Value, json};
+use sqlx::PgConnection;
 use sqlx::types::Json;
-use sqlx::{Connection, PgConnection};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
@@ -394,12 +394,20 @@ async fn judge_event_record(
     }
     let event_id = Uuid::now_v7();
 
-    // Only an accepted event creates or attaches anything. If a concurrent batch claims the
-    // `messageId` first, the person writes are rolled back with the savepoint.
-    let decisions_mark = batch.decisions.mark();
-    let mut savepoint = connection.begin().await.map_err(StoreError::query)?;
-    let resolution =
-        resolve_person(&mut savepoint, workspace, &identifiers, None, &record.trace).await?;
+    // Only an accepted event creates or attaches anything. No savepoint guards the person
+    // writes: a savepoint is a subtransaction, and a batch of more than 64 of them overflows
+    // every snapshot taken while it runs. A repeat is caught by the check above, also for a
+    // repeat earlier in this batch. Only a concurrent batch that commits the `messageId`
+    // between that check and the claim below gets here; it fails the batch as a retryable
+    // race, whose rollback takes the person writes with it, and the retry counts the repeat.
+    let resolution = resolve_person(
+        &mut *connection,
+        workspace,
+        &identifiers,
+        None,
+        &record.trace,
+    )
+    .await?;
     let person_id = resolution.person_id;
     if resolution.created {
         decide(
@@ -412,7 +420,7 @@ async fn judge_event_record(
         );
     }
     record_resolution(
-        &mut savepoint,
+        &mut *connection,
         &mut batch.decisions,
         workspace,
         &record.trace,
@@ -432,21 +440,13 @@ async fn judge_event_record(
         .bind(event_id)
         .bind(timing.occurred_at)
         .bind(person_id)
-        .execute(&mut *savepoint)
+        .execute(&mut *connection)
         .await
         .map_err(StoreError::query)?;
         if claimed.rows_affected() == 0 {
-            savepoint.rollback().await.map_err(StoreError::query)?;
-            batch.decisions.discard_after(decisions_mark);
-            let original = count_duplicate(connection, workspace, message_id)
-                .await?
-                .ok_or_else(StoreError::retryable_race)?;
-            return Ok(EventOutcome::Duplicate {
-                original_event_id: original,
-            });
+            return Err(StoreError::retryable_race());
         }
     }
-    savepoint.commit().await.map_err(StoreError::query)?;
 
     let mut properties = record.properties.clone();
     redact(&mut properties, &policy.redaction, workspace, key);
@@ -1075,6 +1075,72 @@ mod tests {
         assert_eq!(duplicates, 3);
         let decisions = count(&pool, "decision_records").await;
         assert_eq!(decisions, 1, "one person.created and no event.accepted");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn more_than_sixty_four_repeats_in_one_batch_are_each_counted_and_the_batch_commits(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let mut record = event("anything", json!({"a": 1}));
+        record.message_id = Some("m-1".to_owned());
+        let mut records = vec![record.clone()];
+        records.extend(std::iter::repeat_n(record, 70));
+
+        let outcomes = apply_event_batch(&pool, ws, &key(), &records)
+            .await
+            .unwrap();
+
+        let EventOutcome::Accepted { event_id, .. } = outcomes[0] else {
+            panic!("the first is not accepted");
+        };
+        assert!(outcomes[1..].iter().all(|outcome| *outcome
+            == EventOutcome::Duplicate {
+                original_event_id: event_id
+            }));
+        assert_eq!(count(&pool, "events").await, 1);
+        let duplicates: i32 = sqlx::query_scalar("SELECT duplicates FROM event_dedupe")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(duplicates, 70);
+    }
+
+    /// `pg_stat_get_backend_subxact` (PostgreSQL 16, by backend id) reports the open subtransactions of a
+    /// backend that hold an id, and whether they overflowed the 64 a snapshot caches.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_batch_of_more_than_sixty_four_events_opens_no_subtransaction(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let records: Vec<EventRecord> = (0..100)
+            .map(|index| {
+                let mut record = event("anything", json!({"a": index}));
+                record.identifiers = vec![("email".to_owned(), format!("p{index}@example.com"))];
+                record.message_id = Some(format!("m-{index}"));
+                record
+            })
+            .collect();
+        let mut tx = begin(&pool).await.unwrap();
+
+        let outcomes = apply_event_records(&mut tx, ws, &key(), &records)
+            .await
+            .unwrap();
+
+        assert!(
+            outcomes
+                .iter()
+                .all(|outcome| matches!(outcome, EventOutcome::Accepted { .. }))
+        );
+        let (subxacts, overflowed): (i32, bool) = sqlx::query_as(
+            "SELECT s.subxact_count, s.subxact_overflowed \n             FROM pg_stat_get_backend_idset() AS id, pg_stat_get_backend_pid(id) AS pid, \n                  pg_stat_get_backend_subxact(id) AS s \n             WHERE pid = pg_backend_pid()",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        assert_eq!((subxacts, overflowed), (0, false));
+        commit(tx).await.unwrap();
+        assert_eq!(count(&pool, "events").await, 100);
     }
 
     #[sqlx::test]

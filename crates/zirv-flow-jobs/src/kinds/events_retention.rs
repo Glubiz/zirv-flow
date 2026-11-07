@@ -18,6 +18,10 @@ pub(crate) struct EventsRetention;
 impl JobKind for EventsRetention {
     const KIND: &'static str = "events.retention";
 
+    /// Each batch commits on the pool and deleting twice is harmless, so the job transaction
+    /// takes no id until its audit write at the end (#397).
+    const LOCKS_LEASE: bool = false;
+
     async fn run(&self, ctx: &mut JobContext<'_>, _payload: Value) -> Result<(), JobError> {
         let Some(pool) = ctx.pool() else {
             return Err(JobError::new("the worker has no pool to retain events on"));
