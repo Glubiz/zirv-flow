@@ -20,17 +20,11 @@ export function UtmSection({ workspaceId, workspaceSlug, stored, canManage, onSa
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const domains = useResource(
-    () => unwrap(client.GET("/api/v1/workspaces/{ws}/sending-domains", { params: { path: { ws: workspaceId } } })),
-    [workspaceId],
-  );
   const problems = checkUtm(draft);
   const dirty = !sameUtm(draft, original);
   // A refusal shows as soon as the draft differs from what is stored; the server says the same.
   const showProblems = dirty;
   const readOnly = !canManage;
-  const suggestions =
-    domains.status === "ready" ? domains.data.filter((entry) => entry.status === "verified" && !draft.domains.includes(entry.domain)) : [];
 
   function edit(change: Partial<UtmSettings>) {
     setNotice(null);
@@ -102,16 +96,8 @@ export function UtmSection({ workspaceId, workspaceSlug, stored, canManage, onSa
             disabled={readOnly}
             error={showProblems ? problems.domains : undefined}
           />
-          {readOnly ? null : domains.status === "loading" ? <LoadingState label="Loading the verified sending domains" /> : null}
-          {readOnly || domains.status !== "error" ? null : <ErrorState {...describeError(domains.error)} onRetry={domains.reload} />}
-          {readOnly || suggestions.length === 0 ? null : (
-            <div className="row" role="group" aria-label="Verified sending domains">
-              {suggestions.map((entry) => (
-                <Button key={entry.id} onClick={() => setDomains([...draft.domains, entry.domain].join("\n"))}>
-                  Add {entry.domain}
-                </Button>
-              ))}
-            </div>
+          {readOnly ? null : (
+            <VerifiedDomains workspaceId={workspaceId} chosen={draft.domains} onAdd={(domain) => setDomains([...draft.domains, domain].join("\n"))} />
           )}
           <div className="stack">
             <span className="field-label">Example link</span>
@@ -145,5 +131,26 @@ export function UtmSection({ workspaceId, workspaceSlug, stored, canManage, onSa
         </div>
       )}
     </form>
+  );
+}
+
+/** The verified sending domains to add with one click. Only people who can edit the section read them: the list is for admins. */
+function VerifiedDomains({ workspaceId, chosen, onAdd }: { workspaceId: string; chosen: string[]; onAdd: (domain: string) => void }) {
+  const domains = useResource(
+    () => unwrap(client.GET("/api/v1/workspaces/{ws}/sending-domains", { params: { path: { ws: workspaceId } } })),
+    [workspaceId],
+  );
+  if (domains.status === "loading") return <LoadingState label="Loading the verified sending domains" />;
+  if (domains.status === "error") return <ErrorState {...describeError(domains.error)} onRetry={domains.reload} />;
+  const suggestions = domains.data.filter((entry) => entry.status === "verified" && !chosen.includes(entry.domain));
+  if (suggestions.length === 0) return null;
+  return (
+    <div className="row" role="group" aria-label="Verified sending domains">
+      {suggestions.map((entry) => (
+        <Button key={entry.id} onClick={() => onAdd(entry.domain)}>
+          Add {entry.domain}
+        </Button>
+      ))}
+    </div>
   );
 }
