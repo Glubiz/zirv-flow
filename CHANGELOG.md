@@ -15,3 +15,13 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.259.0 (2026-11-07)
+
+### Performance
+
+- index event_dedupe by person (investigation K)
+
+### Other
+
+- sim: add the x5 profile and generators that can drive it
+
