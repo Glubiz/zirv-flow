@@ -5,10 +5,10 @@
 //! marked for segments) and enqueues the next batch on the same trace until none is left. A run
 //! that fails is retried and finds only the records not yet removed.
 
-use serde_json::{Value, json};
+use serde_json::Value;
 use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
-use zirv_flow_store::{NewJob, SOURCE_PURGE_JOB_KIND};
+use zirv_flow_store::{NewJob, SOURCE_PURGE_JOB_KIND, source_purge_job};
 
 use crate::{JobContext, JobError, JobKind};
 
@@ -42,15 +42,16 @@ impl JobKind for SourcesPurge {
 }
 
 fn follow_up(workspace: WorkspaceId, source: Uuid, trace: &zirv_flow_core::TraceContext) -> NewJob {
-    let mut next = NewJob::new(SOURCE_PURGE_JOB_KIND, trace.clone());
-    next.workspace_id = Some(workspace);
-    next.payload = json!({ "workspace_id": workspace, "source_id": source });
+    let mut next = source_purge_job(workspace, source, trace);
+    next.unique_key = None;
     next
 }
 
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
+
+    use serde_json::json;
 
     use sqlx::PgPool;
     use time::OffsetDateTime;

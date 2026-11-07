@@ -317,8 +317,7 @@ pub use snippets::{
     snippet_template_counts, snippet_where_used, update_snippet,
 };
 pub use sources::{
-    DELETE_BY_SOURCE_DELETE as SOURCE_PURGE_DELETE_REASON, DiscoveredStream, NewOAuthState,
-    NewSource, OAuthState, PURGE_BATCH as SOURCE_PURGE_BATCH,
+    DiscoveredStream, NewOAuthState, NewSource, OAuthState,
     PURGE_JOB_KIND as SOURCE_PURGE_JOB_KIND, PurgeBatchOutcome as SourcePurgeOutcome, RefreshError,
     Source, SourceUpdate, StoredTokens, Stream, StreamSettings, TokenError, clear_tokens,
     configure_stream, create_oauth_state, create_source, delete_expired_oauth_states,
