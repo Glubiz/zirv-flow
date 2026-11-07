@@ -38834,7 +38834,7 @@
           },
           "reason": {
             "type": "string",
-            "description": "`missing_required`, `wrong_type`, `not_in_enum` or `unplanned_property`."
+            "description": "`missing_required`, `wrong_type`, `not_in_enum` or `unplanned_property`; a `traits_dropped`\nreject also carries `invalid_key`, `archived_key`, `too_long` and `not_inferable`."
           }
         }
       },

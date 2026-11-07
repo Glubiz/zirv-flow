@@ -114,6 +114,15 @@ pub enum DropReason {
 }
 
 impl DropReason {
+    /// Every variant, for tests that must cover them all.
+    pub const ALL: [Self; 5] = [
+        Self::InvalidKey,
+        Self::Archived,
+        Self::WrongType,
+        Self::TooLong,
+        Self::NotInferable,
+    ];
+
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::InvalidKey => "invalid_key",
@@ -340,5 +349,19 @@ mod tests {
             Err(DropReason::NotInferable)
         );
         assert_eq!(infer_type(&Value::Null), Err(DropReason::NotInferable));
+    }
+
+    #[test]
+    fn all_lists_every_drop_reason_once() {
+        let position = |reason: DropReason| match reason {
+            DropReason::InvalidKey => 0,
+            DropReason::Archived => 1,
+            DropReason::WrongType => 2,
+            DropReason::TooLong => 3,
+            DropReason::NotInferable => 4,
+        };
+        for (index, reason) in DropReason::ALL.into_iter().enumerate() {
+            assert_eq!(position(reason), index, "{}", reason.as_str());
+        }
     }
 }

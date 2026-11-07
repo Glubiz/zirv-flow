@@ -4,6 +4,8 @@
 //! registered at, so an event that races the wait's timeout leaves one winner: whichever commits
 //! first moves the version, and the other job finds it stale.
 
+use std::collections::BTreeMap;
+
 use serde_json::Value;
 use sqlx::PgConnection;
 use sqlx::prelude::FromRow;
@@ -14,7 +16,7 @@ use zirv_flow_core::{Cause, CauseKind, TraceContext, TraceId, WorkspaceId};
 use super::control::enqueue_event_settles;
 use super::runtime::{StepJobInput, StepJobPayload};
 use super::triggers::enqueue_event_enrolls;
-use crate::{StoreError, enqueue};
+use crate::{StoreError, enqueue, find_enrollment};
 
 /// An accepted event, as far as the waits care.
 #[derive(Clone, Debug)]
@@ -105,6 +107,21 @@ pub struct StoredEvent {
     pub properties: Value,
 }
 
+impl StoredEvent {
+    /// The properties as a render context's `event`: empty when they are not an object.
+    pub fn property_map(&self) -> BTreeMap<String, Value> {
+        self.properties
+            .as_object()
+            .map(|properties| {
+                properties
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
 /// Reads one event of a person.
 pub async fn find_event_of_person(
     connection: &mut PgConnection,
@@ -119,6 +136,45 @@ pub async fn find_event_of_person(
     .bind(workspace.as_uuid())
     .bind(person)
     .bind(event_id)
+    .fetch_optional(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(row.map(|(name, occurred_at, properties)| StoredEvent {
+        name,
+        occurred_at,
+        properties,
+    }))
+}
+
+/// The event that started `enrollment`, read at send time: the event its cause names, if it is an
+/// event of the enrollment's own person (or of one merged into them). None for an enrollment
+/// another trigger started, one that is gone, and an event that was deleted or expired.
+pub async fn find_trigger_event(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    enrollment: Uuid,
+) -> Result<Option<StoredEvent>, StoreError> {
+    let Some(found) = find_enrollment(&mut *connection, workspace, enrollment).await? else {
+        return Ok(None);
+    };
+    let cause = found.trace.cause;
+    if cause.kind != CauseKind::Event {
+        return Ok(None);
+    }
+    let Ok(event) = cause.id.parse::<Uuid>() else {
+        return Ok(None);
+    };
+    // The event may still sit on a person merged into the enrollment's person until the merge
+    // rewrite has moved it, so it counts when its person resolves to the enrollment's.
+    let row: Option<(String, OffsetDateTime, Value)> = sqlx::query_as(
+        "SELECT e.name, e.occurred_at, e.properties FROM events e \
+         WHERE e.workspace_id = $1 AND e.id = $2 \
+           AND (SELECT COALESCE(p.merged_into, p.id) FROM people p \
+                WHERE p.id = e.person_id AND p.workspace_id = $1) = $3",
+    )
+    .bind(workspace.as_uuid())
+    .bind(event)
+    .bind(found.person_id)
     .fetch_optional(connection)
     .await
     .map_err(StoreError::query)?;
@@ -258,5 +314,124 @@ mod tests {
             .unwrap();
 
         assert_eq!(enqueued, 0);
+    }
+
+    #[test]
+    fn an_event_reads_into_a_property_map_and_a_non_object_into_an_empty_one() {
+        let event = |properties| StoredEvent {
+            name: "order".into(),
+            occurred_at: OffsetDateTime::UNIX_EPOCH,
+            properties,
+        };
+
+        assert_eq!(
+            event(json!({"n": 1})).property_map().get("n"),
+            Some(&json!(1))
+        );
+        assert!(event(json!([1])).property_map().is_empty());
+    }
+
+    async fn event_of(pool: &PgPool, ws: WorkspaceId, person: Uuid) -> Uuid {
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO events (id, workspace_id, person_id, name, occurred_at, received_at, \
+                properties, source, trace_id, validation_state) \
+             VALUES ($1, $2, $3, 'order', now(), now(), '{\"n\": 1}', 'api', gen_random_uuid(), \
+                'valid')",
+        )
+        .bind(id)
+        .bind(ws.as_uuid())
+        .bind(person)
+        .execute(pool)
+        .await
+        .unwrap();
+        id
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_trigger_event_is_the_events_cause_of_the_enrollments_own_person(pool: PgPool) {
+        let ws = workspace(&pool, "trigger").await;
+        let flow = create(&pool, ws, "Flow").await;
+        publish(&pool, ws, flow.id).await.unwrap();
+        let (enrollment, person) = waiting(&pool, ws, flow.id, "order").await;
+        let (_, other) = waiting(&pool, ws, flow.id, "order").await;
+        let own = event_of(&pool, ws, person).await;
+        let foreign = event_of(&pool, ws, other).await;
+        let mut connection = pool.acquire().await.unwrap();
+        let cause = |id: String| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query(
+                    "UPDATE enrollments SET cause_kind = 'event', cause_id = $2 WHERE id = $1",
+                )
+                .bind(enrollment)
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+        };
+
+        let api = find_trigger_event(&mut connection, ws, enrollment)
+            .await
+            .unwrap();
+        cause(own.to_string()).await;
+        let found = find_trigger_event(&mut connection, ws, enrollment)
+            .await
+            .unwrap();
+        cause(foreign.to_string()).await;
+        let wrong_person = find_trigger_event(&mut connection, ws, enrollment)
+            .await
+            .unwrap();
+        cause("not-a-uuid".into()).await;
+        let malformed = find_trigger_event(&mut connection, ws, enrollment)
+            .await
+            .unwrap();
+
+        assert_eq!(api, None, "an api enrollment has no trigger event");
+        assert_eq!(found.map(|event| event.name).as_deref(), Some("order"));
+        assert_eq!(wrong_person, None);
+        assert_eq!(malformed, None);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_event_still_on_a_person_merged_into_the_enrollments_person_is_read(pool: PgPool) {
+        let ws = workspace(&pool, "merged-trigger").await;
+        let flow = create(&pool, ws, "Flow").await;
+        publish(&pool, ws, flow.id).await.unwrap();
+        let (enrollment, survivor) = waiting(&pool, ws, flow.id, "order").await;
+        let (_, merged) = waiting(&pool, ws, flow.id, "order").await;
+        let (_, stranger) = waiting(&pool, ws, flow.id, "order").await;
+        let on_merged = event_of(&pool, ws, merged).await;
+        let on_stranger = event_of(&pool, ws, stranger).await;
+        sqlx::query("UPDATE people SET merged_into = $1 WHERE id = $2")
+            .bind(survivor)
+            .bind(merged)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        let mut read = async |event: Uuid| {
+            sqlx::query("UPDATE enrollments SET cause_kind = 'event', cause_id = $2 WHERE id = $1")
+                .bind(enrollment)
+                .bind(event.to_string())
+                .execute(&pool)
+                .await
+                .unwrap();
+            find_trigger_event(&mut connection, ws, enrollment)
+                .await
+                .unwrap()
+        };
+
+        let merged_event = read(on_merged).await;
+        let strangers_event = read(on_stranger).await;
+
+        assert_eq!(
+            merged_event.map(|event| event.name).as_deref(),
+            Some("order")
+        );
+        assert_eq!(strangers_event, None);
     }
 }
