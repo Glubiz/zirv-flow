@@ -10,6 +10,21 @@ RUN npm ci
 COPY web/ ./
 RUN npm run build
 
+# cargo-chef builds the dependency graph once from a recipe that carries no
+# workspace versions or sources, so the compiled dependencies stay in a cached
+# layer across the version bump that almost every code change makes.
+FROM --platform=$BUILDPLATFORM rust:1.98-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS chef
+
+ARG CARGO_CHEF_VERSION=0.1.78
+RUN cargo install cargo-chef --version "$CARGO_CHEF_VERSION" --locked
+
+FROM --platform=$BUILDPLATFORM rust:1.98-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS planner
+
+COPY --from=chef /usr/local/cargo/bin/cargo-chef /usr/local/cargo/bin/cargo-chef
+WORKDIR /src
+COPY . .
+RUN cargo chef prepare --recipe-path /recipe.json
+
 # The builder always runs on the build machine's own architecture and
 # cross-compiles with zig as the C compiler and linker, so a multi-arch image
 # never runs rustc under emulation.
@@ -66,23 +81,36 @@ RUN set -eux; \
     echo "$triple" > /triple; \
     rustup target add "$triple"
 
+COPY --from=chef /usr/local/cargo/bin/cargo-chef /usr/local/cargo/bin/cargo-chef
+
+# The cross-compile settings in one place: the dependency layer and the final
+# build must match, or the final build compiles the dependencies again.
+RUN cat > /usr/local/bin/zf-cargo <<'SCRIPT' && chmod +x /usr/local/bin/zf-cargo
+#!/bin/sh
+triple="$(cat /triple)"
+var="$(echo "$triple" | tr 'a-z-' 'A-Z_')"
+export "CARGO_TARGET_${var}_LINKER=/usr/local/bin/cc-$triple"
+export "CC_$(echo "$triple" | tr '-' '_')=/usr/local/bin/cc-$triple"
+export RUSTFLAGS="-C link-self-contained=no"
+exec cargo "$@"
+SCRIPT
+
 WORKDIR /src
+
+# Compiles only the dependencies, into this layer. No cache mounts here: BuildKit
+# cache mounts do not persist between CI runners, and a mounted target/ or
+# registry would keep the result out of the layer that the layer cache stores.
+COPY --from=planner /recipe.json /recipe.json
+RUN set -eux; \
+    triple="$(cat /triple)"; \
+    zf-cargo chef cook --release --locked --target "$triple" -p zirv-flow --recipe-path /recipe.json
+
 COPY . .
 COPY --from=web /web/dist /src/web/dist
 
-# A multi-platform build runs this step once per architecture at the same time
-# on the build platform; locking the shared caches keeps the two cargo runs from
-# unpacking the same crate into the registry at once.
-RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,target=/src/target,sharing=locked \
-    set -eux; \
+RUN set -eux; \
     triple="$(cat /triple)"; \
-    var="$(echo "$triple" | tr 'a-z-' 'A-Z_')"; \
-    export "CARGO_TARGET_${var}_LINKER=/usr/local/bin/cc-$triple"; \
-    export "CC_$(echo "$triple" | tr '-' '_')=/usr/local/bin/cc-$triple"; \
-    export RUSTFLAGS="-C link-self-contained=no"; \
-    cargo build --release --locked --target "$triple" -p zirv-flow; \
+    zf-cargo build --release --locked --target "$triple" -p zirv-flow; \
     install -D "target/$triple/release/zirv-flow" /out/zirv-flow
 
 # An empty directory owned by the non-root user, so a named volume mounted

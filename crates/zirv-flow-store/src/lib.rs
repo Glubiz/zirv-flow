@@ -697,6 +697,24 @@ impl Error for StoreError {
 /// Other crates reach it through the store's `test-support` feature.
 #[cfg(any(test, feature = "test-support"))]
 pub async fn reset_database(pool: &sqlx::PgPool) {
+    // Table by table first: one DROP SCHEMA would lock every object in a single transaction, and a
+    // few concurrent ones exhaust a default server's shared lock table.
+    let tables: Vec<String> = sqlx::query_scalar(
+        "SELECT quote_ident(c.relname) FROM pg_class c \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND NOT c.relispartition",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    for table in tables {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP TABLE IF EXISTS public.{table} CASCADE"
+        )))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
     for statement in ["DROP SCHEMA public CASCADE", "CREATE SCHEMA public"] {
         sqlx::query(statement).execute(pool).await.unwrap();
     }
