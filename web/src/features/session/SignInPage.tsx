@@ -1,4 +1,4 @@
-import { useState, type SyntheticEvent } from "react";
+import { useEffect, useRef, useState, type SyntheticEvent } from "react";
 import { useLocation, useNavigate } from "react-router";
 
 import { client, describeError, unwrap, useResource } from "../../api";
@@ -9,6 +9,7 @@ interface FromState {
   from?: string;
 }
 
+const ERROR_ID = "sign-in-error";
 const BOTH_METHODS = { local: true, oidc: true };
 
 export function SignInPage() {
@@ -19,9 +20,16 @@ export function SignInPage() {
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<ReturnType<typeof describeError> | null>(null);
+  const emailRef = useRef<HTMLInputElement>(null);
   const version = useResource(() => unwrap(client.GET("/api/v1/version")), []);
   const methodsResource = useResource(() => unwrap(client.GET("/api/v1/session/methods")), []);
 
+  useEffect(() => {
+    if (failure) emailRef.current?.focus();
+  }, [failure]);
+
+  const invalid = failure ? true : undefined;
+  const describedBy = failure ? ERROR_ID : undefined;
   const from = (location.state as FromState | null)?.from ?? "/";
   const methods = methodsResource.status === "ready" ? methodsResource.data : BOTH_METHODS;
   const settled = methodsResource.status !== "loading";
@@ -66,6 +74,9 @@ export function SignInPage() {
               label="Email"
               type="email"
               autoComplete="username"
+              ref={emailRef}
+              aria-invalid={invalid}
+              aria-describedby={describedBy}
               value={email}
               onChange={(event) => setEmail(event.target.value)}
               required
@@ -74,11 +85,13 @@ export function SignInPage() {
               label="Password"
               type="password"
               autoComplete="current-password"
+              aria-invalid={invalid}
+              aria-describedby={describedBy}
               value={password}
               onChange={(event) => setPassword(event.target.value)}
               required
             />
-            {failure ? <InlineError {...failure} /> : null}
+            {failure ? <InlineError {...failure} id={ERROR_ID} /> : null}
             <Button type="submit" variant="primary" large disabled={busy}>
               {busy ? "Signing in" : "Sign in"}
             </Button>

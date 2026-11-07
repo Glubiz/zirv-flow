@@ -5,7 +5,7 @@ import { useWorkspaceAccess } from "../features/members";
 import { AccountMenu, useSignedInUser } from "../features/session";
 import { useCurrentWorkspace, WorkspaceSwitcher, type Workspace } from "../features/workspaces";
 import { Brand, Button, MenuButton, Sheet } from "../ui";
-import { destinationUrl, isSettingsPath, matchesDestination, navigationGroups, NAVIGATION, visibleDestinations, type Destination } from "./navigation";
+import { destinationUrl, isSettingsPath, matchesDestination, navigationGroups, pageTitle, visibleDestinations, type Destination } from "./navigation";
 import { NavigationIcon } from "./NavigationIcon";
 import { PagePalette } from "./PagePalette";
 import { useSidebarFold } from "./useSidebarFold";
@@ -37,8 +37,7 @@ function ShellLayout({ current, destinations, canSearchPeople }: { current: Work
   if (drawerPath !== null && !drawerOpen) setDrawerPath(null);
 
   useEffect(() => {
-    const page = [...NAVIGATION].sort((a, b) => b.route.length - a.route.length).find((item) => matchesDestination(item, location.pathname, base));
-    document.title = `${page?.label ?? "zirv flow"} · zirv flow`;
+    document.title = pageTitle(location.pathname, base);
   }, [location.pathname, base]);
 
   useEffect(() => {

@@ -127,7 +127,7 @@ describe("people routes", () => {
     });
     renderApp("/w/ws1/people/p1");
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("no such resource");
+    expect(await screen.findByText("This person does not exist")).toBeInTheDocument();
     expect(within(screen.getByRole("navigation", { name: "Breadcrumb" })).getByRole("link", { name: "People" })).toHaveAttribute("href", "/w/ws1/people");
   });
 });
