@@ -15,3 +15,17 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.258.0 (2026-11-07)
+
+### Fixes
+
+- purge a deleted source's records from people in the background (#561)
+
+### Documentation
+
+- a deleted source's events stay as history (#561)
+
+### Chores
+
+- simplify the #561 purge
+
