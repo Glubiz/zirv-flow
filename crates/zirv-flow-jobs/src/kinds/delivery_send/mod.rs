@@ -4917,6 +4917,25 @@ mod tests {
         zirv_flow_store::decision_testing::checked(pool, |pool| async move {
             let (env, messages) = concurrent_sends(pool, 16, zirv_flow_store::CapMode::Defer).await;
 
+            // As in skip mode, the cap winner can wait on the rate limit under load. Run only
+            // its copy: a rate wait keeps `first_wait`, and the cap deferrals clear it.
+            while let Some((_, _, run_at, _)) = env
+                .send_jobs()
+                .await
+                .into_iter()
+                .find(|job| !job.1["first_wait"].is_null())
+            {
+                env.clock.set(run_at);
+                sqlx::query(
+                    "UPDATE jobs SET run_at = now() WHERE kind = 'delivery.send' \
+                     AND payload ->> 'first_wait' IS NOT NULL",
+                )
+                .execute(&env.pool)
+                .await
+                .unwrap();
+                env.attempt().await.unwrap();
+            }
+
             let mut statuses = Vec::new();
             for id in &messages {
                 statuses.push(env.message(*id).await.status);
