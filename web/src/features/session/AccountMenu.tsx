@@ -29,6 +29,7 @@ export function AccountMenu() {
     <>
       <MenuButton
         label="Account menu"
+        visibleText={initials(user.email)}
         buttonClassName="avatar-button"
         buttonContent={initials(user.email)}
         heading={user.email}

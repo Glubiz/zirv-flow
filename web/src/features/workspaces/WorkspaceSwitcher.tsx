@@ -44,6 +44,7 @@ export function WorkspaceSwitcher({ compact = false }: { compact?: boolean }) {
   return (
     <MenuButton
       label="Switch workspace"
+      visibleText={compact ? (current?.name.slice(0, 1) ?? "W") : (current?.name ?? "No workspace")}
       placement={compact ? "beside" : "below-start"}
       buttonClassName="pill-button"
       buttonContent={

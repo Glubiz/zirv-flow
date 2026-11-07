@@ -88,11 +88,11 @@ function ShellLayout({ current, destinations, canSearchPeople }: { current: Work
     return (
       <nav className={rail ? "sidebar-content sidebar-rail" : "sidebar-content"} aria-label={settings ? "Settings" : "Main"}>
         <div className="sidebar-brand">
-          <Link to="/w" className="brand-link" aria-label="Workspaces" aria-current={location.pathname === "/w" ? "page" : undefined} onClick={() => setDrawerPath(null)}><Brand /></Link>
+          <Link to="/w" className="brand-link" aria-label="zirv flow, workspaces" aria-current={location.pathname === "/w" ? "page" : undefined} onClick={() => setDrawerPath(null)}><Brand /></Link>
           {!rail ? <Button className="sidebar-fold" aria-label="Fold the menu" onClick={toggle}><NavigationIcon name="Fold" /></Button> : null}
         </div>
         <WorkspaceSwitcher compact={rail} />
-        <Button className="sidebar-search" aria-label="Search pages" aria-keyshortcuts="Meta+K Control+K" onClick={search}>
+        <Button className="sidebar-search" aria-label={rail ? "Search pages" : undefined} aria-keyshortcuts="Meta+K Control+K" onClick={search}>
           {rail ? <NavigationIcon name="Search" /> : <>Search <kbd>⌘K</kbd></>}
         </Button>
         <div className="sidebar-nav">
