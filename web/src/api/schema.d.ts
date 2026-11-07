@@ -3438,7 +3438,8 @@ export interface paths {
         post?: never;
         /**
          * Deletes a source with its streams and its stored credential. Workspace admins only. Audited
-         *     as `source.deleted`.
+         *     as `source.deleted`. The source's records are removed from people in the background: the
+         *     request enqueues the purge and answers at once, and trait and segment updates follow.
          */
         delete: operations["delete_source"];
         options?: never;

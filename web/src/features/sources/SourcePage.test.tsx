@@ -298,6 +298,7 @@ describe("a source", () => {
     await user.click(await screen.findByRole("button", { name: "Delete" }));
     const dialog = within(screen.getByRole("dialog", { name: "Delete CRM?" }));
     expect(calls.some((call) => call.method === "DELETE")).toBe(false);
+    expect(dialog.getByText(/data leaves people's profiles and segments in the background/)).toBeInTheDocument();
     await user.click(dialog.getByRole("button", { name: "Delete CRM" }));
 
     expect(await screen.findByText("Now at /w/ws1/sources")).toBeInTheDocument();

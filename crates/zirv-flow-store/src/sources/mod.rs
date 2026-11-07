@@ -4,6 +4,7 @@
 
 mod crud;
 mod oauth;
+mod purge;
 mod schedule;
 mod streams;
 
@@ -15,6 +16,10 @@ pub use oauth::{
     NewOAuthState, OAuthState, RefreshError, StoredTokens, TokenError, clear_tokens,
     create_oauth_state, delete_expired_oauth_states, link_tokens, load_tokens, refresh_serialized,
     take_oauth_state,
+};
+pub use purge::{
+    DELETE_BY_SOURCE_DELETE, PURGE_BATCH, PURGE_JOB_KIND, PurgeBatchOutcome, purge_job,
+    purge_source_batch,
 };
 pub use schedule::{sync_reconcile_schedule, sync_schedule, sync_source_reconcile_schedules};
 pub use streams::{

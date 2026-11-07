@@ -431,7 +431,7 @@ pub(crate) async fn update_source(
 
 /// Deletes a source with its streams and its token secret, and audits `source.deleted` (and
 /// `secret.deleted` for the token secret), all in one transaction. The workspace credential it
-/// used stays.
+/// used stays. Enqueues the purge of the source's records in the same transaction.
 pub(crate) async fn delete_source(
     pool: &PgPool,
     context: &Context,
@@ -454,6 +454,11 @@ pub(crate) async fn delete_source(
         "source.deleted",
         Some(("source", source.id)),
         json!({"kind": source.kind, }),
+    )
+    .await?;
+    zirv_flow_store::enqueue(
+        &mut *tx,
+        &zirv_flow_store::source_purge_job(workspace, source.id, &crate::trace::request_trace()),
     )
     .await?;
     if let Some(secret) = source.oauth_secret_id {
@@ -607,7 +612,8 @@ pub(crate) async fn update(
 }
 
 /// Deletes a source with its streams and its stored credential. Workspace admins only. Audited
-/// as `source.deleted`.
+/// as `source.deleted`. The source's records are removed from people in the background: the
+/// request enqueues the purge and answers at once, and trait and segment updates follow.
 #[utoipa::path(
     delete,
     operation_id = "delete_source",

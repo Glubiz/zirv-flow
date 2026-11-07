@@ -56,7 +56,12 @@ with ids, names and field names, never a value.
 `credential_id`, and shows the id and only the names of the fields the credential holds, never a
 value. To use another credential, send a new `credential_id` with `PATCH .../sources/{id}`; to change
 a secret, rotate the credential. Deleting a source deletes its streams and its account tokens, and
-leaves the credential. A server started without a master key answers 503 where a credential has to
+leaves the credential. It also removes the source's data from people: its records are retracted in
+the background, batch by batch, exactly as if the source had reported each one deleted. Each person
+is recomputed from the records that remain, so people and other sources' contributions stay,
+traits only this source brought and identifiers only it held go, and segments and flows react as
+the traits change. The request answers at once; trait and segment updates finish shortly after, in
+proportion to how many records the source held. A server started without a master key answers 503 where a credential has to
 be sealed or opened. A source that calls out does so through the guarded HTTP client and the egress policy (see Egress).
 
 **API.** Under `/api/v1/workspaces/{ws}/sources`: `GET` and `POST`; `GET`, `PATCH` and `DELETE`
@@ -197,7 +202,7 @@ deletions. A run that fails, is cancelled, or stops on the reject threshold swee
 an incremental run never sweeps, since it cannot tell a dropped record from an unchanged one.
 The sweep runs inside the run, before it is `succeeded`; a crash mid-sweep resumes on the next
 attempt and removes each record once. Every removal appends a `sync.record` decision with
-outcome `deleted` (reason `source`, `signal` or `swept`; it names the record, never a value)
+outcome `deleted` (reason `source`, `signal`, `swept` or `source_deleted`; it names the record, never a value)
 next to the store's `contribution.removed`, and removing a record deletes the events that were
 linked to it (the `source_record_id` field of `events`) in the same transaction. The event a mapping yields for a
 record is linked to that record's ledger row, so a sweep, a delete signal, a connector delete or a

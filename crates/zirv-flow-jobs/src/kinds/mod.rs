@@ -33,6 +33,7 @@ mod privacy_export;
 mod segment_reevaluate;
 pub(crate) mod segment_refresh;
 mod sending_domain_verify;
+mod sources_purge;
 mod summary_rollup;
 mod sync_run;
 mod sync_tokens;
@@ -76,6 +77,7 @@ pub(crate) static ALL: &[&dyn ErasedKind] = &[
     &import_dry_run::ImportDryRun,
     &import_run::ImportRun,
     &sync_run::SyncRunKind,
+    &sources_purge::SourcesPurge,
     &kafka_consume::KafkaConsume,
     &segment_refresh::SegmentRefresh,
     &segment_reevaluate::SegmentReevaluate,

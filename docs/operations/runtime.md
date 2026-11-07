@@ -89,6 +89,7 @@ does not exist.
 | `zirv_flow_sync_runs_total` | counter | `outcome` | Ended sync runs |
 | `zirv_flow_sync_run_duration_seconds` | histogram | none | Sync run duration |
 | `zirv_flow_sync_records_total` | counter | `outcome` | Records of committed sync batches |
+| `zirv_flow_source_purge_records_total` | counter | none | Records removed by the purge of a deleted source |
 | `zirv_flow_sync_events_total` | counter | `outcome` | Events of committed sync batches |
 | `zirv_flow_stream_freshness_seconds` | gauge | `workspace`, `stream` | Age of a stream's data |
 | `zirv_flow_stream_state` | gauge | `workspace`, `stream` | 0 fresh, 1 stale, 2 failing |

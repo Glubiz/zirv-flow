@@ -720,6 +720,32 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn deleting_a_source_answers_204_and_enqueues_exactly_one_purge(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let id = fx.create_ok("CRM", MARKER, 1).await;
+        let purges = || async {
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM jobs WHERE kind = 'sources.purge'")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        };
+
+        let deleted = fx.as_admin("DELETE", &format!("/sources/{id}"), None).await;
+        let again = fx.as_admin("DELETE", &format!("/sources/{id}"), None).await;
+
+        assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+        assert_eq!(again.status, StatusCode::NOT_FOUND);
+        assert_eq!(purges().await, 1, "a second delete enqueues nothing");
+        let payload: Value =
+            sqlx::query_scalar("SELECT payload FROM jobs WHERE kind = 'sources.purge'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(payload["source_id"], json!(id));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn every_mutation_is_audited_without_a_credential_value(pool: PgPool) {
         let fx = fixture(&pool).await;
         let id = fx.create_ok("CRM", MARKER, 1).await;

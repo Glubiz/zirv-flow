@@ -212,7 +212,8 @@ function Detail({ workspaceId, hook, stream, canManage, onChanged }: DetailProps
         <Dialog title={`Delete ${hook.name}?`} onClose={() => setConfirmDelete(false)}>
           <p className="muted">
             Deleting <span className="strong">{hook.name}</span> removes its URL, its secret, its stream and any payloads not yet
-            applied. People and events it already created stay. This cannot be undone.
+            applied. People stay, but its data leaves their profiles and segments in the background. This cannot be
+            undone.
           </p>
           {failure ? <InlineError {...failure} /> : null}
           <div className="dialog-actions">
