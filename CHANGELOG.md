@@ -15,3 +15,9 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.257.0 (2026-11-07)
+
+### Other
+
+- Document the JSON-body error statuses; fail a refused trait write at once (#562)
+
