@@ -1,7 +1,7 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createMemoryRouter, RouterProvider } from "react-router";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { json, MEMBER, mockApi, OWNER, problem, session, WORKSPACE } from "../test/mockApi";
 import { AppRoutes } from "./App";
@@ -304,6 +304,19 @@ describe("settings shell and Home", () => {
     mockApi({ ...routes, "GET /api/v1/workspaces/ws1/sending-domains": () => json([{ status: "verified" }, { status: "unverified" }]) });
     renderApp("/w/ws1/settings");
     expect(await screen.findByText("1 not verified")).toBeInTheDocument();
+  });
+
+  it("scrolls the current page's entry into view in the sidebar", async () => {
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    mockApi(routes);
+    renderApp("/w/ws1/segments");
+    const nav = await screen.findByRole("navigation", { name: "Main" });
+
+    await waitFor(() => expect(scrolled).toHaveBeenCalled());
+    const current = nav.querySelector("[aria-current='page']");
+    expect(current).not.toBeNull();
+    expect(scrolled.mock.instances).toContain(current);
   });
 
   it("names each shell control with the text it shows first", async () => {

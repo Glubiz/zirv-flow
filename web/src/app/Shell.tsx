@@ -41,6 +41,11 @@ function ShellLayout({ current, destinations, canSearchPeople }: { current: Work
   }, [location.pathname, base]);
 
   useEffect(() => {
+    // The list scrolls inside the sidebar; bring the current page's entry into view so its highlight is not cut off.
+    document.querySelector(".sidebar-nav [aria-current='page']")?.scrollIntoView?.({ block: "nearest" });
+  }, [location.pathname, base, settings, folded, drawerOpen]);
+
+  useEffect(() => {
     if (first.current) {
       first.current = false;
       return;

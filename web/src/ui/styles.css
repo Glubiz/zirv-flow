@@ -538,6 +538,54 @@ select {
   text-align: right;
 }
 
+/* Whole words, so a long key widens the table (which scrolls) instead of wrapping one character per line. */
+.table td.mono {
+  overflow-wrap: break-word;
+}
+
+@media (max-width: 640px) {
+  .table-cards,
+  .table-cards tbody,
+  .table-cards tr,
+  .table-cards td {
+    display: block;
+  }
+
+  .table-cards thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+
+  .table-cards tr {
+    display: grid;
+    gap: 6px;
+    padding: 12px 16px;
+    border-top: 1px solid var(--line);
+  }
+
+  .table-cards td,
+  .table-cards td:first-child,
+  .table-cards td:last-child {
+    padding: 0;
+    border-top: 0;
+    text-align: left;
+  }
+
+  .table-cards td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    font-size: 13px;
+    color: var(--ink-3);
+  }
+
+  .table-cards td:empty {
+    display: none;
+  }
+}
+
 .pill {
   display: inline-flex;
   align-items: center;
@@ -704,6 +752,14 @@ select {
   min-height: 0;
   padding: 4px;
   margin: -4px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-2) transparent;
+  /* Covers hide the shadows at the ends; the shadows show only where more is hidden. */
+  background:
+    linear-gradient(var(--paper) 30%, transparent) top / 100% 24px local no-repeat,
+    linear-gradient(transparent, var(--paper) 70%) bottom / 100% 24px local no-repeat,
+    radial-gradient(farthest-side at 50% 0, var(--line-2), transparent) top / 100% 8px scroll no-repeat,
+    radial-gradient(farthest-side at 50% 100%, var(--line-2), transparent) bottom / 100% 8px scroll no-repeat;
 }
 
 .sidebar-group { display: flex; flex-direction: column; gap: 2px; }
