@@ -955,6 +955,7 @@ mod tests {
     #[sqlx::test(migrations = false)]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_merged_into_index_migration_accepts_the_index_built_by_hand(pool: PgPool) {
+        crate::reset_database(&pool).await;
         let mut before = sqlx::migrate!("./migrations");
         before.migrations = before
             .migrations

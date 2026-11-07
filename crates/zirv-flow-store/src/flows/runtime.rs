@@ -1237,6 +1237,7 @@ mod tests {
     #[sqlx::test(migrations = false)]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn migration_0090_accepts_the_indexes_changed_by_hand(pool: PgPool) {
+        crate::reset_database(&pool).await;
         let mut before = sqlx::migrate!("./migrations");
         before.migrations = before
             .migrations

@@ -1,0 +1,66 @@
+name: OpenAPI Gate
+
+# Split from ci.yaml: this gate also reads the PR body and labels (the api-breaking-approved
+# exception), so it re-runs on edited, labeled and unlabeled, which the rest of CI does not need.
+on:
+  pull_request:
+    branches: [ main, 'release/**' ]
+    types: [opened, synchronize, reopened, edited, labeled, unlabeled]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  openapi-breaking:
+    name: OpenAPI Breaking Changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Install pinned oasdiff
+        env:
+          # https://github.com/oasdiff/oasdiff/releases/tag/v1.34.0
+          # https://github.com/oasdiff/oasdiff/releases/download/v1.34.0/checksums.txt
+          OASDIFF_VERSION: 1.34.0
+          OASDIFF_SHA256: 7c88e09fd500b231af2819eb21f6fdfc7bcdfe2741d2c1937c59e7b72c8a575a
+        run: |
+          set -euo pipefail
+          dir=$(mktemp -d)
+          asset="oasdiff_${OASDIFF_VERSION}_linux_amd64.tar.gz"
+          url="https://github.com/oasdiff/oasdiff/releases/download/v${OASDIFF_VERSION}"
+          curl -fsSL --retry 3 "$url/$asset" -o "$dir/$asset"
+          curl -fsSL --retry 3 "$url/checksums.txt" -o "$dir/checksums.txt"
+          # Check both the reviewable pin and the release's published checksum.
+          grep -Fx "$OASDIFF_SHA256  $asset" "$dir/checksums.txt"
+          (cd "$dir" && printf '%s  %s\n' "$OASDIFF_SHA256" "$asset" | sha256sum -c -)
+          tar -xzf "$dir/$asset" -C "$dir" oasdiff
+          echo "$dir" >> "$GITHUB_PATH"
+
+      - name: OpenAPI gate self-test
+        run: bash scripts/openapi-gate/self-test.sh
+
+      - name: Compare the branch and frozen API contracts
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          document=crates/zirv-flow-api/openapi.json
+          dir=$(mktemp -d)
+          git show "origin/$BASE_REF:$document" > "$dir/base.json"
+          baselines=()
+          # rc1 starts the freeze; keep that baseline through the rc series.
+          # After 1.0, always compare the immutable v1.0.0 contract too.
+          for tag in v1.0.0-rc.1 v1.0.0; do
+            if git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null; then
+              git show "refs/tags/$tag:$document" > "$dir/$tag.json"
+              baselines+=("$dir/$tag.json")
+            fi
+          done
+          bash scripts/openapi-gate/check.sh "$dir/base.json" "$document" "${baselines[@]}"
