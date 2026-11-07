@@ -121,7 +121,7 @@ async fn find(
         (status = 200, description = "The matching contacts", body = SearchContactsBody),
         (status = 400, description = "limit is out of range", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
-        (status = 403, description = "A key without the read scope", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "A key without the read scope, or a caller who may not see identifiers (`code` is `contact_key_not_searchable`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "q is missing or too long", body = Problem, content_type = "application/problem+json")
     ),
@@ -145,23 +145,28 @@ pub(crate) async fn get(
     }
     let q = q.ok_or_else(|| ApiError::unprocessable("q: is required"))?;
     check_query(&q)?;
+    let masking = Masking::of(&state, &principal, workspace.id).await?;
+    refuse_key_search(&masking)?;
     let contacts = find(&state, workspace.id, &q, limit).await?;
-    reply(&state, &principal, workspace.id, contacts).await
+    Ok(reply(&masking, contacts))
 }
 
-async fn reply(
-    state: &AppState,
-    principal: &Principal,
-    workspace: WorkspaceId,
-    contacts: Vec<Contact>,
-) -> Result<Json<SearchContactsBody>, ApiError> {
-    let masking = Masking::of(state, principal, workspace).await?;
-    Ok(Json(SearchContactsBody {
+/// A prefix search answers with keys, so it is closed to a caller who may not see them.
+fn refuse_key_search(masking: &Masking) -> Result<(), ApiError> {
+    if masking.hides_keys() {
+        Err(ApiError::contact_key_not_searchable())
+    } else {
+        Ok(())
+    }
+}
+
+fn reply(masking: &Masking, contacts: Vec<Contact>) -> Json<SearchContactsBody> {
+    Json(SearchContactsBody {
         contacts: contacts
             .into_iter()
             .map(|contact| masking.body(contact))
             .collect(),
-    }))
+    })
 }
 
 /// Finds contacts by an identifier matched exactly after normalisation, or by `q` like the GET.
@@ -176,7 +181,7 @@ async fn reply(
     responses(
         (status = 200, description = "The matching contacts", body = SearchContactsBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
-        (status = 403, description = "A key without the read scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "A key without the read scope, a missing CSRF token, or a `q` search by a caller who may not see identifiers (`code` is `contact_key_not_searchable`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "Not exactly one of identifier and q, an invalid identifier, or a limit out of range", body = Problem, content_type = "application/problem+json")
     ),
@@ -198,6 +203,7 @@ pub(crate) async fn post(
             )));
         }
     };
+    let masking = Masking::of(&state, &principal, workspace.id).await?;
     let contacts = match (body.identifier, body.q) {
         (Some(identifier), None) => {
             let mut connection = state
@@ -219,6 +225,7 @@ pub(crate) async fn post(
         }
         (None, Some(q)) => {
             check_query(&q)?;
+            refuse_key_search(&masking)?;
             find(&state, workspace.id, &q, limit).await?
         }
         _ => {
@@ -227,7 +234,7 @@ pub(crate) async fn post(
             ));
         }
     };
-    reply(&state, &principal, workspace.id, contacts).await
+    Ok(reply(&masking, contacts))
 }
 
 #[cfg(test)]

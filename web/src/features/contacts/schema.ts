@@ -2,6 +2,12 @@ import { client, unwrap, useResource, type components, type Resource } from "../
 import { useWorkspaceAccess } from "../members";
 
 export type Contact = components["schemas"]["ContactBody"];
+/** A contact the caller named by its key, so the key is known even when a list would hide it. */
+export type KeyedContact = Contact & { key: string };
+
+export function keyed(contact: Contact, key: string): KeyedContact {
+  return { ...contact, key };
+}
 type DefinitionBody = components["schemas"]["ContactDefinitionBody"];
 export type DefinitionField = components["schemas"]["ContactFieldBody"];
 export type Trait = components["schemas"]["TraitBody"];

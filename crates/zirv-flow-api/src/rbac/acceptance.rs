@@ -226,6 +226,9 @@ pub(in crate::rbac) mod tests {
             code: &'static str,
             admin_passes: bool,
         },
+        /// A `Read` route that a caller without access to personal values is refused with `code`,
+        /// because its answer would list identifiers.
+        IdentifiersHidden { code: &'static str },
         /// A session needs `session`; a key needs `admin` and is then refused with `refusal`,
         /// because the route acts for a person.
         NoKeys {
@@ -288,6 +291,11 @@ pub(in crate::rbac) mod tests {
         if row.path == "/api/v1/oauth/callback" {
             return vec![plain(Rule::Redirect)];
         }
+        if row.method == Method::Get && row.path.ends_with("/contacts/search") {
+            return vec![plain(Rule::IdentifiersHidden {
+                code: "contact_key_not_searchable",
+            })];
+        }
         if row.note.starts_with("Edit; a request naming a real person") {
             let (code, admin_passes) = if row.path.ends_with("/flows/{id}/test") {
                 ("flow_test_values_forbidden", false)
@@ -343,6 +351,19 @@ pub(in crate::rbac) mod tests {
                         (Expect::Through, Some(then)) => workspace_outcome(then, &kind),
                         (outcome, _) => outcome,
                     },
+                };
+            }
+            Rule::IdentifiersHidden { code } => {
+                let revealed = match &kind {
+                    Kind::Member(rank, pii) => *rank == 3 || *pii,
+                    Kind::Key(scopes) => {
+                        scopes.contains(&Scope::Admin) || scopes.contains(&Scope::Pii)
+                    }
+                    _ => true,
+                };
+                return match (workspace_outcome(Need::Read, &kind), revealed) {
+                    (Expect::Through, false) => Expect::Refused(code),
+                    (other, _) => other,
                 };
             }
             Rule::PersonValues { code, admin_passes } => {

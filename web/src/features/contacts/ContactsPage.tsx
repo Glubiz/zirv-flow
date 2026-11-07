@@ -1,7 +1,7 @@
 import { useState, type SyntheticEvent } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 
-import { describeError } from "../../api";
+import { ApiError, describeError, type Resource } from "../../api";
 import {
   Button,
   EmptyState,
@@ -16,6 +16,9 @@ import {
 import { ContactForm } from "./ContactForm";
 import { showValue, useContactAccess, useContactSchema, type Contact, type ContactSchema } from "./schema";
 import { useContacts, type ContactQuery } from "./useContacts";
+
+/** The code of the refusal a caller gets for a key search when contact keys are hidden from them. */
+const KEY_SEARCH_REFUSED = "contact_key_not_searchable";
 
 /** How many definition fields the table shows next to the key. */
 const COLUMNS = 3;
@@ -33,6 +36,13 @@ function Contacts({ workspaceId }: { workspaceId: string }) {
   const [creating, setCreating] = useState(false);
   const navigate = useNavigate();
   const searching = query.text !== null;
+  const searchRefused =
+    list.resource.status === "error" &&
+    list.resource.error instanceof ApiError &&
+    list.resource.error.code === KEY_SEARCH_REFUSED;
+  const shown: Resource<Contact[]> = searchRefused
+    ? { status: "ready", data: [], reload: list.reload, refreshing: false }
+    : list.resource;
 
   return (
     <div className="page">
@@ -61,11 +71,16 @@ function Contacts({ workspaceId }: { workspaceId: string }) {
       />
       <Panel flush>
         <ResourceView
-          resource={list.resource}
+          resource={shown}
           loadingLabel="Loading contacts"
           isEmpty={(data) => data.length === 0}
           empty={
-            searching ? (
+            searchRefused ? (
+              <EmptyState title="Search by key is not open to you">
+                Contact keys are hidden from you, so they cannot be searched. Show all contacts and open one from its person, or find
+                the person under People.
+              </EmptyState>
+            ) : searching ? (
               <EmptyState title="No contact matches">
                 Search matches the start of a contact key, or a whole email address or phone number.
               </EmptyState>
@@ -184,7 +199,7 @@ function ColumnsFor({ schema, contacts }: { schema: ContactSchema | null; contac
       </thead>
       <tbody>
         {contacts.map((contact) => (
-          <ContactRow key={contact.key} contact={contact} columns={keys} />
+          <ContactRow key={contact.person_id} contact={contact} columns={keys} />
         ))}
       </tbody>
     </>
@@ -196,7 +211,13 @@ function ContactRow({ contact, columns }: { contact: Contact; columns: string[] 
   return (
     <tr>
       <td className="strong">
-        <Link to={`/w/${ws}/contacts/${encodeURIComponent(contact.key)}`}>{contact.key}</Link>
+        {contact.key === null ? (
+          <>
+            <HiddenValue what="The contact key" /> <Link to={`/w/${ws}/people/${contact.person_id}`}>Open profile</Link>
+          </>
+        ) : (
+          <Link to={`/w/${ws}/contacts/${encodeURIComponent(contact.key)}`}>{contact.key}</Link>
+        )}
       </td>
       {columns.map((key) => (
         <td key={key}>{cell(contact, key)}</td>

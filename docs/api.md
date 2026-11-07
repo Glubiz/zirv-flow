@@ -317,6 +317,7 @@ A test reads the sources and fails when a code used there is missing from this l
 | `query_timeout` | An explorer query ran over its time limit |
 | `explorer_busy` | Every connection of the explorer pool stayed busy for a second; see `Retry-After` |
 | `pii_trait_not_searchable` | The trait holds personal data and cannot be searched |
+| `contact_key_not_searchable` | A caller who may not see identifiers searched contacts by key prefix |
 | `pii_property_not_explorable` | The event property holds personal data and cannot be explored |
 | `debugger_streams_busy` | The workspace has the most debugger streams open on this server |
 | `consent_policy_invalid` | A consent policy draft fails its checks; `issues` lists them |

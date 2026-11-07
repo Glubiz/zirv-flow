@@ -5391,8 +5391,14 @@ export interface components {
             fields: {
                 [key: string]: unknown;
             };
-            /** @description The contact key: the identifier `external:contact_key`. */
-            key: string;
+            /**
+             * @description The contact key: the identifier `external:contact_key`. `null` with `masked` set in a
+             *     list or search answer for a caller who may not see identifiers; an answer to a request
+             *     that named the key carries it.
+             */
+            key: string | null;
+            /** @description Whether `key` is hidden from this caller; the contact is reached by `person_id`. */
+            masked: boolean;
             /** @description The keys of `fields` whose value is hidden from this caller. */
             masked_fields: string[];
             /**
@@ -15331,7 +15337,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description A key without the read scope */
+            /** @description A key without the read scope, or a caller who may not see identifiers (`code` is `contact_key_not_searchable`) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -15394,7 +15400,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description A key without the read scope, or a missing CSRF token */
+            /** @description A key without the read scope, a missing CSRF token, or a `q` search by a caller who may not see identifiers (`code` is `contact_key_not_searchable`) */
             403: {
                 headers: {
                     [name: string]: unknown;

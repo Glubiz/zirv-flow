@@ -2,15 +2,15 @@ import { useState, type SyntheticEvent } from "react";
 
 import { ApiError, client, describeError, unwrap, type ErrorSummary } from "../../api";
 import { Button, Dialog, InlineError, SelectField, TextField } from "../../ui";
-import { identifierLabel, reasonText, type Contact, type ContactSchema, type SchemaField } from "./schema";
+import { identifierLabel, keyed, reasonText, type ContactSchema, type KeyedContact, type SchemaField } from "./schema";
 
 interface ContactFormProps {
   workspaceId: string;
   schema: ContactSchema;
   /** The contact being edited; absent when creating. */
-  contact?: Contact;
+  contact?: KeyedContact;
   onClose: () => void;
-  onSaved: (contact: Contact) => void;
+  onSaved: (contact: KeyedContact) => void;
 }
 
 type Values = Record<string, string>;
@@ -129,7 +129,7 @@ export function ContactForm({ workspaceId, schema, contact, onClose, onSaved }: 
               body: { key: key.trim(), fields: collected.fields },
             }),
           );
-      onSaved(saved);
+      onSaved(keyed(saved, contact ? contact.key : key.trim()));
     } catch (error) {
       showFailure(error);
       setBusy(false);

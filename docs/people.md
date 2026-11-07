@@ -219,6 +219,15 @@ of identifier fields and of fields flagged personal data are shown to the owner,
 admins and `admin` keys, memberships with `view_pii`, and keys with `pii`; other readers get `null` for them and the field names in
 `masked_fields`. That applies to the response of a write too.
 
+The contact key is an identifier too, and the same readers do not see it in a list. For them
+`GET .../contacts` rows carry `key: null`, `masked: true` and the `person_id`, and the web app
+links such a row to the person profile. A key prefix search would list keys, so `GET
+.../contacts/search` and `POST .../contacts/search` with `q` answer `403` with the code
+`contact_key_not_searchable` for them; `POST .../contacts/search` with an `identifier` still
+works and its rows hide the key. A request that names the key (`GET`, `PUT`, `PATCH` and
+`POST` of that key) is answered with the key, since the caller supplied it, and with the field
+values masked as above. A bulk upsert answers with a count only.
+
 **Deleting a contact** retracts its `native` record. What stays of the person follows the
 workspace's [orphan policy](#deletion-erasure-and-export): another source's data on the same
 person stays, and under the `delete` policy a person left with nothing is deleted with the

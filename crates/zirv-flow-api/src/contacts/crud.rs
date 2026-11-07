@@ -143,7 +143,7 @@ async fn run(
     } else {
         let contact = written.contact.ok_or_else(ApiError::not_found)?;
         let masking = Masking::of(state, principal, workspace).await?;
-        (status, Json(masking.body(contact))).into_response()
+        (status, Json(masking.body_for_key(contact))).into_response()
     };
     if written.replayed {
         response
@@ -247,7 +247,7 @@ pub(crate) async fn get(
         .ok_or_else(ApiError::not_found)?;
     drop(connection);
     let masking = Masking::of(&state, &principal, workspace.id).await?;
-    Ok(Json(masking.body(contact)))
+    Ok(Json(masking.body_for_key(contact)))
 }
 
 fn encode_after(key: &str) -> String {
