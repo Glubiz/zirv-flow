@@ -9,7 +9,7 @@ usage() {
   cat <<'TEXT'
 usage: sim.sh <command>
   init                      create .state/ with the CA, leaf certificate, secrets and control file
-  up [--profile full|small] init, build the tools image, start and wait for every service
+  up [--profile full|small|x5] init, build the tools image, start and wait for every service
   down                      stop the stack, keep the volumes
   reset                     remove the stack, its volumes and .state/ (this project only)
   logs <service> [args]     docker compose logs
@@ -20,7 +20,7 @@ usage: sim.sh <command>
   rate N | burst [factor] [seconds] | pause | resume | export-now   traffic controls
   provision [stage...]      provision the workspace through the API (stages: base registry people connections
                             sending segments templates syncs gate flows; default all)
-  start [--profile full|small]  up, provision, ready gate, traffic on, then the event-driven flows
+  start [--profile full|small|x5]  up, provision, ready gate, traffic on, then the event-driven flows
   verify [--provision] [group...]  the checks of design 8.2, exit non-zero when one fails
   sync-all                  queue a run for every pull stream
   blast                     start the re-engagement flow now on the lapsed customers

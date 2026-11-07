@@ -3,6 +3,7 @@
 
 import http.client
 import json
+import os
 import random
 import threading
 import time
@@ -96,4 +97,4 @@ def send(count):
 if __name__ == "__main__":
     while not KEY_FILE.exists():
         time.sleep(2)
-    pace.run("ingest", send, chunk_items=CHUNK, workers=8)
+    pace.run("ingest", send, chunk_items=CHUNK, workers=int(os.environ.get("SIM_GEN_INGEST_WORKERS", "8")))

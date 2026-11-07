@@ -33,7 +33,7 @@ passes it.
 ## Start, stop, reset
 
 ```sh
-scripts/sim/sim.sh start --profile full     # or --profile small
+scripts/sim/sim.sh start --profile full     # or --profile small, or --profile x5
 scripts/sim/sim.sh status
 scripts/sim/sim.sh verify
 scripts/sim/sim.sh down                     # stop, keep the volumes
@@ -68,6 +68,53 @@ per second in total at 1 M (the eight first syncs share one PostgreSQL and lock 
 backfill takes most of a working day. Four hours in, the ingest inbox held 1.6 M items and drained about 30 per
 second: at 1 M, start with `SIM_TRAFFIC_AFTER_BACKFILL=1 sim.sh start --profile full` so the generators begin
 after the first syncs, or run `sim.sh traffic off` meanwhile.
+
+## The x5 profile
+
+`sim.sh start --profile x5` is the full profile's world scaled to the next load round: 500 k people at a
+daily-curve peak of 6,500 events/s, which is `sim.sh rate 3490` (the curve's peak over its mean is
+1.862). The ingest generator then carries 68% (about 4,400 events/s at peak) and Kafka 22% (about
+1,430/s). The limits live in `scripts/sim/profiles/x5.env`, with a comment block that names each
+service. The budget is fixed and never raises the Docker VM (32 CPUs, about 33.5 GB):
+
+| Group | CPUs | Memory | Services |
+|---|---|---|---|
+| Application | 8 | 10.5 GB (of 16) | `zf-serve-1/2` 1 CPU 1 GB each; `zf-worker-1` to `-4` 1.375 CPUs 2 GB each; `zf-scheduler` 0.5 CPUs 512 MB |
+| Database | 8 | 10 GB (of 16) | `zf-db` with `shared_buffers` 2560MB and `effective_cache_size` 6GB |
+| The rest | about 7.7 | about 10 GB | Kafka 1.5 CPUs 2 GB; `gen-ingest` 1.5 CPUs; `gen-kafka` 0.75 CPUs; `lb` 1 CPU; the other generators, `edge`, company databases, Prometheus and fixtures |
+
+Retention is two days (`SIM_RETENTION_DAYS=2`) and the disk guard is `SIM_MAX_DB_GB=150`: at about 580
+bytes per event 5x is about 177 GB a day. Needs about 31 GB of Docker memory with every container at its
+limit.
+
+Workers 3 and 4 are two more compose services (`zf-worker-3`, `zf-worker-4`) under the compose profile
+`workers-x5`, which `x5.env` enables through `COMPOSE_PROFILES`; the small and full profiles never start
+them. Prometheus finds them through DNS, so a stack without them has no failing target.
+
+Generator capacity, measured against a stub that answers `202` (the product is not involved): the ingest
+generator uses about 0.065 CPU per 1,000 events/s (0.27 CPU at 4,130/s with 8 sender threads, no late or
+dropped chunks), and the Kafka generator's payload builder about 0.013 CPU per 1,000 events/s before the
+producer library's own work. The CPU caps leave room for the 3x burst; the worker count of
+`gen-ingest` matters more than its CPU, because the open-loop senders wait on the product's answers (24
+threads in x5).
+
+## Variables
+
+Set in `scripts/sim/profiles/<profile>.env`; every default is today's value.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SIM_GEN_INGEST_WORKERS` | 8 | Sender threads of `gen-ingest` |
+| `SIM_CPUS_GEN_INGEST`, `SIM_MEM_GEN_INGEST` | 0.25, 256m | `gen-ingest` limits |
+| `SIM_CPUS_GEN_KAFKA`, `SIM_MEM_GEN_KAFKA` | 0.25, 256m | `gen-kafka` limits |
+| `SIM_CPUS_GEN_CHANGES`, `SIM_MEM_GEN_CHANGES` | 0.25, 256m | `gen-changes` limits |
+| `SIM_CPUS_GEN_FORMS`, `SIM_MEM_GEN_FORMS` | 0.25, 128m | `gen-forms` limits |
+| `SIM_CPUS_LB`, `SIM_MEM_LB` | 0.25, 128m | `lb` limits |
+| `SIM_CPUS_EDGE`, `SIM_MEM_EDGE` | 0.25, 192m | `edge` limits |
+| `COMPOSE_PROFILES` | unset | `workers-x5` starts `zf-worker-3` and `zf-worker-4` |
+
+The `lb` nginx configuration caps nothing near 100 requests/s per serve (default worker connections of
+1024, no rate or connection limits), so it needs no variable.
 
 ## Signing in and addresses
 

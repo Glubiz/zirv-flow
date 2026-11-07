@@ -162,6 +162,15 @@ services:
   zf-worker-2:
     <<: *worker
 
+  # Workers 3 and 4 start only when COMPOSE_PROFILES names `workers-x5` (the x5 profile sets it).
+  zf-worker-3:
+    <<: *worker
+    profiles: [workers-x5]
+
+  zf-worker-4:
+    <<: *worker
+    profiles: [workers-x5]
+
   zf-scheduler:
     <<: *zirv
     command: ["scheduler"]
@@ -176,8 +185,8 @@ services:
   lb:
     image: nginx:1.28.0-alpine
     networks: [sim]
-    mem_limit: 128m
-    cpus: 0.25
+    mem_limit: ${SIM_MEM_LB:-128m}
+    cpus: ${SIM_CPUS_LB:-0.25}
     ports:
       - "127.0.0.1:8080:8080"
     volumes:
@@ -305,8 +314,8 @@ services:
           - exports.sim.example.com
           - mailer-api.sim.example.com
           - receiver.sim.example.com
-    mem_limit: 192m
-    cpus: 0.25
+    mem_limit: ${SIM_MEM_EDGE:-192m}
+    cpus: ${SIM_CPUS_EDGE:-0.25}
     volumes:
       - ./nginx/edge.conf:/etc/nginx/conf.d/default.conf:ro
       - ${SIM_STATE:?run sim.sh}:/sim:ro
@@ -399,8 +408,11 @@ services:
     <<: *generator
     profiles: [traffic]
     command: ["python", "-B", "/gen/ingest.py"]
-    mem_limit: 256m
-    cpus: 0.25
+    environment:
+      <<: *gen-env
+      SIM_GEN_INGEST_WORKERS: ${SIM_GEN_INGEST_WORKERS:-8}
+    mem_limit: ${SIM_MEM_GEN_INGEST:-256m}
+    cpus: ${SIM_CPUS_GEN_INGEST:-0.25}
 
   gen-changes:
     <<: *generator
@@ -410,22 +422,22 @@ services:
       - ${SIM_STATE:?run sim.sh}:/sim
       - billing-data:/data
     command: ["python", "-B", "/gen/changes.py"]
-    mem_limit: 256m
-    cpus: 0.25
+    mem_limit: ${SIM_MEM_GEN_CHANGES:-256m}
+    cpus: ${SIM_CPUS_GEN_CHANGES:-0.25}
 
   gen-kafka:
     <<: *generator
     profiles: [traffic]
     command: ["python", "-B", "/gen/kafka.py"]
-    mem_limit: 256m
-    cpus: 0.25
+    mem_limit: ${SIM_MEM_GEN_KAFKA:-256m}
+    cpus: ${SIM_CPUS_GEN_KAFKA:-0.25}
 
   gen-forms:
     <<: *generator
     profiles: [traffic]
     command: ["python", "-B", "/gen/forms.py"]
-    mem_limit: 128m
-    cpus: 0.25
+    mem_limit: ${SIM_MEM_GEN_FORMS:-128m}
+    cpus: ${SIM_CPUS_GEN_FORMS:-0.25}
 
   # Builds the shared tools image: `docker compose --profile tools build sim-tools`.
   sim-tools:
