@@ -691,6 +691,17 @@ impl Error for StoreError {
     }
 }
 
+/// Empties a test database of every application object and of the migration bookkeeping. A test
+/// that needs a database no migration has touched (`#[sqlx::test(migrations = false)]`) calls it
+/// first: the database is a clone of `template1`, which `prepare_test_template` may have migrated.
+/// Other crates reach it through the store's `test-support` feature.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn reset_database(pool: &sqlx::PgPool) {
+    for statement in ["DROP SCHEMA public CASCADE", "CREATE SCHEMA public"] {
+        sqlx::query(statement).execute(pool).await.unwrap();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use sqlx::PgPool;
@@ -711,6 +722,27 @@ mod tests {
         "_sqlx_migrations",
         "retention_runs",
     ];
+
+    #[sqlx::test(migrations = false)]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_reset_database_has_no_tables_and_migrates_to_the_latest_version(pool: PgPool) {
+        reset_database(&pool).await;
+        let tables: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog', 'information_schema')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(tables, 0);
+
+        let applied = migrate(&pool).await.unwrap();
+
+        assert_eq!(
+            applied.len(),
+            sqlx::migrate!("./migrations").migrations.len()
+        );
+        assert_eq!(schema_state(&pool).await.unwrap(), SchemaState::UpToDate);
+    }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]

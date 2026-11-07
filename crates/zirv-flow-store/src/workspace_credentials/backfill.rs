@@ -43,6 +43,7 @@ mod tests {
     async fn an_existing_source_and_destination_credential_still_opens_referenced_in_place(
         pool: PgPool,
     ) {
+        crate::reset_database(&pool).await;
         migrate_before_credentials(&pool).await;
         let ws = workspace(&pool, "one").await;
         let keys = Keyring::new(MasterKey::generate(), None).unwrap();
@@ -160,6 +161,7 @@ mod tests {
     async fn owners_whose_names_differ_only_in_case_or_after_the_hundredth_character_and_whose_ids_share_a_prefix_all_get_a_credential(
         pool: PgPool,
     ) {
+        crate::reset_database(&pool).await;
         migrate_before_credentials(&pool).await;
         let ws = workspace(&pool, "one").await;
         let keys = Keyring::new(MasterKey::generate(), None).unwrap();
@@ -216,6 +218,7 @@ mod tests {
     async fn a_database_source_credential_is_named_for_username_and_still_opens_with_its_sealed_user(
         pool: PgPool,
     ) {
+        crate::reset_database(&pool).await;
         migrate_before_credentials(&pool).await;
         let ws = workspace(&pool, "one").await;
         let keys = Keyring::new(MasterKey::generate(), None).unwrap();
@@ -285,6 +288,7 @@ mod tests {
     async fn the_old_credential_columns_are_dropped_and_every_workspace_gets_its_own_credentials(
         pool: PgPool,
     ) {
+        crate::reset_database(&pool).await;
         migrate_before_credentials(&pool).await;
         let (one, two) = (workspace(&pool, "one").await, workspace(&pool, "two").await);
         let keys = Keyring::new(MasterKey::generate(), None).unwrap();
