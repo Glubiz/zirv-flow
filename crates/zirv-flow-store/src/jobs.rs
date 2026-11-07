@@ -2445,14 +2445,20 @@ mod tests {
         let now = database_now(&pool).await.unwrap();
         let next = slot + time::Duration::hours(1);
 
-        let due = due_schedules(&pool, now, 10).await.unwrap();
+        // The migrations seed instance schedules of their own; only this test's row counts.
+        let mine = |due: Vec<Schedule>| -> Vec<Schedule> {
+            due.into_iter()
+                .filter(|schedule| schedule.id == id)
+                .collect()
+        };
+        let due = mine(due_schedules(&pool, now, 100).await.unwrap());
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].next_run_at, slot);
         assert!(advance_schedule(&pool, id, slot, next).await.unwrap());
         // A second scheduler holding the old slot loses the race.
         assert!(!advance_schedule(&pool, id, slot, next).await.unwrap());
 
-        let due = due_schedules(&pool, now, 10).await.unwrap();
+        let due = mine(due_schedules(&pool, now, 100).await.unwrap());
         assert_eq!(due[0].next_run_at, next);
     }
 
@@ -2476,7 +2482,9 @@ mod tests {
             .unwrap();
         disable_schedule(&pool, disabled).await.unwrap();
 
-        assert!(due_schedules(&pool, now, 10).await.unwrap().is_empty());
+        // The migrations seed instance schedules of their own; only this test's rows count.
+        let due = due_schedules(&pool, now, 100).await.unwrap();
+        assert!(due.iter().all(|schedule| schedule.kind != "a.kind"));
     }
 
     #[sqlx::test]
@@ -2627,6 +2635,7 @@ mod tests {
     #[sqlx::test(migrations = false)]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_dead_at_migration_applies_to_a_table_that_already_has_dead_rows(pool: PgPool) {
+        crate::reset_database(&pool).await;
         let mut before = sqlx::migrate!("./migrations");
         before.migrations = before
             .migrations
@@ -2663,6 +2672,7 @@ mod tests {
     #[sqlx::test(migrations = false)]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_live_enrollments_index_migration_accepts_the_index_built_by_hand(pool: PgPool) {
+        crate::reset_database(&pool).await;
         let mut before = sqlx::migrate!("./migrations");
         before.migrations = before
             .migrations
@@ -2692,6 +2702,7 @@ mod tests {
     #[sqlx::test(migrations = false)]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_capped_claim_index_migration_accepts_the_indexes_built_by_hand(pool: PgPool) {
+        crate::reset_database(&pool).await;
         let mut before = sqlx::migrate!("./migrations");
         before.migrations = before
             .migrations

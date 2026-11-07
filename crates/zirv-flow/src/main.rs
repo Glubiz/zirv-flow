@@ -2511,6 +2511,7 @@ endpoint = \"http://collector:4318/\""
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn serve_refuses_pending_migrations_when_migrating_on_start_is_off(pool: PgPool) {
+        zirv_flow_store::reset_database(&pool).await;
         let (code, output) = serve_against(&pool, false).await;
 
         assert_eq!(code, 1, "{output}");
