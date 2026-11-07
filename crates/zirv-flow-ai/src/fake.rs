@@ -7,6 +7,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use serde_json::Value;
+use tokio::sync::Semaphore;
 use zirv_flow_core::SecretString;
 
 use crate::error::AiError;
@@ -21,6 +22,7 @@ pub struct FakeProvider {
     script: Mutex<VecDeque<Result<ChatResponse, AiError>>>,
     seen: Mutex<Vec<ChatRequest>>,
     delay: Duration,
+    gate: Option<Semaphore>,
 }
 
 impl FakeProvider {
@@ -33,6 +35,20 @@ impl FakeProvider {
     pub fn with_delay(mut self, delay: Duration) -> Self {
         self.delay = delay;
         self
+    }
+
+    /// Holds every call, once it is recorded, until the test releases it with `release`; calls
+    /// then overlap for as long as the test wants instead of for a fixed delay.
+    pub fn with_gate(mut self) -> Self {
+        self.gate = Some(Semaphore::new(0));
+        self
+    }
+
+    /// Lets `calls` held calls go on to answer. Does nothing without a gate.
+    pub fn release(&self, calls: usize) {
+        if let Some(gate) = &self.gate {
+            gate.add_permits(calls);
+        }
     }
 
     /// Queues an answer.
@@ -105,6 +121,12 @@ impl Provider for FakeProvider {
     ) -> BoxFuture<'a, Result<ChatResponse, AiError>> {
         Box::pin(async move {
             self.seen.lock().unwrap().push(request.clone());
+            if let Some(gate) = &self.gate {
+                gate.acquire()
+                    .await
+                    .map_err(|_| AiError::Transport("gate closed".to_owned()))?
+                    .forget();
+            }
             tokio::time::sleep(self.delay).await;
             self.script
                 .lock()

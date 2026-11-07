@@ -12515,32 +12515,58 @@ email,b@example.com,
         crate::test_support::labels_hold_no(&output, &["example.com"]);
     }
 
-    /// Runs `count` dispatches at once against a provider that takes a moment to answer, and
-    /// returns how many went through and how many each gate refused.
+    /// Runs `count` dispatches at once against a gated provider and returns how many went through
+    /// and how many each gate refused. The admitted calls are held inside the provider until every
+    /// refusal has come back, so no reservation can be settled before the last one is made.
     async fn dispatch_together(
         state: &AppState,
         user: Option<UserId>,
         workspace: zirv_flow_core::WorkspaceId,
         count: usize,
+        fake: &zirv_flow_ai::fake::FakeProvider,
+        admitted: usize,
     ) -> (usize, usize, usize) {
-        let results = futures_util::future::join_all((0..count).map(|_| {
-            crate::dispatch(state, user, workspace, "mapping", |privacy| {
-                mapping_request(privacy, false)
+        let sent = fake.call_count();
+        let mut pending: futures_util::stream::FuturesUnordered<_> = (0..count)
+            .map(|_| {
+                crate::dispatch(state, user, workspace, "mapping", |privacy| {
+                    mapping_request(privacy, false)
+                })
             })
-        }))
-        .await;
+            .collect();
         let mut counts = (0, 0, 0);
-        for result in results {
-            match result {
-                Ok(_) => counts.0 += 1,
-                Err(crate::DispatchError::Ai(zirv_flow_ai::AiError::RateLimited)) => counts.1 += 1,
-                Err(crate::DispatchError::Ai(zirv_flow_ai::AiError::BudgetExceeded)) => {
-                    counts.2 += 1;
-                }
-                Err(other) => panic!("unexpected {other:?}"),
+        let mut tally = |result: Result<_, crate::DispatchError>| match result {
+            Ok(_) => counts.0 += 1,
+            Err(crate::DispatchError::Ai(zirv_flow_ai::AiError::RateLimited)) => counts.1 += 1,
+            Err(crate::DispatchError::Ai(zirv_flow_ai::AiError::BudgetExceeded)) => counts.2 += 1,
+            Err(other) => panic!("unexpected {other:?}"),
+        };
+        for _ in 0..count - admitted {
+            tally(
+                futures_util::StreamExt::next(&mut pending)
+                    .await
+                    .expect("a refusal comes back while the admitted calls are held"),
+            );
+        }
+        while fake.call_count() < sent + admitted {
+            tokio::select! {
+                Some(result) = futures_util::StreamExt::next(&mut pending) => tally(result),
+                () = tokio::time::sleep(std::time::Duration::from_millis(5)) => {}
             }
         }
+        fake.release(admitted);
+        while let Some(result) = futures_util::StreamExt::next(&mut pending).await {
+            tally(result);
+        }
         counts
+    }
+
+    /// A provider that holds every call but the settings probe of `enabled_workspace`, which is
+    /// let through ahead of time.
+    fn gated_fake() -> Arc<zirv_flow_ai::fake::FakeProvider> {
+        let fake = Arc::new(zirv_flow_ai::fake::FakeProvider::new().with_gate());
+        fake.release(1);
+        fake
     }
 
     fn slow_fake(answers: usize) -> Arc<zirv_flow_ai::fake::FakeProvider> {
@@ -12557,7 +12583,7 @@ email,b@example.com,
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn concurrent_calls_cannot_pass_the_rate_limit_together(pool: PgPool) {
-        let fake = slow_fake(0);
+        let fake = gated_fake();
         let (state, _router, _owner, ws) =
             enabled_workspace(&pool, &fake, ai_config(None, 2), json!({})).await;
         let workspace: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
@@ -12568,7 +12594,7 @@ email,b@example.com,
         }
 
         let (ok, rate_limited, over_budget) =
-            dispatch_together(&state, Some(user), workspace, 5).await;
+            dispatch_together(&state, Some(user), workspace, 5, &fake, 2).await;
 
         assert_eq!(
             (ok, rate_limited, over_budget),
@@ -12588,7 +12614,7 @@ email,b@example.com,
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn concurrent_calls_cannot_spend_past_the_budget_together(pool: PgPool) {
-        let fake = slow_fake(0);
+        let fake = gated_fake();
         let config = ai_config(None, 20);
         let request = mapping_request(zirv_flow_ai::Privacy::SchemaOnly, false).unwrap();
         let model = config.model("openai", "big").unwrap().1.clone();
@@ -12610,7 +12636,8 @@ email,b@example.com,
             fake.push(Ok(zirv_flow_ai::fake::text_response("ok", 10, 10)));
         }
 
-        let (ok, rate_limited, over_budget) = dispatch_together(&state, None, workspace, 6).await;
+        let (ok, rate_limited, over_budget) =
+            dispatch_together(&state, None, workspace, 6, &fake, 3).await;
 
         assert_eq!((ok, rate_limited, over_budget), (3, 0, 3));
         assert_eq!(fake.call_count(), sent + 3);
