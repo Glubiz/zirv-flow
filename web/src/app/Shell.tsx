@@ -5,7 +5,7 @@ import { useWorkspaceAccess } from "../features/members";
 import { AccountMenu, useSignedInUser } from "../features/session";
 import { useCurrentWorkspace, WorkspaceSwitcher, type Workspace } from "../features/workspaces";
 import { Brand, Button, MenuButton, Sheet } from "../ui";
-import { destinationUrl, isSettingsPath, matchesDestination, navigationGroups, NAVIGATION, visibleDestinations, type Destination } from "./navigation";
+import { destinationUrl, isSettingsPath, matchesDestination, navigationGroups, pageTitle, visibleDestinations, type Destination } from "./navigation";
 import { NavigationIcon } from "./NavigationIcon";
 import { PagePalette } from "./PagePalette";
 import { useSidebarFold } from "./useSidebarFold";
@@ -37,9 +37,15 @@ function ShellLayout({ current, destinations, canSearchPeople }: { current: Work
   if (drawerPath !== null && !drawerOpen) setDrawerPath(null);
 
   useEffect(() => {
-    const page = [...NAVIGATION].sort((a, b) => b.route.length - a.route.length).find((item) => matchesDestination(item, location.pathname, base));
-    document.title = `${page?.label ?? "zirv flow"} · zirv flow`;
+    document.title = pageTitle(location.pathname, base);
   }, [location.pathname, base]);
+
+  useEffect(() => {
+    // The list scrolls inside the sidebar; bring the current page's entry into view so its highlight is not cut off.
+    // Not every environment implements scrollIntoView (jsdom does not).
+    const current: Partial<Element> | null = document.querySelector(".sidebar-nav [aria-current='page']");
+    current?.scrollIntoView?.({ block: "nearest" });
+  }, [location.pathname, base, settings, folded, drawerOpen]);
 
   useEffect(() => {
     if (first.current) {
@@ -89,11 +95,11 @@ function ShellLayout({ current, destinations, canSearchPeople }: { current: Work
     return (
       <nav className={rail ? "sidebar-content sidebar-rail" : "sidebar-content"} aria-label={settings ? "Settings" : "Main"}>
         <div className="sidebar-brand">
-          <Link to="/w" className="brand-link" aria-label="Workspaces" aria-current={location.pathname === "/w" ? "page" : undefined} onClick={() => setDrawerPath(null)}><Brand /></Link>
+          <Link to="/w" className="brand-link" aria-label="zirv flow, workspaces" aria-current={location.pathname === "/w" ? "page" : undefined} onClick={() => setDrawerPath(null)}><Brand /></Link>
           {!rail ? <Button className="sidebar-fold" aria-label="Fold the menu" onClick={toggle}><NavigationIcon name="Fold" /></Button> : null}
         </div>
         <WorkspaceSwitcher compact={rail} />
-        <Button className="sidebar-search" aria-label="Search pages" aria-keyshortcuts="Meta+K Control+K" onClick={search}>
+        <Button className="sidebar-search" aria-label={rail ? "Search pages" : undefined} aria-keyshortcuts="Meta+K Control+K" onClick={search}>
           {rail ? <NavigationIcon name="Search" /> : <>Search <kbd>⌘K</kbd></>}
         </Button>
         <div className="sidebar-nav">

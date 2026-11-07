@@ -16,7 +16,7 @@ export type { TabEntry } from "./TabNav";
 export { Pill } from "./Pill";
 export type { Tone } from "./Pill";
 export { previewDocument } from "./previewDocument";
-export { ResourceView } from "./ResourceView";
+export { LoadError, ResourceView } from "./ResourceView";
 export { Sheet } from "./Sheet";
 export { SkipLink } from "./SkipLink";
 export { Stepper } from "./Stepper";

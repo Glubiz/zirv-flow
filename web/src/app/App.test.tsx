@@ -1,7 +1,7 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createMemoryRouter, RouterProvider } from "react-router";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { json, MEMBER, mockApi, OWNER, problem, session, WORKSPACE } from "../test/mockApi";
 import { AppRoutes } from "./App";
@@ -127,7 +127,7 @@ describe("people routes", () => {
     });
     renderApp("/w/ws1/people/p1");
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("no such resource");
+    expect(await screen.findByText("This person does not exist")).toBeInTheDocument();
     expect(within(screen.getByRole("navigation", { name: "Breadcrumb" })).getByRole("link", { name: "People" })).toHaveAttribute("href", "/w/ws1/people");
   });
 });
@@ -210,7 +210,7 @@ describe("navigation without a workspace", () => {
       expect(nav.querySelectorAll("[aria-disabled='true']")).toHaveLength(15);
     });
     expect(nav.querySelectorAll("[aria-current='page']")).toHaveLength(1);
-    expect(within(nav).getByRole("link", { name: "Workspaces" })).toHaveAttribute("aria-current", "page");
+    expect(within(nav).getByRole("link", { name: "zirv flow, workspaces" })).toHaveAttribute("aria-current", "page");
     for (const name of ["Home", "Lists", "Segments", "Flows", "Templates", "Content library", "Contacts", "People", "Sources", "Imports", "Events", "Consent", "Explorer", "Traces", "Settings"]) {
       expect(within(nav).queryByRole("link", { name: new RegExp(name) })).not.toBeInTheDocument();
     }
@@ -287,7 +287,7 @@ describe("settings shell and Home", () => {
     const user = userEvent.setup();
     renderApp("/w/ws1/settings");
     const nav = await screen.findByRole("navigation", { name: "Settings" });
-    await user.click(within(nav).getByRole("button", { name: "Search pages" }));
+    await user.click(within(nav).getByRole("button", { name: /^Search/ }));
     for (const name of ["Sending domains", "Destinations", "Forwarding", "Privacy and erasure", "Audit log", "API keys", "Credentials", "AI assistant"]) {
       if (role === "admin") {
         expect(await within(nav).findByRole("link", { name })).toBeInTheDocument();
@@ -306,13 +306,45 @@ describe("settings shell and Home", () => {
     expect(await screen.findByText("1 not verified")).toBeInTheDocument();
   });
 
+  it("scrolls the current page's entry into view in the sidebar", async () => {
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    mockApi(routes);
+    renderApp("/w/ws1/segments");
+    const nav = await screen.findByRole("navigation", { name: "Main" });
+
+    await waitFor(() => expect(scrolled).toHaveBeenCalled());
+    const current = nav.querySelector("[aria-current='page']");
+    expect(current).not.toBeNull();
+    expect(scrolled.mock.instances).toContain(current);
+  });
+
+  it("names each shell control with the text it shows first", async () => {
+    mockApi(routes);
+    renderApp("/w/ws1");
+    const nav = await screen.findByRole("navigation", { name: "Main" });
+    await screen.findByText("No running flows");
+
+    const controls = [
+      within(nav).getByRole("link", { name: /workspaces/i }),
+      within(nav).getByRole("button", { name: /switch workspace/i }),
+      within(nav).getByRole("button", { name: /^Search/ }),
+      screen.getByRole("button", { name: /account menu/i }),
+    ];
+    for (const control of controls) {
+      const shown = control.textContent.replace(/\s+/g, " ").trim().toLowerCase();
+      expect(shown).not.toBe("");
+      expect((control.getAttribute("aria-label") ?? shown).toLowerCase().startsWith(shown)).toBe(true);
+    }
+  });
+
   it("opens the palette with Ctrl+K and Cmd+K and restores focus on Escape", async () => {
     mockApi(routes);
     const user = userEvent.setup();
     renderApp("/w/ws1");
     await screen.findByText("No running flows");
     const nav = await screen.findByRole("navigation", { name: "Main" });
-    const search = within(nav).getByRole("button", { name: "Search pages" });
+    const search = within(nav).getByRole("button", { name: /^Search/ });
     search.focus();
     await user.keyboard("{Control>}k{/Control}");
     expect(screen.getByRole("dialog", { name: "Go to a page" })).toBeInTheDocument();

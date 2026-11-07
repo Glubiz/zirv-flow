@@ -110,14 +110,33 @@ export function AssistantPanel(props: AssistantPanelProps) {
           current.enabled ? (
             <Drafting {...props} personal={current.pii_opt_in} />
           ) : (
-            <div className="dock-body">
-              <EmptyState title="The assistant is off">
-                An admin can turn it on in the <AiSettingsLink workspaceId={props.workspaceId} />.
-              </EmptyState>
-            </div>
+            <AssistantOff workspaceId={props.workspaceId} />
           )
         }
       </ResourceView>
+    </div>
+  );
+}
+
+/** Off for two reasons: the deployment offers no model (nothing an admin can do here), or an admin has not turned it on. */
+function AssistantOff({ workspaceId }: { workspaceId: string }) {
+  const models = useResource(
+    () => unwrap(client.GET("/api/v1/workspaces/{ws}/ai/models", { params: { path: { ws: workspaceId } } })),
+    [workspaceId],
+  );
+  const unavailable = models.status === "ready" && models.data.providers.length === 0;
+  return (
+    <div className="dock-body">
+      {unavailable ? (
+        <EmptyState title="AI is not configured on this deployment">
+          The server lists no model providers, so the assistant is unavailable. The operator adds providers and models in the server
+          configuration.
+        </EmptyState>
+      ) : (
+        <EmptyState title="The assistant is off">
+          An admin can turn it on in the <AiSettingsLink workspaceId={workspaceId} />.
+        </EmptyState>
+      )}
     </div>
   );
 }

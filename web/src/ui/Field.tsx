@@ -35,6 +35,7 @@ interface TextFieldProps extends Omit<InputHTMLAttributes<HTMLInputElement>, "id
   /** What is wrong with the value; marks the field invalid. */
   error?: string;
   mono?: boolean;
+  ref?: Ref<HTMLInputElement>;
 }
 
 export function TextField({ label, hint, error, mono = false, className, ...rest }: TextFieldProps) {

@@ -122,7 +122,7 @@ function SourceDetail({ workspaceId, sourceId }: { workspaceId: string; sourceId
 
   return (
     <div className="page">
-      <ResourceView resource={source} loadingLabel="Loading source">
+      <ResourceView resource={source} loadingLabel="Loading source" noun="source">
         {(data) => {
           const known = kinds.status === "ready" ? kinds.data : null;
           const kind = known?.find((entry) => entry.kind === data.kind) ?? null;

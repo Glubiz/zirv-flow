@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react"
 import { Link, useParams, useSearchParams } from "react-router";
 
 import { ApiError, client, describeError, unwrap, useResource, type components, type ErrorSummary } from "../../api";
-import { Button, Dialog, EmptyState, ErrorState, LoadingState, Panel, plural } from "../../ui";
+import { Button, Dialog, EmptyState, LoadError, LoadingState, Panel, plural } from "../../ui";
 import { AssistantToggle, useAssistantAccess, useAssistantDock, withoutDock, type Draft } from "../assistant";
 import { useCatalog, useLeaveGuard } from "../segments";
 import { useFlowAccess } from "./access";
@@ -96,16 +96,11 @@ function FlowLoader({ workspaceId, flowId }: { workspaceId: string; flowId: stri
     );
   }
   if (flow.status === "error") {
-    const missing = flow.error instanceof ApiError && flow.error.status === 404;
     return (
       <div className="page">
         {back}
         <Panel flush>
-          {missing ? (
-            <EmptyState title="This flow does not exist">It may have been deleted, or the address is wrong.</EmptyState>
-          ) : (
-            <ErrorState {...describeError(flow.error)} onRetry={flow.reload} />
-          )}
+          <LoadError error={flow.error} onRetry={flow.reload} noun="flow" />
         </Panel>
       </div>
     );

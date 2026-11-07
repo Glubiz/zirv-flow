@@ -12,6 +12,8 @@ export interface MenuEntry {
 
 interface MenuButtonProps {
   label: string;
+  /** The text the button shows, if any. Its accessible name then starts with it, so voice control can say what it sees. */
+  visibleText?: string;
   buttonClassName: string;
   buttonContent: ReactNode;
   heading?: string;
@@ -24,6 +26,7 @@ interface MenuButtonProps {
 
 export function MenuButton({
   label,
+  visibleText,
   buttonClassName,
   buttonContent,
   heading,
@@ -107,7 +110,7 @@ export function MenuButton({
         ref={button}
         type="button"
         className={buttonClassName}
-        aria-label={label}
+        aria-label={visibleText ? `${visibleText}, ${label.toLowerCase()}` : label}
         aria-current={current ? "page" : undefined}
         aria-haspopup="menu"
         aria-expanded={open}

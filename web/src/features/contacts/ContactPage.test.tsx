@@ -94,7 +94,7 @@ describe("contact", () => {
   it("says when the contact does not exist", async () => {
     mount({ [`GET ${CONTACT}`]: () => problem(404, "Not Found", "no such resource") });
 
-    expect(await screen.findByText("No such contact")).toBeInTheDocument();
+    expect(await screen.findByText("This contact does not exist")).toBeInTheDocument();
   });
 
   it("shows a retry when loading fails", async () => {
