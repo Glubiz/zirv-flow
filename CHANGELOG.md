@@ -15,3 +15,13 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.254.0 (2026-11-07)
+
+### Chores
+
+- drain the cap winner's rate-limit wait in the defer-mode cap test
+
+### Other
+
+- Merge remote-tracking branch 'origin/main' into test/defer-cap-flake
+
