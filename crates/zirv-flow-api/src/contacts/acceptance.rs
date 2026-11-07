@@ -1059,6 +1059,69 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_masked_caller_cannot_recover_a_key_from_a_cursor_and_paging_returns_every_row_once(
+        pool: PgPool,
+    ) {
+        use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+        let fx = fixture(&pool).await;
+        fx.define().await;
+        let keys = ["secret-a", "secret-b", "secret-c", "secret-d", "secret-e"];
+        for (n, key) in keys.iter().enumerate() {
+            fx.create(key, json!({"email": format!("p{n}@example.com")}))
+                .await;
+        }
+        let admin_page = fx
+            .send("GET", "/contacts?limit=50", None, &fx.admin, &[])
+            .await;
+        let admin_order: Vec<Value> = admin_page.body["contacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["person_id"].clone())
+            .collect();
+
+        let mut cursor: Option<String> = None;
+        let mut seen: Vec<Value> = Vec::new();
+        let mut cursors = Vec::new();
+        loop {
+            let path = match &cursor {
+                Some(cursor) => fx.path(&format!("/contacts?limit=2&cursor={cursor}")),
+                None => fx.path("/contacts?limit=2"),
+            };
+            let page = call(&fx.router, "GET", &path, None, Auth::Key(&fx.read), &[]).await;
+            assert_eq!(page.status, StatusCode::OK);
+            for row in page.body["contacts"].as_array().unwrap() {
+                assert_eq!(row["key"], Value::Null);
+                seen.push(row["person_id"].clone());
+            }
+            match page.body["next_cursor"].as_str() {
+                Some(next) => {
+                    cursors.push(next.to_owned());
+                    cursor = Some(next.to_owned());
+                }
+                None => break,
+            }
+        }
+
+        assert_eq!(seen, admin_order);
+        assert!(!cursors.is_empty());
+        for cursor in &cursors {
+            let decoded = URL_SAFE_NO_PAD
+                .decode(cursor)
+                .ok()
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+                .unwrap_or_default();
+            for key in keys {
+                assert!(!cursor.contains(key), "{cursor}");
+                assert!(!decoded.contains(key), "{cursor}");
+            }
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_contact_of_another_workspace_is_a_404(pool: PgPool) {
         let fx = fixture(&pool).await;
         fx.create("c-1", json!({})).await;

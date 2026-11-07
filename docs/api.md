@@ -404,8 +404,9 @@ signed-in person (the assistant's drafts, accepting a draft and explanations, an
 source's OAuth consent): every API key is refused with a `403`, whatever its scopes. A cell that
 says `when person_id is set` names a request that needs more once it names a real person: the
 call needs the scope or role shown first, and a request with a `person_id` also needs access to
-personal values (an `admin` or `pii` key, or a member with `view_pii`), so a key with `admin`
-alone cannot call them at all. Ingestion keys (`ingest`) call the ingestion operations and
+personal values. A key needs `write` together with `pii` or `admin`; `write` alone and `admin`
+alone are both refused. A member needs the `editor` role and `view_pii`, or the `admin` role.
+Ingestion keys (`ingest`) call the ingestion operations and
 nothing else. The `pii` scope does not open a route: it lets a key that also has `read` see masked
 values.
 

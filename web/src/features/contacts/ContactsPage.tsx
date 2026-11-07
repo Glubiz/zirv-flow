@@ -199,7 +199,7 @@ function ColumnsFor({ schema, contacts }: { schema: ContactSchema | null; contac
       </thead>
       <tbody>
         {contacts.map((contact) => (
-          <ContactRow key={contact.person_id} contact={contact} columns={keys} />
+          <ContactRow key={contact.id} contact={contact} columns={keys} />
         ))}
       </tbody>
     </>

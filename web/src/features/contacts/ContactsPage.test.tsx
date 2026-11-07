@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { json, MEMBER, mockApi, OWNER, problem, session } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
@@ -37,8 +37,9 @@ const DEFINITION = {
   updated_by: null,
 };
 
-function contact(key: string | null, fields: Record<string, unknown>, masked: string[] = [], person = `p-${key}`) {
+function contact(key: string | null, fields: Record<string, unknown>, masked: string[] = [], person = `p-${key}`, id = `id-${key}-${person}`) {
   return {
+    id,
     key,
     masked: key === null,
     person_id: person,
@@ -183,6 +184,25 @@ describe("contacts list", () => {
     expect(calls.filter((call) => call.method === "GET" && call.path.endsWith("/contacts")).at(-1)?.search).toContain(
       "cursor=cursor-1",
     );
+  });
+
+  it("keeps two masked contacts of one person apart after Load more", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    mount({
+      [LIST]: (request) => {
+        const after = new URL(request.url).searchParams.get("cursor");
+        return after === null
+          ? json({ contacts: [contact(null, {}, [], "person-9", "row-1")], next_cursor: "row-1" })
+          : json({ contacts: [contact(null, {}, [], "person-9", "row-2")], next_cursor: null });
+      },
+    });
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole("button", { name: "Load more" }));
+
+    await waitFor(() => expect(screen.getAllByRole("link", { name: "Open profile" })).toHaveLength(2));
+    expect(errors.mock.calls.flat().join(" ")).not.toContain("same key");
+    errors.mockRestore();
   });
 
   it("searches with a POST so the value stays out of the URL, and can go back to everyone", async () => {

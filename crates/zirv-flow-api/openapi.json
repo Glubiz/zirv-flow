@@ -30346,6 +30346,7 @@
         "type": "object",
         "description": "A contact. Values of identifier fields and PII-flagged fields are `null` and listed in\n`masked_fields` for a caller who may not see values: members and `read` keys.",
         "required": [
+          "id",
           "key",
           "masked",
           "person_id",
@@ -30366,6 +30367,11 @@
             "propertyNames": {
               "type": "string"
             }
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "An opaque id of this contact, unique per row and safe to show to any caller; it is\nnot the key and cannot be turned into it. Use it to tell rows apart."
           },
           "key": {
             "type": [
@@ -30510,7 +30516,7 @@
               "string",
               "null"
             ],
-            "description": "Pass as `cursor` for the next page; null on the last page."
+            "description": "Pass as `cursor` for the next page; null on the last page. Opaque: it names the last\nrow by its `id` and reveals no key."
           }
         }
       },

@@ -39,6 +39,9 @@ const DETAIL_FIELDS: usize = 5;
 /// `masked_fields` for a caller who may not see values: members and `read` keys.
 #[derive(Serialize, ToSchema)]
 pub(crate) struct ContactBody {
+    /// An opaque id of this contact, unique per row and safe to show to any caller; it is
+    /// not the key and cannot be turned into it. Use it to tell rows apart.
+    id: Uuid,
     /// The contact key: the identifier `external:contact_key`. `null` with `masked` set in a
     /// list or search answer for a caller who may not see identifiers; an answer to a request
     /// that named the key carries it.
@@ -134,6 +137,7 @@ impl Masking {
             }
         }
         ContactBody {
+            id: contact.id,
             key: (!hide_key).then_some(contact.key),
             masked: hide_key,
             person_id: contact.person_id,
@@ -230,6 +234,7 @@ mod tests {
 
     fn contact() -> Contact {
         Contact {
+            id: Uuid::nil(),
             key: "c-1".into(),
             person_id: Uuid::nil(),
             fields: json!({"email": "a@example.com", "plan": "pro", "ssn": "123"})

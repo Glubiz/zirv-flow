@@ -133,7 +133,10 @@ can therefore remove another person's transcript or draft (a draft is deleted, s
 afterwards is a `404`), and a spelling that is not among the person's
 identifiers is missed. A changed spelling is missed everywhere. A value on another person's source
 record is found through the identity conflict that record lost; a record that lists the value with
-no recorded conflict is not found. The retention windows bound what
+no recorded conflict is not found. This leaves three cases uncovered: a value the identity limit
+skipped on another person's record, which the erased person acquired later; a conflict removed
+after the owner's contact write released the identity; and event conflicts, which name no source
+record. A follow-up covers them. The retention windows bound what
 the by-value search cannot reach. Deleting a person (`DELETE /api/v1/workspaces/{ws}/people/{id}`)
 is not erasure: it adds no suppression and no ledger entry.
 

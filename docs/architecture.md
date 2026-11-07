@@ -3219,7 +3219,10 @@ removes the group's `(kind, value)` pairs from `identifiers` of every record nam
 `identity_conflicts` row against the group (found through the `(workspace_id, person_id)` and
 `(workspace_id, other_person_id)` indexes, then the primary key, never a scan of `source_records`),
 keeps the row, and renames a record keyed by one of the values to `erased:<record id>`. A record
-that lists the value with no recorded conflict is not reached.
+that lists the value with no recorded conflict is not reached. Three cases therefore stay
+uncovered: a value the identity limit skipped on another person's record, which the erased
+person acquired later; a conflict removed after the owner's contact write released the identity;
+and event conflicts, which name no source record. A follow-up covers them.
 
 **Ledger outside the database (OQ-13, ruling cae7a407).** `privacy.ledger_dir`
 names the directory holding one JSON file per completed erasure entry.

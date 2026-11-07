@@ -5,11 +5,10 @@ use axum::Json;
 use axum::extract::{Path, RawQuery, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use utoipa::ToSchema;
+use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
 use zirv_flow_store::{Contact, ContactChange, Idempotency};
 
@@ -48,7 +47,8 @@ pub(crate) struct ContactFieldsRequest {
 pub(crate) struct ContactsBody {
     /// In key order.
     contacts: Vec<ContactBody>,
-    /// Pass as `cursor` for the next page; null on the last page.
+    /// Pass as `cursor` for the next page; null on the last page. Opaque: it names the last
+    /// row by its `id` and reveals no key.
     next_cursor: Option<String>,
 }
 
@@ -250,15 +250,7 @@ pub(crate) async fn get(
     Ok(Json(masking.body_for_key(contact)))
 }
 
-fn encode_after(key: &str) -> String {
-    URL_SAFE_NO_PAD.encode(key)
-}
-
-fn decode_after(cursor: &str) -> Option<String> {
-    String::from_utf8(URL_SAFE_NO_PAD.decode(cursor).ok()?).ok()
-}
-
-fn parse_list_query(query: &str) -> Result<(u32, Option<String>), ApiError> {
+fn parse_list_query(query: &str) -> Result<(u32, Option<Uuid>), ApiError> {
     let (mut limit, mut after) = (DEFAULT_LIMIT, None);
     for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
         match key.as_ref() {
@@ -266,8 +258,9 @@ fn parse_list_query(query: &str) -> Result<(u32, Option<String>), ApiError> {
             "before" | "after" => return Err(ApiError::paging_parameter_renamed()),
             "cursor" => {
                 after = Some(
-                    decode_after(&value)
-                        .ok_or_else(|| ApiError::bad_request("cursor is malformed"))?,
+                    value
+                        .parse()
+                        .map_err(|_| ApiError::bad_request("cursor is malformed"))?,
                 );
             }
             _ => {}
@@ -310,13 +303,13 @@ pub(crate) async fn list(
         .acquire()
         .await
         .map_err(|_| ApiError::internal())?;
-    let page =
-        zirv_flow_store::list_contacts(&mut connection, workspace.id, after.as_deref(), limit)
-            .await?;
+    let page = zirv_flow_store::list_contacts(&mut connection, workspace.id, after, limit)
+        .await?
+        .ok_or_else(|| ApiError::bad_request("cursor is malformed"))?;
     drop(connection);
     let masking = Masking::of(&state, &principal, workspace.id).await?;
     Ok(Json(ContactsBody {
-        next_cursor: page.next_after.as_deref().map(encode_after),
+        next_cursor: page.next_after.map(|id| id.to_string()),
         contacts: page
             .contacts
             .into_iter()
@@ -470,22 +463,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_cursor_round_trips_a_key_with_any_characters() {
-        for key in ["c-1", "a/b?c=d&e", "ünï", "x y"] {
-            assert_eq!(decode_after(&encode_after(key)).as_deref(), Some(key));
-        }
-        assert_eq!(decode_after("!!"), None);
-    }
-
-    #[test]
     fn the_list_query_takes_a_limit_and_an_opaque_after() {
-        let after = encode_after("c-9");
+        let after = Uuid::from_u128(9);
 
         let parsed = parse_list_query(&format!("limit=5&cursor={after}")).unwrap();
 
-        assert_eq!(parsed, (5, Some("c-9".to_owned())));
+        assert_eq!(parsed, (5, Some(after)));
         assert_eq!(parse_list_query("").unwrap(), (DEFAULT_LIMIT, None));
-        for bad in ["limit=0", "limit=201", "cursor=%21%21"] {
+        for bad in [
+            "limit=0",
+            "limit=201",
+            "cursor=%21%21",
+            "cursor=c2VjcmV0LWI",
+        ] {
             assert_eq!(
                 parse_list_query(bad).unwrap_err().status(),
                 StatusCode::BAD_REQUEST,
