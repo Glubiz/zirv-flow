@@ -15,3 +15,15 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.247.0 (2026-11-07)
+
+### Fixes
+
+- a send or webhook reads the trigger event across a merge (#541)
+- the rejects list reads every code a dropped-traits reject stores (#542)
+- a flow send reads the event that started the enrollment (#541)
+
+### Chores
+
+- one property_map for the trigger event of a send and a webhook (#541)
+
