@@ -40,6 +40,7 @@ use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::mapping::{
     self, Header, JsonRecord, Mapping, TraitState, reject_sample, validate_paths,
 };
+use zirv_flow_core::no_nul::{CONTAINS_NUL, has_nul};
 use zirv_flow_store::HmacKey;
 use zirv_flow_store::secrets::OpenError;
 use zirv_flow_store::{
@@ -344,6 +345,9 @@ impl Planner<'_> {
             ..Planned::default()
         };
         for record in records {
+            if has_nul(&record.key) {
+                continue;
+            }
             let cells = JsonRecord::from_value_for_mapping(
                 &record.data,
                 self.mapping,
@@ -373,6 +377,16 @@ impl Planner<'_> {
                 self.mapping,
                 self.declared.iter().copied(),
             );
+            // A key PostgreSQL cannot store is rejected under a cleaned copy of it, so the
+            // reject itself can be stored and the unit goes on.
+            if has_nul(&record.key) {
+                planned.rejected.push(SyncReject {
+                    record_key: record.key.replace('\0', "\u{FFFD}"),
+                    reasons: vec![(String::new(), CONTAINS_NUL)],
+                    sample: serde_json::json!({"properties": {}, "masked": []}),
+                });
+                continue;
+            }
             if let Some(why) = self.deletion(&record, &cells) {
                 planned.deleted.push((record.key, why));
                 continue;
@@ -2771,6 +2785,57 @@ mod tests {
         assert_eq!(planned.upserts.len(), 1);
         assert_eq!(planned.upserts[0].record.record_key, "kept");
         assert!(planned.rejected.is_empty());
+    }
+
+    #[test]
+    fn a_nul_in_a_mapped_value_or_a_key_is_a_reject_and_the_rest_of_the_unit_goes_on() {
+        let mapping: Mapping = serde_json::from_value(mapping()).unwrap();
+        let catalog = HashMap::from([(
+            "display_name".to_owned(),
+            TraitState::Active(TraitType::String),
+        )]);
+        let plain = HashSet::from(["display_name".to_owned()]);
+        let trace = TraceContext::root(Cause::api("t"));
+        let planner = Planner {
+            mapping: &mapping,
+            catalog: &catalog,
+            plain: &plain,
+            declared: vec!["email", "name"],
+            source: "s",
+            stream: "stream_1",
+            trace: &trace,
+        };
+        let record = |key: &str, name: &str| Record {
+            key: key.into(),
+            data: json!({"email": "a@example.com", "name": name}),
+            deleted: false,
+            occurrence: None,
+        };
+
+        let planned = planner.plan(
+            vec![
+                record("good", "Ada"),
+                record("value", "Ad\0a"),
+                record("key\0", "Ada"),
+            ],
+            OffsetDateTime::now_utc(),
+        );
+
+        assert_eq!(planned.upserts.len(), 1);
+        assert_eq!(planned.upserts[0].record.record_key, "good");
+        let rejected: Vec<_> = planned
+            .rejected
+            .iter()
+            .map(|reject| (reject.record_key.as_str(), reject.reasons.clone()))
+            .collect();
+        assert_eq!(
+            rejected,
+            vec![
+                ("value", vec![("name".to_owned(), "contains_nul")]),
+                ("key\u{FFFD}", vec![(String::new(), "contains_nul")]),
+            ]
+        );
+        assert!(!format!("{:?}", planned.rejected).contains("\u{0}"));
     }
 
     #[test]

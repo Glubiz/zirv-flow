@@ -18,6 +18,7 @@ pub mod freshness;
 pub mod fuzz;
 mod ids;
 pub mod mapping;
+pub mod no_nul;
 pub mod password;
 pub mod people;
 mod role;

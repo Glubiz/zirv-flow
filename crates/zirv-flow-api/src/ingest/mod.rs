@@ -464,7 +464,13 @@ async fn accept(
         &items,
     )
     .await
-    .map_err(|_| unavailable())?;
+    .map_err(|error| {
+        if error.is_invalid_data() {
+            ApiError::contains_nul("an item")
+        } else {
+            unavailable()
+        }
+    })?;
     Ok(accepted)
 }
 
@@ -821,6 +827,47 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(jobs, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_nul_in_a_trait_or_property_is_a_400_naming_that_item_and_the_batch_stores_nothing(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+
+        let single = fx
+            .send(
+                "/api/v1/ingest/identify",
+                json!({"userId": "u-1", "traits": {"plan": "a\u{0}b"}}),
+            )
+            .await;
+        let batch = fx
+            .send(
+                "/api/v1/ingest/batch",
+                json!({"batch": [
+                    {"type": "identify", "userId": "u-1", "messageId": "m-1"},
+                    {"type": "track", "userId": "u-1", "event": "seen",
+                     "properties": {"order": {"lines": ["ok", "x\u{0}"]}}},
+                    {"type": "identify", "userId": "u-2", "traits": {"k\u{0}": 1}},
+                ]}),
+            )
+            .await;
+
+        assert_eq!(single.status, StatusCode::BAD_REQUEST, "{:?}", single.body);
+        assert_eq!(
+            single.body["errors"],
+            json!([{"index": 0, "field": "traits.plan", "reason": "contains_nul"}])
+        );
+        assert_eq!(batch.status, StatusCode::BAD_REQUEST, "{:?}", batch.body);
+        assert_eq!(
+            batch.body["errors"],
+            json!([
+                {"index": 1, "field": "properties.order.lines[1]", "reason": "contains_nul"},
+                {"index": 2, "field": "traits.k", "reason": "contains_nul"},
+            ])
+        );
+        assert!(fx.inbox().await.is_empty());
     }
 
     #[sqlx::test]

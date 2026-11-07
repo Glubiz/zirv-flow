@@ -968,6 +968,7 @@ fn routes() -> Router<AppState> {
 /// Outermost first: the request id, then the trace, then the metrics.
 fn with_layers(routes: Router<AppState>, state: AppState) -> Router {
     routes
+        .layer(from_fn(json::refuse_nul_query))
         .layer(from_fn(metrics::record))
         .layer(from_fn(trace::assign))
         .layer(from_fn(request_id::assign))
