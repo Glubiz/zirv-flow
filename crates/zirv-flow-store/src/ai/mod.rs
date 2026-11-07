@@ -16,8 +16,8 @@ pub use calls::{
     record_ai_call, reserve_ai_call, spent_this_month,
 };
 pub use drafts::{
-    AiDraft, DRAFT_PURGE_BATCH, DraftKind, DraftStatus, NewAiDraft, find_ai_draft, insert_ai_draft,
-    mark_ai_draft_accepted, purge_expired_ai_drafts,
+    AiDraft, DRAFT_PURGE_BATCH, DraftKind, DraftStatus, NewAiDraft, erase_ai_drafts, find_ai_draft,
+    insert_ai_draft, mark_ai_draft_accepted, purge_expired_ai_drafts,
 };
 pub use settings::{
     AiSettings, AiSettingsUpdate, ProbeRecord, find_ai_settings, lock_ai_settings, put_ai_settings,

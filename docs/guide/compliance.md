@@ -107,8 +107,10 @@ system resolver, outside the egress policy. Reputation is yours (duty 4).
 master key is needed). The `privacy.erase` job runs in one transaction and
 removes the person's identities, source records, events in all partitions, ingest rejects, list and
 segment memberships, consent and its history, enrollments and their steps and waits, flow entries,
-messages, test-send entries, decision records, stored assistant transcripts, pending and dead
-forwarding payloads, pending exports and saved preview people. It then deletes the person. A failure
+messages, test-send entries, decision records, stored assistant transcripts and drafts, pending and dead
+forwarding payloads, pending exports and saved preview people. It also takes the person's identifier
+values off the source records of other people that an identity conflict names against them (the
+record that lost the conflict keeps its other identifiers and stays that person's). It then deletes the person. A failure
 rolls everything back and the request retries. What remains, by design and nothing else:
 
 - the keyed hash of each email and phone as an `erased` suppression (E4);
@@ -125,10 +127,13 @@ idempotency keys) is deleted by value in the same transaction.
 person, who stays suppressed. For the data found by value, an identifier matches only as a whole
 field, ignoring case, in rejects with no person, import files, import reject cells and idempotency
 keys; an email also matches as a substring there, so a non-email identifier inside free text in those
-places is not found. Assistant transcripts are different: they are matched by case-insensitive
+places is not found. Assistant transcripts and drafts are different: they are matched by case-insensitive
 substring on the person's id and identifier values, within that workspace only. A short identifier
-can therefore remove another person's transcript, and a spelling that is not among the person's
-identifiers is missed. A changed spelling is missed everywhere. The retention windows bound what
+can therefore remove another person's transcript or draft (a draft is deleted, so accepting it
+afterwards is a `404`), and a spelling that is not among the person's
+identifiers is missed. A changed spelling is missed everywhere. A value on another person's source
+record is found through the identity conflict that record lost; a record that lists the value with
+no recorded conflict is not found. The retention windows bound what
 the by-value search cannot reach. Deleting a person (`DELETE /api/v1/workspaces/{ws}/people/{id}`)
 is not erasure: it adds no suppression and no ledger entry.
 
@@ -155,7 +160,8 @@ replay. The content scan does not cover the files.
 `zirv-flow admin replay-erasures --from <ledger_dir>` merges the missing entries and erases those
 people again, restoring their suppressions, before any role starts. Running it twice changes
 nothing. *Limit:* the replay holds only hashes, so it cannot reach data found by value
-(transcripts, import files, rejects with no person); their retention windows bound that data. The
+(transcripts, drafts, import files, rejects with no person, and values on other people's source
+records); their retention windows bound that data. The
 steps are in the [backup and restore guide](../operations/backup-restore.md).
 
 ### Export of a person

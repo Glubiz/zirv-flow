@@ -3184,7 +3184,7 @@ content stored. **Erasure**
 identifier HMACs); (2) add suppression hashes; (3) delete identities, ledger
 contributions, events in all partitions, ingest rejects, list members, consent,
 segment memberships, enrollments, step executions, enrollment waits, flow entries, messages, test-send log entries,
-person-scoped decision records, stored assistant transcripts, pending
+person-scoped decision records, stored assistant transcripts and drafts, pending
 and dead forwarding payloads and pending exports, and delete saved preview-person
 rows (`template_preview_people`); (4) call `erase` on forwarding and delivery destinations that
 declare it and record results; (5) delete the person; (6) write an audit entry
@@ -3198,20 +3198,28 @@ class, erases, then reads every text, JSON, bytea and array column of every base
 them (raw, lowercase, percent-encoded, form-encoded), reporting table, column and count and
 never a value. A drift guard fails on a table that is not person-scoped, a survivor, closed by
 value or declared value-free. Data with no person column is deleted by value in the erase
-transaction, beside the transcript delete and outside `DELETIONS`: rejects with no person
+transaction, beside the transcript and draft deletes and outside `DELETIONS`: rejects with no person
 (payload, sample), import chunks (the whole file of an import with a matching chunk; every such
 import that has not ended is set `failed` with `erased` first, in the same transaction, and the
 batch checkpoint locks the import row and requires `running`, so a worker that already read rows
 cannot commit them), import reject cells and contact idempotency keys, each bounded by the
 workspace. Matching: an identifier matches only as a whole field, ignoring case (a CSV cell, a
 JSON scalar, the message id, the whole idempotency key); an email also as a substring; transcripts
-keep substring matching. A non-email identifier embedded in free text is not found. The chunk scan
+and drafts keep substring matching (a matching draft is deleted, so accept answers 404). A non-email identifier embedded in free text is not found. The chunk scan
 reads the workspace's import files of the last 7 days once per erase, each decoded once and tested
 against one combined pattern. The scan also reads the survivor tables (their rows may stay, a
 plaintext value may not). Limits: a changed spelling is missed; replay holds only hashes and
 cannot reach these value-keyed classes, so the live erase is the control and the retention
 windows (30 days, 7 days, 24 hours) bound the rest; the ledger file under `privacy.ledger_dir` is
 outside the database and the scan does not cover it.
+
+Another person's `source_records` can list an erased value: the record that lost an identity
+conflict keeps the identifier off its person but still lists it. Before the delete, the erase
+removes the group's `(kind, value)` pairs from `identifiers` of every record named by an
+`identity_conflicts` row against the group (found through the `(workspace_id, person_id)` and
+`(workspace_id, other_person_id)` indexes, then the primary key, never a scan of `source_records`),
+keeps the row, and renames a record keyed by one of the values to `erased:<record id>`. A record
+that lists the value with no recorded conflict is not reached.
 
 **Ledger outside the database (OQ-13, ruling cae7a407).** `privacy.ledger_dir`
 names the directory holding one JSON file per completed erasure entry.

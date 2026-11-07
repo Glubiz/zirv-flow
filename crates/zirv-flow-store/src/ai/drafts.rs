@@ -269,6 +269,36 @@ pub async fn purge_expired_ai_drafts(
     Ok(done.rows_affected())
 }
 
+/// Deletes the workspace's drafts whose content contains any of `needles`, ignoring case: the
+/// erased person's ids and identifier values. A draft is deleted rather than redacted: it is a
+/// model's copy of a sample, accepting it opens an editor from `content`, and a copy with a hole
+/// in it would apply a mapping or definition nobody wrote. After this the author's accept is a
+/// 404. Like a transcript it is matched by substring, so a draft that merely contains a short
+/// value goes too. Returns how many were deleted.
+pub async fn erase_ai_drafts(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    needles: &[String],
+) -> Result<u64, StoreError> {
+    let needles: Vec<&str> = needles
+        .iter()
+        .map(|needle| needle.trim())
+        .filter(|needle| !needle.is_empty())
+        .collect();
+    if needles.is_empty() {
+        return Ok(0);
+    }
+    let done = sqlx::query(
+        "DELETE FROM ai_drafts d WHERE d.workspace_id = $1 AND d.content IS NOT NULL AND EXISTS (             SELECT 1 FROM unnest($2::text[]) AS needle             WHERE position(lower(needle) IN lower(d.content::text)) > 0)",
+    )
+    .bind(workspace.as_uuid())
+    .bind(&needles)
+    .execute(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(done.rows_affected())
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -520,6 +550,77 @@ mod tests {
                 .await
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn erasing_a_value_deletes_the_drafts_that_hold_it_and_only_in_that_workspace(
+        pool: PgPool,
+    ) {
+        let one = workspace(&pool, "one").await;
+        let two = workspace(&pool, "two").await;
+        let ada = user(&pool, "ada@example.com").await;
+        let source_one = source(&pool, one).await;
+        let source_two = source(&pool, two).await;
+        let now = datetime!(2026-05-15 12:00 UTC);
+        let holding = json!({"mapping": {"sample": "Ada.Lovelace@Example.com"}});
+        let other = json!({"mapping": {"sample": "grace@example.com"}});
+        let hit = mapping(
+            one,
+            ada,
+            source_one,
+            Some(&holding),
+            now + Duration::days(1),
+        );
+        let kept = mapping(one, ada, source_one, Some(&other), now + Duration::days(1));
+        let elsewhere = mapping(
+            two,
+            ada,
+            source_two,
+            Some(&holding),
+            now + Duration::days(1),
+        );
+        for draft in [&hit, &kept, &elsewhere] {
+            insert(&pool, draft).await;
+        }
+        let mut connection = pool.acquire().await.unwrap();
+
+        let deleted = erase_ai_drafts(
+            &mut connection,
+            one,
+            &["ada.lovelace@example.com".to_owned()],
+        )
+        .await
+        .unwrap();
+        let nothing = erase_ai_drafts(&mut connection, one, &[String::new()])
+            .await
+            .unwrap();
+
+        assert_eq!((deleted, nothing), (1, 0));
+        assert!(
+            find_ai_draft(&pool, one, ada, hit.id, now)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            find_ai_draft(&pool, one, ada, kept.id, now)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            find_ai_draft(&pool, two, ada, elsewhere.id, now)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            !mark_ai_draft_accepted(&mut connection, one, ada, hit.id, now)
+                .await
+                .unwrap(),
+            "an erased draft cannot be accepted"
         );
     }
 

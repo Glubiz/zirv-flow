@@ -280,6 +280,7 @@ pub async fn erase_person(
     // after this commits the drain finds its locked person gone, which is a retryable race, and the
     // batch retries into a new person.
     let mut values: Vec<String> = Vec::new();
+    let mut pairs: Vec<(String, String)> = Vec::new();
     // The call lock comes before every row lock: a sync that holds it shared across its call, and
     // then waits for the person row, must never meet an erasure that holds the row and waits for
     // the lock. Once the erasure has it, no sync is between its call and its outcome for these
@@ -304,6 +305,7 @@ pub async fn erase_person(
         }
         for (kind, value) in group_identities(connection, workspace, group.current).await? {
             values.push(value.clone());
+            pairs.push((kind.clone(), value.clone()));
             // Stored identities are normalized already; one that no longer parses has no hash.
             if let Ok(identifier) = Identifier::parse(&kind, &value) {
                 let hash = identifier_hash(key, &identifier).to_vec();
@@ -357,9 +359,17 @@ pub async fn erase_person(
             .chain(values),
     );
     crate::ai::erase_ai_transcripts(connection, workspace, &needles).await?;
+    crate::ai::erase_ai_drafts(connection, workspace, &needles).await?;
     crate::erase_unattributed_rejects(connection, workspace, &needles).await?;
     crate::erase_import_values(connection, workspace, &needles).await?;
     crate::erase_contact_idempotency(connection, workspace, &needles).await?;
+    // Another person's record can list a value of this group: the loser of an identity conflict.
+    // That record is theirs, so it stays and loses the value. It runs before `delete_person`,
+    // which deletes the conflicts that point at it.
+    let group: Vec<Uuid> = std::iter::once(person)
+        .chain(people.iter().copied())
+        .collect();
+    redact_other_source_records(connection, workspace, &group, &pairs).await?;
     let mut person_found = false;
     for id in std::iter::once(person).chain(people) {
         person_found |=
@@ -520,6 +530,40 @@ async fn group_ids(
     .fetch_all(connection)
     .await
     .map_err(StoreError::query)
+}
+
+/// Removes the `pairs` (kind and value) from the `identifiers` of the source records of people
+/// outside `group` that an identity conflict names against the group, and renames such a record
+/// whose key is one of the pairs (`kind:value`) to `erased:<record id>`. The records are found
+/// through `identity_conflicts` by its `(workspace_id, person_id)` and
+/// `(workspace_id, other_person_id)` indexes, then by primary key, so the work is bounded by the
+/// group's conflicts and not by the size of `source_records`. A record that lists a value
+/// without any recorded conflict is not found; an identify records one whenever it keeps an
+/// identifier off a person because another person holds it. Returns the records changed.
+async fn redact_other_source_records(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    group: &[Uuid],
+    pairs: &[(String, String)],
+) -> Result<u64, StoreError> {
+    if pairs.is_empty() {
+        return Ok(0);
+    }
+    let (kinds, values): (Vec<&str>, Vec<&str>) = pairs
+        .iter()
+        .map(|(kind, value)| (kind.as_str(), value.as_str()))
+        .unzip();
+    let done = sqlx::query(
+        "WITH named AS (              SELECT source_record_id AS id FROM identity_conflicts               WHERE workspace_id = $1 AND other_person_id = ANY($2) AND source_record_id IS NOT NULL              UNION              SELECT source_record_id FROM identity_conflicts               WHERE workspace_id = $1 AND person_id = ANY($2) AND source_record_id IS NOT NULL)          UPDATE source_records s SET              identifiers = COALESCE((                  SELECT jsonb_agg(e.item ORDER BY e.position)                    FROM jsonb_array_elements(s.identifiers) WITH ORDINALITY AS e(item, position)                   WHERE NOT EXISTS (SELECT 1 FROM unnest($3::text[], $4::text[]) AS p(kind, value)                                      WHERE p.kind = e.item ->> 'kind'                                        AND p.value = e.item ->> 'value')), '[]'::jsonb),              record_key = CASE WHEN EXISTS (SELECT 1 FROM unnest($3::text[], $4::text[]) AS p(kind, value)                                              WHERE p.kind || ':' || p.value = s.record_key)                                THEN 'erased:' || s.id ELSE s.record_key END          WHERE s.workspace_id = $1 AND s.id IN (SELECT id FROM named) AND s.person_id <> ALL($2)            AND (EXISTS (SELECT 1 FROM jsonb_array_elements(s.identifiers) AS e(item),                                unnest($3::text[], $4::text[]) AS p(kind, value)                          WHERE p.kind = e.item ->> 'kind' AND p.value = e.item ->> 'value')                 OR EXISTS (SELECT 1 FROM unnest($3::text[], $4::text[]) AS p(kind, value)                             WHERE p.kind || ':' || p.value = s.record_key))",
+    )
+    .bind(workspace.as_uuid())
+    .bind(group)
+    .bind(&kinds)
+    .bind(&values)
+    .execute(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(done.rows_affected())
 }
 
 /// The `(kind, value)` of every identity of the person and of the people merged into them.
@@ -1806,6 +1850,145 @@ mod tests {
             assert!(
                 matches!(&outcome, Err(error) if error.is_retryable()),
                 "{outcome:?}"
+            );
+        })
+        .await;
+    }
+
+    /// Two identifies that share `EMAIL`: the first person owns it, and the second record keeps it
+    /// off its person and lands in a conflict. Returns both people and the second record's id.
+    async fn conflict_loser(pool: &PgPool, ws: WorkspaceId) -> (Uuid, Uuid, Uuid) {
+        let outcomes = crate::apply_profile_batch(
+            pool,
+            ws,
+            &[
+                profile(
+                    "crm",
+                    "a",
+                    &[("external:crm", "A"), ("email", EMAIL)],
+                    json!({}),
+                ),
+                profile(
+                    "crm",
+                    "b",
+                    &[("email", EMAIL), ("external:crm", "B")],
+                    json!({}),
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+        let (owner, loser) = (person_of(&outcomes[0]), person_of(&outcomes[1]));
+        assert_ne!(owner, loser);
+        let record: Uuid = sqlx::query_scalar(
+            "SELECT c.source_record_id FROM identity_conflicts c              WHERE c.workspace_id = $1 AND c.other_person_id = $2 AND c.person_id = $3",
+        )
+        .bind(ws.as_uuid())
+        .bind(owner)
+        .bind(loser)
+        .fetch_one(pool)
+        .await
+        .expect("the second identify recorded a conflict against the first person");
+        (owner, loser, record)
+    }
+
+    async fn record_identifiers(pool: &PgPool, id: Uuid) -> (Value, String, Uuid) {
+        sqlx::query_as(
+            "SELECT identifiers, record_key, person_id FROM source_records WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn erasing_a_person_takes_their_value_off_the_record_that_lost_a_conflict_and_keeps_the_record(
+        pool: PgPool,
+    ) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            let (owner, loser, record) = conflict_loser(&pool, ws).await;
+            let before = record_identifiers(&pool, record).await;
+            assert!(before.0.to_string().contains(EMAIL), "{before:?}");
+            let request = request(&pool, ws, owner).await;
+
+            erase(&pool, ws, request.id).await;
+
+            let (identifiers, key, person) = record_identifiers(&pool, record).await;
+            assert_eq!(identifiers, json!([{"kind": "external:crm", "value": "B"}]));
+            assert_eq!((key.as_str(), person), (before.1.as_str(), loser));
+            let loaded = crate::load_profile(&pool, ws, loser)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                !loaded.identity_groups.is_empty(),
+                "the other person has their record"
+            );
+            let again = crate::apply_profile_batch(
+                &pool,
+                ws,
+                &[profile(
+                    "crm",
+                    "b",
+                    &[("email", EMAIL), ("external:crm", "B")],
+                    json!({}),
+                )],
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                person_of(&again[0]),
+                loser,
+                "a later identify still finds the person"
+            );
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_record_keyed_by_the_erased_value_is_renamed_and_a_record_without_a_conflict_is_not_reached(
+        pool: PgPool,
+    ) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            let (owner, _, record) = conflict_loser(&pool, ws).await;
+            let key = format!("email:{EMAIL}");
+            sqlx::query("UPDATE source_records SET record_key = $2 WHERE id = $1")
+                .bind(record)
+                .bind(&key)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let outcomes = crate::apply_profile_batch(
+                &pool,
+                ws,
+                &[profile("crm", "c", &[("external:crm", "C")], json!({}))],
+            )
+            .await
+            .unwrap();
+            let unrecorded: Uuid = sqlx::query_scalar(
+                "UPDATE source_records SET identifiers = identifiers || $2::jsonb              WHERE workspace_id = $1 AND record_key = 'c' RETURNING id",
+            )
+            .bind(ws.as_uuid())
+            .bind(json!([{"kind": "email", "value": EMAIL}]))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let _ = person_of(&outcomes[0]);
+            let request = request(&pool, ws, owner).await;
+
+            erase(&pool, ws, request.id).await;
+
+            let renamed = record_identifiers(&pool, record).await;
+            assert_eq!(renamed.1, format!("erased:{record}"));
+            let left = record_identifiers(&pool, unrecorded).await;
+            assert!(
+                left.0.to_string().contains(EMAIL),
+                "no conflict names this record, so erasure does not find it"
             );
         })
         .await;

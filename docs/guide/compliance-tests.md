@@ -48,6 +48,9 @@ Each enforced claim (E1 to E20) of the [compliance guide](compliance.md) maps to
 | E8 | The job erases and completes the request | `the_job_erases_the_person_suppresses_the_email_and_completes_the_request` | `crates/zirv-flow-jobs/src/kinds/privacy_erase.rs` |
 | E8 | Limit: matching is by whole field | `a_needle_matches_only_as_a_whole_field` | `crates/zirv-flow-store/src/by_value.rs` |
 | E8 | Transcripts of the person are deleted | `erasing_a_person_deletes_the_ai_transcripts_that_name_them_and_no_others` | `crates/zirv-flow-store/src/privacy/erasure.rs` |
+| E8 | Drafts that hold a value are deleted by substring within the workspace | `erasing_a_value_deletes_the_drafts_that_hold_it_and_only_in_that_workspace` | `crates/zirv-flow-store/src/ai/drafts.rs` |
+| E8 | Another person's record loses the value and stays | `erasing_a_person_takes_their_value_off_the_record_that_lost_a_conflict_and_keeps_the_record` | `crates/zirv-flow-store/src/privacy/erasure.rs` |
+| E8 | Limit: a record keyed by the value is renamed; a record with no conflict is not reached | `a_record_keyed_by_the_erased_value_is_renamed_and_a_record_without_a_conflict_is_not_reached` | `crates/zirv-flow-store/src/privacy/erasure.rs` |
 | E9 | Merged people are erased with the survivor | `erasing_a_person_with_every_data_class_leaves_only_the_ledger` | `crates/zirv-flow-store/src/privacy/erasure.rs` |
 | E9 | A backup before a merge is erased too | `replay_erases_every_id_the_group_had_when_a_backup_predates_the_merge` | `crates/zirv-flow-store/src/privacy/erasure.rs` |
 | E10 | Only declaring destinations get one call | `only_the_destinations_that_declare_erase_receive_one_call_with_a_stable_key` | `crates/zirv-flow/src/e2e/privacy.rs` |
