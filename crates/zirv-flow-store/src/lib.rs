@@ -61,10 +61,10 @@ pub use ai::{
     AiCall, AiDraft, AiSettings, AiSettingsUpdate, AiUsage, CallOutcome, DRAFT_PURGE_BATCH,
     DraftKind, DraftStatus, FeatureUsage, FinishedAiCall, NewAiCall, NewAiDraft, ProbeRecord,
     Reservation, ReservationLimits, TRANSCRIPT_PURGE_BATCH, UserUsage, ai_usage,
-    calls_in_last_minute, erase_ai_transcripts, find_ai_draft, find_ai_settings, finish_ai_call,
-    insert_ai_draft, insert_ai_transcript, lock_ai_settings, mark_ai_draft_accepted, month_start,
-    purge_expired_ai_drafts, purge_expired_ai_transcripts, put_ai_settings, record_ai_call,
-    reserve_ai_call, spent_this_month,
+    calls_in_last_minute, erase_ai_drafts, erase_ai_transcripts, find_ai_draft, find_ai_settings,
+    finish_ai_call, insert_ai_draft, insert_ai_transcript, lock_ai_settings,
+    mark_ai_draft_accepted, month_start, purge_expired_ai_drafts, purge_expired_ai_transcripts,
+    put_ai_settings, record_ai_call, reserve_ai_call, spent_this_month,
 };
 pub use api_idempotency::{
     ApiIdempotencyKey, Reserved, bind_api_idempotency_hash, complete_api_idempotency,

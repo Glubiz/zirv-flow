@@ -39,8 +39,16 @@ const DETAIL_FIELDS: usize = 5;
 /// `masked_fields` for a caller who may not see values: members and `read` keys.
 #[derive(Serialize, ToSchema)]
 pub(crate) struct ContactBody {
-    /// The contact key: the identifier `external:contact_key`.
-    key: String,
+    /// An opaque id of this contact, unique per row and safe to show to any caller; it is
+    /// not the key and cannot be turned into it. Use it to tell rows apart.
+    id: Uuid,
+    /// The contact key: the identifier `external:contact_key`. `null` with `masked` set in a
+    /// list or search answer for a caller who may not see identifiers; an answer to a request
+    /// that named the key carries it.
+    #[schema(required = true)]
+    key: Option<String>,
+    /// Whether `key` is hidden from this caller; the contact is reached by `person_id`.
+    masked: bool,
     /// The person the contact belongs to; the merged profile is at `/people/{person_id}`.
     person_id: Uuid,
     /// The fields as written, by registry key.
@@ -96,7 +104,24 @@ impl Masking {
         })
     }
 
+    /// Whether the caller may not see contact keys.
+    pub(crate) fn hides_keys(&self) -> bool {
+        self.hidden.is_some()
+    }
+
+    /// The contact as a list or search row: the key is hidden from a caller without access to
+    /// identifiers.
     pub(crate) fn body(&self, contact: Contact) -> ContactBody {
+        self.render(contact, self.hides_keys())
+    }
+
+    /// The contact as the answer to a request that named its key: the caller holds the key
+    /// already, so it is echoed.
+    pub(crate) fn body_for_key(&self, contact: Contact) -> ContactBody {
+        self.render(contact, false)
+    }
+
+    fn render(&self, contact: Contact, hide_key: bool) -> ContactBody {
         let mut fields = Map::new();
         let mut masked_fields = Vec::new();
         for (key, value) in contact.fields {
@@ -112,7 +137,9 @@ impl Masking {
             }
         }
         ContactBody {
-            key: contact.key,
+            id: contact.id,
+            key: (!hide_key).then_some(contact.key),
+            masked: hide_key,
             person_id: contact.person_id,
             fields,
             masked_fields,
@@ -207,6 +234,7 @@ mod tests {
 
     fn contact() -> Contact {
         Contact {
+            id: Uuid::nil(),
             key: "c-1".into(),
             person_id: Uuid::nil(),
             fields: json!({"email": "a@example.com", "plan": "pro", "ssn": "123"})
@@ -231,6 +259,21 @@ mod tests {
             json!({"email": null, "plan": "pro", "ssn": null})
         );
         assert_eq!(body.masked_fields, ["email", "ssn"]);
+    }
+
+    #[test]
+    fn a_row_hides_the_key_from_a_masked_caller_but_an_answer_to_a_named_key_keeps_it() {
+        let masking = Masking {
+            hidden: Some(HashSet::new()),
+        };
+
+        let row = masking.body(contact());
+        let named = masking.body_for_key(contact());
+        let open = Masking { hidden: None }.body(contact());
+
+        assert_eq!((row.key, row.masked), (None, true));
+        assert_eq!((named.key.as_deref(), named.masked), (Some("c-1"), false));
+        assert_eq!((open.key.as_deref(), open.masked), (Some("c-1"), false));
     }
 
     #[test]

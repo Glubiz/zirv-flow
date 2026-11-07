@@ -319,6 +319,18 @@ impl ApiError {
         }
     }
 
+    /// A caller without access to identifiers asked to search contacts by key prefix: the
+    /// answer would list keys.
+    pub(crate) fn contact_key_not_searchable() -> Self {
+        Self {
+            code: Some("contact_key_not_searchable"),
+            ..Self::new(
+                StatusCode::FORBIDDEN,
+                "q: a contact key cannot be searched without access to identifiers",
+            )
+        }
+    }
+
     /// An `Idempotency-Key` that was first used for a different request.
     pub(crate) fn idempotency_key_reused() -> Self {
         Self {

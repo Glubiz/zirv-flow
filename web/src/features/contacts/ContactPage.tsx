@@ -16,7 +16,7 @@ import {
   Pill,
 } from "../../ui";
 import { ContactForm } from "./ContactForm";
-import { identifierLabel, showValue, useContactAccess, useContactSchema, type Contact, type SchemaField } from "./schema";
+import { identifierLabel, keyed, showValue, useContactAccess, useContactSchema, type Contact, type KeyedContact, type SchemaField } from "./schema";
 
 export function ContactPage() {
   const { ws = "", key = "" } = useParams();
@@ -74,7 +74,7 @@ function ContactView({ workspaceId, contactKey }: { workspaceId: string; contact
     );
   }
 
-  const data = contact.data;
+  const data = keyed(contact.data, contactKey);
   return (
     <div className="page">
       <PageHeader
@@ -170,7 +170,7 @@ function DeleteDialog({
   onClose,
 }: {
   workspaceId: string;
-  contact: Contact;
+  contact: KeyedContact;
   onClose: () => void;
 }) {
   const navigate = useNavigate();

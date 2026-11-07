@@ -39,6 +39,7 @@ const DEFINITION = {
 function contact(fields: Record<string, unknown>, masked: string[] = []) {
   return {
     key: "c-1",
+    masked: false,
     person_id: "person-1",
     fields,
     masked_fields: masked,
