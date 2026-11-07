@@ -714,6 +714,21 @@ react as configured and destination syncs remove the person downstream (10.2).
 Deletion removes one source's contribution; **erasure** (16.3) removes the
 person and every derived row.
 
+As built (deleting a source): `DELETE /sources/{id}` deletes the source row and, in the same
+transaction, enqueues one `sources.purge` job (payload `{workspace_id, source_id}`, unique key
+`sources.purge:{source_id}`, so at most one is ready or running). Each run removes up to
+`SYNC_SWEEP_BATCH` live records of that source in its own transaction through
+`remove_contribution_in`, with a `sync.record`/`deleted` decision (reason `source_deleted`) per
+record, requests the segment re-evaluation, and enqueues the next batch until none is left. A
+removed record is tombstoned, so a run that fails and is retried finds only what remains and
+removes each record once; two workers cannot double-remove because the removal locks the record
+and re-checks its tombstone. A sync run of the deleted source is fenced by its run row, which the
+delete cascades away: a batch committed before the delete is purged with the rest, and any later
+batch finds no run and writes nothing. Events the source sent without a record link (webhook
+and stream events, `source_record_id` NULL) stay as history, as they do for a sync deletion: on
+timelines, in event-based segment conditions, and in `is_orphan`, so a person who still has
+events is not orphan-deleted (supervisor ruling 786b63dc).
+
 As built (M2): `remove_contribution` tombstones the record, recomputes the traits, deletes the
 identities no other live record of the person lists (and the conflicts about them), marks the
 person dirty, appends `contribution.removed` and then applies `workspaces.orphan_policy`

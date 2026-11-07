@@ -295,7 +295,7 @@ function SourceDetail({ workspaceId, sourceId }: { workspaceId: string; sourceId
                 <Dialog title={`Delete ${data.name}?`} onClose={() => setDeleting(false)}>
                   <p className="muted">
                     Deleting <span className="strong">{data.name}</span> removes its settings, its streams and its stored
-                    credential. This cannot be undone.
+                    credential. Its data leaves people's profiles and segments in the background. This cannot be undone.
                   </p>
                   {failure ? <InlineError {...failure} /> : null}
                   <div className="dialog-actions">

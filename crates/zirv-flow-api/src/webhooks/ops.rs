@@ -540,6 +540,15 @@ pub(crate) async fn delete_webhook(
         json!({"source_id": hook.source_id}),
     )
     .await?;
+    zirv_flow_store::enqueue(
+        &mut *tx,
+        &zirv_flow_store::source_purge_job(
+            workspace,
+            hook.source_id,
+            &crate::trace::request_trace(),
+        ),
+    )
+    .await?;
     admin::audit_secret_deleted(&mut tx, context, workspace, secret).await?;
     zirv_flow_store::commit(tx).await?;
     Ok(())

@@ -159,6 +159,15 @@ pub(crate) fn record_sync_run(outcome: RunOutcome, seconds: f64) {
     metrics::histogram!("zirv_flow_sync_run_duration_seconds").record(seconds);
 }
 
+/// Counts the records a source-purge batch removed: `zirv_flow_source_purge_records_total`.
+pub(crate) fn record_source_purge(removed: i64) {
+    if let Ok(removed) = u64::try_from(removed)
+        && removed > 0
+    {
+        metrics::counter!("zirv_flow_source_purge_records_total").increment(removed);
+    }
+}
+
 /// Counts what a committed sync batch did: `zirv_flow_sync_records_total{outcome}`.
 pub(crate) fn record_sync_records(counts: &zirv_flow_store::SyncCounts) {
     for (outcome, count) in [
