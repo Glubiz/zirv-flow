@@ -92,8 +92,9 @@ impl DirtyBatch {
 
 /// The one total order every writer that touches several segments' rows locks them in: a
 /// segment comes after every segment it references, ties go by id, and archived segments are
-/// ordered with the rest. The passes, merges and erasures all lock through it, so no two of
-/// them can wait on each other.
+/// ordered with the rest. The passes and erasures lock through it, so no two of them can wait
+/// on each other. A merge takes no segment lock: the pass its mark schedules closes the merged
+/// person's rows.
 async fn lock_order(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -152,8 +153,8 @@ pub async fn lock_reevaluation(
 }
 
 /// Takes, in the same order as a pass, the refresh lock of every segment in which one of
-/// `people` has an open row, for the rest of the transaction. A merge or an erasure calls this
-/// before it writes any segment row, so none of them waits on a pass that waits on it.
+/// `people` has an open row, for the rest of the transaction. An erasure calls this before it
+/// writes any segment row, so it never waits on a pass that waits on it.
 pub(crate) async fn lock_segments_of_people(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -318,7 +319,11 @@ pub struct ReevaluateApply<'a> {
 /// the difference, all in the caller's transaction, after [`lock_segment_refresh`]:
 ///
 /// - a person in the set with no open row gets one and a `segment.entered` event;
-/// - an open row of a batch person who is not in the set is closed with a `segment.exited` event;
+/// - an open row of a batch person who is not in the set is closed with a `segment.exited` event,
+///   except the row of a person merged away: a merge marks both people and leaves their rows to
+///   this pass, which closes the merged person's with cause `data_change` on the merge's trace and
+///   no event, decision or flow trigger, and judges the survivor on its own row, so a survivor
+///   already in the segment does not enter it again;
 /// - each change appends a decision, and its event and row carry the trace of the person's mark
 ///   and, in the decision, its cause;
 /// - the segment's `member_count` follows. `computed_version` and `computed_at` are left: a
@@ -797,8 +802,7 @@ mod tests {
             let trace = TraceContext::root(Cause::api("req"));
             let batch = DirtyBatch::new(&[dirty(ada, &trace)], &trace);
             reevaluate(&pool, ws, seg.id, "pro", &batch).await;
-            // A refresh that ran concurrently with a merge opened a row after the merge closed
-            // them: the loser is merged but has an open row.
+            // A merge leaves the loser's open rows to the pass that consumes its mark.
             let survivor = person(&pool, ws, "ada2@example.com", "pro").await;
             sqlx::query("UPDATE people SET merged_into = $2 WHERE id = $1")
                 .bind(ada)
@@ -806,6 +810,8 @@ mod tests {
                 .execute(&pool)
                 .await
                 .unwrap();
+            let merge = TraceContext::root(Cause::api("merge"));
+            let batch = DirtyBatch::new(&[dirty(ada, &merge)], &trace);
 
             let outcome = reevaluate(&pool, ws, seg.id, "pro", &batch).await;
 
@@ -822,6 +828,27 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(count, 0);
+            // The person the loser was is still there as the survivor: no exit is recorded.
+            let (closed_by, cause, ordered): (Uuid, String, bool) = sqlx::query_as(
+                "SELECT exited_trace_id, exited_cause, exited_at >= entered_at \
+                 FROM segment_members WHERE person_id = $1",
+            )
+            .bind(ada)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                (closed_by, cause.as_str(), ordered),
+                (merge.trace_id.as_uuid(), "data_change", true)
+            );
+            let exits: i64 = sqlx::query_scalar(
+                "SELECT (SELECT count(*) FROM events WHERE name = 'segment.exited') \
+                      + (SELECT count(*) FROM decision_records WHERE action = 'segment.exited')",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(exits, 0, "a merged person's row closes without an exit");
         })
         .await;
     }

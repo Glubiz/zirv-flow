@@ -216,6 +216,7 @@ pub struct RefreshApply<'a> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RefreshOutcome {
     pub entered: i64,
+    /// Rows closed, including those of people merged away, which record no exit.
     pub exited: i64,
 }
 
@@ -402,7 +403,9 @@ pub(super) fn refresh_statement(members: &SqlQuery, scope: Scope, capture: bool)
         )
     };
     let entered = recorded("entered", "inserted", &decision_actions::SEGMENT_ENTERED);
-    let exited = recorded("exited", "closed", &decision_actions::SEGMENT_EXITED);
+    // The row of a person merged away closes without an exit: the person it stood for is still
+    // there as the survivor, whom the same diff judges on its own row.
+    let exited = recorded("exited", "exits", &decision_actions::SEGMENT_EXITED);
     // The trace a row is opened or closed under, reached through the batch in a batch diff.
     let (enter_join, leave_join) = match scope {
         Scope::Segment => ("", ""),
@@ -460,7 +463,10 @@ pub(super) fn refresh_statement(members: &SqlQuery, scope: Scope, capture: bool)
                  WHERE m.workspace_id = $1 AND m.segment_id = {segment} \
                    AND m.person_id = t.id AND m.exited_at IS NULL)), \
          leaving AS ( \
-             SELECT m.id AS row_id, m.person_id FROM segment_members m \
+             SELECT m.id AS row_id, m.person_id, \
+                 EXISTS (SELECT 1 FROM people p WHERE p.id = m.person_id \
+                     AND p.merged_into IS NOT NULL) AS merged \
+             FROM segment_members m \
              WHERE m.workspace_id = $1 AND m.segment_id = {segment} AND m.exited_at IS NULL \
                {leaving_scope} \
                AND NOT EXISTS (SELECT 1 FROM target t WHERE t.id = m.person_id)), \
@@ -472,9 +478,11 @@ pub(super) fn refresh_statement(members: &SqlQuery, scope: Scope, capture: bool)
              RETURNING person_id), \
          closed AS ( \
              UPDATE segment_members m SET exited_version = {version}, exited_at = {now}, \
-                 exited_trace_id = {trace}, exited_cause = {cause} \
+                 exited_trace_id = {trace}, \
+                 exited_cause = CASE WHEN l.merged THEN 'data_change' ELSE {cause} END \
              FROM leaving l{leave_join} WHERE m.id = l.row_id AND m.exited_at IS NULL \
-             RETURNING m.person_id), \
+             RETURNING m.person_id, l.merged), \
+         exits AS (SELECT person_id FROM closed WHERE NOT merged), \
          {entered}, {exited}{trailing} \
          SELECT ARRAY[ \
              (SELECT count(*) FROM inserted), (SELECT count(*) FROM closed), \
@@ -494,7 +502,9 @@ pub(super) fn refresh_statement(members: &SqlQuery, scope: Scope, capture: bool)
 /// caller's transaction, after [`lock_segment_refresh`]:
 ///
 /// - a person in the set with no open row gets one and a `segment.entered` event;
-/// - an open row whose person is not in the set is closed with a `segment.exited` event;
+/// - an open row whose person is not in the set is closed with a `segment.exited` event, except
+///   the row of a person merged away, which closes with cause `data_change` and no event,
+///   decision or flow trigger (the person is still there as the survivor);
 /// - each change appends a decision under the trace;
 /// - the segment's `computed_version`, `computed_at` and `member_count` are written;
 /// - when anything changed, a `dependent` refresh is enqueued for each live segment whose current
@@ -1022,6 +1032,77 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!((events, changes), (2, 0));
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_refresh_closes_a_merged_persons_row_without_an_exit_and_the_count_drops(
+        pool: PgPool,
+    ) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            let seg = segment(&pool, ws, "Pros", 60).await;
+            let loser = person(&pool, ws, PERSONAL_DATA.email, "pro").await;
+            let gone = person(&pool, ws, "bob@example.com", "pro").await;
+            refresh(&pool, ws, seg.id, "pro", MembershipCause::Initial, NOW).await;
+            // A merge that the pass has not caught up with yet, beside a real exit.
+            let survivor = person(&pool, ws, "ada2@example.com", "free").await;
+            sqlx::query("UPDATE people SET merged_into = $2 WHERE id = $1")
+                .bind(loser)
+                .bind(survivor)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("UPDATE people SET traits = '{}' WHERE id = $1")
+                .bind(gone)
+                .execute(&pool)
+                .await
+                .unwrap();
+
+            let (outcome, trace) =
+                refresh(&pool, ws, seg.id, "pro", MembershipCause::Time, NOW).await;
+
+            assert_eq!(
+                outcome,
+                RefreshOutcome {
+                    entered: 0,
+                    exited: 2
+                }
+            );
+            assert!(open_people(&pool, seg.id).await.is_empty());
+            let count: i32 = sqlx::query_scalar("SELECT member_count FROM segments WHERE id = $1")
+                .bind(seg.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(count, 0);
+            let rows: Vec<(Uuid, Option<String>, Option<Uuid>)> = sqlx::query_as(
+                "SELECT person_id, exited_cause, exited_trace_id FROM segment_members \
+                 ORDER BY person_id = $1",
+            )
+            .bind(loser)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            let closed_by = Some(trace.trace_id.as_uuid());
+            assert_eq!(
+                rows,
+                [
+                    (gone, Some("time".to_owned()), closed_by),
+                    (loser, Some("data_change".to_owned()), closed_by)
+                ]
+            );
+            let exits: Vec<Uuid> = sqlx::query_scalar(
+                "SELECT person_id FROM events WHERE name = 'segment.exited' \
+                 UNION ALL SELECT (subject_ids ->> 'person')::uuid FROM decision_records \
+                 WHERE action = 'segment.exited'",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(exits, [gone, gone], "only the real exit is recorded");
         })
         .await;
     }

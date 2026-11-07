@@ -1,7 +1,9 @@
 //! Merging people (architecture section 7.3): what moves to the survivor in the transaction
 //! of the record that joined them, and the job that re-points the rest afterwards.
 //!
-//! List memberships and consent move in [`merge_people`] too.
+//! Consent moves in [`merge_people`] too. List memberships move in the rewrite job, and the
+//! merged people's segment rows are closed by the next re-evaluation pass, so a merge inside a
+//! drain batch takes no list or segment lock.
 
 use sqlx::{PgConnection, PgExecutor};
 use uuid::Uuid;
@@ -13,7 +15,6 @@ use super::apply::{recompute, record_decision};
 use super::slots::{lock_and_read_writer_slots, slot_nulls_sql};
 use crate::changes::mark_people;
 use crate::consent;
-use crate::lists::{lock_lists_for_merge, move_on_merge};
 use crate::{NewDecision, NewJob, StoreError, append_decision, enqueue};
 
 /// The job kind that re-points what [`merge_people`] leaves behind.
@@ -56,6 +57,12 @@ pub async fn current_person<'e>(
 /// caller's transaction: its identities and ledger rows move, it points at the survivor, a
 /// provenance row and a `person.merge` decision are written and the rewrite job is enqueued.
 /// Afterwards the survivor's traits are recomputed from every contribution it now holds.
+///
+/// It writes no segment or list row and takes no segment or list lock: a drain batch applies
+/// many records in one transaction, and a lock taken per merge would be taken out of order
+/// across them. The losers' open segment rows are closed by the pass their merge mark
+/// schedules, and their list memberships move in the rewrite job, which this transaction
+/// enqueues.
 pub(super) async fn merge_people(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -66,11 +73,9 @@ pub(super) async fn merge_people(
     crate::changes::cache_change_readers(connection, workspace).await?;
     // A trait writer: the loser's traits are emptied below, so its slots are emptied with them.
     let slots = lock_and_read_writer_slots(connection, workspace).await?;
-    lock_lists_for_merge(connection, workspace, losers).await?;
-    // Both sides are marked before anything touches the segments. The next pass then sees the
-    // loser as merged, so a row that a concurrent full refresh opens for it after this merge
-    // closed its rows is closed by that pass. Marking first also keeps a pass that holds a
-    // mark from waiting on a segment row this merge holds.
+    // Both sides are marked in the merge class, which every live segment reads. The next pass
+    // closes the losers' open rows without an exit, since the person they were is still there
+    // as the survivor, and evaluates the survivor on everything it now holds.
     let mut marked = losers.to_vec();
     marked.push(survivor);
     mark_people(
@@ -82,9 +87,6 @@ pub(super) async fn merge_people(
         None,
     )
     .await?;
-    // The segments the losers are open members of are locked in the pass's order before any of
-    // their rows is written, so this merge and a pass can never wait on each other.
-    crate::segments::lock_segments_of_people(connection, workspace, losers).await?;
     for &loser in losers {
         let mut identity_ids: Vec<Uuid> = sqlx::query_scalar(
             "UPDATE identities SET person_id = $3 \
@@ -108,8 +110,6 @@ pub(super) async fn merge_people(
         .map_err(StoreError::query)?;
         identity_ids.sort();
         record_ids.sort();
-        move_on_merge(connection, workspace, loser, survivor, trace).await?;
-        crate::segments::close_on_merge(connection, workspace, loser, trace).await?;
         // The loser keeps no traits: reads follow merged_into to the survivor's.
         let reset = format!(
             "UPDATE people SET merged_into = $3, traits = '{{}}'::jsonb, \
@@ -384,6 +384,12 @@ async fn lock_merged_and_survivor(
 /// once the person is merged and every batch is done; a person that was not merged is left
 /// alone.
 ///
+/// The list memberships and their history move here, last, with the lists locked
+/// ([`crate::lists::move_on_merge`]): the survivor ends up in the union of both people's lists
+/// and the counts are exact again. Until then the loser's rows stay, and the list writers and
+/// audiences follow `merged_into` from them. The person-change guard is taken first, because a
+/// moved membership marks the survivor.
+///
 /// The flow tables, one by one:
 /// - `flow_entries` is **folded** into the survivor's row for the same flow in the merge
 ///   transaction ([`merge_people`]), not here: the two were one human, so a `once` flow that
@@ -414,6 +420,7 @@ pub async fn rewrite_merged_person(
     trace: &TraceContext,
     job: Option<(Uuid, i32)>,
 ) -> Result<u64, StoreError> {
+    crate::changes::cache_change_readers(connection, workspace).await?;
     let Some(survivor) = lock_merged_and_survivor(connection, workspace, merged).await? else {
         return Ok(0);
     };
@@ -452,6 +459,7 @@ pub async fn rewrite_merged_person(
             }
         }
     }
+    total += crate::lists::move_on_merge(connection, workspace, merged, survivor, trace).await?;
     // A conflict between two people that have both been merged into the survivor is now
     // between one person and itself.
     sqlx::query(

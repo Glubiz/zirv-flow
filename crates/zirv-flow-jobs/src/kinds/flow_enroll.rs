@@ -2207,4 +2207,132 @@ mod tests {
         })
         .await;
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn between_a_merge_and_its_rewrite_a_list_or_segment_send_reaches_the_survivor_once(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            env.define_plan().await;
+            let trace = TraceContext::root(Cause::api("t"));
+            let other = "bob@example.com";
+            let apply = |key: &'static str, emails: Vec<&'static str>| {
+                let (pool, ws, trace) = (env.pool.clone(), env.ws, trace.clone());
+                async move {
+                    let record = zirv_flow_store::ProfileRecord {
+                        source: "crm".into(),
+                        stream: "contacts".into(),
+                        record_key: key.into(),
+                        identifiers: emails
+                            .into_iter()
+                            .map(|email| ("email".into(), email.into()))
+                            .collect(),
+                        traits: json!({"plan": "pro"}).as_object().cloned().unwrap(),
+                        observed_at: OffsetDateTime::now_utc(),
+                        trace,
+                    };
+                    let outcomes = zirv_flow_store::apply_profile_batch(&pool, ws, &[record])
+                        .await
+                        .unwrap();
+                    match &outcomes[0] {
+                        zirv_flow_store::ProfileOutcome::Applied { person_id, .. }
+                        | zirv_flow_store::ProfileOutcome::Unchanged { person_id, .. } => {
+                            *person_id
+                        }
+                        zirv_flow_store::ProfileOutcome::Rejected { reason } => {
+                            panic!("rejected: {reason}")
+                        }
+                    }
+                }
+            };
+            let survivor = apply("1", vec![PERSONAL_DATA.email]).await;
+            let loser = apply("2", vec![other]).await;
+            let list = zirv_flow_store::create_list(&env.pool, env.ws, "VIPs", "", None)
+                .await
+                .unwrap()
+                .id;
+            let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
+            let both = [survivor, loser];
+            let source = zirv_flow_store::ListSource::Api;
+            zirv_flow_store::add_members(&mut tx, env.ws, list, &both, source, None, &trace)
+                .await
+                .unwrap();
+            zirv_flow_store::commit(tx).await.unwrap();
+            let pros = env.segment("Pros", plan_is("pro")).await;
+            env.refresh(pros, "save", TraceContext::root(Cause::api("job")))
+                .await;
+            let leaving = env
+                .flow(
+                    "Win back",
+                    settings(entered_trigger(pros, "exited"), once()),
+                )
+                .await;
+            let by_list = env
+                .flow("To the list", settings(json!({"type": "manual"}), once()))
+                .await;
+            let by_segment = env
+                .flow(
+                    "To the segment",
+                    settings(json!({"type": "manual"}), once()),
+                )
+                .await;
+
+            assert_eq!(apply("3", vec![PERSONAL_DATA.email, other]).await, survivor);
+            // The rewrite has not run and no pass either: the loser still holds its rows.
+            let mut pair = both.to_vec();
+            pair.sort_unstable();
+            let listed = || {
+                sqlx::query_scalar::<_, Uuid>(
+                    "SELECT person_id FROM list_members WHERE list_id = $1 ORDER BY person_id",
+                )
+                .bind(list)
+                .fetch_all(&env.pool)
+            };
+            assert_eq!(listed().await.unwrap(), pair);
+            assert_eq!(env.members(pros).await, pair);
+            let send = |flow, source| EnrollJobPayload {
+                workspace: env.ws,
+                flow,
+                version: None,
+                trigger: TriggerKind::Manual,
+                work: EnrollWork::Audience {
+                    source,
+                    occurrence: Some(Uuid::now_v7()),
+                    after: None,
+                    entered_by: None,
+                },
+            };
+            let start = TraceContext::root(Cause::api("start"));
+            env.run(&send(by_list, AudienceSource::List(list)), &start)
+                .await;
+            env.run(&send(by_segment, AudienceSource::Segment(pros)), &start)
+                .await;
+
+            assert_eq!(env.enrolled(by_list).await, [survivor]);
+            assert_eq!(env.enrolled(by_segment).await, [survivor]);
+            assert_eq!(env.decisions("enrolled", None).await, 2);
+            // A full refresh in between closes the loser's row without an exit, so the flow on
+            // the segment's exits starts nobody.
+            let (_, schedule) = schedule_trace();
+            env.refresh(pros, "schedule", schedule).await;
+            env.drain(1).await;
+            assert_eq!(env.members(pros).await, [survivor]);
+            assert!(env.enrolled(leaving).await.is_empty());
+            // The rewrite moves the loser's membership and the count follows.
+            let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
+            zirv_flow_store::rewrite_merged_person(&mut tx, env.ws, loser, &trace, None)
+                .await
+                .unwrap();
+            zirv_flow_store::commit(tx).await.unwrap();
+            assert_eq!(listed().await.unwrap(), [survivor]);
+            let found = zirv_flow_store::find_list(&env.pool, env.ws, list)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(found.member_count, 1);
+        })
+        .await;
+    }
 }

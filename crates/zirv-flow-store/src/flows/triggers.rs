@@ -506,7 +506,9 @@ pub async fn find_events(
 }
 
 /// The next page of an audience: up to [`MAX_ENROLL_PEOPLE`] people with an id after `after`, in
-/// id order. A person merged into another is never in a page. With `entered_by` set, a segment
+/// id order. A person merged into another is never in an `Everyone` page. A segment or list page
+/// may hold one whose rows the next pass or the merge's rewrite has not yet closed or moved; the
+/// enroll resolves it to its survivor and enrolls that person once. With `entered_by` set, a segment
 /// page holds only the members whose current membership began at or before it (a publish
 /// fan-out's snapshot); the other sources ignore it.
 pub async fn audience_page(

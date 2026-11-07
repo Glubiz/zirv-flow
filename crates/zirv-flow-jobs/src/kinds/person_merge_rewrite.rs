@@ -1,11 +1,11 @@
 //! `person.merge.rewrite`: re-points the person-scoped rows that the merge transaction does
-//! not move to the person a merged person was merged into.
+//! not move to the person a merged person was merged into, and moves its list memberships.
 //!
 //! The payload is `{workspace_id, merged_person_id}`. The job reads the survivor from the
 //! merged person's `merged_into`, so a later merge of the survivor is followed. It re-points
 //! in batches of 1,000 rows per statement (after locking the merged person and the survivor, so an
-//! erasure of the group waits for it), appends a `person.merge.rewrite` decision when it
-//! is done, and a re-run re-points nothing more.
+//! erasure of the group waits for it), moves the memberships with their lists locked, appends a
+//! `person.merge.rewrite` decision when it is done, and a re-run re-points nothing more.
 
 use serde_json::Value;
 use uuid::Uuid;
@@ -17,6 +17,8 @@ pub(crate) struct PersonMergeRewrite;
 
 impl JobKind for PersonMergeRewrite {
     const KIND: &'static str = zirv_flow_store::REWRITE_JOB_KIND;
+    // A moved membership marks the survivor in the lists class.
+    const NEEDS_CHANGE_READERS: bool = true;
 
     async fn run(&self, ctx: &mut JobContext<'_>, payload: Value) -> Result<(), JobError> {
         let (workspace, merged) = parse(&payload)?;

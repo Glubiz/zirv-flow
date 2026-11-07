@@ -1,5 +1,5 @@
 //! List memberships: adding and removing people, reading them, the history of every change,
-//! and the move a merge makes. A change follows `merged_into`, is idempotent, keeps
+//! and the move a merge's rewrite job makes. A change follows `merged_into`, is idempotent, keeps
 //! `member_count` exact in its own transaction and leaves one history row and one
 //! `list.membership` decision per real change. Decisions carry ids only.
 
@@ -122,7 +122,7 @@ impl Change {
 }
 
 /// Resolves each person to the one that stands for it now and locks those people, so a merge
-/// cannot move memberships while this transaction writes them. Keyed by the id given; people
+/// of them cannot commit while this transaction writes them. Keyed by the id given; people
 /// that do not exist are absent.
 async fn lock_current_people(
     connection: &mut PgConnection,
@@ -154,7 +154,8 @@ async fn lock_current_people(
 
 /// The distinct current people to change, and an outcome that already counts every existing
 /// person as unchanged and lists the missing ones. The list is locked for the rest of the
-/// transaction, after the people, which is the order a merge locks in.
+/// transaction, after the people, which is the order a merge's rewrite locks in; the rewrite
+/// that moves a merged person's rows of this list waits for it, or this waits for the rewrite.
 async fn prepare(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -199,11 +200,13 @@ struct Recorded<'a> {
     trace: &'a TraceContext,
 }
 
-/// Writes the history rows and decisions of `people` and moves the count.
+/// Writes the history rows and decisions of `people` and moves the count by `rows`, the
+/// membership rows written: a removal also takes the rows of people merged into them.
 async fn record_changes(
     connection: &mut PgConnection,
     recorded: &Recorded<'_>,
     people: &[Uuid],
+    rows: u64,
 ) -> Result<(), StoreError> {
     if people.is_empty() {
         return Ok(());
@@ -226,7 +229,7 @@ async fn record_changes(
     .execute(&mut *connection)
     .await
     .map_err(StoreError::query)?;
-    let count = i64::try_from(people.len()).unwrap_or(i64::MAX);
+    let count = i64::try_from(rows).unwrap_or(i64::MAX);
     let delta = match recorded.change {
         Change::Added => count,
         Change::Removed => -count,
@@ -264,8 +267,10 @@ async fn record_changes(
     append_decisions(connection, &decisions).await
 }
 
-/// Adds `people` to a list, following merges. Adding a member again writes nothing. At most
-/// [`MAX_PEOPLE_PER_CALL`] people; people that do not exist are reported, never created.
+/// Adds `people` to a list, following merges. Adding a member again writes nothing, and so does
+/// adding a survivor whose merged-away person is still a member until the merge's rewrite moves
+/// that row. At most [`MAX_PEOPLE_PER_CALL`] people; people that do not exist are reported,
+/// never created.
 pub async fn add_members(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -280,6 +285,10 @@ pub async fn add_members(
     let added: Vec<Uuid> = sqlx::query_scalar(
         "INSERT INTO list_members (workspace_id, list_id, person_id, source) \
          SELECT $1, $2, t.person_id, $4 FROM unnest($3::uuid[]) AS t(person_id) \
+         WHERE NOT EXISTS (SELECT 1 FROM people p JOIN list_members m \
+                             ON m.workspace_id = p.workspace_id AND m.person_id = p.id \
+                           WHERE p.workspace_id = $1 AND p.merged_into = t.person_id \
+                             AND m.list_id = $2) \
          ON CONFLICT DO NOTHING RETURNING person_id",
     )
     .bind(workspace.as_uuid())
@@ -297,7 +306,8 @@ pub async fn add_members(
         actor,
         trace,
     };
-    record_changes(connection, &recorded, &added).await?;
+    let rows = u64::try_from(added.len()).unwrap_or(u64::MAX);
+    record_changes(connection, &recorded, &added, rows).await?;
     if !added.is_empty() {
         request_reevaluation(connection, workspace).await?;
     }
@@ -306,7 +316,9 @@ pub async fn add_members(
     Ok(outcome)
 }
 
-/// Removes `people` from a list, following merges. Removing a non-member writes nothing.
+/// Removes `people` from a list, following merges. Removing a non-member writes nothing. The
+/// rows of the people merged into them go too: until the merge's rewrite moves such a row it is
+/// the person's membership, and moving it afterwards would put the person back.
 pub async fn remove_members(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -318,9 +330,17 @@ pub async fn remove_members(
 ) -> Result<MembershipOutcome, MembershipError> {
     crate::changes::cache_change_readers(connection, workspace).await?;
     let (targets, mut outcome) = prepare(connection, workspace, list, people).await?;
-    let removed: Vec<Uuid> = sqlx::query_scalar(
-        "DELETE FROM list_members \
-         WHERE workspace_id = $1 AND list_id = $2 AND person_id = ANY($3) RETURNING person_id",
+    // One row per membership removed, named by the person it now stands for.
+    let gone: Vec<Uuid> = sqlx::query_scalar(
+        "WITH gone AS ( \
+             DELETE FROM list_members m \
+             WHERE m.workspace_id = $1 AND m.list_id = $2 \
+               AND (m.person_id = ANY($3) OR m.person_id IN ( \
+                    SELECT p.id FROM people p \
+                    WHERE p.workspace_id = $1 AND p.merged_into = ANY($3))) \
+             RETURNING m.person_id) \
+         SELECT COALESCE(p.merged_into, g.person_id) FROM gone g \
+         JOIN people p ON p.id = g.person_id",
     )
     .bind(workspace.as_uuid())
     .bind(list)
@@ -328,6 +348,10 @@ pub async fn remove_members(
     .fetch_all(&mut *connection)
     .await
     .map_err(StoreError::query)?;
+    let rows = u64::try_from(gone.len()).unwrap_or(u64::MAX);
+    let mut removed = gone;
+    removed.sort_unstable();
+    removed.dedup();
     let recorded = Recorded {
         workspace,
         list,
@@ -336,7 +360,7 @@ pub async fn remove_members(
         actor,
         trace,
     };
-    record_changes(connection, &recorded, &removed).await?;
+    record_changes(connection, &recorded, &removed, rows).await?;
     if !removed.is_empty() {
         request_reevaluation(connection, workspace).await?;
     }
@@ -513,37 +537,31 @@ pub async fn membership_history<'e>(
     Ok((rows, more))
 }
 
-/// Locks, in id order and in one statement, every list any of `losers` is in. A merge calls
-/// it once for its whole group before [`move_on_merge`], after the people are locked, so two
-/// merges that share lists always take them in the same order.
-pub(crate) async fn lock_lists_for_merge(
-    connection: &mut PgConnection,
-    workspace: WorkspaceId,
-    losers: &[Uuid],
-) -> Result<(), StoreError> {
-    sqlx::query(
-        "SELECT id FROM lists WHERE workspace_id = $1 AND id IN \
-            (SELECT list_id FROM list_members WHERE workspace_id = $1 AND person_id = ANY($2)) \
-         ORDER BY id FOR UPDATE",
-    )
-    .bind(workspace.as_uuid())
-    .bind(losers)
-    .execute(connection)
-    .await
-    .map_err(StoreError::query)?;
-    Ok(())
-}
-
-/// Moves the memberships and history of `loser` to `survivor`, in the transaction of the
-/// merge, which holds both people and (through [`lock_lists_for_merge`]) their lists locked. The survivor ends up in the union of both people's
-/// lists and keeps the earlier `added_at` of the two; counts follow.
+/// Moves the memberships and history of `loser` to `survivor`, in the transaction of the merge's
+/// rewrite job, which holds both people `FOR KEY SHARE` and the person-change guard. The loser's
+/// lists are locked first, in id order and in one statement, after the people as every list
+/// writer locks; a merged-away person gains no membership, so the set cannot grow before the
+/// move. The survivor ends up in the union of both people's lists and keeps the earlier
+/// `added_at` of the two; counts follow. A moved membership marks the survivor in the lists
+/// class, so the segments that read lists evaluate it on its new memberships. Returns the rows
+/// moved (memberships and history); a second run moves none.
 pub(crate) async fn move_on_merge(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     loser: Uuid,
     survivor: Uuid,
     trace: &TraceContext,
-) -> Result<(), StoreError> {
+) -> Result<u64, StoreError> {
+    sqlx::query(
+        "SELECT id FROM lists WHERE workspace_id = $1 AND id IN \
+            (SELECT list_id FROM list_members WHERE workspace_id = $1 AND person_id = $2) \
+         ORDER BY id FOR UPDATE",
+    )
+    .bind(workspace.as_uuid())
+    .bind(loser)
+    .execute(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
     let held: Vec<Uuid> = sqlx::query_scalar(
         "SELECT list_id FROM list_members \
          WHERE workspace_id = $1 AND person_id = $2 ORDER BY list_id",
@@ -553,6 +571,7 @@ pub(crate) async fn move_on_merge(
     .fetch_all(&mut *connection)
     .await
     .map_err(StoreError::query)?;
+    let mut moved = 0;
     if !held.is_empty() {
         // Lists both are in: the survivor keeps the earlier time, and one member is gone.
         let shared: Vec<Uuid> = sqlx::query_scalar(
@@ -580,12 +599,13 @@ pub(crate) async fn move_on_merge(
         .execute(&mut *connection)
         .await
         .map_err(StoreError::query)?;
-        sqlx::query("DELETE FROM list_members WHERE workspace_id = $1 AND person_id = $2")
+        moved += sqlx::query("DELETE FROM list_members WHERE workspace_id = $1 AND person_id = $2")
             .bind(workspace.as_uuid())
             .bind(loser)
             .execute(&mut *connection)
             .await
-            .map_err(StoreError::query)?;
+            .map_err(StoreError::query)?
+            .rows_affected();
         sqlx::query(
             "UPDATE lists SET member_count = member_count - 1 \
              WHERE workspace_id = $1 AND id = ANY($2)",
@@ -595,8 +615,18 @@ pub(crate) async fn move_on_merge(
         .execute(&mut *connection)
         .await
         .map_err(StoreError::query)?;
+        mark_people(
+            connection,
+            workspace,
+            &[survivor],
+            ChangeClasses::LISTS,
+            trace,
+            None,
+        )
+        .await?;
+        request_reevaluation(connection, workspace).await?;
     }
-    let moved = sqlx::query(
+    let history = sqlx::query(
         "UPDATE list_member_changes SET person_id = $3 \
          WHERE workspace_id = $1 AND person_id = $2",
     )
@@ -607,7 +637,8 @@ pub(crate) async fn move_on_merge(
     .await
     .map_err(StoreError::query)?
     .rows_affected();
-    if !held.is_empty() || moved > 0 {
+    moved += history;
+    if !held.is_empty() || history > 0 {
         append_decision(
             connection,
             &NewDecision {
@@ -626,7 +657,7 @@ pub(crate) async fn move_on_merge(
         )
         .await?;
     }
-    Ok(())
+    Ok(moved)
 }
 
 #[cfg(test)]
@@ -875,10 +906,33 @@ mod tests {
         assert_eq!(count(&pool, ws, list).await, 0);
     }
 
+    /// Runs the merge's rewrite job for `merged` on `trace`, as the job does, and returns the
+    /// rows it moved.
+    async fn rewrite(pool: &PgPool, ws: WorkspaceId, merged: Uuid, trace: &TraceContext) -> u64 {
+        let mut tx = begin(pool).await.unwrap();
+        let moved = crate::rewrite_merged_person(&mut tx, ws, merged, trace, None)
+            .await
+            .unwrap();
+        commit(tx).await.unwrap();
+        moved
+    }
+
+    /// The `(person, list)` membership rows of `people`, sorted.
+    async fn memberships(pool: &PgPool, people: &[Uuid]) -> Vec<(Uuid, Uuid)> {
+        sqlx::query_as(
+            "SELECT person_id, list_id FROM list_members WHERE person_id = ANY($1) ORDER BY 1, 2",
+        )
+        .bind(people)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_merge_leaves_the_survivor_in_the_union_of_both_peoples_lists(pool: PgPool) {
         let ws = workspace(&pool, "one").await;
+        crate::segments::tests_support::segment_reading(&pool, ws, ChangeClasses::LISTS).await;
         let a = create_list(&pool, ws, "A", "", None).await.unwrap().id;
         let b = create_list(&pool, ws, "B", "", None).await.unwrap().id;
         let c = create_list(&pool, ws, "C", "", None).await.unwrap().id;
@@ -914,6 +968,32 @@ mod tests {
 
         assert!(
             matches!(&outcomes[0], ProfileOutcome::Applied { person_id, .. } if *person_id == p1)
+        );
+        // The merge leaves the memberships to its rewrite job: until it runs, the loser's rows
+        // stay and B counts both.
+        let mut before = vec![(p1, a), (p1, b), (p2, b), (p2, c)];
+        before.sort_unstable();
+        assert_eq!(memberships(&pool, &[p1, p2]).await, before);
+        assert_eq!(count(&pool, ws, b).await, 2);
+        sqlx::query("DELETE FROM person_changes")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let first = rewrite(&pool, ws, p2, &merge_trace).await;
+        let second = rewrite(&pool, ws, p2, &merge_trace).await;
+
+        // Two memberships and their two history rows moved; the second run finds none.
+        assert_eq!((first, second), (4, 0));
+        let marks: Vec<(Uuid, i16)> =
+            sqlx::query_as("SELECT person_id, classes FROM person_changes")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            marks,
+            [(p1, 4)],
+            "the survivor is marked in the lists class"
         );
         let lists = lists_for(&pool, ws, p1).await.unwrap();
         let names: Vec<&str> = lists.iter().map(|list| list.name.as_str()).collect();
@@ -986,6 +1066,10 @@ mod tests {
         );
 
         let outcomes = apply_profile_batch(&pool, ws, &[joined]).await.unwrap();
+        let rewrites = trace();
+        for loser in [second, first] {
+            rewrite(&pool, ws, loser, &rewrites).await;
+        }
 
         assert!(
             matches!(&outcomes[0], ProfileOutcome::Applied { person_id, .. } if *person_id == survivor)
@@ -1014,6 +1098,139 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(history.len(), 7);
+    }
+
+    async fn added_at(pool: &PgPool, list: Uuid, person: Uuid) -> OffsetDateTime {
+        sqlx::query_scalar(
+            "SELECT added_at FROM list_members WHERE list_id = $1 AND person_id = $2",
+        )
+        .bind(list)
+        .bind(person)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_chained_merge_leaves_the_last_survivor_with_each_membership_once(pool: PgPool) {
+        // Both orders the two rewrite jobs can run in.
+        for (round, b_first) in [(0, true), (1, false)] {
+            let ws = workspace(&pool, &format!("ws{round}")).await;
+            let x = create_list(&pool, ws, "X", "", None).await.unwrap().id;
+            let y = create_list(&pool, ws, "Y", "", None).await.unwrap().id;
+            let z = create_list(&pool, ws, "Z", "", None).await.unwrap().id;
+            // The oldest person survives: C, then B, then A.
+            let c = person(&pool, ws, "c", &[("external:crm", "c")]).await;
+            let b = person(&pool, ws, "b", &[("email", "b@example.com")]).await;
+            let a = person(&pool, ws, "a", &[("anonymous_id", "a")]).await;
+            add(&pool, ws, x, &[a]).await.unwrap();
+            add(&pool, ws, y, &[a]).await.unwrap();
+            add(&pool, ws, x, &[b]).await.unwrap();
+            add(&pool, ws, z, &[b]).await.unwrap();
+            add(&pool, ws, x, &[c]).await.unwrap();
+            let first_in_x = added_at(&pool, x, a).await;
+            // A into B, then B into C, before either rewrite job ran.
+            let ab = person(
+                &pool,
+                ws,
+                "ab",
+                &[("email", "b@example.com"), ("anonymous_id", "a")],
+            );
+            assert_eq!(ab.await, b);
+            let bc = person(
+                &pool,
+                ws,
+                "bc",
+                &[("external:crm", "c"), ("email", "b@example.com")],
+            );
+            assert_eq!(bc.await, c);
+            let into: Vec<Option<Uuid>> =
+                sqlx::query_scalar("SELECT merged_into FROM people WHERE id = ANY($1) ORDER BY id")
+                    .bind([a, b].as_slice())
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(into, [Some(c), Some(c)], "the chain is compressed");
+            assert_eq!(memberships(&pool, &[a, b]).await.len(), 4);
+            assert_eq!(count(&pool, ws, x).await, 3);
+            let trace = trace();
+
+            let order = if b_first { [b, a] } else { [a, b] };
+            for merged in order {
+                rewrite(&pool, ws, merged, &trace).await;
+            }
+            let again = rewrite(&pool, ws, a, &trace).await + rewrite(&pool, ws, b, &trace).await;
+
+            assert_eq!(again, 0, "a second run moves nothing");
+            let mut expected = vec![(c, x), (c, y), (c, z)];
+            expected.sort_unstable();
+            assert_eq!(memberships(&pool, &[a, b, c]).await, expected);
+            for list in [x, y, z] {
+                assert_eq!(count(&pool, ws, list).await, 1);
+                assert_eq!(rows(&pool, "list_members", list).await, 1);
+            }
+            assert_eq!(added_at(&pool, x, c).await, first_in_x);
+            let left: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM list_member_changes WHERE person_id = ANY($1)",
+            )
+            .bind([a, b].as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(left, 0);
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn between_a_merge_and_its_rewrite_adding_or_removing_the_survivor_follows_the_loser(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let kept = create_list(&pool, ws, "Kept", "", None).await.unwrap().id;
+        let left = create_list(&pool, ws, "Left", "", None).await.unwrap().id;
+        let survivor = person(&pool, ws, "1", &[("external:crm", "1")]).await;
+        let loser = person(&pool, ws, "2", &[("anonymous_id", "a")]).await;
+        add(&pool, ws, kept, &[loser]).await.unwrap();
+        add(&pool, ws, left, &[loser]).await.unwrap();
+        let joined = person(
+            &pool,
+            ws,
+            "3",
+            &[("external:crm", "1"), ("anonymous_id", "a")],
+        );
+        assert_eq!(joined.await, survivor);
+
+        // The rewrite has not run: the loser's rows are the person's memberships.
+        let added = add(&pool, ws, kept, &[survivor]).await.unwrap();
+        let removed = remove(&pool, ws, left, &[survivor]).await.unwrap();
+
+        assert_eq!((added.changed, added.unchanged), (0, 1));
+        assert_eq!((removed.changed, removed.unchanged), (1, 0));
+        assert_eq!(
+            (count(&pool, ws, kept).await, count(&pool, ws, left).await),
+            (1, 0)
+        );
+        rewrite(&pool, ws, loser, &trace()).await;
+        assert_eq!(
+            memberships(&pool, &[survivor, loser]).await,
+            [(survivor, kept)],
+            "a removed membership does not come back with the rewrite"
+        );
+        assert_eq!(
+            (count(&pool, ws, kept).await, count(&pool, ws, left).await),
+            (1, 0)
+        );
+        let (history, _) = membership_history(&pool, ws, survivor, 10, None)
+            .await
+            .unwrap();
+        let on_left: Vec<&str> = history
+            .iter()
+            .filter(|change| change.list_id == left)
+            .map(|change| change.action.as_str())
+            .collect();
+        assert_eq!(on_left, ["removed", "added"]);
     }
 
     #[sqlx::test]
