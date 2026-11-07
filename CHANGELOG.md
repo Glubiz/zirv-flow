@@ -15,3 +15,15 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.255.0 (2026-11-07)
+
+### Fixes
+
+- the explorer headline shows the exact total, as the chart summary does (#560)
+- phone-width overflow on templates, explorer and API keys; explorer count separator (#560)
+- write the timeline check's body to a file, not /dev/null
+
+### Chores
+
+- gate the fake provider so the AI concurrency tests overlap for certain (#558)
+
