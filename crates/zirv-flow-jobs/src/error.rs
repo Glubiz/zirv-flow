@@ -11,6 +11,7 @@ use zirv_flow_store::StoreError;
 pub struct JobError {
     message: &'static str,
     retry_after: Option<Duration>,
+    refusal: Option<&'static str>,
 }
 
 impl JobError {
@@ -18,7 +19,19 @@ impl JobError {
         Self {
             message,
             retry_after: None,
+            refusal: None,
         }
+    }
+
+    /// Marks the error as a refusal that no retry can change, with its reason code. A job kind
+    /// that understands refusals ends at once instead of retrying; the worker itself ignores it.
+    pub const fn with_refusal(mut self, code: &'static str) -> Self {
+        self.refusal = Some(code);
+        self
+    }
+
+    pub const fn refusal(&self) -> Option<&'static str> {
+        self.refusal
     }
 
     /// Asks the worker to wait at least this long before the next attempt, such as the time a
@@ -84,6 +97,15 @@ mod tests {
         assert_eq!(error.retry_after(), Some(Duration::from_secs(30)));
         assert_eq!(error.to_string(), "the destination asked for a pause");
         assert_eq!(JobError::new("x").retry_after(), None);
+    }
+
+    #[test]
+    fn a_refusal_carries_its_code_and_a_plain_error_has_none() {
+        let error = JobError::new("refused").with_refusal("archived_key");
+
+        assert_eq!(error.refusal(), Some("archived_key"));
+        assert_eq!(error.to_string(), "refused");
+        assert_eq!(JobError::new("x").refusal(), None);
     }
 
     #[test]
