@@ -15,3 +15,14 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.246.0 (2026-11-07)
+
+### Chores
+
+- split the PostgreSQL tests into two jobs per version; keep synchronous_commit on (#540)
+- build the template program with the workspace features; say what a stale template does (#540)
+- drop stray runs of spaces from the psql step and the reset test query (#540)
+- give tag and dispatch runs a concurrency group of their own (#540)
+- prepare the test template, split the OpenAPI gate, cancel superseded PR runs (#540)
+- prepare a migrated template1 so tests skip per-test migrations (#540)
+
