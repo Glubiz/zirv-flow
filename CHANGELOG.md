@@ -15,3 +15,12 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.248.0 (2026-11-07)
+
+### Chores
+
+- reset a test database table by table (#540)
+- define the cargo wrapper and copy cargo-chef into the builder (#540)
+- split the PostgreSQL tests into three jobs per version (#540)
+- cache compiled dependencies with a pinned cargo-chef layer (#540)
+
