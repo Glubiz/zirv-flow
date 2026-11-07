@@ -25,9 +25,10 @@ on:
         required: false
         default: ''
 
-# A new push to a PR cancels that PR's older run; a tag push or a dispatch is never cancelled.
+# A new push to a PR cancels that PR's older run. A tag push or a dispatch gets a group of its own,
+# so it is neither cancelled nor replaced while queued.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
