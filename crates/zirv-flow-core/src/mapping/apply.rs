@@ -30,6 +30,8 @@ pub enum RowErrorReason {
     UnknownColumn,
     /// The key column's value is longer than 512 characters.
     InvalidKey,
+    /// A value holds a NUL character, which PostgreSQL stores in no text.
+    ContainsNul,
 }
 
 impl RowErrorReason {
@@ -41,6 +43,7 @@ impl RowErrorReason {
             Self::BadTimestamp => "bad_timestamp",
             Self::UnknownColumn => "unknown_column",
             Self::InvalidKey => "invalid_key",
+            Self::ContainsNul => crate::no_nul::CONTAINS_NUL,
         }
     }
 }
@@ -211,7 +214,12 @@ pub fn apply(
             }),
             Some(cell) => {
                 let key = cell.trim();
-                if key.chars().count() > MAX_KEY_CHARS {
+                if crate::no_nul::has_nul(key) {
+                    errors.push(RowError {
+                        column: column.clone(),
+                        reason: RowErrorReason::ContainsNul,
+                    });
+                } else if key.chars().count() > MAX_KEY_CHARS {
                     errors.push(RowError {
                         column: column.clone(),
                         reason: RowErrorReason::InvalidKey,
@@ -298,10 +306,20 @@ fn run_chain(
     cell: &str,
     row: &dyn Cells,
 ) -> Result<Value, RowError> {
+    let nul = || RowError {
+        column: column.to_owned(),
+        reason: RowErrorReason::ContainsNul,
+    };
+    if crate::no_nul::has_nul(cell) {
+        return Err(nul());
+    }
     let mut value = Value::String(cell.to_owned());
     for transform in transforms {
         value = apply_transform(transform, value, row, column)
             .map_err(|(column, reason)| RowError { column, reason })?;
+    }
+    if crate::no_nul::find_nul(&value).is_some() {
+        return Err(nul());
     }
     Ok(value)
 }
@@ -518,6 +536,31 @@ mod tests {
             columns,
             delete_when: None,
         }
+    }
+
+    #[test]
+    fn a_row_with_a_nul_in_a_mapped_cell_is_refused_by_column() {
+        let mapping = Mapping {
+            key_column: Some("id".into()),
+            ..mapping(vec![
+                email("Email"),
+                rule("Plan", Target::Trait { key: "plan".into() }, vec![]),
+            ])
+        };
+
+        let in_trait = run(
+            &mapping,
+            &["id", "Email", "Plan"],
+            &["u1", "a@example.com", "p\0ro"],
+        );
+        let in_key = run(
+            &mapping,
+            &["id", "Email", "Plan"],
+            &["u\0", "a@example.com", "pro"],
+        );
+
+        assert_eq!(in_trait, Err(vec![("Plan".to_owned(), "contains_nul")]));
+        assert_eq!(in_key, Err(vec![("id".to_owned(), "contains_nul")]));
     }
 
     #[test]

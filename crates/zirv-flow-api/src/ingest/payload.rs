@@ -8,6 +8,7 @@ use serde_json::{Map, Value};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use zirv_flow_core::events::{RESERVED_EVENT_CODE, is_reserved_event_name, validate_event_name};
+use zirv_flow_core::no_nul::{CONTAINS_NUL, find_nul_in_members};
 use zirv_flow_core::people::Identifier;
 use zirv_flow_store::{IngestItem, IngestPayload};
 
@@ -210,7 +211,13 @@ fn map_field(
 ) -> Map<String, Value> {
     match object.get(name) {
         None | Some(Value::Null) => Map::new(),
-        Some(Value::Object(map)) => map.clone(),
+        Some(Value::Object(map)) => {
+            if let Some(path) = find_nul_in_members(map) {
+                errors.push(error(index, &format!("{name}.{path}"), CONTAINS_NUL));
+                return Map::new();
+            }
+            map.clone()
+        }
         Some(_) => {
             errors.push(error(index, name, "wrong_type"));
             Map::new()

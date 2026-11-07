@@ -7,7 +7,10 @@ use axum::body::Bytes;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{FromRequest, OptionalFromRequest, Request};
 use axum::http::StatusCode;
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use serde::de::DeserializeOwned;
+use serde_json::Value;
 
 use crate::problem::ApiError;
 
@@ -21,11 +24,25 @@ where
     type Rejection = ApiError;
 
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
-        match <axum::Json<T> as FromRequest<S>>::from_request(request, state).await {
-            Ok(axum::Json(value)) => Ok(Self(value)),
+        match <axum::Json<Value> as FromRequest<S>>::from_request(request, state).await {
+            Ok(axum::Json(value)) => into_body(value),
             Err(rejection) => Err(reject(&rejection)),
         }
     }
+}
+
+/// PostgreSQL stores no NUL in `text` or `jsonb`, so a query string that decodes to one is
+/// refused here for every route at once, as a body is in [`ApiJson`].
+pub(crate) async fn refuse_nul_query(request: Request, next: Next) -> Response {
+    if request.uri().query().is_some_and(has_encoded_nul) {
+        return ApiError::contains_nul("query").into_response();
+    }
+    next.run(request).await
+}
+
+/// Whether percent-decoding `query` yields a NUL: a `%00`.
+fn has_encoded_nul(query: &str) -> bool {
+    query.as_bytes().windows(3).any(|window| window == b"%00")
 }
 
 /// A body that may be left out: an empty body, whatever its headers say, and a literal `null`
@@ -51,18 +68,27 @@ where
         if bytes.is_empty() {
             return Ok(None);
         }
-        match serde_json::from_slice::<Option<T>>(&bytes) {
-            Ok(value) => Ok(value.map(Self)),
-            Err(error) if error.is_data() => Err(ApiError::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "request body is missing a field or has a field of the wrong type",
-            )),
-            Err(_) => Err(ApiError::new(
-                StatusCode::BAD_REQUEST,
-                "request body is not valid JSON",
-            )),
+        let value = serde_json::from_slice::<Value>(&bytes).map_err(|_| {
+            ApiError::new(StatusCode::BAD_REQUEST, "request body is not valid JSON")
+        })?;
+        if value.is_null() {
+            return Ok(None);
         }
+        into_body(value).map(Some)
     }
+}
+
+/// `value` as a `T`, once it holds no NUL: a wrong shape is a 422, as the required body gives.
+fn into_body<T: DeserializeOwned>(value: Value) -> Result<ApiJson<T>, ApiError> {
+    if zirv_flow_core::no_nul::find_nul(&value).is_some() {
+        return Err(ApiError::contains_nul("request body"));
+    }
+    serde_json::from_value(value).map(ApiJson).map_err(|_| {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "request body is missing a field or has a field of the wrong type",
+        )
+    })
 }
 
 fn reject(rejection: &JsonRejection) -> ApiError {
@@ -102,6 +128,27 @@ mod tests {
         <ApiJson<Named> as FromRequest<()>>::from_request(request, &())
             .await
             .map(|ApiJson(body)| body.name)
+    }
+
+    #[tokio::test]
+    async fn a_nul_in_a_value_or_a_key_is_a_422_that_names_no_value() {
+        for body in [r#"{"name":"a\u0000b"}"#, r#"{"name":"x","k\u0000":1}"#] {
+            let error = extract(Some("application/json"), body).await.unwrap_err();
+
+            assert_eq!(error.status_code(), StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(error.code(), Some("contains_nul"));
+            assert_eq!(
+                error.detail(),
+                "request body: must not contain a NUL character"
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_percent_encoded_nul_is_a_nul_in_a_query() {
+        assert!(has_encoded_nul("q=a%00b"));
+        assert!(has_encoded_nul("%00"));
+        assert!(!has_encoded_nul("q=a%2500b&r=%0A"));
     }
 
     #[tokio::test]

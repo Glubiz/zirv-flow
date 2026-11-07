@@ -742,6 +742,40 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_nul_in_a_payload_key_or_value_is_a_400_that_names_the_field_and_stores_nothing(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        let hook = fx.hook("orders").await;
+
+        for payload in [
+            json!({"id": "o-1", "email": "ada@example.com", "form": "a\u{0}b"}),
+            json!({"id": "o-1", "email": "ada@example.com", "order": {"items": ["x", "y\u{0}"]}}),
+            json!({"id": "o-1", "email": "ada@example.com", "k\u{0}": 1}),
+        ] {
+            let reply = deliver(&fx, &hook, payload.to_string().into_bytes()).await;
+
+            assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.text);
+            assert_eq!(reply.body["code"], "invalid_payload");
+            assert_eq!(reply.body["errors"][0]["index"], 0);
+            assert_eq!(reply.body["errors"][0]["reason"], "contains_nul");
+        }
+        let nested = deliver(
+            &fx,
+            &hook,
+            json!({"id": "o-1", "order": {"items": ["x", "y\u{0}"]}})
+                .to_string()
+                .into_bytes(),
+        )
+        .await;
+        assert_eq!(nested.body["errors"][0]["field"], "order.items[1]");
+        assert_eq!(fx.count("SELECT count(*) FROM ingest_inbox").await, 0);
+        let clean = deliver(&fx, &hook, order("o-1", "pro")).await;
+        assert_eq!(clean.status, StatusCode::ACCEPTED, "{}", clean.text);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_hook_over_its_rate_answers_429_with_retry_after_and_another_hook_is_unaffected(
         pool: PgPool,
     ) {
