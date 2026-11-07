@@ -411,7 +411,7 @@ As built (consent, topics and suppressions):
 | Contacts API (push) | Create, update and delete contacts by key, singly or in bulk, through the inbox like identify (7.6) | Idempotency key, else contact key plus payload hash | Oldest unprocessed inbox row |
 | Kafka stream | A long-running consumer job per stream, not a `sync.run` batch (7.6, 14); the partition offsets are the stream checkpoint, committed in the apply-batch transaction (7.6) | Topic, partition and offset | Consumer lag per partition |
 
-Every path ends in **apply-batch**, one transaction per batch (default 500
+Every path ends in **apply-batch**, one transaction per batch (default 50
 records): normalize identifiers; resolve or create the person (merging if
 needed); upsert ledger contributions and recompute affected traits; insert
 events with dedupe; write coalesced dirty marks (`person_changes`) when a live
@@ -447,7 +447,7 @@ and a lost lease aborts them all). A batch is up to `ingest.drain_batch_size` of
 oldest rows of the shard's buckets, picked through `(workspace_id, affinity, id)`, so a scan
 never walks another shard's backlog. A key lives in one bucket, so its
 rows still apply in id order; two shards may share a person under different keys, and a
-deadlock between them is the retryable `40P01`. The worker pool holds `concurrency * (1 +
+deadlock between them is the retryable `40P01`. The worker pool holds `(concurrency + drain_slots) * (1 +
 shards) + 1` connections. Each loop is `drain_batch`: in one transaction it picks the
 batch's ids without locking, locks those rows with `FOR UPDATE SKIP LOCKED` (a batch never
 applies past a row it could not lock: the rest of that bucket's picked rows wait for the next
@@ -456,7 +456,9 @@ transaction-taking profile and event paths of apply-batch, deletes them and comm
 drainers never apply a row twice. A retryable error retries the batch with jittered backoff;
 any other error applies the batch's rows one at a time, each in a savepoint, and a row that
 still fails becomes an `apply_failed` ingest reject. The job never re-enqueues itself, since it
-holds its unique key; the scheduler leader enqueues a drain for each workspace whose oldest
+holds its unique key; a worker with drain slots (`worker.drain_slots`, default 1, which claim only
+`ingest.drain` while the general slots leave it alone) enqueues the next drain as soon as a run
+completes with rows left in the inbox, and the scheduler leader enqueues a drain for each workspace whose oldest
 row (one `(workspace_id, id)` index probe per workspace) is over 2 seconds old. Row ids come
 from a sequence, so two requests that commit out of order drain in id order, not commit order.
 

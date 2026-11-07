@@ -91,8 +91,8 @@ scheduler 4, 10 M people), in the [M8 validation report](../benchmarks/m8-valida
 `database.max_connections` is the main pool limit **per process**, not per
 deployment. A process running a worker also opens separate jobs and heartbeat
 pools, and a process running `serve` opens an explorer pool. Let D be its main pool
-limit, E be `explorer.max_connections` (default 4), C be `worker.concurrency` and S be
-`ingest.drain_shards`. The maximum is:
+limit, E be `explorer.max_connections` (default 4), C be `worker.concurrency` plus
+`worker.drain_slots` (default 1) and S be `ingest.drain_shards`. The maximum is:
 
 - `scheduler`: D.
 - `serve`: D + E. The explorer pool serves every explorer query and CSV export page,
@@ -121,10 +121,10 @@ pool. Keep capacity available there for ordinary queries.
 
 Worked example: separate `serve`, `worker` and `scheduler`, each using the current
 [configured default](../../crates/zirv-flow/src/config.rs) D = 10, with C = 4 and
-S = 8 as in [M2 §2.1](../benchmarks/m2-ingestion.md#21-stack-and-tiers). The extra
-worker budget is (2 + 8) × 4 + 1 = **41** connections; the deployment total is
-3 × 10 + 41 + E = 3 × 10 + 41 + 4 = **75**. Against the benchmark PostgreSQL `max_connections` of **100**
-([M stack](../benchmarks/data/M/sustained-stack.txt)), that leaves **25** before
+S = 8 as in [M2 §2.1](../benchmarks/m2-ingestion.md#21-stack-and-tiers), and one drain slot
+(C = 4 + 1). The extra worker budget is (2 + 8) × 5 + 1 = **51** connections; the deployment total is
+3 × 10 + 51 + E = 3 × 10 + 51 + 4 = **85**. Against the benchmark PostgreSQL `max_connections` of **100**
+([M stack](../benchmarks/data/M/sustained-stack.txt)), that leaves **15** before
 subtracting PostgreSQL reserved slots, monitoring clients, migrations, and the
 admin CLI's own pool. These are calculated ceilings, not a recommended spare
 capacity or observed usage. Count every additional process and concurrent admin

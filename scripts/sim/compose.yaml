@@ -156,7 +156,6 @@ services:
     environment:
       <<: *zirv-env
       ZIRV_FLOW_WORKER__CONCURRENCY: "8"
-      ZIRV_FLOW_INGEST__DRAIN_SHARDS: "4"
       ZIRV_FLOW_OPS__BIND: 0.0.0.0:9100
 
   zf-worker-2:
