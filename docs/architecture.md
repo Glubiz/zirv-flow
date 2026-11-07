@@ -887,6 +887,11 @@ hourly upkeep deletes rows older than 24 hours. Because the table names no perso
 `contact` items (the migration extends the kind check) and the drain maps them to native
 records that replace the stored fields, tallying them as `contact` in
 `zirv_flow_ingest_applied_total`. The endpoints are in the [contact reference](people.md#contacts).
+A contact key can be an address, so a caller without access to personal data gets `key: null`
+and `masked: true` on every listed or searched contact, with `person_id` and an opaque `id` to
+open it by, and a prefix search answers `403 contact_key_not_searchable`. A route addressed by
+an exact key echoes that key, since the caller supplied it (supervisor ruling 8f0337fb, issue
+547).
 
 ## 8. Segmentation engine
 
