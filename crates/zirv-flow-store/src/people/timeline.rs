@@ -286,27 +286,18 @@ pub async fn load_timeline(
         }));
     }
     if filter.decisions {
-        let rows: Vec<DecisionRow> = sqlx::query_as(
-            "SELECT id, recorded_at, action, outcome, reason, cause_kind, subject_ids, trace_id \
-             FROM decision_records \
-             WHERE workspace_id = $1 AND subject_ids ? 'person' \
-               AND (subject_ids ->> 'person') = ANY($2) \
-               AND ($3 OR action <> $4) \
-               AND ($5::timestamptz IS NULL OR recorded_at < $5 \
-                    OR (recorded_at = $5 AND $6 = 1 AND id < $7)) \
-             ORDER BY recorded_at DESC, id DESC LIMIT $8",
-        )
-        .bind(workspace.as_uuid())
-        .bind(&texts)
-        .bind(filter.all_decisions)
-        .bind(EVENT_ACCEPTED)
-        .bind(at)
-        .bind(rank)
-        .bind(id)
-        .bind(limit + 1)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(StoreError::bounded)?;
+        let rows: Vec<DecisionRow> = sqlx::query_as(DECISIONS)
+            .bind(workspace.as_uuid())
+            .bind(&texts)
+            .bind(filter.all_decisions)
+            .bind(EVENT_ACCEPTED)
+            .bind(at)
+            .bind(rank)
+            .bind(id)
+            .bind(limit + 1)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(StoreError::bounded)?;
         entries.extend(rows.into_iter().map(|row| {
             TimelineEntry::Decision(TimelineDecision {
                 id: row.id,
@@ -336,6 +327,25 @@ pub async fn load_timeline(
     };
     Ok(Some(TimelinePage { entries, next }))
 }
+
+/// The decisions of a merged group, newest first. One bounded walk of `decision_records_person_idx`
+/// per person, then a top-N over the walks: `= ANY(array)` over the `subject_ids ->> 'person'`
+/// expression cannot return rows in index order, so the planner walks the primary key backwards
+/// and filters every row it passes.
+const DECISIONS: &str = "\
+    SELECT d.id, d.recorded_at, d.action, d.outcome, d.reason, d.cause_kind, d.subject_ids, \
+           d.trace_id \
+    FROM unnest($2::text[]) AS u(person) \
+    CROSS JOIN LATERAL ( \
+        SELECT id, recorded_at, action, outcome, reason, cause_kind, subject_ids, trace_id \
+        FROM decision_records \
+        WHERE workspace_id = $1 AND subject_ids ? 'person' \
+          AND (subject_ids ->> 'person') = u.person \
+          AND ($3 OR action <> $4) \
+          AND ($5::timestamptz IS NULL OR recorded_at < $5 \
+               OR (recorded_at = $5 AND $6 = 1 AND id < $7)) \
+        ORDER BY recorded_at DESC, id DESC LIMIT $8) d \
+    ORDER BY d.recorded_at DESC, d.id DESC LIMIT $8";
 
 #[cfg(test)]
 mod tests {
@@ -981,5 +991,100 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(indexes, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_decisions_of_a_group_are_read_through_the_person_index_not_the_primary_key(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "ours").await;
+        let group = [Uuid::now_v7().to_string(), Uuid::now_v7().to_string()];
+        // Many newer decisions of other people, and one older decision per member of the group.
+        sqlx::query(
+            "INSERT INTO decision_records \
+                 (id, workspace_id, trace_id, recorded_at, action, outcome, cause_kind, cause_id, \
+                  subject_ids) \
+             SELECT gen_random_uuid(), $1, gen_random_uuid(), now() + s * interval '1 millisecond', \
+                    'step', 'done', 'api', 'x', \
+                    jsonb_build_object('person', gen_random_uuid()::text) \
+             FROM generate_series(1, 60000) AS s",
+        )
+        .bind(ws.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO decision_records \
+                 (id, workspace_id, trace_id, recorded_at, action, outcome, cause_kind, cause_id, \
+                  subject_ids) \
+             SELECT gen_random_uuid(), $1, gen_random_uuid(), now(), 'step', 'done', 'api', 'x', \
+                    jsonb_build_object('person', p) \
+             FROM unnest($2::text[]) AS p",
+        )
+        .bind(ws.as_uuid())
+        .bind(&group[..])
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("VACUUM (ANALYZE) decision_records")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let explain = |sql: String| {
+            let pool = pool.clone();
+            let group = group.to_vec();
+            async move {
+                let lines: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+                    .bind(ws.as_uuid())
+                    .bind(group)
+                    .bind(false)
+                    .bind(EVENT_ACCEPTED)
+                    .bind(None::<OffsetDateTime>)
+                    .bind(0_i32)
+                    .bind(None::<Uuid>)
+                    .bind(26_i64)
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+                lines.join("\n")
+            }
+        };
+        let old = explain(
+            "EXPLAIN (COSTS OFF) SELECT id, recorded_at, action, outcome, reason, cause_kind, \
+                    subject_ids, trace_id \
+             FROM decision_records \
+             WHERE workspace_id = $1 AND subject_ids ? 'person' \
+               AND (subject_ids ->> 'person') = ANY($2) \
+               AND ($3 OR action <> $4) \
+               AND ($5::timestamptz IS NULL OR recorded_at < $5 \
+                    OR (recorded_at = $5 AND $6 = 1 AND id < $7)) \
+             ORDER BY recorded_at DESC, id DESC LIMIT $8"
+                .to_owned(),
+        )
+        .await;
+        let current = explain(format!("EXPLAIN (COSTS OFF) {DECISIONS}")).await;
+
+        // The rows are in this month's partition; the empty ones plan as trivial primary key scans.
+        let month: String = sqlx::query_scalar(
+            "SELECT 'decision_records_y' || to_char(now(), 'YYYY') || 'm' || to_char(now(), 'MM')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let walk = format!("Index Scan Backward using {month}_pkey");
+        assert!(
+            old.contains(&walk),
+            "the check does not catch the old statement\n{old}"
+        );
+        assert!(
+            !current.contains(&walk),
+            "the group walks the primary key\n{current}"
+        );
+        assert!(
+            current.contains(&format!("Index Scan using {month}_workspace_id_expr")),
+            "the person index is not used\n{current}"
+        );
     }
 }
