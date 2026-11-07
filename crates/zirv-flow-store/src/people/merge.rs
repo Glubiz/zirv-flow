@@ -2086,4 +2086,92 @@ mod tests {
 
         assert_eq!((owners(loser).await, owners(survivor).await), (0, 2));
     }
+
+    async fn dedupe_plan(pool: &PgPool, sql: &str, workspace: WorkspaceId, person: Uuid) -> String {
+        let mut tx = pool.begin().await.unwrap();
+        let lines: Vec<String> =
+            sqlx::query_scalar(sqlx::AssertSqlSafe(format!("EXPLAIN (ANALYZE) {sql}")))
+                .bind(workspace.as_uuid())
+                .bind(vec![person])
+                .fetch_all(&mut *tx)
+                .await
+                .unwrap();
+        tx.rollback().await.unwrap();
+        let plan = lines.join("\n");
+        eprintln!("{sql}\n{plan}");
+        plan
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_dedupe_rows_of_a_person_are_found_through_the_person_index(pool: PgPool) {
+        let ws = workspace(&pool, "dedupe").await;
+        sqlx::query(
+            "INSERT INTO people (id, workspace_id) \
+             SELECT gen_random_uuid(), $1 FROM generate_series(1, 4000)",
+        )
+        .bind(ws.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO event_dedupe \
+                 (workspace_id, message_id, event_id, event_occurred_at, person_id) \
+             SELECT $1, 'm-' || n, gen_random_uuid(), now(), p.id \
+             FROM generate_series(1, 200000) n \
+             JOIN (SELECT id, row_number() OVER (ORDER BY id) - 1 AS r FROM people \
+                   WHERE workspace_id = $1) p ON p.r = n % 4000",
+        )
+        .bind(ws.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("ANALYZE event_dedupe")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let person: Uuid = sqlx::query_scalar("SELECT person_id FROM event_dedupe LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        // The rewrite's batch lookup and the delete's statement, as the code issues them.
+        let rewrite = "SELECT workspace_id, message_id FROM event_dedupe \
+                       WHERE workspace_id = $1 AND person_id = ($2)[1] LIMIT 1000";
+        let delete = "DELETE FROM event_dedupe WHERE workspace_id = $1 AND person_id = ANY($2)";
+
+        sqlx::query("DROP INDEX event_dedupe_person_id_idx")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let before = dedupe_plan(&pool, delete, ws, person).await;
+        sqlx::query("CREATE INDEX event_dedupe_person_id_idx ON event_dedupe (person_id)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("ANALYZE event_dedupe")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert!(
+            !before.contains("event_dedupe_person_id_idx"),
+            "the check does not catch a missing index\n{before}"
+        );
+        for sql in [rewrite, delete] {
+            let plan = dedupe_plan(&pool, sql, ws, person).await;
+            assert!(plan.contains("event_dedupe_person_id_idx"), "{plan}");
+            assert!(!plan.contains("Seq Scan on event_dedupe"), "{plan}");
+        }
+        // The foreign key to `people` checks a deleted person with no workspace.
+        let fk =
+            format!("EXPLAIN (ANALYZE) SELECT 1 FROM event_dedupe WHERE person_id = '{person}'");
+        let lines: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(fk))
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        let plan = lines.join("\n");
+        eprintln!("{plan}");
+        assert!(plan.contains("event_dedupe_person_id_idx"), "{plan}");
+        assert!(!plan.contains("Seq Scan on event_dedupe"), "{plan}");
+    }
 }
