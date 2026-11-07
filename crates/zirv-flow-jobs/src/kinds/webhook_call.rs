@@ -318,16 +318,7 @@ async fn render(
     }
     context.message.id.clone_from(&call.idempotency_key);
     if let Some(event) = find_trigger_event(ctx.conn(), call.workspace, call.enrollment).await? {
-        context.event = event
-            .properties
-            .as_object()
-            .map(|properties| {
-                properties
-                    .iter()
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect()
-            })
-            .unwrap_or_default();
+        context.event = event.property_map();
     }
 
     let Some(pool) = ctx.render_pool().cloned() else {

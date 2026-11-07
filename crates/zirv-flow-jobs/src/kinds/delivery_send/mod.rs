@@ -342,16 +342,7 @@ async fn decide(
     // The event that started the enrollment, read now; a flow not started by an event, or an event
     // since deleted, leaves `event` empty and a strict reference ends the render.
     if let Some(event) = find_trigger_event(ctx.conn(), workspace, job.enrollment).await? {
-        context.event = event
-            .properties
-            .as_object()
-            .map(|properties| {
-                properties
-                    .iter()
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect()
-            })
-            .unwrap_or_default();
+        context.event = event.property_map();
     }
     let pool_for_render = ctx.render_pool().cloned();
     let tracked = (!transactional).then_some(()).and(tracker.as_ref());

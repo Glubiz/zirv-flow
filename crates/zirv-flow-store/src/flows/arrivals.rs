@@ -4,6 +4,8 @@
 //! registered at, so an event that races the wait's timeout leaves one winner: whichever commits
 //! first moves the version, and the other job finds it stale.
 
+use std::collections::BTreeMap;
+
 use serde_json::Value;
 use sqlx::PgConnection;
 use sqlx::prelude::FromRow;
@@ -105,6 +107,21 @@ pub struct StoredEvent {
     pub properties: Value,
 }
 
+impl StoredEvent {
+    /// The properties as a render context's `event`: empty when they are not an object.
+    pub fn property_map(&self) -> BTreeMap<String, Value> {
+        self.properties
+            .as_object()
+            .map(|properties| {
+                properties
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
 /// Reads one event of a person.
 pub async fn find_event_of_person(
     connection: &mut PgConnection,
@@ -130,8 +147,8 @@ pub async fn find_event_of_person(
 }
 
 /// The event that started `enrollment`, read at send time: the event its cause names, if it is an
-/// event of the enrollment's own person (or of one merged into them). None for an enrollment another trigger started, one that
-/// is gone, and an event that was deleted or expired.
+/// event of the enrollment's own person (or of one merged into them). None for an enrollment
+/// another trigger started, one that is gone, and an event that was deleted or expired.
 pub async fn find_trigger_event(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -297,6 +314,21 @@ mod tests {
             .unwrap();
 
         assert_eq!(enqueued, 0);
+    }
+
+    #[test]
+    fn an_event_reads_into_a_property_map_and_a_non_object_into_an_empty_one() {
+        let event = |properties| StoredEvent {
+            name: "order".into(),
+            occurred_at: OffsetDateTime::UNIX_EPOCH,
+            properties,
+        };
+
+        assert_eq!(
+            event(json!({"n": 1})).property_map().get("n"),
+            Some(&json!(1))
+        );
+        assert!(event(json!([1])).property_map().is_empty());
     }
 
     async fn event_of(pool: &PgPool, ws: WorkspaceId, person: Uuid) -> Uuid {
