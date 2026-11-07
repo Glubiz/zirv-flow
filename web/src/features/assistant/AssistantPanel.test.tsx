@@ -488,7 +488,7 @@ describe("the assistant panel for a segment", () => {
     await user.click(screen.getByRole("button", { name: "Draft" }));
 
     const problems = await screen.findByRole("list", { name: "Problems with the last attempt" });
-    expect(problems).toHaveTextContent("The definition uses a field that does not exist in this workspace. (/all/0/trait)");
+    expect(problems).toHaveTextContent("The definition uses a field that does not exist in this workspace, or has been archived. (/all/0/trait)");
     expect(screen.queryByRole("button", { name: "Put into the draft" })).not.toBeInTheDocument();
     expect(renderPreview).not.toHaveBeenCalled();
   });
@@ -540,7 +540,7 @@ describe("the assistant panel for a segment", () => {
       [
         "ai_draft_invalid",
         [{ pointer: "/all/0/trait", code: "unknown_trait" }],
-        "The definition uses a field that does not exist in this workspace. (/all/0/trait)",
+        "The definition uses a field that does not exist in this workspace, or has been archived. (/all/0/trait)",
       ],
     ];
     for (const [code, issues, shown] of cases) {

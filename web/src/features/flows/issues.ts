@@ -42,7 +42,7 @@ const MESSAGES: Record<FlowIssue["code"], string> = {
   too_many_exit_criteria: "The flow has more exit rules than it may have.",
   unknown_segment: "This refers to a segment that does not exist. Choose one.",
   unknown_list: "This refers to a list that does not exist. Choose one.",
-  unknown_trait: "This refers to a field that does not exist in the workspace.",
+  unknown_trait: "This refers to a field that does not exist in the workspace, or has been archived.",
   unknown_event: "This refers to an event the workspace has no schema for.",
   unknown_property: "This refers to a property the event does not have.",
   unknown_topic: "This refers to a topic that does not exist.",

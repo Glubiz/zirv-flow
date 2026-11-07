@@ -255,7 +255,7 @@ describe("drafting a segment", () => {
 
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("This draft cannot be accepted");
-    expect(alert).toHaveTextContent("The definition uses a field that does not exist in this workspace. (/all/0/trait)");
+    expect(alert).toHaveTextContent("The definition uses a field that does not exist in this workspace, or has been archived. (/all/0/trait)");
     await user.click(screen.getByRole("button", { name: "Show without the draft" }));
     expect(screen.getByLabelText("Value")).toHaveValue("Aarhus");
   });
@@ -273,7 +273,7 @@ describe("drafting a segment", () => {
     await askToDraft(user);
 
     const problems = await screen.findByRole("list", { name: "Problems with the last attempt" });
-    expect(problems).toHaveTextContent("The definition uses a field that does not exist in this workspace. (/all/0/trait)");
+    expect(problems).toHaveTextContent("The definition uses a field that does not exist in this workspace, or has been archived. (/all/0/trait)");
     expect(screen.queryByRole("button", { name: "Put into the draft" })).not.toBeInTheDocument();
   });
 });

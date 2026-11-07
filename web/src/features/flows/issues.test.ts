@@ -10,3 +10,9 @@ describe("issueText", () => {
     expect(text).not.toContain("workspace settings");
   });
 });
+
+describe("issueText for fields", () => {
+  it("does not claim a missing field when it may be archived", () => {
+    expect(issueText({ code: "unknown_trait", node: "check" })).toContain("or has been archived");
+  });
+});

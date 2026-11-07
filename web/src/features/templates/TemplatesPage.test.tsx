@@ -54,6 +54,16 @@ function listCalls(calls: Call[]): URLSearchParams[] {
   return calls.filter((call) => call.method === "GET" && call.path === `${WS}/templates`).map((call) => new URLSearchParams(call.search));
 }
 
+describe("a template that fails to load for another reason", () => {
+  it("still offers a retry", async () => {
+    mockApi({ ...templateRoutes({ role: "admin" }), [`GET ${WS}/templates/${TEMPLATE_ID}`]: () => problem(500, "Internal Server Error", "internal error") });
+    renderRoute(`/w/ws1/templates/${TEMPLATE_ID}`, "/w/:ws/templates/:id", <TemplatePage />);
+
+    expect(await screen.findByRole("button", { name: "Try again" })).toBeInTheDocument();
+    expect(screen.queryByText("This template does not exist")).not.toBeInTheDocument();
+  });
+});
+
 describe("a template that does not exist", () => {
   it("says so, with no retry", async () => {
     mockApi({ ...templateRoutes({ role: "admin" }), [`GET ${WS}/templates/${TEMPLATE_ID}`]: () => problem(404, "Not Found", "no such resource") });
