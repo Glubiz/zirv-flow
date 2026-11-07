@@ -64,7 +64,7 @@ interpreted as a pass. Published versions are immutable; **Versions and use**
 shows history and where the template is used. An active flow prevents archiving
 its template until the reference is removed.
 
-In a flow send, `{{ event.* }}` reads the properties of the event that started the enrollment,
+In a flow email or webhook step, `{{ event.* }}` reads the properties of the event that started the enrollment,
 looked up when the message is sent. When another trigger (an API call, a schedule or a segment)
 started the enrollment, or the event has since been deleted, `event` is empty: use
 `{{ event.order_id | default("") }}` to render anyway, since a bare reference ends the message as

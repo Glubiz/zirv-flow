@@ -6280,4 +6280,34 @@ mod tests {
         })
         .await;
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_survivor_enrollment_reads_the_event_before_the_merge_rewrite_has_run(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let mut env = Env::new(pool, "one").await;
+            env.render = Some(start_pool("serve", "").await);
+            let survivor = env.person(PERSONAL_DATA.email).await;
+            let merged = env.person("merged@example.com").await;
+            let template = event_template(&env, false).await;
+            let event = order_event(&env, merged, "D-4001").await;
+            sqlx::query("UPDATE people SET merged_into = $1 WHERE id = $2")
+                .bind(survivor)
+                .bind(merged)
+                .execute(&env.pool)
+                .await
+                .unwrap();
+
+            let message = send_caused_by(&env, survivor, template, Some(event)).await;
+
+            assert_eq!(message.status, "sent");
+            assert!(
+                env.sent()[0].payload["html"]
+                    .as_str()
+                    .unwrap()
+                    .contains("D-4001")
+            );
+        })
+        .await;
+    }
 }

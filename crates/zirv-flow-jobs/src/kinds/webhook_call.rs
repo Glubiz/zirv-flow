@@ -55,8 +55,9 @@ use zirv_flow_render::RenderContext;
 use zirv_flow_store::secrets::OpenError;
 use zirv_flow_store::{
     SigningKey, WEBHOOK_JOB_KIND, WebhookOutcome, WebhookPerson, WebhookResult, WebhookSubject,
-    find_template, find_template_version, list_identities, live_signing_keys, lock_webhook_person,
-    read_template_field_catalog, read_webhook_subject, record_webhook_outcome, secrets,
+    find_template, find_template_version, find_trigger_event, list_identities, live_signing_keys,
+    lock_webhook_person, read_template_field_catalog, read_webhook_subject, record_webhook_outcome,
+    secrets,
 };
 use zirv_flow_templates::parse_template_document;
 
@@ -316,6 +317,18 @@ async fn render(
             .insert("email".to_owned(), Value::from(email.value));
     }
     context.message.id.clone_from(&call.idempotency_key);
+    if let Some(event) = find_trigger_event(ctx.conn(), call.workspace, call.enrollment).await? {
+        context.event = event
+            .properties
+            .as_object()
+            .map(|properties| {
+                properties
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
 
     let Some(pool) = ctx.render_pool().cloned() else {
         warn!("webhook template not rendered: the worker has no render pool");
@@ -2021,5 +2034,47 @@ mod tests {
             0,
             "a raw URL has no destination row to record an attempt against"
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_templated_node_reads_the_event_that_started_the_enrollment(pool: PgPool) {
+        let mut env = Env::new(pool).await;
+        env.sign_with_a_secret().await;
+        let (person, enrolled) = env.enrolled().await;
+        let event = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO events (id, workspace_id, person_id, name, occurred_at, received_at, \
+                properties, source, trace_id, validation_state) \
+             VALUES ($1, $2, $3, 'order_placed', now(), now(), '{\"order_id\": \"A-77\"}', 'api', \
+                gen_random_uuid(), 'valid')",
+        )
+        .bind(event)
+        .bind(env.ws.as_uuid())
+        .bind(person)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE enrollments SET cause_kind = 'event', cause_id = $2 WHERE id = $1")
+            .bind(enrolled.enrollment)
+            .bind(event.to_string())
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        let template = env
+            .template(
+                "webhook",
+                webhook_document(json!({}), r#"{"order": "{{ event.order_id }}"}"#),
+                true,
+            )
+            .await;
+        env.queue_templated(&enrolled, person, template).await;
+
+        env.attempt_rendering(Some(start_pool().await)).await;
+
+        let hits = env.mock.hits();
+        assert_eq!(hits.len(), 1);
+        let body: Value = serde_json::from_slice(&hits[0].body).unwrap();
+        assert_eq!(body, json!({"order": "A-77"}));
     }
 }
