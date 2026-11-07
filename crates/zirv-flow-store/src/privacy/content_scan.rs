@@ -38,6 +38,10 @@ const BY_VALUE: &[(&str, &str)] = &[
         "erase_ai_transcripts: workspace filter, substring match",
     ),
     (
+        "ai_drafts",
+        "erase_ai_drafts: workspace filter, substring match; a draft is deleted, so accept is a 404",
+    ),
+    (
         "ingest_rejects",
         "erase_unattributed_rejects for a null person; DELETIONS for the rest",
     ),
@@ -176,8 +180,8 @@ const VALUE_FREE: &[(&[&str], &str)] = &[
         "Idempotency-Key bookkeeping: hash of the caller with the key, an HMAC-keyed request hash and a response hash, a state, a lease, a status and the created resource's id; request identifiers cannot be confirmed without the server secret; no response body and no client-chosen text; 24 hour expiry",
     ),
     (
-        &["ai_calls", "ai_drafts", "ai_settings"],
-        "AI use: counters and mapping drafts; the free text is in ai_transcripts",
+        &["ai_calls", "ai_settings"],
+        "AI use: counters and settings; the free text is in ai_transcripts, drafts are by value",
     ),
     (
         &[
@@ -212,7 +216,10 @@ mod tests {
     use zirv_flow_core::{HmacPurpose, HmacRoot, WorkspaceId};
 
     use super::*;
-    use crate::ai::{CallOutcome, NewAiCall, insert_ai_transcript, record_ai_call};
+    use crate::ai::{
+        CallOutcome, DraftKind, DraftStatus, NewAiCall, NewAiDraft, insert_ai_draft,
+        insert_ai_transcript, record_ai_call,
+    };
     use crate::people::{apply_profile_batch, person_reference_places};
     use crate::privacy::testing::{
         BYSTANDER_EMAIL, EMAIL, Seeded, identifier_key, master_key, person_of, profile,
@@ -487,6 +494,57 @@ mod tests {
         .unwrap();
     }
 
+    /// A valid manifest draft whose content holds `text`, written by a new user.
+    async fn draft(pool: &PgPool, ws: WorkspaceId, text: &str) -> Uuid {
+        let user = crate::create_user(
+            pool,
+            &zirv_flow_core::Email::parse(&format!("{}@example.org", Uuid::now_v7().simple()))
+                .unwrap(),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        let id = Uuid::now_v7();
+        let content = json!({"manifest": {"sample": text}});
+        let mut connection = pool.acquire().await.unwrap();
+        insert_ai_draft(
+            &mut connection,
+            &NewAiDraft {
+                id,
+                workspace_id: ws,
+                user_id: user.id,
+                kind: DraftKind::Manifest,
+                source_id: None,
+                stream_name: None,
+                segment_id: None,
+                flow_id: None,
+                template_id: None,
+                status: DraftStatus::Valid,
+                content: Some(&content),
+                base_digest: None,
+                expires_at: OffsetDateTime::now_utc() + time::Duration::days(7),
+            },
+        )
+        .await
+        .unwrap();
+        id
+    }
+
+    /// The bystander's record `2` also lists the survivor's email and phone, the way an identify
+    /// that lost a unique-kind conflict keeps them. The seed recorded the conflict.
+    async fn list_survivor_values_on_the_bystanders_record(pool: &PgPool, ws: WorkspaceId) {
+        let done = sqlx::query(
+            "UPDATE source_records SET identifiers = identifiers || $2::jsonb              WHERE workspace_id = $1 AND record_key = '2'",
+        )
+        .bind(ws.as_uuid())
+        .bind(json!([{"kind": "email", "value": EMAIL}, {"kind": "phone", "value": PHONE}]))
+        .execute(pool)
+        .await
+        .unwrap();
+        assert_eq!(done.rows_affected(), 1);
+    }
+
     async fn test_send(pool: &PgPool, ws: WorkspaceId, address: &str) {
         let hash = zirv_flow_core::people::identifier_hash(
             &identifier_key(),
@@ -588,6 +646,8 @@ mod tests {
         null_person_reject(pool, ws, json!({"contact": EXTERNAL, "device": ANON})).await;
         test_send(pool, ws, EMAIL).await;
         idempotency_key(pool, ws, &format!("retry-{EMAIL}-ext")).await;
+        draft(pool, ws, &format!("map {EMAIL} to the contact")).await;
+        list_survivor_values_on_the_bystanders_record(pool, ws).await;
 
         // The bystander's, in the same classes.
         let grace = "grace@example.com";
@@ -599,6 +659,7 @@ mod tests {
         null_person_reject(pool, ws, json!({"contact": grace})).await;
         test_send(pool, ws, grace).await;
         idempotency_key(pool, ws, "retry-grace@example.com-ext").await;
+        draft(pool, ws, "map grace@example.com to the contact").await;
         let id_file = format!("id\n{COLLIDING}\n");
         upload(pool, ws, "bystander-id", id_file.as_bytes()).await;
         let colliding = upload(pool, ws, "bystander-id-refused", b"id\n").await;
@@ -669,6 +730,7 @@ mod tests {
             "events",
             "consent_changes",
             "ai_transcripts",
+            "ai_drafts",
             "import_chunks",
             "import_rejects",
             "ingest_rejects",
@@ -701,6 +763,8 @@ mod tests {
         for table in [
             "identities",
             "ai_transcripts",
+            "ai_drafts",
+            "source_records",
             "import_chunks",
             "import_rejects",
             "ingest_rejects",

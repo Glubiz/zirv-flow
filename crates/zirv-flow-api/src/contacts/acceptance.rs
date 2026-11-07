@@ -32,6 +32,7 @@ mod tests {
         csrf: String,
     }
 
+    #[derive(Clone, Copy)]
     enum Auth<'a> {
         Key(&'a str),
         Session(&'a Login),
@@ -888,7 +889,7 @@ mod tests {
         .await;
 
         let first = fx
-            .send("GET", "/contacts?limit=2", None, &fx.read, &[])
+            .send("GET", "/contacts?limit=2", None, &fx.admin, &[])
             .await;
         let cursor = first.body["next_cursor"].as_str().unwrap().to_owned();
         let second = fx
@@ -896,12 +897,12 @@ mod tests {
                 "GET",
                 &format!("/contacts?limit=2&cursor={cursor}"),
                 None,
-                &fx.read,
+                &fx.admin,
                 &[],
             )
             .await;
         let by_prefix = fx
-            .send("GET", "/contacts/search?q=a", None, &fx.read, &[])
+            .send("GET", "/contacts/search?q=a", None, &fx.admin, &[])
             .await;
         let by_email_get = fx
             .send(
@@ -926,7 +927,7 @@ mod tests {
                 "POST",
                 "/contacts/search",
                 Some(json!({"q": "b@example.com"})),
-                &fx.read,
+                &fx.admin,
                 &[],
             )
             .await;
@@ -971,6 +972,153 @@ mod tests {
         assert_eq!(invalid.status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(invalid.body["detail"], "identifier: invalid_email");
         assert_eq!(bad_limit.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_caller_without_pii_access_gets_no_contact_key_from_a_list_or_a_search(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        fx.define().await;
+        // Not hex, so no id in a body can contain the key by chance.
+        let created = fx
+            .create("zulu-1", json!({"email": "a@example.com", "age": 5}))
+            .await;
+        let person = created.body["person_id"].clone();
+        let editor = member_login(&pool, &fx.router, fx.ws, Role::Editor).await;
+        let viewer = member_login(&pool, &fx.router, fx.ws, Role::Viewer).await;
+        let admin_login = member_login(&pool, &fx.router, fx.ws, Role::Admin).await;
+        let list = fx.path("/contacts");
+        let search = fx.path("/contacts/search?q=zulu-");
+        let post = fx.path("/contacts/search");
+        let one = fx.path("/contacts/zulu-1");
+        let by_identifier = json!({"identifier": {"kind": "email", "value": "a@example.com"}});
+
+        for auth in [
+            Auth::Key(&fx.read),
+            Auth::Key(&fx.write),
+            Auth::Session(&editor),
+            Auth::Session(&viewer),
+        ] {
+            let listed = call(&fx.router, "GET", &list, None, auth, &[]).await;
+            let row = &listed.body["contacts"][0];
+            assert_eq!(row["key"], Value::Null);
+            assert_eq!(row["masked"], true);
+            assert_eq!(row["person_id"], person);
+            assert!(!listed.body.to_string().contains("zulu-1"));
+
+            let refused = call(&fx.router, "GET", &search, None, auth, &[]).await;
+            assert_eq!(refused.status, StatusCode::FORBIDDEN);
+            assert_eq!(refused.body["code"], "contact_key_not_searchable");
+            let refused_post = call(
+                &fx.router,
+                "POST",
+                &post,
+                Some(json!({"q": "zulu-"})),
+                auth,
+                &[],
+            )
+            .await;
+            assert_eq!(refused_post.status, StatusCode::FORBIDDEN);
+            assert_eq!(refused_post.body["code"], "contact_key_not_searchable");
+
+            let exact = call(
+                &fx.router,
+                "POST",
+                &post,
+                Some(by_identifier.clone()),
+                auth,
+                &[],
+            )
+            .await;
+            assert_eq!(exact.status, StatusCode::OK);
+            assert_eq!(exact.body["contacts"][0]["key"], Value::Null);
+            assert_eq!(exact.body["contacts"][0]["masked"], true);
+
+            let by_key = call(&fx.router, "GET", &one, None, auth, &[]).await;
+            assert_eq!(by_key.body["key"], "zulu-1");
+            assert_eq!(by_key.body["masked"], false);
+            assert_eq!(by_key.body["fields"]["email"], Value::Null);
+        }
+        for auth in [Auth::Key(&fx.admin), Auth::Session(&admin_login)] {
+            let listed = call(&fx.router, "GET", &list, None, auth, &[]).await;
+            assert_eq!(listed.body["contacts"][0]["key"], "zulu-1");
+            assert_eq!(listed.body["contacts"][0]["masked"], false);
+            let found = call(&fx.router, "GET", &search, None, auth, &[]).await;
+            assert_eq!(found.body["contacts"][0]["key"], "zulu-1");
+        }
+        let put = fx
+            .send(
+                "PUT",
+                "/contacts/zulu-1",
+                Some(json!({"fields": {"email": "a@example.com", "age": 6}})),
+                &fx.write,
+                &[],
+            )
+            .await;
+        assert_eq!(put.body["key"], "zulu-1");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_masked_caller_cannot_recover_a_key_from_a_cursor_and_paging_returns_every_row_once(
+        pool: PgPool,
+    ) {
+        use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+        let fx = fixture(&pool).await;
+        fx.define().await;
+        let keys = ["secret-a", "secret-b", "secret-c", "secret-d", "secret-e"];
+        for (n, key) in keys.iter().enumerate() {
+            fx.create(key, json!({"email": format!("p{n}@example.com")}))
+                .await;
+        }
+        let admin_page = fx
+            .send("GET", "/contacts?limit=50", None, &fx.admin, &[])
+            .await;
+        let admin_order: Vec<Value> = admin_page.body["contacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["person_id"].clone())
+            .collect();
+
+        let mut cursor: Option<String> = None;
+        let mut seen: Vec<Value> = Vec::new();
+        let mut cursors = Vec::new();
+        loop {
+            let path = match &cursor {
+                Some(cursor) => fx.path(&format!("/contacts?limit=2&cursor={cursor}")),
+                None => fx.path("/contacts?limit=2"),
+            };
+            let page = call(&fx.router, "GET", &path, None, Auth::Key(&fx.read), &[]).await;
+            assert_eq!(page.status, StatusCode::OK);
+            for row in page.body["contacts"].as_array().unwrap() {
+                assert_eq!(row["key"], Value::Null);
+                seen.push(row["person_id"].clone());
+            }
+            match page.body["next_cursor"].as_str() {
+                Some(next) => {
+                    cursors.push(next.to_owned());
+                    cursor = Some(next.to_owned());
+                }
+                None => break,
+            }
+        }
+
+        assert_eq!(seen, admin_order);
+        assert!(!cursors.is_empty());
+        for cursor in &cursors {
+            let decoded = URL_SAFE_NO_PAD
+                .decode(cursor)
+                .ok()
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+                .unwrap_or_default();
+            for key in keys {
+                assert!(!cursor.contains(key), "{cursor}");
+                assert!(!decoded.contains(key), "{cursor}");
+            }
+        }
     }
 
     #[sqlx::test]

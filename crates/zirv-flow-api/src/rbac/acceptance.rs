@@ -27,7 +27,7 @@ pub(in crate::rbac) mod tests {
 
     use crate::admin::{self, Context};
     use crate::auth::Need;
-    use crate::rbac::{Class, Method, ROUTES, Route};
+    use crate::rbac::{Class, Method, ROUTES, Route, names_a_person, session_only};
     use crate::{AppState, router};
 
     pub(in crate::rbac) const PASSWORD: &str = "correct horse battery";
@@ -226,6 +226,9 @@ pub(in crate::rbac) mod tests {
             code: &'static str,
             admin_passes: bool,
         },
+        /// A `Read` route that a caller without access to personal values is refused with `code`,
+        /// because its answer would list identifiers.
+        IdentifiersHidden { code: &'static str },
         /// A session needs `session`; a key needs `admin` and is then refused with `refusal`,
         /// because the route acts for a person.
         NoKeys {
@@ -248,8 +251,7 @@ pub(in crate::rbac) mod tests {
     /// note says, has one per branch.
     fn cases(row: &Route) -> Vec<Case> {
         let plain = |rule| Case { patch: None, rule };
-        let post = row.method == Method::Post;
-        if post && row.path.ends_with("/ai/drafts") {
+        if session_only(row) && row.path.ends_with("/ai/drafts") {
             let rule = |then| Rule::NoKeys {
                 session: Need::Edit,
                 then,
@@ -264,21 +266,21 @@ pub(in crate::rbac) mod tests {
                 },
             ];
         }
-        if post && row.path.ends_with("/ai/drafts/{id}/accept") {
+        if session_only(row) && row.path.ends_with("/ai/drafts/{id}/accept") {
             return vec![plain(Rule::NoKeys {
                 session: Need::Edit,
                 then: None,
                 refusal: ASSISTANT_NEEDS_USER,
             })];
         }
-        if post && row.path.ends_with("/ai/explain") {
+        if session_only(row) && row.path.ends_with("/ai/explain") {
             return vec![plain(Rule::NoKeys {
                 session: Need::Admin,
                 then: None,
                 refusal: ASSISTANT_NEEDS_USER,
             })];
         }
-        if post && row.path.ends_with("/oauth/start") {
+        if session_only(row) && row.path.ends_with("/oauth/start") {
             return vec![plain(Rule::NoKeys {
                 session: Need::Admin,
                 then: None,
@@ -288,7 +290,12 @@ pub(in crate::rbac) mod tests {
         if row.path == "/api/v1/oauth/callback" {
             return vec![plain(Rule::Redirect)];
         }
-        if row.note.starts_with("Edit; a request naming a real person") {
+        if row.method == Method::Get && row.path.ends_with("/contacts/search") {
+            return vec![plain(Rule::IdentifiersHidden {
+                code: "contact_key_not_searchable",
+            })];
+        }
+        if names_a_person(row) {
             let (code, admin_passes) = if row.path.ends_with("/flows/{id}/test") {
                 ("flow_test_values_forbidden", false)
             } else {
@@ -343,6 +350,19 @@ pub(in crate::rbac) mod tests {
                         (Expect::Through, Some(then)) => workspace_outcome(then, &kind),
                         (outcome, _) => outcome,
                     },
+                };
+            }
+            Rule::IdentifiersHidden { code } => {
+                let revealed = match &kind {
+                    Kind::Member(rank, pii) => *rank == 3 || *pii,
+                    Kind::Key(scopes) => {
+                        scopes.contains(&Scope::Admin) || scopes.contains(&Scope::Pii)
+                    }
+                    _ => true,
+                };
+                return match (workspace_outcome(Need::Read, &kind), revealed) {
+                    (Expect::Through, false) => Expect::Refused(code),
+                    (other, _) => other,
                 };
             }
             Rule::PersonValues { code, admin_passes } => {
@@ -1113,6 +1133,26 @@ pub(in crate::rbac) mod tests {
         assert!(caught.contains(&Who::Editor));
         assert!(caught.contains(&Who::KeyRead));
         assert!(!caught.contains(&Who::Admin));
+    }
+
+    #[test]
+    fn a_row_the_matrix_prints_as_session_only_refuses_every_key() {
+        let mut checked = 0;
+        for row in ROUTES.iter().filter(|row| session_only(row)) {
+            for case in cases(row) {
+                for who in EVERYONE {
+                    if matches!(who.kind(), Kind::Key(_)) {
+                        assert!(
+                            matches!(expected(row, case.rule, who), Expect::Forbidden(_)),
+                            "{} admits {who:?}",
+                            row_name(row)
+                        );
+                    }
+                }
+            }
+            checked += 1;
+        }
+        assert_eq!(checked, 6);
     }
 
     #[test]

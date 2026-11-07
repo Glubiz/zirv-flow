@@ -5319,7 +5319,7 @@
             }
           },
           "403": {
-            "description": "A key without the read scope",
+            "description": "A key without the read scope, or a caller who may not see identifiers (`code` is `contact_key_not_searchable`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -5408,7 +5408,7 @@
             }
           },
           "403": {
-            "description": "A key without the read scope, or a missing CSRF token",
+            "description": "A key without the read scope, a missing CSRF token, or a `q` search by a caller who may not see identifiers (`code` is `contact_key_not_searchable`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -30346,7 +30346,9 @@
         "type": "object",
         "description": "A contact. Values of identifier fields and PII-flagged fields are `null` and listed in\n`masked_fields` for a caller who may not see values: members and `read` keys.",
         "required": [
+          "id",
           "key",
+          "masked",
           "person_id",
           "fields",
           "masked_fields",
@@ -30366,9 +30368,21 @@
               "type": "string"
             }
           },
-          "key": {
+          "id": {
             "type": "string",
-            "description": "The contact key: the identifier `external:contact_key`."
+            "format": "uuid",
+            "description": "An opaque id of this contact, unique per row and safe to show to any caller; it is\nnot the key and cannot be turned into it. Use it to tell rows apart."
+          },
+          "key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The contact key: the identifier `external:contact_key`. `null` with `masked` set in a\nlist or search answer for a caller who may not see identifiers; an answer to a request\nthat named the key carries it."
+          },
+          "masked": {
+            "type": "boolean",
+            "description": "Whether `key` is hidden from this caller; the contact is reached by `person_id`."
           },
           "masked_fields": {
             "type": "array",
@@ -30502,7 +30516,7 @@
               "string",
               "null"
             ],
-            "description": "Pass as `cursor` for the next page; null on the last page."
+            "description": "Pass as `cursor` for the next page; null on the last page. Opaque: it names the last\nrow by its `id` and reveals no key."
           }
         }
       },

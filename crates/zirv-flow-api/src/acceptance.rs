@@ -4889,6 +4889,70 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_nul_in_a_body_or_a_query_is_a_422_never_a_500(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        create_topic(&router, &owner, &ws, "news", "opt_out").await;
+        let person = seed_person(&pool, &ws, "ada@example.com").await;
+        let base = format!("/api/v1/workspaces/{ws}");
+
+        let writes = [
+            (
+                "POST",
+                topics_uri(&ws),
+                json!({"key": "k", "name": "n\u{0}", "channel": "email", "policy": "opt_in"}),
+            ),
+            (
+                "PUT",
+                consent_uri(&ws, &person),
+                json!({"channel": "email", "topic_key": "news", "status": "subscribed", "evidence": {"form": "a\u{0}b"}}),
+            ),
+            (
+                "PUT",
+                consent_uri(&ws, &person),
+                json!({"channel": "email", "topic_key": "ne\u{0}ws", "status": "subscribed"}),
+            ),
+            (
+                "POST",
+                format!("{base}/people/search"),
+                json!({"trait": {"key": "plan", "op": "eq", "value": "a\u{0}b"}}),
+            ),
+        ];
+        for (method, uri, body) in writes {
+            let reply = call(&router, method, &uri, Some(body), Auth::Session(&owner)).await;
+            assert_eq!(
+                reply.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{method} {uri}: {:?}",
+                reply.body
+            );
+        }
+        for tail in [
+            "/templates?q=a%00b",
+            "/ingest-rejects?name=a%00b",
+            "/ingest-rejects?reason=a%00b",
+            "/contacts/search?q=a%00b",
+        ] {
+            let reply = call(
+                &router,
+                "GET",
+                &format!("{base}{tail}"),
+                None,
+                Auth::Session(&owner),
+            )
+            .await;
+            assert_eq!(
+                reply.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{tail}: {:?}",
+                reply.body
+            );
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn topics_are_created_listed_updated_archived_and_audited(pool: PgPool) {
         let router = app(&pool).await;
         let owner = owner(&pool, &router).await;

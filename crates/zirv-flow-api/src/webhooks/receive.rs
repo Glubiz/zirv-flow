@@ -16,6 +16,7 @@ use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_core::mapping::walk_path;
+use zirv_flow_core::no_nul::{CONTAINS_NUL, find_nul_in_members};
 use zirv_flow_core::signature::Scheme;
 use zirv_flow_core::{SecretId, SecretPurpose};
 use zirv_flow_store::HookReceive;
@@ -24,11 +25,13 @@ use crate::AppState;
 use crate::ingest::{
     Refusal, declared_too_large, invalid_signature, read_body, too_large, verify_signature,
 };
-use crate::problem::{ApiError, Problem};
+use crate::problem::{ApiError, ItemProblem, Problem};
 use crate::trace::request_trace;
 
 /// The longest dedupe value, in characters.
 const MAX_DEDUPE_CHARS: usize = 128;
+/// The longest field path an error echoes back.
+const MAX_ECHOED_FIELD: usize = 64;
 
 #[derive(Serialize, ToSchema)]
 pub(crate) struct WebhookAccepted {
@@ -182,6 +185,22 @@ async fn accept(state: &AppState, id: &str, request: Request) -> Result<(), Refu
     else {
         return Err(invalid_payload());
     };
+    if let Some(path) = find_nul_in_members(&payload) {
+        return Err(Refusal::new(
+            ApiError::bad_request("the payload holds a NUL character")
+                .with_code("invalid_payload")
+                .with_errors(vec![ItemProblem {
+                    index: 0,
+                    field: path
+                        .chars()
+                        .filter(|c| !c.is_control())
+                        .take(MAX_ECHOED_FIELD)
+                        .collect(),
+                    reason: CONTAINS_NUL.to_owned(),
+                }]),
+            "invalid_payload",
+        ));
+    }
     let value = dedupe_value(&payload, &hook.dedupe_field).ok_or_else(|| {
         Refusal::new(
             ApiError::unprocessable("the payload has no usable value at the dedupe field")
@@ -204,9 +223,12 @@ async fn accept(state: &AppState, id: &str, request: Request) -> Result<(), Refu
         report.is_some(),
     )
     .await
-    .map_err(|_| {
+    .map_err(|error| {
         if let Some(taken) = report {
             state.ingest.release_report(hook.id, taken);
+        }
+        if error.is_invalid_data() {
+            return Refusal::new(ApiError::contains_nul("the payload"), "invalid_payload");
         }
         unavailable()
     })

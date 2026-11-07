@@ -5,7 +5,6 @@ import { client, describeError, unwrap, useResource, type components, type Error
 import {
   Button,
   EmptyState,
-  ErrorState,
   formatAgo,
   formatDateTime,
   InlineError,
@@ -13,6 +12,7 @@ import {
   PageHeader,
   Panel,
   RelatedPanel,
+  LoadError,
   ResourceView,
   shortId,
   TabNav,
@@ -87,7 +87,7 @@ function SegmentView({ workspaceId, segmentId }: { workspaceId: string; segmentI
       <div className="page">
         <PageHeader title="Segment" breadcrumb={crumb} />
         <Panel flush>
-          <ErrorState {...describeError(segment.error)} onRetry={segment.reload} />
+          <LoadError error={segment.error} onRetry={segment.reload} noun="segment" />
         </Panel>
       </div>
     );

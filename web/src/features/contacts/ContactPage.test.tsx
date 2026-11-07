@@ -39,6 +39,7 @@ const DEFINITION = {
 function contact(fields: Record<string, unknown>, masked: string[] = []) {
   return {
     key: "c-1",
+    masked: false,
     person_id: "person-1",
     fields,
     masked_fields: masked,
@@ -93,7 +94,7 @@ describe("contact", () => {
   it("says when the contact does not exist", async () => {
     mount({ [`GET ${CONTACT}`]: () => problem(404, "Not Found", "no such resource") });
 
-    expect(await screen.findByText("No such contact")).toBeInTheDocument();
+    expect(await screen.findByText("This contact does not exist")).toBeInTheDocument();
   });
 
   it("shows a retry when loading fails", async () => {

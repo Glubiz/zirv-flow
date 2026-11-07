@@ -46,12 +46,13 @@ export const NAVIGATION: readonly Destination[] = [
   { label: "Audit log", route: "settings/audit", area: "settings", group: "Compliance", role: "admin" },
   { label: "Jobs", route: "/jobs", area: "settings", group: "System", role: "owner", global: true },
   { label: "Health", route: "/health", area: "settings", group: "System", global: true },
+  { label: "New segment", route: "segments/new", area: "pages", group: "Audience" },
   { label: "Identity conflicts", route: "people/conflicts", area: "pages", group: "Audience" },
   { label: "Consent dimensions", route: "consent/dimensions", area: "pages", group: "Audience" },
   { label: "Consent policy", route: "consent/policy", area: "pages", group: "Audience" },
   { label: "Suppressions", route: "suppressions", area: "pages", group: "Audience" },
   { label: "Event debugger", route: "events/debugger", area: "pages", group: "Data" },
-  { label: "Ingest rejects", route: "events/rejects", area: "pages", group: "Data" },
+  { label: "Rejects", route: "events/rejects", area: "pages", group: "Data" },
   { label: "Snippets", route: "snippets", area: "pages", group: "Messaging" },
   { label: "Images", route: "images", area: "pages", group: "Messaging" },
   { label: "Workspaces", route: "/w", area: "utility", group: "", global: true, exact: true },
@@ -77,6 +78,12 @@ export function matchesDestination(item: Destination, pathname: string, base: st
   if (item.exact) return path === url;
   if (item.except?.some((route) => below(path, `${prefix}/${route}`))) return false;
   return item.matches ? item.matches.some((route) => below(path, `${prefix}/${route}`)) : below(path, url);
+}
+
+/** The page's name for the browser tab: the destination that matches most closely, which is also what the page's heading says. */
+export function pageTitle(pathname: string, base: string | null): string {
+  const page = [...NAVIGATION].sort((a, b) => b.route.length - a.route.length).find((item) => matchesDestination(item, pathname, base));
+  return `${page?.label ?? "zirv flow"} · zirv flow`;
 }
 
 export function isSettingsPath(pathname: string, base: string | null): boolean {

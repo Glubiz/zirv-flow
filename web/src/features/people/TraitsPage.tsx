@@ -80,7 +80,7 @@ function TraitList({ workspaceId, canManage }: { workspaceId: string; canManage:
         >
           {(data) => (
             <div className="table-scroll">
-              <table className="table">
+              <table className="table table-cards">
                 <caption>Fields of this workspace</caption>
                 <thead>
                   <tr>
@@ -103,19 +103,19 @@ function TraitList({ workspaceId, canManage }: { workspaceId: string; canManage:
                         {trait.key}
                         {trait.description ? <div className="faint">{trait.description}</div> : null}
                       </td>
-                      <td>{typeLabel(trait.type)}</td>
-                      <td>
+                      <td data-label="Type">{typeLabel(trait.type)}</td>
+                      <td data-label="Winning source">
                         {precedenceLabel(trait.precedence)}
                         {trait.precedence === "source_priority" && trait.source_order.length > 0 ? (
                           <div className="faint">{trait.source_order.map((entry) => entryLabel(entry, sources)).join(" > ")}</div>
                         ) : null}
                       </td>
-                      <td>
+                      <td data-label="Handling">
                         {trait.pii ? <Pill tone="attention">Personal data</Pill> : null}
                         {trait.channel_address ? <Pill>Channel address</Pill> : null}
                         {!trait.pii && !trait.channel_address ? "—" : null}
                       </td>
-                      <td>
+                      <td data-label="Status">
                         {trait.archived ? <Pill tone="error">Archived</Pill> : <Pill>Active</Pill>}
                         {trait.inferred ? <Pill>Inferred</Pill> : null}
                       </td>

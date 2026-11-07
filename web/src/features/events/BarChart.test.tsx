@@ -26,6 +26,27 @@ describe("bar chart", () => {
     expect(screen.getByRole("img", { name: /Events per day: 13 in total/ })).toBeInTheDocument();
   });
 
+  it("labels a day bucket with its date only, and an hour bucket with the time", () => {
+    const day = render(<BarChart bars={BARS} unit="day" />);
+    const dayLabels = [...day.container.querySelectorAll("text")].map((node) => node.textContent);
+    expect(dayLabels.some((text) => /\d[:.]\d\d[:.]\d\d/.test(text))).toBe(false);
+    day.unmount();
+
+    const hour = render(<BarChart bars={BARS} unit="hour" />);
+    const hourLabels = [...hour.container.querySelectorAll("text")].map((node) => node.textContent);
+    expect(hourLabels.some((text) => /\d[:.]\d\d[:.]\d\d/.test(text))).toBe(true);
+  });
+
+  it("writes large numbers with separators or in short form", async () => {
+    const user = userEvent.setup();
+    const { container } = render(<BarChart bars={[{ start: "2026-10-01T00:00:00Z", count: 2_562_183 }]} unit="day" />);
+
+    expect(screen.getByRole("img", { name: /2,562,183 in total/ })).toBeInTheDocument();
+    expect([...container.querySelectorAll("text")].map((node) => node.textContent)).toContain("5 M");
+    await user.click(screen.getByText("Show the numbers as a table"));
+    expect(screen.getAllByText("2,562,183").length).toBeGreaterThan(0);
+  });
+
   it("gives the same numbers in a table", async () => {
     const user = userEvent.setup();
     render(<BarChart bars={BARS} unit="day" />);

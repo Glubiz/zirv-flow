@@ -25,6 +25,11 @@ export function entryLabel(entry: string, sources: SourceBody[] | null): string 
   return IMPORT_LABEL.test(entry) ? `Import ${entry}` : "Unknown source";
 }
 
+/** A provenance source as the profile prints it: the source's name, or the raw value when the source is gone or unknown. */
+export function sourceName(source: string, sources: SourceBody[] | null): string {
+  return sources?.find((candidate) => candidate.id === source)?.name ?? source;
+}
+
 export function useWorkspaceSources(workspaceId: string) {
   return useResource(
     () => unwrap(client.GET("/api/v1/workspaces/{ws}/sources", { params: { path: { ws: workspaceId } } })),

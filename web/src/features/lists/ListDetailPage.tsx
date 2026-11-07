@@ -5,12 +5,12 @@ import { client, describeError, unwrap, useResource, type ErrorSummary } from ".
 import {
   Button,
   EmptyState,
-  ErrorState,
   formatDateTime,
   InlineError,
   kindLabel,
   PageHeader,
   Panel,
+  LoadError,
   ResourceView,
   SelectField,
   shortId,
@@ -88,7 +88,7 @@ function ListDetail({ workspaceId, listId }: { workspaceId: string; listId: stri
     <div className="page">
       {list.status === "error" ? (
         <Panel flush>
-          <ErrorState {...describeError(list.error)} onRetry={list.reload} />
+          <LoadError error={list.error} onRetry={list.reload} noun="list" />
         </Panel>
       ) : (
         <>

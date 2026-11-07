@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { json, MEMBER, mockApi, OWNER, problem, session } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
@@ -37,10 +37,12 @@ const DEFINITION = {
   updated_by: null,
 };
 
-function contact(key: string, fields: Record<string, unknown>, masked: string[] = []) {
+function contact(key: string | null, fields: Record<string, unknown>, masked: string[] = [], person = `p-${key}`, id = `id-${key}-${person}`) {
   return {
+    id,
     key,
-    person_id: `p-${key}`,
+    masked: key === null,
+    person_id: person,
     fields,
     masked_fields: masked,
     created_at: "2026-10-01T09:00:00Z",
@@ -103,6 +105,35 @@ describe("contacts list", () => {
     expect(within(table).getByText("36")).toBeInTheDocument();
   });
 
+  it("links a row whose key is hidden to the person profile and never shows a key", async () => {
+    mount({
+      [LIST]: () => json({ contacts: [contact(null, { age: 36 }, [], "person-9")], next_cursor: null }),
+    });
+
+    const table = await screen.findByRole("table");
+    const row = within(table).getAllByRole("row")[1]!;
+    expect(within(row).getByText("Hidden")).toBeInTheDocument();
+    expect(within(row).getByRole("link", { name: "Open profile" })).toHaveAttribute("href", "/w/ws1/people/person-9");
+    expect(within(row).getByText("36")).toBeInTheDocument();
+  });
+
+  it("explains a refused key search instead of showing an error", async () => {
+    mount({
+      [LIST]: () => json({ contacts: [contact(null, {}, [], "person-9")], next_cursor: null }),
+      [SEARCH]: () => problem(403, "Forbidden", "q: a contact key cannot be searched", undefined, "contact_key_not_searchable"),
+    });
+    const user = userEvent.setup();
+    await screen.findByRole("link", { name: "Open profile" });
+
+    await user.type(screen.getByLabelText("Search"), "c-");
+    await user.click(screen.getByRole("button", { name: "Search" }));
+
+    expect(await screen.findByText("Search by key is not open to you")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Show all" }));
+    expect(await screen.findByRole("link", { name: "Open profile" })).toBeInTheDocument();
+  });
+
   it("shows a loading state while the contacts load", async () => {
     mount({ [LIST]: () => new Promise<Response>(() => undefined) });
 
@@ -153,6 +184,25 @@ describe("contacts list", () => {
     expect(calls.filter((call) => call.method === "GET" && call.path.endsWith("/contacts")).at(-1)?.search).toContain(
       "cursor=cursor-1",
     );
+  });
+
+  it("keeps two masked contacts of one person apart after Load more", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    mount({
+      [LIST]: (request) => {
+        const after = new URL(request.url).searchParams.get("cursor");
+        return after === null
+          ? json({ contacts: [contact(null, {}, [], "person-9", "row-1")], next_cursor: "row-1" })
+          : json({ contacts: [contact(null, {}, [], "person-9", "row-2")], next_cursor: null });
+      },
+    });
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole("button", { name: "Load more" }));
+
+    await waitFor(() => expect(screen.getAllByRole("link", { name: "Open profile" })).toHaveLength(2));
+    expect(errors.mock.calls.flat().join(" ")).not.toContain("same key");
+    errors.mockRestore();
   });
 
   it("searches with a POST so the value stays out of the URL, and can go back to everyone", async () => {

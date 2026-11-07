@@ -1,22 +1,22 @@
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 
-import { ApiError, client, describeError, unwrap, unwrapEmpty, useResource, type ErrorSummary } from "../../api";
+import { client, describeError, unwrap, unwrapEmpty, useResource, type ErrorSummary } from "../../api";
 import {
   Button,
   Dialog,
-  EmptyState,
   ErrorState,
   formatDateTime,
   HiddenValue,
   InlineError,
+  LoadError,
   LoadingState,
   PageHeader,
   Panel,
   Pill,
 } from "../../ui";
 import { ContactForm } from "./ContactForm";
-import { identifierLabel, showValue, useContactAccess, useContactSchema, type Contact, type SchemaField } from "./schema";
+import { identifierLabel, keyed, showValue, useContactAccess, useContactSchema, type Contact, type KeyedContact, type SchemaField } from "./schema";
 
 export function ContactPage() {
   const { ws = "", key = "" } = useParams();
@@ -47,24 +47,19 @@ function ContactView({ workspaceId, contactKey }: { workspaceId: string; contact
     );
   }
   if (contact.status === "error") {
-    const missing = contact.error instanceof ApiError && contact.error.status === 404;
     return (
       <div className="page">
         <Panel flush>
-          {missing ? (
-            <EmptyState
-              title="No such contact"
-              action={
-                <Link className="btn" to={`/w/${workspaceId}/contacts`}>
-                  Back to contacts
-                </Link>
-              }
-            >
-              It may have been deleted.
-            </EmptyState>
-          ) : (
-            <ErrorState {...describeError(contact.error)} onRetry={contact.reload} />
-          )}
+          <LoadError
+            error={contact.error}
+            onRetry={contact.reload}
+            noun="contact"
+            action={
+              <Link className="btn" to={`/w/${workspaceId}/contacts`}>
+                Back to contacts
+              </Link>
+            }
+          />
         </Panel>
       </div>
     );
@@ -79,7 +74,7 @@ function ContactView({ workspaceId, contactKey }: { workspaceId: string; contact
     );
   }
 
-  const data = contact.data;
+  const data = keyed(contact.data, contactKey);
   return (
     <div className="page">
       <PageHeader
@@ -175,7 +170,7 @@ function DeleteDialog({
   onClose,
 }: {
   workspaceId: string;
-  contact: Contact;
+  contact: KeyedContact;
   onClose: () => void;
 }) {
   const navigate = useNavigate();

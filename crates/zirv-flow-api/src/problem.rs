@@ -283,6 +283,14 @@ impl ApiError {
         Self::new(StatusCode::UNPROCESSABLE_ENTITY, detail)
     }
 
+    /// A value holds a NUL character, which PostgreSQL stores in no text. `place` says where.
+    pub(crate) fn contains_nul(place: &str) -> Self {
+        Self {
+            code: Some(zirv_flow_core::no_nul::CONTAINS_NUL),
+            ..Self::unprocessable(format!("{place}: must not contain a NUL character"))
+        }
+    }
+
     /// An unexpected failure; the cause is deliberately not shown to the caller.
     pub(crate) fn internal() -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
@@ -307,6 +315,18 @@ impl ApiError {
             ..Self::new(
                 StatusCode::FORBIDDEN,
                 "trait.op: only eq and exists can search a PII trait without access to values",
+            )
+        }
+    }
+
+    /// A caller without access to identifiers asked to search contacts by key prefix: the
+    /// answer would list keys.
+    pub(crate) fn contact_key_not_searchable() -> Self {
+        Self {
+            code: Some("contact_key_not_searchable"),
+            ..Self::new(
+                StatusCode::FORBIDDEN,
+                "q: a contact key cannot be searched without access to identifiers",
             )
         }
     }
@@ -1331,6 +1351,8 @@ impl From<zirv_flow_store::StoreError> for ApiError {
             Self::search_timeout()
         } else if error.is_run_active() {
             Self::sync_run_blocks_change()
+        } else if error.is_invalid_data() {
+            Self::contains_nul("request")
         } else {
             Self::internal()
         }

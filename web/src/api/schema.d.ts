@@ -5391,8 +5391,20 @@ export interface components {
             fields: {
                 [key: string]: unknown;
             };
-            /** @description The contact key: the identifier `external:contact_key`. */
-            key: string;
+            /**
+             * Format: uuid
+             * @description An opaque id of this contact, unique per row and safe to show to any caller; it is
+             *     not the key and cannot be turned into it. Use it to tell rows apart.
+             */
+            id: string;
+            /**
+             * @description The contact key: the identifier `external:contact_key`. `null` with `masked` set in a
+             *     list or search answer for a caller who may not see identifiers; an answer to a request
+             *     that named the key carries it.
+             */
+            key: string | null;
+            /** @description Whether `key` is hidden from this caller; the contact is reached by `person_id`. */
+            masked: boolean;
             /** @description The keys of `fields` whose value is hidden from this caller. */
             masked_fields: string[];
             /**
@@ -5459,7 +5471,10 @@ export interface components {
         ContactsBody: {
             /** @description In key order. */
             contacts: components["schemas"]["ContactBody"][];
-            /** @description Pass as `cursor` for the next page; null on the last page. */
+            /**
+             * @description Pass as `cursor` for the next page; null on the last page. Opaque: it names the last
+             *     row by its `id` and reveals no key.
+             */
             next_cursor?: string | null;
         };
         ConvertTemplateDraftRequest: {
@@ -15331,7 +15346,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description A key without the read scope */
+            /** @description A key without the read scope, or a caller who may not see identifiers (`code` is `contact_key_not_searchable`) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -15394,7 +15409,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description A key without the read scope, or a missing CSRF token */
+            /** @description A key without the read scope, a missing CSRF token, or a `q` search by a caller who may not see identifiers (`code` is `contact_key_not_searchable`) */
             403: {
                 headers: {
                     [name: string]: unknown;

@@ -339,7 +339,7 @@ function ListView(props: ViewProps) {
   return (
     <div className="panel panel-flush">
       <div className="table-scroll">
-        <table className="table">
+        <table className="table table-cards">
           <caption>Templates of this workspace</caption>
           <thead>
             <tr>
@@ -363,14 +363,14 @@ function ListView(props: ViewProps) {
                     <Link to={`/w/${props.workspaceId}/templates/${item.id}`}>{item.name}</Link>
                     <div className="hint">{kindLabel(item)}</div>
                   </td>
-                  <td>
+                  <td data-label="Status">
                     {statusLabel(item)}
                     {statusKey(item) === "changes" ? <div className="hint">Draft changes</div> : null}
                   </td>
-                  <td>{checks.text}</td>
-                  <td>{flowCount(item)}</td>
-                  <td>{themeLabel(item)}</td>
-                  <td>
+                  <td data-label="Checks">{checks.text}</td>
+                  <td data-label="Used in">{flowCount(item)}</td>
+                  <td data-label="Theme">{themeLabel(item)}</td>
+                  <td data-label="Edited">
                     {editedAgo(item)}
                     {item.edited_by_email ? <div className="hint">{item.edited_by_email}</div> : null}
                   </td>

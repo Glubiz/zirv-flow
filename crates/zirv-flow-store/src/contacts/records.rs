@@ -15,6 +15,8 @@ use crate::StoreError;
 /// A contact as stored.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Contact {
+    /// The native record's own id: opaque, unique per contact, and not the key.
+    pub id: Uuid,
     pub key: String,
     /// The surviving person the contact's record belongs to.
     pub person_id: Uuid,
@@ -26,6 +28,7 @@ pub struct Contact {
 
 #[derive(FromRow)]
 struct ContactRow {
+    id: Uuid,
     record_key: String,
     person_id: Uuid,
     traits: Value,
@@ -46,6 +49,7 @@ impl From<ContactRow> for Contact {
             })
             .unwrap_or_default();
         Self {
+            id: row.id,
             key: row.record_key,
             person_id: row.person_id,
             fields,
@@ -57,7 +61,7 @@ impl From<ContactRow> for Contact {
 
 /// The live native contact records of a workspace; the caller adds conditions and an order.
 /// `$1` is the workspace.
-const SELECT: &str = "SELECT s.record_key, COALESCE(p.merged_into, s.person_id) AS person_id, \
+const SELECT: &str = "SELECT s.id, s.record_key, COALESCE(p.merged_into, s.person_id) AS person_id, \
         s.traits, s.created_at, s.updated_at \
      FROM source_records s \
      JOIN people p ON p.workspace_id = s.workspace_id AND p.id = s.person_id \
@@ -86,23 +90,41 @@ pub async fn find_contact(
 #[derive(Clone, Debug, PartialEq)]
 pub struct ContactPage {
     pub contacts: Vec<Contact>,
-    /// The key to pass as `after` for the next page; none on the last page.
-    pub next_after: Option<String>,
+    /// The id of the last contact, to pass as `after` for the next page; none on the last page.
+    pub next_after: Option<Uuid>,
 }
 
-/// Up to `limit` contacts with a key after `after`, in key order.
+/// Up to `limit` contacts after the contact with id `after`, in key order. The position is
+/// resolved here from the id, so a caller never holds a key. None when `after` names no
+/// contact of the workspace (it was erased since the previous page).
 pub async fn list_contacts(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
-    after: Option<&str>,
+    after: Option<Uuid>,
     limit: u32,
-) -> Result<ContactPage, StoreError> {
+) -> Result<Option<ContactPage>, StoreError> {
+    let after_key: Option<String> = match after {
+        Some(id) => {
+            let key: Option<String> = sqlx::query_scalar(
+                "SELECT record_key FROM source_records                  WHERE workspace_id = $1 AND id = $2 AND source = 'native' AND stream = 'contacts'",
+            )
+            .bind(workspace.as_uuid())
+            .bind(id)
+            .fetch_optional(&mut *connection)
+            .await
+            .map_err(StoreError::query)?;
+            match key {
+                Some(key) => Some(key),
+                None => return Ok(None),
+            }
+        }
+        None => None,
+    };
     let rows: Vec<ContactRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "{SELECT} AND ($2::text IS NULL OR s.record_key > $2) \
-         ORDER BY s.record_key LIMIT $3"
+        "{SELECT} AND ($2::text IS NULL OR s.record_key > $2)          ORDER BY s.record_key LIMIT $3"
     )))
     .bind(workspace.as_uuid())
-    .bind(after)
+    .bind(after_key)
     .bind(i64::from(limit) + 1)
     .fetch_all(connection)
     .await
@@ -111,12 +133,12 @@ pub async fn list_contacts(
     let more = contacts.len() > limit as usize;
     contacts.truncate(limit as usize);
     let next_after = more
-        .then(|| contacts.last().map(|contact| contact.key.clone()))
+        .then(|| contacts.last().map(|contact| contact.id))
         .flatten();
-    Ok(ContactPage {
+    Ok(Some(ContactPage {
         contacts,
         next_after,
-    })
+    }))
 }
 
 /// What to look contacts up by.
@@ -216,10 +238,19 @@ mod tests {
         }
         let mut connection = pool.acquire().await.unwrap();
 
-        let first = list_contacts(&mut connection, one, None, 2).await.unwrap();
-        let second = list_contacts(&mut connection, one, first.next_after.as_deref(), 2)
+        let first = list_contacts(&mut connection, one, None, 2)
+            .await
+            .unwrap()
+            .unwrap();
+        let second = list_contacts(&mut connection, one, first.next_after, 2)
+            .await
+            .unwrap()
+            .unwrap();
+        let stale = list_contacts(&mut connection, two, first.next_after, 2)
             .await
             .unwrap();
+        assert!(stale.is_none());
+        assert_ne!(first.contacts[0].id, first.contacts[1].id);
         let prefixed = search_contacts(
             &mut connection,
             one,
@@ -272,7 +303,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_ne!(other.person_id, mine.person_id);
-        let theirs = list_contacts(&mut connection, two, None, 10).await.unwrap();
+        let theirs = list_contacts(&mut connection, two, None, 10)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(keys(&theirs.contacts), ["a1", "a2", "b"]);
     }
 }

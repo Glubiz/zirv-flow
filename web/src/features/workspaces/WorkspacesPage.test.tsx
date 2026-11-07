@@ -42,7 +42,7 @@ describe("workspaces", () => {
     expect(post?.body).toEqual({ name: "Spring campaigns", slug: null });
     expect(post?.headers.get("x-csrf-token")).toBe("csrf-ws");
 
-    await user.click(screen.getByRole("button", { name: "Switch workspace" }));
+    await user.click(screen.getByRole("button", { name: /switch workspace$/ }));
     expect(screen.getByRole("menuitemradio", { name: "Spring campaigns" })).toBeInTheDocument();
   });
 
@@ -53,7 +53,7 @@ describe("workspaces", () => {
     });
     const user = userEvent.setup();
     const { router } = renderRoute("/w", "/w/*", <WorkspacesProvider><WorkspaceSwitcher /></WorkspacesProvider>);
-    await user.click(await screen.findByRole("button", { name: "Switch workspace" }));
+    await user.click(await screen.findByRole("button", { name: /switch workspace$/ }));
     await user.click(screen.getByRole("menuitemradio", { name: "Spring campaigns" }));
     expect(router.state.location.pathname).toBe("/w/ws1");
   });

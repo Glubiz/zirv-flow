@@ -61,10 +61,10 @@ pub use ai::{
     AiCall, AiDraft, AiSettings, AiSettingsUpdate, AiUsage, CallOutcome, DRAFT_PURGE_BATCH,
     DraftKind, DraftStatus, FeatureUsage, FinishedAiCall, NewAiCall, NewAiDraft, ProbeRecord,
     Reservation, ReservationLimits, TRANSCRIPT_PURGE_BATCH, UserUsage, ai_usage,
-    calls_in_last_minute, erase_ai_transcripts, find_ai_draft, find_ai_settings, finish_ai_call,
-    insert_ai_draft, insert_ai_transcript, lock_ai_settings, mark_ai_draft_accepted, month_start,
-    purge_expired_ai_drafts, purge_expired_ai_transcripts, put_ai_settings, record_ai_call,
-    reserve_ai_call, spent_this_month,
+    calls_in_last_minute, erase_ai_drafts, erase_ai_transcripts, find_ai_draft, find_ai_settings,
+    finish_ai_call, insert_ai_draft, insert_ai_transcript, lock_ai_settings,
+    mark_ai_draft_accepted, month_start, purge_expired_ai_drafts, purge_expired_ai_transcripts,
+    put_ai_settings, record_ai_call, reserve_ai_call, spent_this_month,
 };
 pub use api_idempotency::{
     ApiIdempotencyKey, Reserved, bind_api_idempotency_hash, complete_api_idempotency,
@@ -440,6 +440,7 @@ enum StoreErrorKind {
     Query,
     Conflict,
     Retryable,
+    InvalidData,
     Timeout,
     PoolTimeout,
     RunActive,
@@ -487,8 +488,14 @@ impl StoreError {
             .as_database_error()
             .and_then(|error| error.code())
             .is_some_and(|code| matches!(code.as_ref(), "40P01" | "40001"));
+        let invalid_data = source
+            .as_database_error()
+            .and_then(|error| error.code())
+            .is_some_and(|code| matches!(code.as_ref(), "22021" | "22P05"));
         let kind = if conflict {
             StoreErrorKind::Conflict
+        } else if invalid_data {
+            StoreErrorKind::InvalidData
         } else if retryable {
             StoreErrorKind::Retryable
         } else {
@@ -555,6 +562,12 @@ impl StoreError {
     /// A change the stream's active sync run would undo: it was refused and nothing was written.
     pub(crate) fn run_active() -> Self {
         Self::new(StoreErrorKind::RunActive)
+    }
+
+    /// Whether PostgreSQL refused a value it cannot store: a NUL in `text` (22021), or as an
+    /// escape in `jsonb` (22P05). The input is at fault, so running it again cannot help.
+    pub fn is_invalid_data(&self) -> bool {
+        matches!(self.kind, StoreErrorKind::InvalidData)
     }
 
     /// Whether the change was refused because a sync run is queued or running.
@@ -651,6 +664,9 @@ impl fmt::Display for StoreError {
                 self.write_source(formatter)
             }
             StoreErrorKind::Conflict => formatter.write_str("the value already exists"),
+            StoreErrorKind::InvalidData => {
+                formatter.write_str("the database cannot store a value of the request")
+            }
             StoreErrorKind::Timeout => formatter.write_str("the query ran past its time limit"),
             StoreErrorKind::PoolTimeout => {
                 formatter.write_str("no database connection came free in time")

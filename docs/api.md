@@ -317,6 +317,7 @@ A test reads the sources and fails when a code used there is missing from this l
 | `query_timeout` | An explorer query ran over its time limit |
 | `explorer_busy` | Every connection of the explorer pool stayed busy for a second; see `Retry-After` |
 | `pii_trait_not_searchable` | The trait holds personal data and cannot be searched |
+| `contact_key_not_searchable` | A caller who may not see identifiers searched contacts by key prefix |
 | `pii_property_not_explorable` | The event property holds personal data and cannot be explored |
 | `debugger_streams_busy` | The workspace has the most debugger streams open on this server |
 | `consent_policy_invalid` | A consent policy draft fails its checks; `issues` lists them |
@@ -398,7 +399,14 @@ The session column is the lowest role that may call: `member` is any member of t
 `editor`, `publisher` and `admin` are the roles of
 [architecture 16.2](architecture.md#162-secrets-rbac-audit), and each role includes the ones before
 it. `owner` is the instance owner alone. The key column is the one scope that grants the call; an
-`admin` key also reads the member list. Ingestion keys (`ingest`) call the ingestion operations and
+`admin` key also reads the member list. `none (session only)` marks a route that acts for the
+signed-in person (the assistant's drafts, accepting a draft and explanations, and starting a
+source's OAuth consent): every API key is refused with a `403`, whatever its scopes. A cell that
+says `when person_id is set` names a request that needs more once it names a real person: the
+call needs the scope or role shown first, and a request with a `person_id` also needs access to
+personal values. A key needs `write` together with `pii` or `admin`; `write` alone and `admin`
+alone are both refused. A member needs the `editor` role and `view_pii`, or the `admin` role.
+Ingestion keys (`ingest`) call the ingestion operations and
 nothing else. The `pii` scope does not open a route: it lets a key that also has `read` see masked
 values.
 
@@ -461,11 +469,11 @@ values.
 | PUT | `/api/v1/workspaces/{ws}/ai/settings` | admin | admin |
 | GET | `/api/v1/workspaces/{ws}/ai/models` | admin | admin |
 | GET | `/api/v1/workspaces/{ws}/ai/usage` | admin | admin |
-| POST | `/api/v1/workspaces/{ws}/ai/drafts` | admin | admin |
-| POST | `/api/v1/workspaces/{ws}/ai/drafts/{id}/accept` | editor | write |
-| POST | `/api/v1/workspaces/{ws}/segments/{id}/ai/explain` | admin | admin |
-| POST | `/api/v1/workspaces/{ws}/flows/{id}/ai/explain` | admin | admin |
-| POST | `/api/v1/workspaces/{ws}/traces/{trace_id}/ai/explain` | admin | admin |
+| POST | `/api/v1/workspaces/{ws}/ai/drafts` | editor, or admin for a mapping or manifest draft | none (session only) |
+| POST | `/api/v1/workspaces/{ws}/ai/drafts/{id}/accept` | editor | none (session only) |
+| POST | `/api/v1/workspaces/{ws}/segments/{id}/ai/explain` | admin | none (session only) |
+| POST | `/api/v1/workspaces/{ws}/flows/{id}/ai/explain` | admin | none (session only) |
+| POST | `/api/v1/workspaces/{ws}/traces/{trace_id}/ai/explain` | admin | none (session only) |
 | GET | `/api/v1/workspaces/{ws}/traits` | member | read |
 | POST | `/api/v1/workspaces/{ws}/traits` | admin | admin |
 | PATCH | `/api/v1/workspaces/{ws}/traits/{key}` | admin | admin |
@@ -498,7 +506,7 @@ values.
 | GET | `/api/v1/workspaces/{ws}/flows/{id}/entries` | member | read |
 | POST | `/api/v1/workspaces/{ws}/flows/{id}/versions/{n}/exit-enrollments` | publisher | publish |
 | POST | `/api/v1/workspaces/{ws}/flows/{id}/start` | publisher | publish |
-| POST | `/api/v1/workspaces/{ws}/flows/{id}/test` | admin | admin |
+| POST | `/api/v1/workspaces/{ws}/flows/{id}/test` | editor (also view_pii or admin when person_id is set) | write (also pii or admin when person_id is set) |
 | GET | `/api/v1/workspaces/{ws}/flows/{id}/versions` | member | read |
 | GET | `/api/v1/workspaces/{ws}/flows/{id}/versions/{n}` | member | read |
 | GET | `/api/v1/workspaces/{ws}/webhook-signing-secret` | admin | admin |
@@ -540,11 +548,11 @@ values.
 | GET | `/api/v1/workspaces/{ws}/templates/{id}/versions/{n}/stats` | member | read |
 | GET | `/api/v1/workspaces/{ws}/templates/{id}/where-used` | member | read |
 | GET | `/api/v1/workspaces/{ws}/templates/{id}/send-volume` | member | read |
-| POST | `/api/v1/workspaces/{ws}/templates/{id}/preview` | admin | admin |
+| POST | `/api/v1/workspaces/{ws}/templates/{id}/preview` | editor (also view_pii or admin when person_id is set) | write (also pii or admin when person_id is set) |
 | GET | `/api/v1/workspaces/{ws}/templates/{id}/preview-people` | admin | admin |
 | POST | `/api/v1/workspaces/{ws}/templates/{id}/preview-people` | admin | admin |
 | DELETE | `/api/v1/workspaces/{ws}/templates/{id}/preview-people/{person_id}` | admin | admin |
-| POST | `/api/v1/workspaces/{ws}/templates/{id}/test-send` | admin | admin |
+| POST | `/api/v1/workspaces/{ws}/templates/{id}/test-send` | editor (also view_pii or admin when person_id is set) | write (also pii or admin when person_id is set) |
 | GET | `/api/v1/workspaces/{ws}/test-sends` | member | read |
 | GET | `/api/v1/workspaces/{ws}/test-sends/quota` | member | read |
 | GET | `/api/v1/workspaces/{ws}/test-send-allowlist` | admin | admin |
@@ -662,7 +670,7 @@ values.
 | DELETE | `/api/v1/workspaces/{ws}/sources/{id}` | admin | admin |
 | POST | `/api/v1/workspaces/{ws}/sources/{id}/test` | admin | admin |
 | POST | `/api/v1/workspaces/{ws}/sources/{id}/discover` | admin | admin |
-| POST | `/api/v1/workspaces/{ws}/sources/{id}/oauth/start` | admin | admin |
+| POST | `/api/v1/workspaces/{ws}/sources/{id}/oauth/start` | admin | none (session only) |
 | GET | `/api/v1/oauth/callback` | the user who started the consent | none |
 | POST | `/api/v1/workspaces/{ws}/source-manifests/validate` | admin | admin |
 | POST | `/api/v1/workspaces/{ws}/sources/{id}/manifest/sample` | admin | admin |
