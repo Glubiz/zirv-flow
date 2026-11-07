@@ -242,7 +242,8 @@ async fn step(
             savepoint.rollback().await?;
             // The walk's decisions go with its writes.
             decisions.discard_after(mark);
-            if run.last_attempt {
+            // A refusal no retry can change ends the enrollment on the first attempt.
+            if run.last_attempt || failure.error.refusal().is_some() {
                 fail_enrollment(conn, run, &enrollment, &failure, decisions).await
             } else {
                 Err(failure.error)
@@ -1090,6 +1091,9 @@ async fn apply_effect(
 fn effect_error(error: EffectError) -> JobError {
     match error {
         EffectError::Store(error) => error.into(),
+        EffectError::Refused(reason) => {
+            JobError::new("the trait write was refused").with_refusal(reason)
+        }
         other => JobError::new(other.describe()),
     }
 }
@@ -1317,7 +1321,11 @@ async fn fail_enrollment(
 ) -> Result<(), JobError> {
     let job = run.job;
     let failed_node = failure.node.as_deref().unwrap_or(&enrollment.node);
-    let message = failure.error.message();
+    let refusal = failure.error.refusal();
+    let text = match refusal {
+        Some(code) => format!("{}: {code}", failure.error.message()),
+        None => failure.error.message().to_owned(),
+    };
     // The input to run again on a retry. A failed retry keeps what the enrollment stopped on.
     let resume_input = match job.input {
         StepJobInput::Resume { .. } => enrollment.resume_input.clone(),
@@ -1334,7 +1342,7 @@ async fn fail_enrollment(
             state_version: enrollment.state_version,
             wake_at: enrollment.wake_at,
             exit_reason: None,
-            error: Some(message),
+            error: Some(&text),
             failed_node: Some(failed_node),
             failure_placed: failure.node.is_some(),
             resume_input: resume_input.as_ref(),
@@ -1350,7 +1358,7 @@ async fn fail_enrollment(
         workspace_id: job.workspace,
         trace: enrollment.trace.clone(),
         spec: &decision_actions::FLOW_ENROLLMENT_FAILED,
-        detail: Some("step_failed"),
+        detail: Some(refusal.unwrap_or("step_failed")),
         subject_ids: vec![
             ("flow", enrollment.flow_id),
             ("enrollment", enrollment.id),
@@ -2191,6 +2199,72 @@ pub(super) mod tests {
             );
             let late = sample("zirv_flow_timer_wake_lateness_seconds_sum").unwrap();
             assert!((39.0..41.0).contains(&late), "{output}");
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_trait_write_the_registry_refuses_fails_the_enrollment_on_the_first_attempt_with_its_reason(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            env.define_trait("plan", TraitType::String).await;
+            let ada = env
+                .person(PERSONAL_DATA.email, json!({"plan": "pro"}))
+                .await;
+            let graph = json!({"v": 1, "nodes": [
+            {"id": "set", "type": "action.update_trait", "key": "plan",
+             "change": {"op": "set", "value": "free"}},
+            {"id": "end", "type": "exit"}
+        ], "edges": [edge("e1", "set", "next", "end")]});
+            let flow = env.flow("Archived write", graph).await;
+            let enrolled = env.enroll(flow, 1, &[ada]).await;
+            let id = enrolled.enrolled[0].enrollment;
+            zirv_flow_store::update_trait_definition(
+                &env.pool,
+                env.ws,
+                "plan",
+                &zirv_flow_store::TraitDefinitionUpdate {
+                    precedence: None,
+                    source_order: None,
+                    pii: None,
+                    channel_address: None,
+                    description: None,
+                    archived: Some(true),
+                },
+            )
+            .await
+            .unwrap();
+
+            let first = env.claim().await.unwrap();
+            let first = env.execute(first).await;
+
+            assert!(first.is_ok(), "the refusal ends the job: {first:?}");
+            let failed = env.enrollment(id).await;
+            assert_eq!(failed.status, EnrollmentStatus::Failed);
+            assert_eq!(failed.failed_node.as_deref(), Some("set"));
+            assert_eq!(
+                failed.error.as_deref(),
+                Some("the trait write was refused: archived_key")
+            );
+            let reason: Option<String> = sqlx::query_scalar(
+                "SELECT reason FROM decision_records \
+                 WHERE workspace_id = $1 AND trace_id = $2 AND action = 'flow.enrollment' \
+                 AND outcome = 'failed'",
+            )
+            .bind(env.ws.as_uuid())
+            .bind(enrolled.enrolled[0].trace.trace_id.as_uuid())
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+            assert_eq!(reason.as_deref(), Some("archived_key"));
+            assert_eq!(
+                env.count("SELECT count(*) FROM jobs WHERE kind = 'flow.step'")
+                    .await,
+                0
+            );
         })
         .await;
     }
