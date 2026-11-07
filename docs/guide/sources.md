@@ -60,9 +60,12 @@ leaves the credential. It also removes the source's data from people: its record
 the background, batch by batch, exactly as if the source had reported each one deleted. Each person
 is recomputed from the records that remain, so people and other sources' contributions stay,
 traits only this source brought and identifiers only it held go, and segments and flows react as
-the traits change. The request answers at once; trait and segment updates finish shortly after, in
-proportion to how many records the source held. A server started without a master key answers 503 where a credential has to
-be sealed or opened. A source that calls out does so through the guarded HTTP client and the egress policy (see Egress).
+the traits change. Events the source sent stay as history: they remain on people's timelines and
+count in event-based segment conditions, and a person who still has events is not deleted by the
+orphan policy, even one only this source created. The request answers at once; trait and segment
+updates finish shortly after, in proportion to how many records the source held. A server started
+without a master key answers 503 where a credential has to be sealed or opened. A source that calls
+out does so through the guarded HTTP client and the egress policy (see Egress).
 
 **API.** Under `/api/v1/workspaces/{ws}/sources`: `GET` and `POST`; `GET`, `PATCH` and `DELETE`
 on `/{id}`; `POST /{id}/test` (returns `{ok, error}`; a failed test is a 200); `POST
