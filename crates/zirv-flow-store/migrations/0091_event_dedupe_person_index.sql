@@ -1,0 +1,17 @@
+-- The merge rewrite (`people/merge.rs`), a person's delete (`privacy/delete.rs`) and the erasure
+-- scan (`people/erasure.rs`) find the `event_dedupe` rows of a person by `person_id`. No index
+-- covered that column (the primary key leads with `message_id`), so each lookup scanned the
+-- whole table: on the sim the rewrite ran 7-9 full scans a second over 3-5 million rows.
+--
+-- `event_dedupe_person_id_idx` holds `person_id` alone, as `enrollments_person_id_idx` does
+-- (0090): person ids are unique across workspaces, so one index serves those lookups, which also
+-- state the workspace, and the foreign-key check when a `people` row is deleted, which states
+-- only the person.
+--
+-- The build takes a SHARE lock on `event_dedupe` until it is done, which blocks every write to it
+-- and so every event ingest. A populated deployment builds the index first, by hand, with the
+-- statement below; the migration then finds it and does nothing. A failed concurrent build leaves
+-- an invalid index of its name: drop it and build it again before upgrading.
+--
+--     CREATE INDEX CONCURRENTLY event_dedupe_person_id_idx ON event_dedupe (person_id);
+CREATE INDEX IF NOT EXISTS event_dedupe_person_id_idx ON event_dedupe (person_id);
