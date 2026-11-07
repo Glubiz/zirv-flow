@@ -419,9 +419,12 @@ jobs:
 
       # sqlx creates each test database with a plain CREATE DATABASE, which clones template1, so a
       # migrated template1 lets every test skip the migrations. Runs before the tests and after
-      # the durability step; fails the job on any error.
+      # the durability step; fails the job on any error. Built with --workspace so the tests below
+      # reuse its compile: -p resolves other features and builds shared crates twice.
       - name: Prepare test template
-        run: cargo run -p zirv-flow-store --example prepare_test_template
+        run: |
+          cargo build --workspace --example prepare_test_template
+          target/debug/examples/prepare_test_template
 
       # The Kafka tests are ignored like the PostgreSQL ones and run in the step below. The
       # script starts a Redpanda broker and an Apache Kafka broker with SASL, both advertising

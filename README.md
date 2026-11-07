@@ -328,8 +328,9 @@ DATABASE_URL=postgres://postgres:postgres@localhost:55418/postgres cargo nextest
 ```
 
 Optionally, on a disposable server, `DATABASE_URL=... cargo run -p zirv-flow-store --example prepare_test_template`
-migrates `template1` once so no test migrates its own database (CI does this); re-run it after adding
-a migration. A test that needs an empty database calls `crate::reset_database(&pool).await` first.
+migrates `template1` once so no test migrates its own database (CI does this). Re-run it after adding or
+editing a migration or switching branches: an older template makes every test apply the missing migrations,
+and a newer or edited one fails each test's setup. A test needing an empty database calls `crate::reset_database(&pool).await` first.
 
 The MySQL source tests also need a MySQL 8.4 server, named by `ZIRV_FLOW_TEST_MYSQL_URL` (CI starts one
 as a service next to PostgreSQL). A test that needs a server it was not given fails and names the
