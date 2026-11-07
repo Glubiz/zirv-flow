@@ -332,7 +332,7 @@ describe("settings shell and Home", () => {
       screen.getByRole("button", { name: /account menu/i }),
     ];
     for (const control of controls) {
-      const shown = (control.textContent ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+      const shown = control.textContent.replace(/\s+/g, " ").trim().toLowerCase();
       expect(shown).not.toBe("");
       expect((control.getAttribute("aria-label") ?? shown).toLowerCase().startsWith(shown)).toBe(true);
     }

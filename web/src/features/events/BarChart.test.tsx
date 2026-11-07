@@ -28,12 +28,12 @@ describe("bar chart", () => {
 
   it("labels a day bucket with its date only, and an hour bucket with the time", () => {
     const day = render(<BarChart bars={BARS} unit="day" />);
-    const dayLabels = [...day.container.querySelectorAll("text")].map((node) => node.textContent ?? "");
+    const dayLabels = [...day.container.querySelectorAll("text")].map((node) => node.textContent);
     expect(dayLabels.some((text) => /\d[:.]\d\d[:.]\d\d/.test(text))).toBe(false);
     day.unmount();
 
     const hour = render(<BarChart bars={BARS} unit="hour" />);
-    const hourLabels = [...hour.container.querySelectorAll("text")].map((node) => node.textContent ?? "");
+    const hourLabels = [...hour.container.querySelectorAll("text")].map((node) => node.textContent);
     expect(hourLabels.some((text) => /\d[:.]\d\d[:.]\d\d/.test(text))).toBe(true);
   });
 
