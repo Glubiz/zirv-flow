@@ -979,17 +979,18 @@ mod tests {
     async fn a_caller_without_pii_access_gets_no_contact_key_from_a_list_or_a_search(pool: PgPool) {
         let fx = fixture(&pool).await;
         fx.define().await;
+        // Not hex, so no id in a body can contain the key by chance.
         let created = fx
-            .create("c-1", json!({"email": "a@example.com", "age": 5}))
+            .create("zulu-1", json!({"email": "a@example.com", "age": 5}))
             .await;
         let person = created.body["person_id"].clone();
         let editor = member_login(&pool, &fx.router, fx.ws, Role::Editor).await;
         let viewer = member_login(&pool, &fx.router, fx.ws, Role::Viewer).await;
         let admin_login = member_login(&pool, &fx.router, fx.ws, Role::Admin).await;
         let list = fx.path("/contacts");
-        let search = fx.path("/contacts/search?q=c-");
+        let search = fx.path("/contacts/search?q=zulu-");
         let post = fx.path("/contacts/search");
-        let one = fx.path("/contacts/c-1");
+        let one = fx.path("/contacts/zulu-1");
         let by_identifier = json!({"identifier": {"kind": "email", "value": "a@example.com"}});
 
         for auth in [
@@ -1003,7 +1004,7 @@ mod tests {
             assert_eq!(row["key"], Value::Null);
             assert_eq!(row["masked"], true);
             assert_eq!(row["person_id"], person);
-            assert!(!listed.body.to_string().contains("c-1"));
+            assert!(!listed.body.to_string().contains("zulu-1"));
 
             let refused = call(&fx.router, "GET", &search, None, auth, &[]).await;
             assert_eq!(refused.status, StatusCode::FORBIDDEN);
@@ -1012,7 +1013,7 @@ mod tests {
                 &fx.router,
                 "POST",
                 &post,
-                Some(json!({"q": "c-"})),
+                Some(json!({"q": "zulu-"})),
                 auth,
                 &[],
             )
@@ -1034,27 +1035,27 @@ mod tests {
             assert_eq!(exact.body["contacts"][0]["masked"], true);
 
             let by_key = call(&fx.router, "GET", &one, None, auth, &[]).await;
-            assert_eq!(by_key.body["key"], "c-1");
+            assert_eq!(by_key.body["key"], "zulu-1");
             assert_eq!(by_key.body["masked"], false);
             assert_eq!(by_key.body["fields"]["email"], Value::Null);
         }
         for auth in [Auth::Key(&fx.admin), Auth::Session(&admin_login)] {
             let listed = call(&fx.router, "GET", &list, None, auth, &[]).await;
-            assert_eq!(listed.body["contacts"][0]["key"], "c-1");
+            assert_eq!(listed.body["contacts"][0]["key"], "zulu-1");
             assert_eq!(listed.body["contacts"][0]["masked"], false);
             let found = call(&fx.router, "GET", &search, None, auth, &[]).await;
-            assert_eq!(found.body["contacts"][0]["key"], "c-1");
+            assert_eq!(found.body["contacts"][0]["key"], "zulu-1");
         }
         let put = fx
             .send(
                 "PUT",
-                "/contacts/c-1",
+                "/contacts/zulu-1",
                 Some(json!({"fields": {"email": "a@example.com", "age": 6}})),
                 &fx.write,
                 &[],
             )
             .await;
-        assert_eq!(put.body["key"], "c-1");
+        assert_eq!(put.body["key"], "zulu-1");
     }
 
     #[sqlx::test]
