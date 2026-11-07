@@ -110,7 +110,7 @@ describe("saving a segment", () => {
     mountPage();
 
     const banner = await screen.findByText("Not updating");
-    expect(banner.parentElement).toHaveTextContent("This field does not exist in the workspace.");
+    expect(banner.parentElement).toHaveTextContent("This field does not exist in the workspace, or it has been archived.");
   });
 
   it("shows no warning while the saved rules still match", async () => {

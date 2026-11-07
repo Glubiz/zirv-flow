@@ -31,7 +31,7 @@ const ISSUES: Record<string, string> = {
   unsupported_version: "This definition version is not supported.",
   malformed: "This part of the definition is not shaped correctly.",
   unknown_key: "This part of the definition has a key that is not recognised.",
-  unknown_trait: "This field does not exist in the workspace.",
+  unknown_trait: "This field does not exist in the workspace, or it has been archived.",
   unknown_event: "This event is not known to the workspace.",
   unknown_property: "This property is not part of the event.",
   unknown_list: "This list does not exist.",

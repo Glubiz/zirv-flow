@@ -197,7 +197,7 @@ describe("consent policy builder", () => {
 
     await waitFor(() => expect(savedBodies(calls)).toHaveLength(1));
     const card = (await screen.findByRole("heading", { name: /Ghost field/ })).closest("li")!;
-    expect(await within(card).findByText("This field does not exist in the workspace.")).toBeInTheDocument();
+    expect(await within(card).findByText("This field does not exist in the workspace, or it has been archived.")).toBeInTheDocument();
     expect(within(card).getByText("1 problem")).toBeInTheDocument();
   });
 

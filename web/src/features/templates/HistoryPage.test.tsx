@@ -56,6 +56,20 @@ const puts = (calls: Call[]) => calls.filter((call) => call.method === "PUT" && 
 const previewsOf = (calls: Call[]) => calls.filter((call) => call.method === "POST" && call.path.endsWith("/preview")).map((call) => call.body as Record<string, unknown>);
 
 describe("the Versions and use page", () => {
+  it("names an unlisted author by the sign-in when it is the viewer, and says so when it is someone else", async () => {
+    const versions = [
+      { version: 3, blocking: 0, warnings: 0, published_by: "u-owner", note: "By the owner", published_at: "2026-10-20T09:12:00Z" },
+      { version: 2, blocking: 0, warnings: 0, published_by: "u-gone", note: "By someone removed", published_at: "2026-10-14T09:12:00Z" },
+    ];
+    mockApi({ ...routes({ versions }), [`GET ${BASE}/versions/3`]: () => json({ version: 3, document: LIVE_DOC, warnings: [], published_by: "u-owner", published_at: "2026-10-20T09:12:00Z", note: "By the owner" }) });
+    mount();
+
+    const rows = await screen.findAllByRole("button", { name: /^(Draft|Version \d)/ });
+    expect(within(rows[1] as HTMLElement).getByText(/owner@example\.test/)).toBeInTheDocument();
+    expect(within(rows[2] as HTMLElement).getByText(/Not on the member list/)).toBeInTheDocument();
+    expect(screen.queryByText(/A former member/)).not.toBeInTheDocument();
+  });
+
   it("lists the draft first, then each version with its note and author", async () => {
     mockApi(routes());
     mount();
