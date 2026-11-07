@@ -81,18 +81,37 @@ RUN set -eux; \
     echo "$triple" > /triple; \
     rustup target add "$triple"
 
+COPY --from=chef /usr/local/cargo/bin/cargo-chef /usr/local/cargo/bin/cargo-chef
+
+# The cross-compile settings in one place: the dependency layer and the final
+# build must match, or the final build compiles the dependencies again.
+RUN cat > /usr/local/bin/zf-cargo <<'SCRIPT' && chmod +x /usr/local/bin/zf-cargo
+#!/bin/sh
+triple="$(cat /triple)"
+var="$(echo "$triple" | tr 'a-z-' 'A-Z_')"
+export "CARGO_TARGET_${var}_LINKER=/usr/local/bin/cc-$triple"
+export "CC_$(echo "$triple" | tr '-' '_')=/usr/local/bin/cc-$triple"
+export RUSTFLAGS="-C link-self-contained=no"
+exec cargo "$@"
+SCRIPT
+
 WORKDIR /src
 
 # Compiles only the dependencies, into this layer. No cache mounts here: BuildKit
 # cache mounts do not persist between CI runners, and a mounted target/ or
 # registry would keep the result out of the layer that the layer cache stores.
 COPY --from=planner /recipe.json /recipe.json
-RUN set -eux; \n    triple="$(cat /triple)"; \n    zf-cargo chef cook --release --locked --target "$triple" -p zirv-flow --recipe-path /recipe.json
+RUN set -eux; \
+    triple="$(cat /triple)"; \
+    zf-cargo chef cook --release --locked --target "$triple" -p zirv-flow --recipe-path /recipe.json
 
 COPY . .
 COPY --from=web /web/dist /src/web/dist
 
-RUN set -eux; \n    triple="$(cat /triple)"; \n    zf-cargo build --release --locked --target "$triple" -p zirv-flow; \n    install -D "target/$triple/release/zirv-flow" /out/zirv-flow
+RUN set -eux; \
+    triple="$(cat /triple)"; \
+    zf-cargo build --release --locked --target "$triple" -p zirv-flow; \
+    install -D "target/$triple/release/zirv-flow" /out/zirv-flow
 
 # An empty directory owned by the non-root user, so a named volume mounted
 # here is writable by it (the compose quickstart keeps the master key here).
