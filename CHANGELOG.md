@@ -15,3 +15,17 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.252.0 (2026-11-07)
+
+### Fixes
+
+- refuse a NUL character before it reaches PostgreSQL (#546)
+
+### Documentation
+
+- say which ingest fields answer contains_nul for a NUL
+
+### Chores
+
+- parse an optional JSON body once
+
