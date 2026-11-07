@@ -15,3 +15,13 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.250.0 (2026-11-07)
+
+### Fixes
+
+- read a person's decisions per person through the person index (#550)
+
+### Chores
+
+- time the timeline of a live person (#550)
+
