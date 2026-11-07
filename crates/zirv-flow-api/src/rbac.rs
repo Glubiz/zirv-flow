@@ -465,6 +465,30 @@ pub(crate) const ROUTES: &[Route] = table! {
     Get    "/api/v1/workspaces/{ws}/traces/{trace_id}" => READ;
 };
 
+/// The note every row starts with whose need depends on a person named in the request.
+const NAMES_A_PERSON: &str = "Edit; a request naming a real person";
+
+/// Whether a handler refuses every API key, whatever its scopes, because it acts for the
+/// signed-in person: the assistant routes and the start of a source's OAuth consent. The scope
+/// check still runs first, so the table keeps the class the session needs.
+fn session_only(row: &Route) -> bool {
+    row.method == Method::Post
+        && [
+            "/ai/drafts",
+            "/ai/drafts/{id}/accept",
+            "/ai/explain",
+            "/oauth/start",
+        ]
+        .iter()
+        .any(|tail| row.path.ends_with(tail))
+}
+
+/// Whether the row's need is the Edit of its class plus the personal-data grant when the
+/// request names a real person (`person_id`).
+fn names_a_person(row: &Route) -> bool {
+    row.note.starts_with(NAMES_A_PERSON)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -871,8 +895,31 @@ mod tests {
     const MATRIX_BEGIN: &str = "<!-- scope-matrix:begin -->";
     const MATRIX_END: &str = "<!-- scope-matrix:end -->";
 
-    /// The session role and the API key scope a class asks for, as the policy prints them.
+    /// The session role and the API key scope a call needs, as the policy prints them. A row
+    /// whose handler asks less than the strictest need its class records (the preview, the test
+    /// send and the flow test, which need Edit until a request names a person) prints what the
+    /// call asks, and a route no API key can call prints `none (session only)`.
     fn who(row: &Route) -> (&'static str, &'static str) {
+        if session_only(row) {
+            let session = if row
+                .note
+                .starts_with("Admin for a mapping or manifest draft")
+            {
+                "editor, or admin for a mapping or manifest draft"
+            } else {
+                match row.class {
+                    Class::Need(Need::Edit) => "editor",
+                    _ => "admin",
+                }
+            };
+            return (session, "none (session only)");
+        }
+        if names_a_person(row) {
+            return (
+                "editor (also view_pii or admin when person_id is set)",
+                "write (also pii or admin when person_id is set)",
+            );
+        }
         if row.class == Class::Instance && row.note.starts_with("any authenticated principal") {
             return ("any signed-in user", "any scope");
         }
@@ -915,6 +962,92 @@ mod tests {
             policy.find(MATRIX_BEGIN).expect("the matrix start marker") + MATRIX_BEGIN.len();
         let end = policy.find(MATRIX_END).expect("the matrix end marker");
         format!("{}\n\n{matrix}\n{}", &policy[..begin], &policy[end..])
+    }
+
+    fn row_of(method: Method, path: &str) -> Route {
+        *ROUTES
+            .iter()
+            .find(|row| row.method == method && row.path == path)
+            .unwrap_or_else(|| panic!("no row for {path}"))
+    }
+
+    #[test]
+    fn a_route_no_key_can_call_prints_none_and_the_request_dependent_routes_print_what_they_ask() {
+        let ws = "/api/v1/workspaces/{ws}";
+        for tail in [
+            "/ai/drafts",
+            "/ai/drafts/{id}/accept",
+            "/segments/{id}/ai/explain",
+            "/flows/{id}/ai/explain",
+            "/traces/{trace_id}/ai/explain",
+            "/sources/{id}/oauth/start",
+        ] {
+            let (_, key) = who(&row_of(Method::Post, &format!("{ws}{tail}")));
+            assert_eq!(key, "none (session only)", "{tail}");
+        }
+        assert_eq!(
+            who(&row_of(
+                Method::Post,
+                &format!("{ws}/ai/drafts/{{id}}/accept")
+            )),
+            ("editor", "none (session only)")
+        );
+        assert_eq!(
+            who(&row_of(
+                Method::Post,
+                &format!("{ws}/flows/{{id}}/ai/explain")
+            )),
+            ("admin", "none (session only)")
+        );
+        for tail in [
+            "/templates/{id}/preview",
+            "/templates/{id}/test-send",
+            "/flows/{id}/test",
+        ] {
+            let (session, key) = who(&row_of(Method::Post, &format!("{ws}{tail}")));
+            assert!(session.starts_with("editor"), "{tail}: {session}");
+            assert!(key.starts_with("write"), "{tail}: {key}");
+        }
+        // The rows keep the classes enforcement is judged against; only the print changed.
+        let admin = [
+            "/templates/{id}/preview",
+            "/templates/{id}/test-send",
+            "/flows/{id}/test",
+            "/ai/drafts",
+        ];
+        for tail in admin {
+            assert_eq!(
+                row_of(Method::Post, &format!("{ws}{tail}")).class,
+                ADMIN,
+                "{tail}"
+            );
+        }
+        assert_eq!(
+            row_of(Method::Post, &format!("{ws}/ai/drafts/{{id}}/accept")).class,
+            EDIT
+        );
+    }
+
+    #[test]
+    fn no_other_row_changed_what_it_prints() {
+        for row in ROUTES {
+            if session_only(row) || names_a_person(row) {
+                continue;
+            }
+            let (session, key) = who(row);
+            assert!(
+                !key.contains("session only") && !key.contains("person_id"),
+                "{}",
+                row.path
+            );
+            assert!(!session.contains("person_id"), "{}", row.path);
+        }
+        let printed: Vec<&str> = ROUTES
+            .iter()
+            .filter(|row| session_only(row))
+            .map(|row| row.path)
+            .collect();
+        assert_eq!(printed.len(), 6, "{printed:?}");
     }
 
     #[test]
