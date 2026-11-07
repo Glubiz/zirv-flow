@@ -11,6 +11,7 @@ import {
   ResourceView,
   SelectField,
   TextField,
+  formatCount,
   formatDateTime,
 } from "../../ui";
 import { BarChart } from "./BarChart";
@@ -229,7 +230,7 @@ function Results({ workspaceId, query }: { workspaceId: string; query: Query }) 
           {(data) => (
             <>
               <p className="muted">
-                {data.total} {data.total === 1 ? "event" : "events"} in the range.
+                {formatCount(data.total)} {data.total === 1 ? "event" : "events"} in the range.
               </p>
               {data.truncated ? (
                 <p className="notice" role="status">

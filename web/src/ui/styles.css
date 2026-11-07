@@ -488,6 +488,8 @@ select {
 
 .table-scroll {
   overflow-x: auto;
+  /* The containing block of the visually hidden text in a cell, so it scrolls with the table instead of widening the page. */
+  position: relative;
 }
 
 .table {
@@ -3051,6 +3053,8 @@ main:focus {
 .seg-tabs {
   display: inline-flex;
   align-self: flex-start;
+  max-width: 100%;
+  overflow-x: auto;
   gap: 2px;
   padding: 3px;
   border: 1px solid var(--line);
@@ -3059,6 +3063,7 @@ main:focus {
 }
 
 .seg {
+  flex: none;
   min-height: 40px;
   padding: 0 16px;
   border: 0;

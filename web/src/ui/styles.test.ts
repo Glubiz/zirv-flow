@@ -28,6 +28,19 @@ describe("narrow tables", () => {
   });
 });
 
+describe("phone width", () => {
+  it("makes a table scroller the containing block of hidden cell text, so it cannot widen the page", () => {
+    expect(rule(".table-scroll")).toContain("position: relative");
+  });
+
+  it("keeps a segmented control inside its container and scrolls it there", () => {
+    const declarations = rule(".seg-tabs");
+    expect(declarations).toContain("max-width: 100%");
+    expect(declarations).toContain("overflow-x: auto");
+    expect(rule(".seg")).toContain("flex: none");
+  });
+});
+
 describe("the sidebar list", () => {
   it("shows that it scrolls with a thin scrollbar and edge shadows", () => {
     const declarations = rule(".sidebar-nav");
