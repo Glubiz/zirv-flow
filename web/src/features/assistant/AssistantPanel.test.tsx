@@ -112,6 +112,32 @@ describe("the assistant panel", () => {
     expect(screen.queryByRole("button", { name: "Draft" })).not.toBeInTheDocument();
   });
 
+  it("says the deployment has no AI configured, rather than offering to turn it on, when it lists no providers", async () => {
+    mockApi({
+      ...BASE,
+      [SETTINGS]: () => json(settings(false)),
+      "GET /api/v1/workspaces/ws1/ai/models": () => json({ providers: [], min_context_window_tokens: 32768 }),
+    });
+    mount();
+
+    expect(await screen.findByText("AI is not configured on this deployment")).toBeInTheDocument();
+    expect(screen.queryByText("The assistant is off")).not.toBeInTheDocument();
+    expect(screen.queryByText(/An admin can turn it on/)).not.toBeInTheDocument();
+  });
+
+  it("offers the settings when the deployment has a provider and an admin has not turned it on", async () => {
+    mockApi({
+      ...BASE,
+      [SETTINGS]: () => json(settings(false)),
+      "GET /api/v1/workspaces/ws1/ai/models": () =>
+        json({ providers: [{ id: "openai", kind: "openai_compatible", base_url: "https://x.test", models: [] }], min_context_window_tokens: 32768 }),
+    });
+    mount();
+
+    expect(await screen.findByText("The assistant is off")).toBeInTheDocument();
+    expect(await screen.findByText(/An admin can turn it on in the/)).toBeInTheDocument();
+  });
+
   it("says what it sends, by the workspace's opt-in", async () => {
     mockApi({ ...BASE, [SETTINGS]: () => json(settings(true, false)) });
     const first = mount();
@@ -462,7 +488,7 @@ describe("the assistant panel for a segment", () => {
     await user.click(screen.getByRole("button", { name: "Draft" }));
 
     const problems = await screen.findByRole("list", { name: "Problems with the last attempt" });
-    expect(problems).toHaveTextContent("The definition uses a field that does not exist in this workspace. (/all/0/trait)");
+    expect(problems).toHaveTextContent("The definition uses a field that does not exist in this workspace, or has been archived. (/all/0/trait)");
     expect(screen.queryByRole("button", { name: "Put into the draft" })).not.toBeInTheDocument();
     expect(renderPreview).not.toHaveBeenCalled();
   });
@@ -514,7 +540,7 @@ describe("the assistant panel for a segment", () => {
       [
         "ai_draft_invalid",
         [{ pointer: "/all/0/trait", code: "unknown_trait" }],
-        "The definition uses a field that does not exist in this workspace. (/all/0/trait)",
+        "The definition uses a field that does not exist in this workspace, or has been archived. (/all/0/trait)",
       ],
     ];
     for (const [code, issues, shown] of cases) {

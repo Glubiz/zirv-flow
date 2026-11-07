@@ -80,7 +80,7 @@ const SEGMENT_ISSUE_TEXT: Record<string, string> = {
   malformed: "This part of the definition is not in the shape a segment definition has.",
   unsupported_version: "Only version 1 of the definition is supported.",
   unknown_key: "This key does not exist in a segment definition.",
-  unknown_trait: "The definition uses a field that does not exist in this workspace.",
+  unknown_trait: "The definition uses a field that does not exist in this workspace, or has been archived.",
   unknown_event: "The definition uses an event that does not exist in this workspace.",
   unknown_property: "The definition uses a property that the event does not have.",
   unknown_list: "The definition uses a list that does not exist in this workspace.",

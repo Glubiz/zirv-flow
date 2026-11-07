@@ -57,11 +57,13 @@ interface InlineErrorProps {
   title: string;
   detail?: string;
   traceId?: string | null;
+  /** Lets a field point at this message with `aria-describedby`. */
+  id?: string;
 }
 
-export function InlineError({ title, detail, traceId }: InlineErrorProps) {
+export function InlineError({ title, detail, traceId, id }: InlineErrorProps) {
   return (
-    <div className="form-error" role="alert">
+    <div className="form-error" role="alert" id={id}>
       <span className="strong">{title}</span>
       {detail ? <span>{detail}</span> : null}
       {traceId ? (

@@ -4,6 +4,7 @@ import { Link, useParams } from "react-router";
 import { ApiError, client, describeError, unwrap, useResource, type ErrorSummary } from "../../api";
 import { Button, InlineError, LoadingState, ResourceView } from "../../ui";
 import { useMembers } from "../members";
+import { useSignedInUser } from "../session";
 import { useTemplateAccess } from "./access";
 import { diffDocuments } from "./diff";
 import { DetailsPanel, draftRow, HistoryList, UsedByPanel, versionRow } from "./HistoryPanels";
@@ -37,7 +38,7 @@ interface Failure {
   conflict: boolean;
 }
 
-const authorOf = (authors: ReadonlyMap<string, string>, userId: string | null | undefined): string => (userId ? (authors.get(userId) ?? "A former member") : "An API key");
+const authorOf = (authors: ReadonlyMap<string, string>, userId: string | null | undefined): string => (userId ? (authors.get(userId) ?? "Not on the member list") : "An API key");
 
 const fromDetail = (detail: TemplateDetail): Draft => ({ document: detail.draft.document, revision: detail.draft.revision, savedAt: detail.draft.updated_at });
 
@@ -49,7 +50,13 @@ export function HistoryPage() {
   const detail = useResource(() => unwrap(client.GET("/api/v1/workspaces/{ws}/templates/{id}", idPath(ws, id))), [ws, id]);
   const versions = useResource(() => unwrap(client.GET("/api/v1/workspaces/{ws}/templates/{id}/versions", idPath(ws, id))), [ws, id]);
   const members = useMembers(ws);
-  const authors = useMemo(() => new Map(members.status === "ready" ? members.data.map((member) => [member.user_id, member.email]) : []), [members]);
+  const me = useSignedInUser();
+  const authors = useMemo(() => {
+    const known = new Map(members.status === "ready" ? members.data.map((member) => [member.user_id, member.email]) : []);
+    // The instance owner works in every workspace without being listed as a member of it.
+    if (!known.has(me.id)) known.set(me.id, me.email);
+    return known;
+  }, [members, me]);
   return (
     <ResourceView resource={access.ready ? detail : { status: "loading", reload: detail.reload }} loadingLabel="Loading the history">
       {(template) => (

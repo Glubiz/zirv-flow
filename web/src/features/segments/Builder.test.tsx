@@ -240,7 +240,7 @@ describe("segment builder", () => {
     const value = within(condition).getByLabelText("Value");
     expect(value).toHaveAccessibleDescription("The value does not fit the type.");
     const top = screen.getByText("Problems with the definition as a whole").closest("div");
-    expect(top).toHaveTextContent("This field does not exist in the workspace.");
+    expect(top).toHaveTextContent("This field does not exist in the workspace, or it has been archived.");
 
     await user.type(value, "x");
     expect(value).not.toHaveAttribute("aria-invalid");

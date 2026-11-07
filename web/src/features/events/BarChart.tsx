@@ -1,4 +1,4 @@
-import { formatDateTime } from "../../ui";
+import { formatCount, formatDate, formatDateTime } from "../../ui";
 
 export interface Bar {
   start: string;
@@ -27,11 +27,13 @@ export function BarChart({ bars, unit }: { bars: readonly Bar[]; unit: string })
   const top = niceMax(Math.max(0, ...bars.map((bar) => bar.count)));
   const inner = { width: WIDTH - PAD.left - PAD.right, height: HEIGHT - PAD.top - PAD.bottom };
   const slot = bars.length === 0 ? inner.width : inner.width / bars.length;
+  // A day or a week starts at midnight, so only an hour needs the time.
+  const label = unit === "hour" ? formatDateTime : formatDate;
   const first = bars[0];
   const last = bars.at(-1);
   const summary =
     first && last
-      ? `Events per ${unit}: ${total} in total from ${formatDateTime(first.start)} to ${formatDateTime(last.start)}`
+      ? `Events per ${unit}: ${total.toLocaleString("en-US")} in total from ${label(first.start)} to ${label(last.start)}`
       : `Events per ${unit}: none`;
 
   return (
@@ -40,7 +42,7 @@ export function BarChart({ bars, unit }: { bars: readonly Bar[]; unit: string })
         <line className="chart-axis" x1={PAD.left} x2={WIDTH - PAD.right} y1={PAD.top + inner.height} y2={PAD.top + inner.height} />
         <line className="chart-axis" x1={PAD.left} x2={PAD.left} y1={PAD.top} y2={PAD.top + inner.height} />
         <text className="chart-label" x={PAD.left - 8} y={PAD.top + 4} textAnchor="end">
-          {top}
+          {formatCount(top)}
         </text>
         <text className="chart-label" x={PAD.left - 8} y={PAD.top + inner.height} textAnchor="end">
           0
@@ -56,18 +58,18 @@ export function BarChart({ bars, unit }: { bars: readonly Bar[]; unit: string })
               width={Math.max(1, slot * 0.8)}
               height={height}
             >
-              <title>{`${formatDateTime(bar.start)}: ${bar.count}`}</title>
+              <title>{`${label(bar.start)}: ${bar.count.toLocaleString("en-US")}`}</title>
             </rect>
           );
         })}
         {first ? (
           <text className="chart-label" x={PAD.left} y={HEIGHT - 8} textAnchor="start">
-            {formatDateTime(first.start)}
+            {label(first.start)}
           </text>
         ) : null}
         {last && bars.length > 1 ? (
           <text className="chart-label" x={WIDTH - PAD.right} y={HEIGHT - 8} textAnchor="end">
-            {formatDateTime(last.start)}
+            {label(last.start)}
           </text>
         ) : null}
       </svg>
@@ -87,8 +89,8 @@ export function BarChart({ bars, unit }: { bars: readonly Bar[]; unit: string })
             <tbody>
               {bars.map((bar) => (
                 <tr key={bar.start}>
-                  <td>{formatDateTime(bar.start)}</td>
-                  <td className="num">{bar.count}</td>
+                  <td>{label(bar.start)}</td>
+                  <td className="num">{bar.count.toLocaleString("en-US")}</td>
                 </tr>
               ))}
             </tbody>

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { destinationUrl, isFlowEditor, isSettingsPath, matchesDestination, NAVIGATION, visibleDestinations } from "./navigation";
+import { destinationUrl, isFlowEditor, isSettingsPath, matchesDestination, NAVIGATION, pageTitle, visibleDestinations } from "./navigation";
 
 const base = "/w/ws1";
 const item = (route: string) => NAVIGATION.find((entry) => entry.route === route)!;
@@ -73,5 +73,16 @@ describe("navigation matches", () => {
     for (const route of ["flows", "flows/new", "flows/new/", "templates/t1"]) {
       expect(isFlowEditor(`${base}/${route}`)).toBe(false);
     }
+  });
+});
+
+describe("page titles", () => {
+  it("names a new segment page by its own heading, not by the list it sits under", () => {
+    expect(pageTitle("/w/ws1/segments/new", base)).toBe("New segment · zirv flow");
+    expect(pageTitle("/w/ws1/segments", base)).toBe("Segments · zirv flow");
+  });
+
+  it("calls the rejects page by the heading it shows", () => {
+    expect(pageTitle("/w/ws1/events/rejects", base)).toBe("Rejects · zirv flow");
   });
 });

@@ -130,6 +130,34 @@ function mount(id = PERSON) {
 }
 
 describe("a person's profile", () => {
+  it("prints a source's name instead of its id, and keeps the id when the source is gone", async () => {
+    const KNOWN = "01a1b057-bdba-7000-8000-000000000001";
+    const GONE = "01a1b057-bdba-7000-8000-000000000009";
+    asOwner({
+      [PROFILE_ROUTE]: () =>
+        json(
+          profile({
+            identity_groups: [
+              { source: KNOWN, identities: [identity("email", "ada@example.test")] },
+              { source: GONE, identities: [identity("email", "ada@example.test")] },
+            ],
+            traits: [
+              { key: "city", trait_type: "string", value: "Aarhus", masked: false, pii: false, source: KNOWN, observed_at: null },
+            ],
+          }),
+        ),
+      "GET /api/v1/workspaces/ws1/sources": () =>
+        json([{ id: KNOWN, name: "Shop database", kind: "postgres", config: {}, enabled: true }]),
+    });
+    mount();
+
+    expect(await screen.findByRole("region", { name: "Identities from Shop database" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: `Identities from ${GONE}` })).toBeInTheDocument();
+    const city = within(screen.getByRole("table", { name: "Field values with the source and time of each" })).getByRole("row", { name: /city/ });
+    expect(within(city).getByText("Shop database")).toBeInTheDocument();
+    expect(screen.queryByText(KNOWN)).not.toBeInTheDocument();
+  });
+
   it("shows identities by source, the observed ones and the traits with their provenance", async () => {
     asOwner();
     mount();
@@ -230,11 +258,12 @@ describe("a person's profile", () => {
     expect(await screen.findByText("Loading the profile")).toBeInTheDocument();
   });
 
-  it("shows a 404 for a person who is not in the workspace", async () => {
+  it("says the person does not exist for an id that is not in the workspace", async () => {
     asOwner({ [PROFILE_ROUTE]: () => problem(404, "Not Found", "no such resource") });
     mount();
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("no such resource");
+    expect(await screen.findByText("This person does not exist")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Timeline" })).not.toBeInTheDocument();
   });
 });

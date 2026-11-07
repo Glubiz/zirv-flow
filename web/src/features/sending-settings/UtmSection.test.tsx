@@ -137,12 +137,21 @@ describe("UTM parameters section", () => {
     expect(await within(form).findByText(/each entry must be a domain name/)).toBeInTheDocument();
   });
 
+  it("asks for the verified sending domains when the person can change the section", async () => {
+    const calls = mockApi(routes("admin", UTM_OFF));
+    mount();
+
+    expect(await screen.findByRole("button", { name: "Add news.example.com" })).toBeInTheDocument();
+    expect(calls.some((call) => call.path.endsWith("/sending-domains"))).toBe(true);
+  });
+
   it("is read only for a member", async () => {
-    mockApi(routes("editor", { ...UTM_OFF, enabled: true, domains: ["example.com"] }));
+    const calls = mockApi(routes("editor", { ...UTM_OFF, enabled: true, domains: ["example.com"] }));
     mount();
 
     const form = await screen.findByRole("form", { name: "UTM parameters" });
     expect(within(form).getByRole("checkbox", { name: "Add UTM parameters to email links" })).toBeDisabled();
+    expect(calls.some((call) => call.path.endsWith("/sending-domains"))).toBe(false);
     expect(within(form).getByLabelText("Source pattern")).toBeDisabled();
     expect(within(form).getByLabelText("Link domains")).toBeDisabled();
     expect(within(form).queryByRole("button", { name: "Save UTM parameters" })).not.toBeInTheDocument();
