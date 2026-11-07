@@ -823,7 +823,8 @@ use crate::workspaces::{
         &SecuritySchemes,
         &PreviewTag,
         &SegmentSchemas,
-        &FlowSchemas
+        &FlowSchemas,
+        &JsonBodyErrors
     )
 )]
 struct ApiDoc;
@@ -895,6 +896,66 @@ impl Modify for PreviewTag {
                 ))
                 .build(),
         );
+    }
+}
+
+/// Documents the statuses the shared JSON extractor answers (`json.rs`) on every operation
+/// that takes a JSON body, so no handler repeats them. A status a handler already documents
+/// keeps its own description.
+struct JsonBodyErrors;
+
+const JSON_BODY_ERRORS: [(&str, &str); 3] = [
+    ("400", "The body is empty or is not valid JSON"),
+    ("415", "The content type is not application/json"),
+    (
+        "422",
+        "The body is missing a field or has a field of the wrong type",
+    ),
+];
+
+impl Modify for JsonBodyErrors {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        use utoipa::openapi::{ContentBuilder, Ref, RefOr, ResponseBuilder};
+
+        for item in openapi.paths.paths.values_mut() {
+            for operation in [
+                &mut item.get,
+                &mut item.put,
+                &mut item.post,
+                &mut item.delete,
+                &mut item.patch,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let takes_json = operation
+                    .request_body
+                    .as_ref()
+                    .is_some_and(|body| body.content.contains_key("application/json"));
+                if !takes_json {
+                    continue;
+                }
+                for (status, description) in JSON_BODY_ERRORS {
+                    operation
+                        .responses
+                        .responses
+                        .entry(status.to_owned())
+                        .or_insert_with(|| {
+                            RefOr::T(
+                                ResponseBuilder::new()
+                                    .description(description)
+                                    .content(
+                                        "application/problem+json",
+                                        ContentBuilder::new()
+                                            .schema(Some(Ref::from_schema_name("Problem")))
+                                            .build(),
+                                    )
+                                    .build(),
+                            )
+                        });
+                }
+            }
+        }
     }
 }
 
@@ -1626,6 +1687,30 @@ mod tests {
                 "{path}"
             );
         }
+    }
+
+    #[test]
+    fn every_json_body_operation_documents_400_415_and_422_as_problems() {
+        let document = serde_json::to_value(openapi()).unwrap();
+        let mut seen = 0;
+        let mut missing = Vec::new();
+        for (method, path, operation) in operations(&document) {
+            if operation["requestBody"]["content"]["application/json"].is_null() {
+                continue;
+            }
+            seen += 1;
+            for status in ["400", "415", "422"] {
+                let response = &operation["responses"][status];
+                if response["content"]["application/problem+json"]["schema"]["$ref"]
+                    != "#/components/schemas/Problem"
+                {
+                    missing.push(format!("{method} {path} {status}"));
+                }
+            }
+        }
+
+        assert!(seen > 100, "only {seen} JSON-body operations found");
+        assert!(missing.is_empty(), "undocumented: {missing:#?}");
     }
 
     #[test]

@@ -195,6 +195,12 @@ describe("event explorer", () => {
     expect(await screen.findByText(/The newest are left out/)).toBeInTheDocument();
   });
 
+  it("writes the exact headline total with thousands separators, as the chart summary does", async () => {
+    mockApi(routes({ [`POST ${BASE}/events/explore/count`]: () => json({ ...COUNT, total: 2_685_455 }) }));
+    open();
+    expect(await screen.findByText("2,685,455 events in the range.")).toBeInTheDocument();
+  });
+
   it("pages to older events with the cursor", async () => {
     const calls = mockApi(
       routes({

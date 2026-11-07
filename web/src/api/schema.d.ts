@@ -12107,6 +12107,24 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
+            /** @description The content type is not application/json */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is missing a field or has a field of the wrong type */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description The destination is over its rate limit */
             429: {
                 headers: {
@@ -12180,6 +12198,24 @@ export interface operations {
             };
             /** @description The body is over ingest.max_request_bytes */
             413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is missing a field or has a field of the wrong type */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -12267,6 +12303,24 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
+            /** @description The content type is not application/json */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is missing a field or has a field of the wrong type */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description The key is over its rate limit */
             429: {
                 headers: {
@@ -12340,6 +12394,24 @@ export interface operations {
             };
             /** @description The body is over ingest.max_request_bytes */
             413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is missing a field or has a field of the wrong type */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -12463,8 +12535,26 @@ export interface operations {
                     "application/json": components["schemas"]["SessionBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Invalid email or password */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -12660,6 +12750,15 @@ export interface operations {
                     "application/json": components["schemas"]["SessionBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Missing or wrong setup token */
             403: {
                 headers: {
@@ -12671,6 +12770,15 @@ export interface operations {
             };
             /** @description An owner already exists */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -12778,6 +12886,15 @@ export interface operations {
                     "application/json": components["schemas"]["UserBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not signed in */
             401: {
                 headers: {
@@ -12798,6 +12915,15 @@ export interface operations {
             };
             /** @description The email is already in use */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -12896,6 +13022,15 @@ export interface operations {
                     "application/json": components["schemas"]["WorkspaceBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not signed in */
             401: {
                 headers: {
@@ -12916,6 +13051,15 @@ export interface operations {
             };
             /** @description The slug is taken */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -13009,6 +13153,15 @@ export interface operations {
                     "application/json": components["schemas"]["WorkspaceBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -13029,6 +13182,15 @@ export interface operations {
             };
             /** @description No such workspace, or no access to it */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -13073,6 +13235,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DraftBody"];
+                };
+            };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description Not authenticated */
@@ -13122,6 +13293,15 @@ export interface operations {
             };
             /** @description The body is over 160 KiB */
             413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -13362,6 +13542,15 @@ export interface operations {
                     "application/json": components["schemas"]["AiSettingsBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -13382,6 +13571,15 @@ export interface operations {
             };
             /** @description No such workspace, or no access to it */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -13546,6 +13744,15 @@ export interface operations {
                     "application/json": components["schemas"]["CreatedApiKeyBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -13575,6 +13782,15 @@ export interface operations {
             };
             /** @description The Idempotency-Key is in use: `idempotency_key_in_flight` while the first request runs (see Retry-After), or `idempotency_key_replayed` once it created a key, with resource_id as its id and no secret */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -14237,6 +14453,15 @@ export interface operations {
                     "application/json": components["schemas"]["DimensionBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -14266,6 +14491,15 @@ export interface operations {
             };
             /** @description The key already exists */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -14311,6 +14545,15 @@ export interface operations {
                     "application/json": components["schemas"]["DimensionBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -14331,6 +14574,15 @@ export interface operations {
             };
             /** @description No such workspace or dimension, or no access */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -14376,6 +14628,15 @@ export interface operations {
                     "application/json": components["schemas"]["DimensionValueBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -14405,6 +14666,15 @@ export interface operations {
             };
             /** @description The value key already exists */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -14452,6 +14722,15 @@ export interface operations {
                     "application/json": components["schemas"]["DimensionValueBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -14472,6 +14751,15 @@ export interface operations {
             };
             /** @description No such workspace, dimension or value, or no access */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -14709,6 +14997,15 @@ export interface operations {
                     "application/json": components["schemas"]["ConsentPolicyDraftBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -14738,6 +15035,15 @@ export interface operations {
             };
             /** @description The draft is not at the revision named */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -14781,6 +15087,15 @@ export interface operations {
                     "application/json": components["schemas"]["ConsentPolicyEvaluationBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -14801,6 +15116,15 @@ export interface operations {
             };
             /** @description No such workspace or person, or no access */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -14844,6 +15168,15 @@ export interface operations {
                     "application/json": components["schemas"]["ConsentPolicyVersionBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -14873,6 +15206,15 @@ export interface operations {
             };
             /** @description The draft is not at the revision named */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -15016,6 +15358,15 @@ export interface operations {
                     "application/json": components["schemas"]["ContactDefinitionBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -15036,6 +15387,15 @@ export interface operations {
             };
             /** @description No such workspace, or no access to it */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -15146,6 +15506,15 @@ export interface operations {
                     "application/json": components["schemas"]["ContactBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -15175,6 +15544,15 @@ export interface operations {
             };
             /** @description A contact with that key exists */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -15265,6 +15643,15 @@ export interface operations {
             };
             /** @description The body is over ingest.max_request_bytes */
             413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -15401,6 +15788,15 @@ export interface operations {
                     "application/json": components["schemas"]["SearchContactsBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -15421,6 +15817,15 @@ export interface operations {
             };
             /** @description No such workspace, or no access to it */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -15521,6 +15926,15 @@ export interface operations {
                     "application/json": components["schemas"]["ContactBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -15541,6 +15955,15 @@ export interface operations {
             };
             /** @description No such workspace or contact, or no access */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -15669,6 +16092,15 @@ export interface operations {
                     "application/json": components["schemas"]["ContactBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -15689,6 +16121,15 @@ export interface operations {
             };
             /** @description No such workspace or contact, or no access */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -15841,6 +16282,15 @@ export interface operations {
                     "application/json": components["schemas"]["CredentialBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -15870,6 +16320,15 @@ export interface operations {
             };
             /** @description A live credential has that name or key, or the master key is outdated */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -16035,6 +16494,15 @@ export interface operations {
                     "application/json": components["schemas"]["CredentialBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -16064,6 +16532,15 @@ export interface operations {
             };
             /** @description Another live credential has that name, or the credential is archived (`code` is `credential_archived`) */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -16109,6 +16586,15 @@ export interface operations {
                     "application/json": components["schemas"]["CredentialBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -16138,6 +16624,15 @@ export interface operations {
             };
             /** @description The credential is archived (`code` is `credential_archived`), or the master key is outdated */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -16192,6 +16687,15 @@ export interface operations {
                     "application/json": components["schemas"]["CredentialTestBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -16221,6 +16725,15 @@ export interface operations {
             };
             /** @description The credential or the destination is archived, or the owner's type is not in this build */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -16412,6 +16925,15 @@ export interface operations {
                     "application/json": components["schemas"]["DestinationBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -16441,6 +16963,15 @@ export interface operations {
             };
             /** @description A live destination with that name exists, or the master key is outdated */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -16656,6 +17187,15 @@ export interface operations {
                     "application/json": components["schemas"]["DestinationBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -16685,6 +17225,15 @@ export interface operations {
             };
             /** @description Another live destination has that name, the destination is archived (`code` is `destination_archived`), or its type is not in this build */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -17039,6 +17588,15 @@ export interface operations {
                     "application/json": components["schemas"]["EventPolicyBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -17059,6 +17617,15 @@ export interface operations {
             };
             /** @description No such workspace, or no access to it */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -17152,6 +17719,15 @@ export interface operations {
                     "application/json": components["schemas"]["EventSchemaDetailBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -17181,6 +17757,15 @@ export interface operations {
             };
             /** @description The name already exists */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -17278,6 +17863,15 @@ export interface operations {
                     "application/json": components["schemas"]["EventSchemaDetailBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -17298,6 +17892,15 @@ export interface operations {
             };
             /** @description No such workspace or schema, or no access */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -17343,6 +17946,15 @@ export interface operations {
                     "application/json": components["schemas"]["EventSchemaDetailBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -17363,6 +17975,15 @@ export interface operations {
             };
             /** @description No such workspace or schema, or no access */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -17467,6 +18088,15 @@ export interface operations {
                     "application/json": components["schemas"]["ExploreBreakdownBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -17487,6 +18117,15 @@ export interface operations {
             };
             /** @description No such workspace, or no access to it */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -17541,6 +18180,15 @@ export interface operations {
                     "application/json": components["schemas"]["ExploreCountBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -17561,6 +18209,15 @@ export interface operations {
             };
             /** @description No such workspace, or no access to it */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -17615,6 +18272,15 @@ export interface operations {
                     "text/csv": string;
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -17635,6 +18301,15 @@ export interface operations {
             };
             /** @description No such workspace, or no access to it */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -17718,6 +18393,15 @@ export interface operations {
             };
             /** @description No such workspace, or no access to it */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -17834,6 +18518,15 @@ export interface operations {
                     "application/json": components["schemas"]["FlowDetailBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -17863,6 +18556,15 @@ export interface operations {
             };
             /** @description A flow that is not archived has that name */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -17960,6 +18662,15 @@ export interface operations {
                     "application/json": components["schemas"]["FlowDetailBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -17989,6 +18700,15 @@ export interface operations {
             };
             /** @description Another flow has that name, or the flow is archived (`code` is `flow_archived`) */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -18034,6 +18754,15 @@ export interface operations {
                     "application/json": components["schemas"]["AiFlowExplainBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -18072,6 +18801,15 @@ export interface operations {
             };
             /** @description The assistant is off (`ai_disabled`) */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -18286,6 +19024,15 @@ export interface operations {
                     "application/json": components["schemas"]["QueuedBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -18315,6 +19062,15 @@ export interface operations {
             };
             /** @description The flow is not published or paused, or its trigger is not `api` (`code` is `flow_state`) */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -18837,6 +19593,15 @@ export interface operations {
                     "application/json": components["schemas"]["QueuedBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -18866,6 +19631,15 @@ export interface operations {
             };
             /** @description The flow is not published or paused, or its trigger is not `manual` (`code` is `flow_state`) */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -18911,6 +19685,15 @@ export interface operations {
                     "application/json": components["schemas"]["FlowTestBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -18931,6 +19714,15 @@ export interface operations {
             };
             /** @description No such workspace, flow, version or person, or no access */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -19269,6 +20061,15 @@ export interface operations {
                     "application/json": components["schemas"]["FlowDetailBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -19298,6 +20099,15 @@ export interface operations {
             };
             /** @description The flow is archived (`code` is `flow_archived`) */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -19468,6 +20278,15 @@ export interface operations {
                     "application/json": components["schemas"]["RedriveBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -19488,6 +20307,15 @@ export interface operations {
             };
             /** @description No such workspace, or no access to it */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -19581,6 +20409,15 @@ export interface operations {
                     "application/json": components["schemas"]["RuleBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -19610,6 +20447,15 @@ export interface operations {
             };
             /** @description A rule with that name exists */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -19757,6 +20603,15 @@ export interface operations {
                     "application/json": components["schemas"]["RuleBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -19786,6 +20641,15 @@ export interface operations {
             };
             /** @description Another rule has that name */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -19999,6 +20863,15 @@ export interface operations {
                     "application/json": components["schemas"]["ConflictBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -20028,6 +20901,15 @@ export interface operations {
             };
             /** @description Already resolved, the move would break an identity rule, or the people changed since the conflict was loaded (detail starts with `conflict_changed`) */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -20437,6 +21319,15 @@ export interface operations {
                     "application/json": components["schemas"]["CsvImportBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -20466,6 +21357,15 @@ export interface operations {
             };
             /** @description The import is running or has ended */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -20779,6 +21679,15 @@ export interface operations {
                     "application/json": components["schemas"]["ReplayBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -20799,6 +21708,15 @@ export interface operations {
             };
             /** @description No such workspace, or no access to it */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -20901,6 +21819,15 @@ export interface operations {
                     "application/json": components["schemas"]["ListBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -20930,6 +21857,15 @@ export interface operations {
             };
             /** @description A list with that name exists */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -21077,6 +22013,15 @@ export interface operations {
                     "application/json": components["schemas"]["ListBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -21106,6 +22051,15 @@ export interface operations {
             };
             /** @description Another list has that name */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -21217,6 +22171,15 @@ export interface operations {
                     "application/json": components["schemas"]["AddMembersBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -21246,6 +22209,15 @@ export interface operations {
             };
             /** @description The people changed at the same moment; try again */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -21396,6 +22368,15 @@ export interface operations {
                     "application/json": components["schemas"]["RemoveMembersBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -21425,6 +22406,15 @@ export interface operations {
             };
             /** @description The people changed at the same moment; try again */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -21520,6 +22510,15 @@ export interface operations {
                     "application/json": components["schemas"]["RoleBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -21549,6 +22548,15 @@ export interface operations {
             };
             /** @description The change would leave the workspace with no admin (`last_admin`); only the owner may do that */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -21680,6 +22688,15 @@ export interface operations {
             };
             /** @description No such workspace, or no access */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -21913,6 +22930,15 @@ export interface operations {
                     "application/json": components["schemas"]["ConsentBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -21933,6 +22959,15 @@ export interface operations {
             };
             /** @description No such workspace or person, or no access */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -22480,6 +23515,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErasureBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -22509,6 +23553,15 @@ export interface operations {
             };
             /** @description The Idempotency-Key is in use: `idempotency_key_in_flight` while the first request runs (see Retry-After), or `idempotency_key_replayed` once it recorded the request, with resource_id as the request's id; the response is not kept */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -22628,6 +23681,15 @@ export interface operations {
                     "application/json": components["schemas"]["ExportBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -22657,6 +23719,15 @@ export interface operations {
             };
             /** @description The Idempotency-Key is in use: `idempotency_key_in_flight` while the first request runs (see Retry-After), or `idempotency_key_replayed` once it recorded the request, with resource_id as the export's id; the response is not kept */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -22820,6 +23891,15 @@ export interface operations {
                     "application/json": components["schemas"]["PrivacySettingsBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -22840,6 +23920,15 @@ export interface operations {
             };
             /** @description No such workspace, or no access to it */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -22933,6 +24022,15 @@ export interface operations {
                     "application/json": components["schemas"]["RetentionBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -22953,6 +24051,15 @@ export interface operations {
             };
             /** @description No such workspace, or no access to it */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -23058,6 +24165,15 @@ export interface operations {
                     "application/json": components["schemas"]["SegmentDetailBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -23087,6 +24203,15 @@ export interface operations {
             };
             /** @description A live segment has that name */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -23130,6 +24255,15 @@ export interface operations {
                     "application/json": components["schemas"]["SegmentPreviewBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -23150,6 +24284,15 @@ export interface operations {
             };
             /** @description No such workspace, or no access to it */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -23256,6 +24399,15 @@ export interface operations {
                     "application/json": components["schemas"]["SegmentDetailBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -23285,6 +24437,15 @@ export interface operations {
             };
             /** @description Another live segment has that name, or the segment is archived (`code` is `segment_archived`) */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -23330,6 +24491,15 @@ export interface operations {
                     "application/json": components["schemas"]["AiExplainBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -23368,6 +24538,15 @@ export interface operations {
             };
             /** @description The assistant is off (`ai_disabled`) */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -24005,6 +25184,15 @@ export interface operations {
                     "application/json": components["schemas"]["SenderIdentityBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -24034,6 +25222,15 @@ export interface operations {
             };
             /** @description A live identity already has that address */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -24240,6 +25437,15 @@ export interface operations {
                     "application/json": components["schemas"]["SenderIdentityBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -24269,6 +25475,15 @@ export interface operations {
             };
             /** @description Another live identity has that address, or the identity is archived (`code` is `sender_identity_archived`) */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -24362,6 +25577,15 @@ export interface operations {
                     "application/json": components["schemas"]["SendingDomainBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -24391,6 +25615,15 @@ export interface operations {
             };
             /** @description The workspace already has the domain, or the master key is outdated */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -24656,6 +25889,15 @@ export interface operations {
                     "application/json": components["schemas"]["SendSettingsBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -24685,6 +25927,15 @@ export interface operations {
             };
             /** @description The settings are not at the revision named (`send_settings_revision_mismatch`) */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -24790,6 +26041,15 @@ export interface operations {
                     "application/json": components["schemas"]["SnippetDetailBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -24819,6 +26079,15 @@ export interface operations {
             };
             /** @description A live snippet has that name */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -24916,6 +26185,15 @@ export interface operations {
                     "application/json": components["schemas"]["SnippetDetailBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -24945,6 +26223,15 @@ export interface operations {
             };
             /** @description Another live snippet has that name, or the snippet is archived (`snippet_archived`) */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -25051,6 +26338,15 @@ export interface operations {
                     "application/json": components["schemas"]["SnippetDetailBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -25080,6 +26376,15 @@ export interface operations {
             };
             /** @description The snippet is archived (`snippet_archived`), or the draft is not at the `revision` named (`snippet_revision_mismatch`) */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -25125,6 +26430,15 @@ export interface operations {
                     "application/json": components["schemas"]["SnippetPreviewBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -25145,6 +26459,15 @@ export interface operations {
             };
             /** @description No such workspace, snippet or version, or no access */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -25434,6 +26757,15 @@ export interface operations {
                     "application/json": components["schemas"]["ValidateBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -25463,6 +26795,24 @@ export interface operations {
             };
             /** @description The body is over the manifest size cap (64 KiB) plus 1 KiB */
             413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is missing a field or has a field of the wrong type */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -25547,6 +26897,15 @@ export interface operations {
                     "application/json": components["schemas"]["SourceBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -25576,6 +26935,15 @@ export interface operations {
             };
             /** @description A source with that name exists, or the master key is outdated */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -25732,6 +27100,15 @@ export interface operations {
                     "application/json": components["schemas"]["SourceBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -25761,6 +27138,15 @@ export interface operations {
             };
             /** @description Another source has that name, the type is not in this build, or `config` changes while a stream of the source has a queued or running run (`code` is `sync_run_active`); wait for the run or cancel it */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -25903,6 +27289,15 @@ export interface operations {
                     "application/json": components["schemas"]["SampleBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -25932,6 +27327,15 @@ export interface operations {
             };
             /** @description The source does not use a manifest, its type is not in this build, or a draft changes the saved base URL or authentication (`manifest_draft_auth_changed`) */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -26151,6 +27555,15 @@ export interface operations {
                     "application/json": components["schemas"]["RunBody"][];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -26180,6 +27593,15 @@ export interface operations {
             };
             /** @description The stream already has an active run (`code` is `sync_run_active`) */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -26396,6 +27818,15 @@ export interface operations {
                     "application/json": components["schemas"]["StreamBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -26425,6 +27856,15 @@ export interface operations {
             };
             /** @description A change of the sync mode, cursor field or primary key while the stream has a queued or running run (`code` is `sync_run_active`); wait for the run or cancel it */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -26472,6 +27912,15 @@ export interface operations {
                     "application/json": components["schemas"]["PreviewBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -26501,6 +27950,15 @@ export interface operations {
             };
             /** @description The source type is not in this build */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -26800,6 +28258,15 @@ export interface operations {
                     "application/json": components["schemas"]["AddedBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -26820,6 +28287,15 @@ export interface operations {
             };
             /** @description No such workspace, or no access to it */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -26872,6 +28348,15 @@ export interface operations {
                     "application/json": components["schemas"]["CheckBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -26892,6 +28377,15 @@ export interface operations {
             };
             /** @description No such workspace, or no access to it */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -27095,6 +28589,15 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -27124,6 +28627,15 @@ export interface operations {
             };
             /** @description The suppression is erased and permanent */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -27248,6 +28760,15 @@ export interface operations {
                     "application/json": components["schemas"]["TemplateDetailBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -27277,6 +28798,15 @@ export interface operations {
             };
             /** @description A live template has that name */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -27374,6 +28904,15 @@ export interface operations {
                     "application/json": components["schemas"]["TemplateDetailBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -27403,6 +28942,15 @@ export interface operations {
             };
             /** @description Another live template has that name, or the template is archived (`code` is `template_archived`) */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -27509,6 +29057,15 @@ export interface operations {
                     "application/json": components["schemas"]["TemplateDetailBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -27538,6 +29095,15 @@ export interface operations {
             };
             /** @description The template is archived (`code` is `template_archived`), or `revision` is not the draft's current revision (`template_draft_revision_mismatch`) */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -27584,6 +29150,15 @@ export interface operations {
                     "application/json": components["schemas"]["TemplateDetailBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -27613,6 +29188,15 @@ export interface operations {
             };
             /** @description The template is archived (`code` is `template_archived`), or `revision` is not the draft's current revision (`template_draft_revision_mismatch`, with `current_revision`) */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -27658,6 +29242,15 @@ export interface operations {
                     "application/json": components["schemas"]["TemplatePreviewBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -27678,6 +29271,15 @@ export interface operations {
             };
             /** @description No such workspace, template, version or person, or no access */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -27802,6 +29404,15 @@ export interface operations {
                     "application/json": components["schemas"]["PreviewPersonBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -27831,6 +29442,24 @@ export interface operations {
             };
             /** @description The template is archived (`template_archived`) or already keeps 20 people (`preview_people_limit`) */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is missing a field or has a field of the wrong type */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -27964,6 +29593,15 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
+            /** @description The content type is not application/json */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description The draft has blocking issues (`code` is `template_invalid`, with `template_issues`), no registered content type handles it (`template_content_unsupported`), or its sender is unknown, archived or on a domain that is not verified (`sender_unverified`) */
             422: {
                 headers: {
@@ -28054,6 +29692,15 @@ export interface operations {
                     "application/json": components["schemas"]["TestSendBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -28083,6 +29730,15 @@ export interface operations {
             };
             /** @description The template is archived (`template_archived`) */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -28406,6 +30062,15 @@ export interface operations {
                     "application/json": components["schemas"]["AllowlistEntryBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -28435,6 +30100,15 @@ export interface operations {
             };
             /** @description The address is on the list already */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -28767,6 +30441,15 @@ export interface operations {
                     "application/json": components["schemas"]["ThemeDetailBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -28796,6 +30479,15 @@ export interface operations {
             };
             /** @description A live theme has that name */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -28839,6 +30531,15 @@ export interface operations {
                     "application/json": components["schemas"]["ThemeBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -28868,6 +30569,15 @@ export interface operations {
             };
             /** @description The theme is not a published, live theme of the workspace (`theme_not_publishable_default`) */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -28974,6 +30684,15 @@ export interface operations {
                     "application/json": components["schemas"]["ThemeDetailBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -29003,6 +30722,15 @@ export interface operations {
             };
             /** @description Another live theme has that name, or the theme is archived (`theme_archived`) */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -29109,6 +30837,15 @@ export interface operations {
                     "application/json": components["schemas"]["ThemeDetailBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -29138,6 +30875,15 @@ export interface operations {
             };
             /** @description The theme is archived (`theme_archived`), or the draft is not at the `revision` named (`theme_revision_mismatch`) */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -29183,6 +30929,15 @@ export interface operations {
                     "application/json": components["schemas"]["ThemePreviewBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -29203,6 +30958,15 @@ export interface operations {
             };
             /** @description No such workspace, theme or version, or no access */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -29563,6 +31327,15 @@ export interface operations {
                     "application/json": components["schemas"]["TopicBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -29592,6 +31365,15 @@ export interface operations {
             };
             /** @description The key already exists */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -29637,6 +31419,15 @@ export interface operations {
                     "application/json": components["schemas"]["TopicBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -29657,6 +31448,15 @@ export interface operations {
             };
             /** @description No such workspace or topic, or no access */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -29926,6 +31726,15 @@ export interface operations {
                     "application/json": components["schemas"]["TraitBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -29955,6 +31764,15 @@ export interface operations {
             };
             /** @description The key already exists */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -30000,6 +31818,15 @@ export interface operations {
                     "application/json": components["schemas"]["TraitBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -30029,6 +31856,15 @@ export interface operations {
             };
             /** @description `trait_indexed`: the type of a trait that holds a slot cannot change; `trait_referenced`: archiving a trait that the current version of a live segment reads, with the segment names in the detail */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -30457,6 +32293,15 @@ export interface operations {
                     "application/json": components["schemas"]["CreatedWebhookBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -30486,6 +32331,15 @@ export interface operations {
             };
             /** @description A source with that name exists, or the master key is outdated */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -30642,6 +32496,15 @@ export interface operations {
                     "application/json": components["schemas"]["WebhookBody"];
                 };
             };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Not authenticated */
             401: {
                 headers: {
@@ -30671,6 +32534,15 @@ export interface operations {
             };
             /** @description Another source has that name */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -30825,6 +32697,15 @@ export interface operations {
             };
             /** @description The body is over ingest.max_webhook_bytes */
             413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };
