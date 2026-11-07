@@ -131,11 +131,12 @@ describe("a list", () => {
     expect(await screen.findByText("ada@example.test")).toBeInTheDocument();
   });
 
-  it("shows an error when the list does not exist", async () => {
+  it("says the list does not exist, with no retry", async () => {
     asAdmin({ [LIST_ROUTE]: () => problem(404, "Not Found", "no such resource") });
     mount();
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("no such resource");
+    expect(await screen.findByText("This list does not exist")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Import CSV" })).not.toBeInTheDocument();
   });
 

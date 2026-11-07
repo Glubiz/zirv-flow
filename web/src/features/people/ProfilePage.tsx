@@ -1,16 +1,18 @@
 import { Link, useParams } from "react-router";
 
-import { client, describeError, unwrap, useResource, type components } from "../../api";
-import { EmptyState, ErrorState, formatDateTime, HiddenValue, kindLabel, LoadingState, PageHeader, Panel, shortId, TabNav, useTabParam } from "../../ui";
+import { client, unwrap, useResource, type components } from "../../api";
+import { EmptyState, formatDateTime, HiddenValue, kindLabel, LoadError, LoadingState, PageHeader, Panel, shortId, TabNav, useTabParam } from "../../ui";
 import { ConsentPanel } from "../consent";
 import { PersonListsPanel } from "../lists";
 import { useWorkspaceAccess } from "../members";
 import { SegmentExplainPanel } from "../segments";
 import { MessageLog } from "./MessageLog";
 import { Timeline } from "./Timeline";
+import { sourceName, useWorkspaceSources } from "./sourceOrder";
 import { typeLabel } from "./TraitDialog";
 
 type Profile = components["schemas"]["ProfileBody"];
+type SourceBody = components["schemas"]["SourceBody"];
 type Identity = components["schemas"]["ProfileIdentityBody"];
 type ProfileTrait = components["schemas"]["ProfileTraitBody"];
 
@@ -27,6 +29,8 @@ function ProfileView({ workspaceId, requestedId }: { workspaceId: string; reques
   );
   const { active: tab } = useTabParam(TABS);
   const access = useWorkspaceAccess(workspaceId);
+  const sources = useWorkspaceSources(workspaceId);
+  const sourceList = sources.status === "ready" ? sources.data : null;
   const canWrite = access.status === "ready" && access.data.canEdit;
 
   const crumb = { group: "Audience", section: "People", to: `/w/${workspaceId}/people` };
@@ -44,7 +48,7 @@ function ProfileView({ workspaceId, requestedId }: { workspaceId: string; reques
       <div className="page">
         <PageHeader title="Person" breadcrumb={crumb} />
         <Panel flush>
-          <ErrorState {...describeError(profile.error)} onRetry={profile.reload} />
+          <LoadError error={profile.error} onRetry={profile.reload} noun="person" />
         </Panel>
       </div>
     );
@@ -66,8 +70,8 @@ function ProfileView({ workspaceId, requestedId }: { workspaceId: string; reques
         <div className="stack">
           <div className="profile-layout">
             <div className="stack">
-              <IdentitiesPanel profile={data} />
-              <TraitsPanel traits={data.traits} />
+              <IdentitiesPanel profile={data} sources={sourceList} />
+              <TraitsPanel traits={data.traits} sources={sourceList} />
               {data.merges.length > 0 ? <MergesPanel workspaceId={workspaceId} profile={data} /> : null}
             </div>
             <div className="stack">
@@ -111,7 +115,7 @@ function IdentityRow({ identity }: { identity: Identity }) {
   );
 }
 
-function IdentitiesPanel({ profile }: { profile: Profile }) {
+function IdentitiesPanel({ profile, sources }: { profile: Profile; sources: SourceBody[] | null }) {
   const empty = profile.identity_groups.length === 0 && profile.observed.length === 0;
   return (
     <Panel title="Identities">
@@ -120,8 +124,8 @@ function IdentitiesPanel({ profile }: { profile: Profile }) {
       ) : (
         <div className="stack">
           {profile.identity_groups.map((group) => (
-            <section key={group.source} aria-label={`Identities from ${group.source}`}>
-              <h3 className="strong">From {group.source}</h3>
+            <section key={group.source} aria-label={`Identities from ${sourceName(group.source, sources)}`}>
+              <h3 className="strong">From {sourceName(group.source, sources)}</h3>
               <ul className="list-plain stack-tight">
                 {group.identities.map((identity, index) => (
                   <IdentityRow key={`${identity.kind}-${index}`} identity={identity} />
@@ -150,7 +154,7 @@ function valueText(value: unknown): string {
   return typeof value === "string" ? value : JSON.stringify(value);
 }
 
-function TraitsPanel({ traits }: { traits: ProfileTrait[] }) {
+function TraitsPanel({ traits, sources }: { traits: ProfileTrait[]; sources: SourceBody[] | null }) {
   return (
     <Panel title="Fields" flush>
       {traits.length === 0 ? (
@@ -175,7 +179,7 @@ function TraitsPanel({ traits }: { traits: ProfileTrait[] }) {
                     {item.trait_type ? <div className="faint">{typeLabel(item.trait_type)}</div> : null}
                   </td>
                   <td className="identity-value">{item.masked ? <HiddenValue /> : valueText(item.value)}</td>
-                  <td>{item.source ?? <span className="faint">—</span>}</td>
+                  <td>{item.source ? sourceName(item.source, sources) : <span className="faint">—</span>}</td>
                   <td>{item.observed_at ? formatDateTime(item.observed_at) : <span className="faint">—</span>}</td>
                 </tr>
               ))}

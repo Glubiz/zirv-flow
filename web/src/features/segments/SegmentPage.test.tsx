@@ -393,15 +393,24 @@ describe("segment page", () => {
       ...base(),
       [`GET ${SEGMENT}`]: () => {
         asked += 1;
-        return asked === 1 ? problem(404, "Not Found", "no such segment") : json(detail());
+        return asked === 1 ? problem(500, "Internal Server Error", "internal error") : json(detail());
       },
     });
     const user = userEvent.setup();
     mountPage();
 
-    expect(await screen.findByText("Not Found")).toBeInTheDocument();
+    expect(await screen.findByText("Internal Server Error")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Try again" }));
     expect(await screen.findByRole("heading", { name: "Big spenders" })).toBeInTheDocument();
+  });
+
+  it("says the segment does not exist for an unknown id, with no retry", async () => {
+    mockApi({ ...base(), [`GET ${SEGMENT}`]: () => problem(404, "Not Found", "no such resource") });
+    mountPage();
+
+    expect(await screen.findByText("This segment does not exist")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Trace ID/)).not.toBeInTheDocument();
   });
 
   it("shows a loading state while the segment loads", async () => {

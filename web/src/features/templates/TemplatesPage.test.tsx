@@ -54,6 +54,16 @@ function listCalls(calls: Call[]): URLSearchParams[] {
   return calls.filter((call) => call.method === "GET" && call.path === `${WS}/templates`).map((call) => new URLSearchParams(call.search));
 }
 
+describe("a template that does not exist", () => {
+  it("says so, with no retry", async () => {
+    mockApi({ ...templateRoutes({ role: "admin" }), [`GET ${WS}/templates/${TEMPLATE_ID}`]: () => problem(404, "Not Found", "no such resource") });
+    renderRoute(`/w/ws1/templates/${TEMPLATE_ID}`, "/w/:ws/templates/:id", <TemplatePage />);
+
+    expect(await screen.findByText("This template does not exist")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
+  });
+});
+
 describe("the template library", () => {
   it("shows each template as a card with its status, checks, flows and edit time", async () => {
     mockApi(libraryRoutes());

@@ -1,15 +1,15 @@
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 
-import { ApiError, client, describeError, unwrap, unwrapEmpty, useResource, type ErrorSummary } from "../../api";
+import { client, describeError, unwrap, unwrapEmpty, useResource, type ErrorSummary } from "../../api";
 import {
   Button,
   Dialog,
-  EmptyState,
   ErrorState,
   formatDateTime,
   HiddenValue,
   InlineError,
+  LoadError,
   LoadingState,
   PageHeader,
   Panel,
@@ -47,24 +47,19 @@ function ContactView({ workspaceId, contactKey }: { workspaceId: string; contact
     );
   }
   if (contact.status === "error") {
-    const missing = contact.error instanceof ApiError && contact.error.status === 404;
     return (
       <div className="page">
         <Panel flush>
-          {missing ? (
-            <EmptyState
-              title="No such contact"
-              action={
-                <Link className="btn" to={`/w/${workspaceId}/contacts`}>
-                  Back to contacts
-                </Link>
-              }
-            >
-              It may have been deleted.
-            </EmptyState>
-          ) : (
-            <ErrorState {...describeError(contact.error)} onRetry={contact.reload} />
-          )}
+          <LoadError
+            error={contact.error}
+            onRetry={contact.reload}
+            noun="contact"
+            action={
+              <Link className="btn" to={`/w/${workspaceId}/contacts`}>
+                Back to contacts
+              </Link>
+            }
+          />
         </Panel>
       </div>
     );

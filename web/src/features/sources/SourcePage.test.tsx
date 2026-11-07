@@ -148,7 +148,7 @@ describe("a source", () => {
       ...ADMIN,
       "GET /api/v1/workspaces/ws1/sources/src-1": () => {
         attempts += 1;
-        return attempts === 1 ? problem(404, "Not Found", "no such resource") : json(aSource());
+        return attempts === 1 ? problem(500, "Internal Server Error", "internal error") : json(aSource());
       },
     });
     const user = userEvent.setup();
@@ -157,6 +157,14 @@ describe("a source", () => {
     await user.click(await screen.findByRole("button", { name: "Try again" }));
 
     expect(await screen.findByRole("heading", { name: "CRM" })).toBeInTheDocument();
+  });
+
+  it("says the source does not exist for an unknown id, with no retry", async () => {
+    mockApi({ ...ADMIN, "GET /api/v1/workspaces/ws1/sources/src-1": () => problem(404, "Not Found", "no such resource") });
+    mount();
+
+    expect(await screen.findByText("This source does not exist")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
   });
 
   it("shows an empty state for a source without streams and a loading state for them", async () => {
