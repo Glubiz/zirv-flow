@@ -15903,4 +15903,55 @@ email,b@example.com,
         );
         assert_eq!(owner_removes.status, StatusCode::NO_CONTENT);
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_rejects_list_reads_a_traits_dropped_reject_for_every_drop_reason(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let workspace_id = ws.parse::<Uuid>().unwrap();
+        // One row per code, stored the way `insert_dropped_traits_reject` stores them.
+        for reason in zirv_flow_core::people::DropReason::ALL {
+            sqlx::query(
+                "INSERT INTO ingest_rejects \
+                    (id, workspace_id, received_at, source, kind, reason, reasons, sample, \
+                     payload, trace_id) \
+                 VALUES (gen_random_uuid(), $1, now(), 'api', 'record', 'traits_dropped', $2, \
+                         '{\"properties\": {}, \"masked\": []}'::jsonb, '{}'::jsonb, \
+                         gen_random_uuid())",
+            )
+            .bind(workspace_id)
+            .bind(sqlx::types::Json(
+                json!([{"property": "k", "reason": reason.as_str()}]),
+            ))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let listed = call(
+            &router,
+            "GET",
+            &format!("/api/v1/workspaces/{ws}/ingest-rejects"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(listed.status, StatusCode::OK, "{:?}", listed.body);
+        let mut codes: Vec<String> = listed.body["rejects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|reject| reject["reasons"][0]["reason"].as_str().unwrap().to_owned())
+            .collect();
+        let mut expected: Vec<String> = zirv_flow_core::people::DropReason::ALL
+            .iter()
+            .map(|reason| reason.as_str().to_owned())
+            .collect();
+        codes.sort();
+        expected.sort();
+        assert_eq!(codes, expected);
+    }
 }

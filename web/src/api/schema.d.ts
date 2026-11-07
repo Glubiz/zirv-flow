@@ -8922,7 +8922,10 @@ export interface components {
         ReasonBody: {
             /** @description The property that failed; never its value. */
             property: string;
-            /** @description `missing_required`, `wrong_type`, `not_in_enum` or `unplanned_property`. */
+            /**
+             * @description `missing_required`, `wrong_type`, `not_in_enum` or `unplanned_property`; a `traits_dropped`
+             *     reject also carries `invalid_key`, `archived_key`, `too_long` and `not_inferable`.
+             */
             reason: string;
         };
         ReasonItem: {

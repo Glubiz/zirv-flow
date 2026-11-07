@@ -18,7 +18,8 @@ use crate::problem::{ApiError, Problem};
 pub(crate) struct ReasonBody {
     /// The property that failed; never its value.
     property: String,
-    /// `missing_required`, `wrong_type`, `not_in_enum` or `unplanned_property`.
+    /// `missing_required`, `wrong_type`, `not_in_enum` or `unplanned_property`; a `traits_dropped`
+    /// reject also carries `invalid_key`, `archived_key`, `too_long` and `not_inferable`.
     reason: String,
 }
 

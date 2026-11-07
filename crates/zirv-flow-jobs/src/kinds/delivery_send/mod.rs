@@ -73,11 +73,11 @@ use zirv_flow_store::{
     MessageStatus, NewJob, NewMessage, NewSuppression, PgConnection, PgPool, SEND_JOB_KIND,
     SOFT_BOUNCE, SendOutcome, SubjectKind, WebhookPerson, WebhookSubject,
     add_organization_suppression, clear_message_in_flight, document_sender, find_destination,
-    find_flow, find_message_links, find_template, find_template_version, insert_message,
-    lock_webhook_person, mark_message_sending, mark_message_unconfirmed, message_address_hash,
-    message_in_flight, message_status, message_unconfirmed, read_template_field_catalog,
-    read_webhook_subject, record_message_deferral, record_message_links, record_send_outcome,
-    throttle_bucket,
+    find_flow, find_message_links, find_template, find_template_version, find_trigger_event,
+    insert_message, lock_webhook_person, mark_message_sending, mark_message_unconfirmed,
+    message_address_hash, message_in_flight, message_status, message_unconfirmed,
+    read_template_field_catalog, read_webhook_subject, record_message_deferral,
+    record_message_links, record_send_outcome, throttle_bucket,
 };
 
 pub(crate) use payload::Queued;
@@ -338,7 +338,12 @@ async fn decide(
         );
         return Ok(trail.fail_unsent(resuming, "render", render::RENDER_ERROR));
     }
-    let context = render::context_of(job, &traits, &address, tracker.as_ref());
+    let mut context = render::context_of(job, &traits, &address, tracker.as_ref());
+    // The event that started the enrollment, read now; a flow not started by an event, or an event
+    // since deleted, leaves `event` empty and a strict reference ends the render.
+    if let Some(event) = find_trigger_event(ctx.conn(), workspace, job.enrollment).await? {
+        context.event = event.property_map();
+    }
     let pool_for_render = ctx.render_pool().cloned();
     let tracked = (!transactional).then_some(()).and(tracker.as_ref());
     let recorded = find_message_links(&pool, job.message).await?;
@@ -6067,6 +6072,232 @@ mod tests {
                 .await;
             assert_message_fixture(&env, &message, ("send.gate", "blocked", Some("delivery")))
                 .await;
+        })
+        .await;
+    }
+
+    /// A template whose subject and body read `event.order_id`, with `default` when `fallback`.
+    async fn event_template(env: &Env, fallback: bool) -> Uuid {
+        let read = if fallback {
+            "{{ event.order_id | default('none') }}"
+        } else {
+            "{{ event.order_id }}"
+        };
+        let document = json!({"schema": 1, "channel": "email", "mode": "code", "email": {
+            "subject": format!("Order {read}"), "sender": env.sender, "lang": "en",
+            "category": "transactional", "html": format!("<p>Thanks for {read}</p>"),
+            "text": format!("Thanks for {read}"),
+        }});
+        env.template_of("transactional", document).await
+    }
+
+    /// An event of `person` with an `order_id` property.
+    async fn order_event(env: &Env, person: Uuid, order: &str) -> Uuid {
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO events (id, workspace_id, person_id, name, occurred_at, received_at, \
+                properties, source, trace_id, validation_state) \
+             VALUES ($1, $2, $3, 'order_placed', now(), now(), \
+                jsonb_build_object('order_id', $4::text), 'api', gen_random_uuid(), 'valid')",
+        )
+        .bind(id)
+        .bind(env.ws.as_uuid())
+        .bind(person)
+        .bind(order)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+        id
+    }
+
+    /// Makes `event` the cause of the enrollment, as an event trigger does.
+    async fn caused_by(env: &Env, enrollment: Uuid, event: Uuid) {
+        sqlx::query("UPDATE enrollments SET cause_kind = 'event', cause_id = $2 WHERE id = $1")
+            .bind(enrollment)
+            .bind(event.to_string())
+            .execute(&env.pool)
+            .await
+            .unwrap();
+    }
+
+    /// Queues a send of `template` to `person`, runs it, and returns the message. `event` is made
+    /// the cause of the person's enrollment first.
+    async fn send_caused_by(
+        env: &Env,
+        person: Uuid,
+        template: Uuid,
+        event: Option<Uuid>,
+    ) -> zirv_flow_store::Message {
+        let queued = env.queue(person, template, 5).await;
+        if let Some(event) = event {
+            caused_by(env, queued.enrolled.enrollment, event).await;
+        }
+        env.attempt().await.unwrap();
+        env.message(queued.message).await
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_template_reading_the_trigger_event_is_sent_with_its_value_in_subject_and_body(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let mut env = Env::new(pool, "one").await;
+            env.render = Some(start_pool("serve", "").await);
+            let person = env.person(PERSONAL_DATA.email).await;
+            let template = event_template(&env, false).await;
+            let event = order_event(&env, person, "A-1001").await;
+
+            let message = send_caused_by(&env, person, template, Some(event)).await;
+
+            assert_eq!(message.status, "sent");
+            let sent = env.sent();
+            assert!(sent[0].payload["html"].as_str().unwrap().contains("A-1001"));
+            assert_eq!(sent[0].payload["subject"], "Order A-1001");
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn without_a_trigger_event_a_bare_event_reference_fails_and_a_default_is_sent(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let mut env = Env::new(pool, "one").await;
+            env.render = Some(start_pool("serve", "").await);
+            let person = env.person(PERSONAL_DATA.email).await;
+            let bare = event_template(&env, false).await;
+            let guarded = event_template(&env, true).await;
+
+            let failed = send_caused_by(&env, person, bare, None).await;
+            let sent = send_caused_by(&env, person, guarded, None).await;
+
+            assert_eq!(
+                (failed.status.as_str(), failed.reason.as_deref()),
+                ("failed", Some("render_error"))
+            );
+            assert_eq!(sent.status, "sent");
+            assert_eq!(env.sent()[0].payload["subject"], "Order none");
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_deleted_trigger_event_fails_as_a_render_error(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let mut env = Env::new(pool, "one").await;
+            env.render = Some(start_pool("serve", "").await);
+            let person = env.person(PERSONAL_DATA.email).await;
+            let template = event_template(&env, false).await;
+            let event = order_event(&env, person, "A-1002").await;
+            sqlx::query("DELETE FROM events WHERE id = $1")
+                .bind(event)
+                .execute(&env.pool)
+                .await
+                .unwrap();
+
+            let message = send_caused_by(&env, person, template, Some(event)).await;
+
+            assert_eq!(
+                (message.status.as_str(), message.reason.as_deref()),
+                ("failed", Some("render_error"))
+            );
+            assert!(env.sent().is_empty());
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_event_of_another_person_is_not_read(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let mut env = Env::new(pool, "one").await;
+            env.render = Some(start_pool("serve", "").await);
+            let person = env.person(PERSONAL_DATA.email).await;
+            let other = env.person("other@example.com").await;
+            let template = event_template(&env, false).await;
+            let foreign = order_event(&env, other, "B-2001").await;
+
+            let message = send_caused_by(&env, person, template, Some(foreign)).await;
+
+            assert_eq!(
+                (message.status.as_str(), message.reason.as_deref()),
+                ("failed", Some("render_error"))
+            );
+            assert!(env.sent().is_empty());
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_survivor_enrollment_reads_the_event_the_merge_re_pointed(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let mut env = Env::new(pool, "one").await;
+            env.render = Some(start_pool("serve", "").await);
+            let survivor = env.person(PERSONAL_DATA.email).await;
+            let merged = env.person("merged@example.com").await;
+            let template = event_template(&env, false).await;
+            let event = order_event(&env, merged, "C-3001").await;
+            sqlx::query("UPDATE people SET merged_into = $1 WHERE id = $2")
+                .bind(survivor)
+                .bind(merged)
+                .execute(&env.pool)
+                .await
+                .unwrap();
+            let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
+            zirv_flow_store::rewrite_merged_person(
+                &mut tx,
+                env.ws,
+                merged,
+                &TraceContext::root(Cause::api("merge")),
+                None,
+            )
+            .await
+            .unwrap();
+            zirv_flow_store::commit(tx).await.unwrap();
+
+            let message = send_caused_by(&env, survivor, template, Some(event)).await;
+
+            assert_eq!(message.status, "sent");
+            assert!(
+                env.sent()[0].payload["html"]
+                    .as_str()
+                    .unwrap()
+                    .contains("C-3001")
+            );
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_survivor_enrollment_reads_the_event_before_the_merge_rewrite_has_run(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let mut env = Env::new(pool, "one").await;
+            env.render = Some(start_pool("serve", "").await);
+            let survivor = env.person(PERSONAL_DATA.email).await;
+            let merged = env.person("merged@example.com").await;
+            let template = event_template(&env, false).await;
+            let event = order_event(&env, merged, "D-4001").await;
+            sqlx::query("UPDATE people SET merged_into = $1 WHERE id = $2")
+                .bind(survivor)
+                .bind(merged)
+                .execute(&env.pool)
+                .await
+                .unwrap();
+
+            let message = send_caused_by(&env, survivor, template, Some(event)).await;
+
+            assert_eq!(message.status, "sent");
+            assert!(
+                env.sent()[0].payload["html"]
+                    .as_str()
+                    .unwrap()
+                    .contains("D-4001")
+            );
         })
         .await;
     }

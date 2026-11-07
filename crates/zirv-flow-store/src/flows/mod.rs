@@ -21,7 +21,7 @@ mod triggers;
 mod warmup;
 
 pub(crate) use arrivals::{Arrival, enqueue_arrivals};
-pub use arrivals::{StoredEvent, find_event_of_person};
+pub use arrivals::{StoredEvent, find_event_of_person, find_trigger_event};
 pub use control::{
     ControlError, ExitBatch, LIFECYCLE_BATCH, LIFECYCLE_JOB_KIND, LifecycleAction, LifecycleBatch,
     LifecyclePayload, SETTLE_JOB_KIND, SettleItem, SettlePayload, Signal, enqueue_lifecycle,
