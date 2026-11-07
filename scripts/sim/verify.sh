@@ -328,7 +328,8 @@ t_consistency_timeline_old_person() {
   # A live, unmerged person: an erased one answers 404, which is not what this check measures.
   person=$(zf_sql "SELECT d.subject_ids ->> 'person' FROM decision_records d WHERE d.workspace_id = '$WS' AND d.subject_ids ? 'person' AND EXISTS (SELECT 1 FROM people p WHERE p.workspace_id = d.workspace_id AND p.id::text = d.subject_ids ->> 'person' AND p.merged_into IS NULL) ORDER BY d.recorded_at, d.id LIMIT 1")
   [[ -n "$person" ]] || { MESSAGE='no decision of a live person yet'; return "$SKIP_STATUS"; }
-  status=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code} %{time_total}' -b "$STATE/cookies" \
+  # Not /dev/null: lib.sh turns off MSYS path conversion, so a native curl could not open it.
+  status=$(curl -sS --max-time 10 -o "$STATE/timeline.json" -w '%{http_code} %{time_total}' -b "$STATE/cookies" \
     "http://localhost:8080/api/v1$P/people/$person/timeline?limit=25") || status='000 10'
   seconds=${status#* }
   MESSAGE="timeline of ${person:0:8}: HTTP ${status% *} in $seconds s (at most 1 s)"
