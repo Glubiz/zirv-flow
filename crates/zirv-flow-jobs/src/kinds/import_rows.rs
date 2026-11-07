@@ -218,7 +218,10 @@ impl Planner<'_> {
                             reason: error.reason.as_str(),
                         })
                         .collect(),
-                    raw: cells,
+                    raw: cells
+                        .into_iter()
+                        .map(|cell| cell.replace('\0', "\u{FFFD}"))
+                        .collect(),
                 }),
             }
         }

@@ -348,6 +348,17 @@ mod tests {
         list: Option<Uuid>,
     ) -> Import {
         let header = vec!["email".to_owned(), "age".to_owned(), "news".to_owned()];
+        start_mapped(pool, ws, &header, bytes, rows, &mapping(list)).await
+    }
+
+    async fn start_mapped(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        header: &[String],
+        bytes: &[u8],
+        rows: usize,
+        mapping: &Mapping,
+    ) -> Import {
         let trace = TraceContext::root(Cause::api("t"));
         let import = ImportUpload::store(
             pool,
@@ -363,14 +374,14 @@ mod tests {
             bytes,
             &UploadScan {
                 delimiter: ',',
-                header: &header,
+                header,
                 rows_total: i64::try_from(rows).unwrap(),
             },
         )
         .await
         .unwrap();
         let mut tx = zirv_flow_store::begin(pool).await.unwrap();
-        set_import_mapping(&mut tx, ws, import.id, &mapping(list))
+        set_import_mapping(&mut tx, ws, import.id, mapping)
             .await
             .unwrap();
         let started = start_import_run(&mut tx, ws, import.id).await.unwrap();
@@ -488,6 +499,68 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(traits, 1200);
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_nul_in_a_cell_rejects_that_row_and_the_import_finishes(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            create_trait_definition(
+                &pool,
+                ws,
+                &NewTraitDefinition {
+                    key: "note".into(),
+                    trait_type: TraitType::String,
+                    precedence: zirv_flow_core::people::Precedence::Latest,
+                    source_order: Vec::new(),
+                    pii: false,
+                    channel_address: false,
+                    inferred: false,
+                    description: String::new(),
+                },
+            )
+            .await
+            .unwrap();
+            let mapping = Mapping {
+                delete_when: None,
+                key_column: None,
+                event: None,
+                columns: vec![
+                    rule(
+                        "email",
+                        Target::Identifier {
+                            kind: "email".into(),
+                        },
+                        vec![Transform::Trim, Transform::Lower],
+                    ),
+                    rule("note", Target::Trait { key: "note".into() }, vec![]),
+                ],
+            };
+            let header = vec!["email".to_owned(), "note".to_owned()];
+            let bytes =
+                b"email,note\na@example.com,fine\nb@example.com,bad\0cell\nc@example.com,fine\n";
+            let import = start_mapped(&pool, ws, &header, bytes, 3, &mapping).await;
+
+            attempt(&pool, &import, None).await.unwrap();
+
+            let done = reread(&pool, &import).await;
+            assert_eq!(done.status, ImportStatus::Succeeded);
+            assert_eq!(
+                (done.rows_done, done.rows_applied, done.rows_rejected),
+                (3, 2, 1)
+            );
+            let (reason, raw): (String, serde_json::Value) = sqlx::query_as(
+                "SELECT errors->0->>'reason', raw FROM import_rejects WHERE import_id = $1",
+            )
+            .bind(import.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(reason, "contains_nul");
+            assert_eq!(raw[1], "bad\u{FFFD}cell");
         })
         .await;
     }
