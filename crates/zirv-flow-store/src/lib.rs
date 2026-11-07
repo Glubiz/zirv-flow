@@ -728,7 +728,7 @@ mod tests {
     async fn a_reset_database_has_no_tables_and_migrates_to_the_latest_version(pool: PgPool) {
         reset_database(&pool).await;
         let tables: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM information_schema.tables              WHERE table_schema NOT IN ('pg_catalog', 'information_schema')",
+            "SELECT count(*) FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog', 'information_schema')",
         )
         .fetch_one(&pool)
         .await
