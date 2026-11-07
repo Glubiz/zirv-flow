@@ -346,15 +346,16 @@ jobs:
           if-no-files-found: ignore
 
   postgres:
-    name: PostgreSQL ${{ matrix.pg }} (${{ matrix.partition }}/2)
+    name: PostgreSQL ${{ matrix.pg }} (${{ matrix.partition }}/3)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         pg: [16, 18]
-        # Two jobs per version share the tests, so each finishes in about 17 minutes rather than 25.
-        partition: [1, 2]
+        # Three jobs per version share the tests, so a run stays under 20 minutes. Each job compiles
+        # for about 5.5 minutes first, so more partitions gain less.
+        partition: [1, 2, 3]
     services:
       postgres:
         image: postgres:${{ matrix.pg }}
@@ -436,7 +437,7 @@ jobs:
         run: bash scripts/kafka-fixture.sh | sed 's/^export //' >> "$GITHUB_ENV"
 
       - name: Run PostgreSQL Tests
-        run: cargo nextest run --run-ignored only --no-fail-fast --partition count:${{ matrix.partition }}/2
+        run: cargo nextest run --run-ignored only --no-fail-fast --partition count:${{ matrix.partition }}/3
 
       - name: Upgrade integrity SQL self-test
         if: matrix.partition == 1
