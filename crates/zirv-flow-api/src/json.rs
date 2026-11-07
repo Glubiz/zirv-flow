@@ -25,17 +25,7 @@ where
 
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
         match <axum::Json<Value> as FromRequest<S>>::from_request(request, state).await {
-            Ok(axum::Json(value)) => {
-                if zirv_flow_core::no_nul::find_nul(&value).is_some() {
-                    return Err(ApiError::contains_nul("request body"));
-                }
-                serde_json::from_value(value).map(Self).map_err(|_| {
-                    ApiError::new(
-                        StatusCode::UNPROCESSABLE_ENTITY,
-                        "request body is missing a field or has a field of the wrong type",
-                    )
-                })
-            }
+            Ok(axum::Json(value)) => into_body(value),
             Err(rejection) => Err(reject(&rejection)),
         }
     }
@@ -78,23 +68,27 @@ where
         if bytes.is_empty() {
             return Ok(None);
         }
-        if let Ok(value) = serde_json::from_slice::<Value>(&bytes)
-            && zirv_flow_core::no_nul::find_nul(&value).is_some()
-        {
-            return Err(ApiError::contains_nul("request body"));
+        let value = serde_json::from_slice::<Value>(&bytes).map_err(|_| {
+            ApiError::new(StatusCode::BAD_REQUEST, "request body is not valid JSON")
+        })?;
+        if value.is_null() {
+            return Ok(None);
         }
-        match serde_json::from_slice::<Option<T>>(&bytes) {
-            Ok(value) => Ok(value.map(Self)),
-            Err(error) if error.is_data() => Err(ApiError::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "request body is missing a field or has a field of the wrong type",
-            )),
-            Err(_) => Err(ApiError::new(
-                StatusCode::BAD_REQUEST,
-                "request body is not valid JSON",
-            )),
-        }
+        into_body(value).map(Some)
     }
+}
+
+/// `value` as a `T`, once it holds no NUL: a wrong shape is a 422, as the required body gives.
+fn into_body<T: DeserializeOwned>(value: Value) -> Result<ApiJson<T>, ApiError> {
+    if zirv_flow_core::no_nul::find_nul(&value).is_some() {
+        return Err(ApiError::contains_nul("request body"));
+    }
+    serde_json::from_value(value).map(ApiJson).map_err(|_| {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "request body is missing a field or has a field of the wrong type",
+        )
+    })
 }
 
 fn reject(rejection: &JsonRejection) -> ApiError {
