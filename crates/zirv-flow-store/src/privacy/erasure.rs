@@ -352,12 +352,10 @@ pub async fn erase_person(
         delete_inbox_rows(connection, workspace, &matching_rows(&inbox, &wanted)).await?;
     // Transcripts, rejects with no person, import files and idempotency keys are free text or
     // client-chosen, so they are found by the person's ids and identifier values.
-    let needles = usable_needles(
-        std::iter::once(person)
-            .chain(people.iter().copied())
-            .map(|id| id.to_string())
-            .chain(values),
-    );
+    let group: Vec<Uuid> = std::iter::once(person)
+        .chain(people.iter().copied())
+        .collect();
+    let needles = usable_needles(group.iter().map(Uuid::to_string).chain(values));
     crate::ai::erase_ai_transcripts(connection, workspace, &needles).await?;
     crate::ai::erase_ai_drafts(connection, workspace, &needles).await?;
     crate::erase_unattributed_rejects(connection, workspace, &needles).await?;
@@ -366,12 +364,9 @@ pub async fn erase_person(
     // Another person's record can list a value of this group: the loser of an identity conflict.
     // That record is theirs, so it stays and loses the value. It runs before `delete_person`,
     // which deletes the conflicts that point at it.
-    let group: Vec<Uuid> = std::iter::once(person)
-        .chain(people.iter().copied())
-        .collect();
     redact_other_source_records(connection, workspace, &group, &pairs).await?;
     let mut person_found = false;
-    for id in std::iter::once(person).chain(people) {
+    for id in group {
         person_found |=
             delete_person(connection, workspace, id, DeleteReason::Erasure, trace).await?;
     }
