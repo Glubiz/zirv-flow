@@ -356,8 +356,9 @@ impl StoredItem {
 }
 
 /// Appends `items` as one multi-row insert and enqueues the drain job of every shard the rows
-/// fall in, all in one statement, so the wake-ups commit with the rows and the request pays a
-/// single round trip and commit. Returns once the rows are durable.
+/// fall in, all in one statement, so the wake-ups commit with the rows. The request pays the
+/// person lookup ([`known_people`], skipped without identifiers) and that one insert. Returns
+/// once the rows are durable.
 /// The rows are stamped `received_at` with the database's clock, the one the scheduler's safety
 /// net and the inbox-age gauge compare it with.
 pub async fn append_inbox(
