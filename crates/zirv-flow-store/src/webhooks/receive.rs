@@ -11,7 +11,7 @@ use uuid::Uuid;
 use zirv_flow_core::mapping::{Mapping, Target, TraitState, map_json};
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
-use crate::ingest::{bucket, enqueue_drain, strongest_identifier};
+use crate::ingest::{Shard, bucket, drain_shards, enqueue_drain_shard, strongest_identifier};
 use crate::{
     PgPool, StoreError, StreamOutcome, begin, commit, database_now, record_stream_outcome,
 };
@@ -89,7 +89,7 @@ fn payload_bucket(hook: Uuid, mapping: Option<&Value>, payload: &Value) -> i16 {
         .map_or_else(|| bucket(&hook.to_string()), |key| bucket(&key))
 }
 
-/// Appends one verified payload to the inbox, enqueues the workspace's drain and, when `report`
+/// Appends one verified payload to the inbox, enqueues the drain of its bucket's shard and, when `report`
 /// is set, reports the stream as succeeded now, all in one transaction. The row is stamped
 /// `received_at` with the database's clock and bucketed by its person ([`payload_bucket`]).
 /// `message_id` is the namespaced dedupe value (`wh:{hook}:{value}`); `signed_at` is the signed
@@ -108,6 +108,7 @@ pub async fn append_webhook(
         "signed_at": signed_at.and_then(|at| at.format(&Rfc3339).ok()),
     });
     let workspace = hook.workspace();
+    let affinity = payload_bucket(hook.id, hook.mapping.as_ref(), item);
     let mut tx = begin(pool).await?;
     sqlx::query(
         "INSERT INTO ingest_inbox \
@@ -119,11 +120,17 @@ pub async fn append_webhook(
     .bind(&stored)
     .bind(message_id)
     .bind(trace.trace_id.as_uuid())
-    .bind(payload_bucket(hook.id, hook.mapping.as_ref(), item))
+    .bind(affinity)
     .execute(&mut *tx)
     .await
     .map_err(StoreError::query)?;
-    enqueue_drain(&mut *tx, workspace, trace).await?;
+    enqueue_drain_shard(
+        &mut *tx,
+        workspace,
+        Shard::of_bucket(affinity, drain_shards()),
+        trace,
+    )
+    .await?;
     if report {
         let at = database_now(&mut *tx).await?;
         record_stream_outcome(

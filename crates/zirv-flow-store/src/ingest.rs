@@ -6,7 +6,8 @@
 //! event name.
 
 use std::cmp::Reverse;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -26,17 +27,33 @@ use crate::events::{
     DroppedTraits, EventBatch, EventOutcome, EventRecord, FailedItem, Refusal, apply_event_record,
     insert_dropped_traits_reject, insert_record_rejects, reject_apply_failed,
 };
-use crate::jobs::{bind_job, enqueue_ctes};
+use crate::jobs::{DEFAULT_MAX_ATTEMPTS, NOTIFY_CHANNEL};
 use crate::lists::ListCounts;
 use crate::people::{
     ProfileOutcome, ProfileRecord, apply_profile_record, apply_profile_record_into,
 };
 use crate::webhooks::HookResult;
 use crate::webhooks::{HookConfigs, HookMapped, apply_hook_record, map_hook_row};
-use crate::{NewJob, PgConnection, PgPool, StoreError, begin, commit, enqueue};
+use crate::{NewJob, PgConnection, PgPool, StoreError, begin, commit, enqueue, enqueue_many};
 
-/// The job kind that drains a workspace's inbox.
+/// The job kind that drains one shard of a workspace's inbox.
 pub const DRAIN_JOB_KIND: &str = "ingest.drain";
+
+/// The shard count the appenders and the safety net enqueue by (`ingest.drain_shards`), set once
+/// at start-up. A drain job carries the count it was enqueued with and drains that count's
+/// buckets, so a worker configured differently, as in a config change or a rolling deploy, still
+/// drains what the job names.
+static DRAIN_SHARDS: AtomicU32 = AtomicU32::new(8);
+
+/// Sets the shard count new drain jobs are enqueued by, clamped to `1..=Shard::MAX_COUNT`.
+pub fn set_drain_shards(count: u32) {
+    DRAIN_SHARDS.store(count.clamp(1, Shard::MAX_COUNT), Ordering::Relaxed);
+}
+
+/// The shard count new drain jobs are enqueued by.
+pub fn drain_shards() -> u32 {
+    DRAIN_SHARDS.load(Ordering::Relaxed)
+}
 
 /// The `source` every ingested record and event carries.
 const SOURCE: &str = "api";
@@ -86,7 +103,7 @@ const BUCKETS: u8 = 64;
 /// Which of a workspace's buckets a drain takes: shard `index` of `count` owns the buckets
 /// `b` with `b % count == index`. Rows of one record key share a bucket, so shards drain
 /// concurrently and each key still applies in id order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Shard {
     pub index: u32,
     pub count: u32,
@@ -95,6 +112,23 @@ pub struct Shard {
 impl Shard {
     /// Every bucket: one shard of one.
     pub const ALL: Self = Self { index: 0, count: 1 };
+
+    /// The most shards there can be: one per bucket.
+    pub const MAX_COUNT: u32 = BUCKETS as u32;
+
+    /// The shard of `count` that owns `bucket`.
+    pub(crate) fn of_bucket(bucket: i16, count: u32) -> Self {
+        let count = count.clamp(1, Self::MAX_COUNT);
+        Self {
+            index: u32::try_from(bucket).unwrap_or(0) % count,
+            count,
+        }
+    }
+
+    /// Whether the shard names buckets: `count` in `1..=MAX_COUNT` and `index` below it.
+    pub fn is_valid(self) -> bool {
+        (1..=Self::MAX_COUNT).contains(&self.count) && self.index < self.count
+    }
 
     /// The buckets this shard owns.
     fn buckets(self) -> Vec<i16> {
@@ -136,7 +170,10 @@ fn item_bucket(item: &IngestItem) -> i16 {
 /// transaction of its own, and returns how many it did. Rows a pre-bucketing or pre-0.29
 /// writer appended carry no bucket; this puts them in their key's queue by id. The lock is
 /// blocking, not `SKIP LOCKED`: it waits out an erasure and holds nothing else, so it cannot
-/// deadlock. A count below `limit` means none are left.
+/// deadlock. A count below `limit` means none are left, also while several shard jobs run it
+/// at once: the locking clause sits below the `LIMIT`, so a row another run bucketed and
+/// committed while this one waited fails the re-check and is replaced by the next unbucketed
+/// row, and the scan comes up short only when it has seen every row that lacked a bucket.
 pub async fn backfill_affinity(
     pool: &PgPool,
     workspace: WorkspaceId,
@@ -234,9 +271,9 @@ impl StoredItem {
     }
 }
 
-/// Appends `items` as one multi-row insert and enqueues the workspace's drain, both in one
-/// statement, so the wake-up commits with the rows and the request pays a single round trip
-/// and commit. Returns once the rows are durable.
+/// Appends `items` as one multi-row insert and enqueues the drain job of every shard the rows
+/// fall in, all in one statement, so the wake-ups commit with the rows and the request pays a
+/// single round trip and commit. Returns once the rows are durable.
 /// The rows are stamped `received_at` with the database's clock, the one the scheduler's safety
 /// net and the inbox-age gauge compare it with.
 pub async fn append_inbox(
@@ -259,27 +296,61 @@ pub async fn append_inbox(
 
     let affinities: Vec<i16> = items.iter().map(item_bucket).collect();
 
-    let job = drain_job(workspace, trace);
-    let row = bind_job(
-        sqlx::query(concat!(
-            "WITH ",
-            enqueue_ctes!(),
-            ", appended AS ( \
-                 INSERT INTO ingest_inbox \
-                    (workspace_id, api_key_id, kind, item, message_id, received_at, trace_id, \
-                     affinity) \
-                 SELECT $13, $14, i.kind, i.item, i.message_id, now(), $15, i.affinity \
-                 FROM unnest($16::text[], $17::jsonb[], $18::text[], $19::smallint[]) \
-                    WITH ORDINALITY AS i(kind, item, message_id, affinity, n) \
-                 ORDER BY i.n \
-                 RETURNING 1) \
-             SELECT (SELECT count(*) FROM appended), (SELECT count(*) FROM notified)"
-        )),
-        &job,
+    let count = drain_shards();
+    let shards: Vec<i32> = affinities
+        .iter()
+        .map(|bucket| Shard::of_bucket(*bucket, count).index)
+        .collect::<BTreeSet<u32>>()
+        .into_iter()
+        .filter_map(|index| i32::try_from(index).ok())
+        .collect();
+    // The jobs are built in the statement from the shard indexes, so the request carries a few
+    // bytes per shard and not a job row, which at 64 shards would double its size. A shard whose
+    // key is held by a ready or running job is left out before the insert, so a busy shard costs
+    // a probe of `jobs_unique_key_idx`; `ON CONFLICT` still covers a job that appears in between.
+    // `drain_job` is the same job; a test holds the two together.
+    let row = sqlx::query(
+        "WITH jobs_in AS ( \
+             SELECT s AS shard, $9::text || ':' || $1::text || ':' || s || '/' || $3::int AS key \
+             FROM unnest($2::int[]) AS s), \
+         inserted AS ( \
+             INSERT INTO jobs \
+                (id, workspace_id, kind, payload, priority, run_at, max_attempts, unique_key, \
+                 trace_id, cause_kind, cause_id) \
+             SELECT gen_random_uuid(), $1, $9, \
+                    jsonb_build_object('workspace_id', $1::uuid, \
+                        'shard', jsonb_build_object('index', t.shard, 'count', $3::int)), \
+                    0, now(), $8, t.key, $4, $5, $6 \
+             FROM jobs_in t \
+             WHERE NOT EXISTS (SELECT 1 FROM jobs j WHERE j.unique_key = t.key \
+                               AND j.state IN ('ready', 'running')) \
+             ON CONFLICT DO NOTHING \
+             RETURNING kind), \
+         notified AS ( \
+             SELECT pg_notify($7, k.kind) FROM (SELECT DISTINCT kind FROM inserted) k \
+             WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE state = 'ready' AND kind = k.kind \
+                               AND run_at <= now())), \
+         appended AS ( \
+             INSERT INTO ingest_inbox \
+                (workspace_id, api_key_id, kind, item, message_id, received_at, trace_id, \
+                 affinity) \
+             SELECT $1, $10, i.kind, i.item, i.message_id, now(), $4, i.affinity \
+             FROM unnest($11::text[], $12::jsonb[], $13::text[], $14::smallint[]) \
+                WITH ORDINALITY AS i(kind, item, message_id, affinity, n) \
+             ORDER BY i.n \
+             RETURNING 1) \
+         SELECT (SELECT count(*) FROM appended), (SELECT count(*) FROM notified)",
     )
     .bind(workspace.as_uuid())
-    .bind(api_key_id)
+    .bind(&shards)
+    .bind(i32::try_from(count).unwrap_or(i32::MAX))
     .bind(trace.trace_id.as_uuid())
+    .bind(trace.cause.kind.as_str())
+    .bind(&trace.cause.id)
+    .bind(NOTIFY_CHANNEL)
+    .bind(DEFAULT_MAX_ATTEMPTS)
+    .bind(DRAIN_JOB_KIND)
+    .bind(api_key_id)
     .bind(&kinds)
     .bind(&stored)
     .bind(&message_ids)
@@ -291,40 +362,123 @@ pub async fn append_inbox(
     Ok(usize::try_from(inserted).unwrap_or(usize::MAX))
 }
 
-/// Enqueues the workspace's drain. A no-op while one is ready or running.
-pub async fn enqueue_drain<'e>(
+/// Enqueues the drain of `shard`. A no-op while that shard's job is ready or running.
+pub async fn enqueue_drain_shard<'e>(
     executor: impl sqlx::PgExecutor<'e>,
     workspace: WorkspaceId,
+    shard: Shard,
     trace: &TraceContext,
 ) -> Result<bool, StoreError> {
-    enqueue(executor, &drain_job(workspace, trace)).await
+    enqueue(executor, &drain_job(workspace, shard, trace)).await
 }
 
-/// Enqueues the workspace's drain when its inbox still holds a row, and reports whether it did.
+/// A condition on workspace `$1`'s inbox: it holds a row in a bucket shard `index` of count `$2`
+/// owns, or a row with no bucket yet (the backfill buckets it, and any shard may own it). A probe
+/// of `ingest_inbox_affinity_idx` per bucket, never a scan of the backlog.
+fn shard_pending_sql(index: &str) -> String {
+    format!(
+        "(EXISTS (SELECT 1 FROM generate_series({index}, 63, $2::int) b \
+            WHERE EXISTS (SELECT 1 FROM ingest_inbox WHERE workspace_id = $1 AND affinity = b)) \
+          OR EXISTS (SELECT 1 FROM ingest_inbox WHERE workspace_id = $1 AND affinity IS NULL))"
+    )
+}
+
+/// Whether the inbox holds a row `shard` would drain.
+pub async fn shard_pending(
+    pool: &PgPool,
+    workspace: WorkspaceId,
+    shard: Shard,
+) -> Result<bool, StoreError> {
+    if !shard.is_valid() {
+        return Ok(false);
+    }
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT {}",
+        shard_pending_sql("$3::int")
+    )))
+    .bind(workspace.as_uuid())
+    .bind(i32::try_from(shard.count).unwrap_or(i32::MAX))
+    .bind(i32::try_from(shard.index).unwrap_or(i32::MAX))
+    .fetch_one(pool)
+    .await
+    .map_err(StoreError::query)
+}
+
+/// Enqueues the drain of `shard` when its buckets still hold a row, and reports whether it did.
 /// A worker calls it once a drain run has completed, so a run that ended on its time budget, or
 /// that rows were appended behind, is followed by the next at once instead of at the safety net.
 pub async fn enqueue_drain_if_pending(
     pool: &PgPool,
     workspace: WorkspaceId,
+    shard: Shard,
     trace: &TraceContext,
 ) -> Result<bool, StoreError> {
-    let pending: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM ingest_inbox WHERE workspace_id = $1)")
-            .bind(workspace.as_uuid())
-            .fetch_one(pool)
-            .await
-            .map_err(StoreError::query)?;
-    if !pending {
+    if !shard_pending(pool, workspace, shard).await? {
         return Ok(false);
     }
-    enqueue_drain(pool, workspace, trace).await
+    enqueue_drain_shard(pool, workspace, shard, trace).await
 }
 
-fn drain_job(workspace: WorkspaceId, trace: &TraceContext) -> NewJob {
+/// Enqueues the drain of every shard of `count` whose buckets hold a row, in one statement, and
+/// returns how many jobs it inserted (a shard whose job is ready or running is skipped). The
+/// safety net and the hand-off of a pre-shard job use it.
+pub async fn enqueue_pending_drains(
+    pool: &PgPool,
+    workspace: WorkspaceId,
+    count: u32,
+    trace: &TraceContext,
+) -> Result<u64, StoreError> {
+    let count = count.clamp(1, Shard::MAX_COUNT);
+    let pending: Vec<i32> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT s FROM generate_series(0, $2::int - 1) s WHERE {}",
+        shard_pending_sql("s")
+    )))
+    .bind(workspace.as_uuid())
+    .bind(i32::try_from(count).unwrap_or(i32::MAX))
+    .fetch_all(pool)
+    .await
+    .map_err(StoreError::query)?;
+    let jobs: Vec<NewJob> = pending
+        .into_iter()
+        .filter_map(|index| u32::try_from(index).ok())
+        .map(|index| drain_job(workspace, Shard { index, count }, trace))
+        .collect();
+    enqueue_many(pool, &jobs).await
+}
+
+/// The shard a drain job's payload names. `Ok(None)` is a payload from before the drain was
+/// split by shard; `Err` is a shard that names no buckets.
+pub fn payload_shard(payload: &Value) -> Result<Option<Shard>, &'static str> {
+    let Some(shard) = payload.get("shard") else {
+        return Ok(None);
+    };
+    let field = |name: &str| {
+        shard
+            .get(name)
+            .and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+    };
+    match (field("index"), field("count")) {
+        (Some(index), Some(count)) if (Shard { index, count }).is_valid() => {
+            Ok(Some(Shard { index, count }))
+        }
+        _ => Err("the payload names a shard that owns no buckets"),
+    }
+}
+
+fn drain_job(workspace: WorkspaceId, shard: Shard, trace: &TraceContext) -> NewJob {
     let mut job = NewJob::new(DRAIN_JOB_KIND, trace.clone());
     job.workspace_id = Some(workspace);
-    job.payload = json!({ "workspace_id": workspace.as_uuid() });
-    job.unique_key = Some(format!("{DRAIN_JOB_KIND}:{}", workspace.as_uuid()));
+    job.payload = json!({
+        "workspace_id": workspace.as_uuid(),
+        "shard": { "index": shard.index, "count": shard.count },
+    });
+    job.unique_key = Some(format!(
+        "{DRAIN_JOB_KIND}:{}:{}/{}",
+        workspace.as_uuid(),
+        shard.index,
+        shard.count
+    ));
     job
 }
 
@@ -1327,7 +1481,7 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn an_empty_append_still_wakes_the_drain(pool: PgPool) {
+    async fn an_empty_append_enqueues_no_drain(pool: PgPool) {
         crate::decision_testing::checked(pool, |pool| async move {
             let ws = workspace(&pool, "ours").await;
             let trace = TraceContext::root(Cause::api("req-1"));
@@ -1338,14 +1492,14 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-            assert_eq!(jobs, 1);
+            assert_eq!(jobs, 0, "no row, no shard to drain");
         })
         .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn an_append_writes_every_row_with_the_trace_and_enqueues_one_drain(pool: PgPool) {
+    async fn an_append_writes_every_row_with_the_trace_and_enqueues_its_shards_once(pool: PgPool) {
         crate::decision_testing::checked(pool, |pool| async move {
             let ws = workspace(&pool, "ours").await;
             let trace = TraceContext::root(Cause::api("req-1"));
@@ -1371,18 +1525,26 @@ mod tests {
             assert_eq!(rows[1].0, "track");
             assert!(Uuid::parse_str(&rows[1].1).is_ok(), "a server-assigned id");
             assert!(rows.iter().all(|row| row.2 == trace.trace_id.as_uuid()));
-            let jobs: Vec<(String, Option<String>)> =
-                sqlx::query_as("SELECT kind, unique_key FROM jobs")
+            let shards: Vec<i32> =
+                sqlx::query_scalar("SELECT DISTINCT affinity % 8 FROM ingest_inbox ORDER BY 1")
                     .fetch_all(&pool)
                     .await
                     .unwrap();
-            assert_eq!(
-                jobs,
-                [(
-                    DRAIN_JOB_KIND.to_owned(),
-                    Some(format!("ingest.drain:{}", ws.as_uuid()))
-                )]
-            );
+            let jobs: Vec<(String, Option<String>)> =
+                sqlx::query_as("SELECT kind, unique_key FROM jobs ORDER BY unique_key")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            let expected: Vec<(String, Option<String>)> = shards
+                .iter()
+                .map(|index| {
+                    (
+                        DRAIN_JOB_KIND.to_owned(),
+                        Some(format!("ingest.drain:{}:{index}/8", ws.as_uuid())),
+                    )
+                })
+                .collect();
+            assert_eq!(jobs, expected, "one job per shard the rows fall in, once");
         })
         .await;
     }
@@ -1393,7 +1555,7 @@ mod tests {
     /// every other kind.
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn the_next_drain_is_enqueued_only_while_the_inbox_holds_a_row(pool: PgPool) {
+    async fn the_next_drain_is_enqueued_only_while_the_shard_holds_a_row(pool: PgPool) {
         crate::decision_testing::checked(pool, |pool| async move {
             let ws = workspace(&pool, "ours").await;
             let trace = TraceContext::root(Cause::api("req-1"));
@@ -1404,8 +1566,15 @@ mod tests {
                     .await
                     .unwrap()
             };
+            let shard = Shard::of_bucket(item_bucket(&identify("u1", "m-1", json!({}))), 8);
+            let other = Shard {
+                index: (shard.index + 1) % 8,
+                count: 8,
+            };
             assert!(
-                !enqueue_drain_if_pending(&pool, ws, &trace).await.unwrap(),
+                !enqueue_drain_if_pending(&pool, ws, shard, &trace)
+                    .await
+                    .unwrap(),
                 "an empty inbox needs no drain"
             );
             assert_eq!(jobs().await, 0);
@@ -1421,8 +1590,16 @@ mod tests {
             .unwrap();
             assert_eq!(jobs().await, 1, "the append enqueued a drain");
             assert!(
-                !enqueue_drain_if_pending(&pool, ws, &trace).await.unwrap(),
+                !enqueue_drain_if_pending(&pool, ws, shard, &trace)
+                    .await
+                    .unwrap(),
                 "a drain that is ready holds the key"
+            );
+            assert!(
+                !enqueue_drain_if_pending(&pool, ws, other, &trace)
+                    .await
+                    .unwrap(),
+                "another shard's buckets hold no row"
             );
 
             sqlx::query("DELETE FROM jobs WHERE kind = $1")
@@ -1431,7 +1608,9 @@ mod tests {
                 .await
                 .unwrap();
             assert!(
-                enqueue_drain_if_pending(&pool, ws, &trace).await.unwrap(),
+                enqueue_drain_if_pending(&pool, ws, shard, &trace)
+                    .await
+                    .unwrap(),
                 "a completed run that left a row is followed by the next drain"
             );
             assert_eq!(jobs().await, 1);
@@ -1460,9 +1639,14 @@ mod tests {
             .await
             .unwrap();
             assert!(
-                enqueue_drain(&pool, ws, &TraceContext::root(Cause::api("req-1")))
-                    .await
-                    .unwrap()
+                enqueue_drain_shard(
+                    &pool,
+                    ws,
+                    Shard::ALL,
+                    &TraceContext::root(Cause::api("req-1"))
+                )
+                .await
+                .unwrap()
             );
             let priority: i16 = sqlx::query_scalar("SELECT priority FROM jobs WHERE kind = $1")
                 .bind(DRAIN_JOB_KIND)
@@ -3091,6 +3275,258 @@ mod tests {
 
             assert_eq!((outcome.rows, outcome.more), (0, false));
             assert_eq!(inbox_count(&pool).await, 3);
+        })
+        .await;
+    }
+
+    #[test]
+    fn a_shard_owns_buckets_only_with_a_count_up_to_the_bucket_count_and_an_index_below_it() {
+        for (index, count, valid) in [(0, 1, true), (63, 64, true), (4, 4, false), (0, 0, false)] {
+            assert_eq!(Shard { index, count }.is_valid(), valid, "{index}/{count}");
+        }
+        assert!(
+            !Shard {
+                index: 0,
+                count: 65
+            }
+            .is_valid()
+        );
+        assert_eq!(Shard::of_bucket(13, 8), Shard { index: 5, count: 8 });
+        assert_eq!(Shard::of_bucket(13, 0), Shard { index: 0, count: 1 });
+        assert_eq!(
+            Shard::of_bucket(63, 200),
+            Shard {
+                index: 63,
+                count: 64
+            }
+        );
+    }
+
+    #[test]
+    fn a_payload_names_its_shard_or_none_or_one_that_owns_no_buckets() {
+        assert_eq!(payload_shard(&json!({ "workspace_id": "w" })), Ok(None));
+        assert_eq!(
+            payload_shard(&json!({ "shard": { "index": 2, "count": 8 } })),
+            Ok(Some(Shard { index: 2, count: 8 }))
+        );
+        for shard in [
+            json!({ "index": 8, "count": 8 }),
+            json!({ "index": 0, "count": 65 }),
+            json!({ "index": "0", "count": 8 }),
+            json!({ "count": 8 }),
+        ] {
+            assert!(payload_shard(&json!({ "shard": shard })).is_err());
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_append_enqueues_exactly_the_shards_its_rows_fall_in_in_one_statement(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            sqlx::raw_sql(
+                "CREATE TABLE statement_log (client_query text NOT NULL); \
+                 CREATE FUNCTION log_statement() RETURNS trigger LANGUAGE plpgsql AS \
+                   $$ BEGIN INSERT INTO statement_log VALUES (current_query()); RETURN NULL; END $$; \
+                 CREATE TRIGGER log_inbox AFTER INSERT ON ingest_inbox \
+                   FOR EACH STATEMENT EXECUTE FUNCTION log_statement(); \
+                 CREATE TRIGGER log_jobs AFTER INSERT ON jobs \
+                   FOR EACH STATEMENT EXECUTE FUNCTION log_statement();",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            let items: Vec<IngestItem> = (0..40)
+                .map(|n| identify(&format!("u{n}"), &format!("m-{n}"), json!({})))
+                .collect();
+
+            append(&pool, ws, &TraceContext::root(Cause::api("req")), &items).await;
+
+            let shards: Vec<i32> =
+                sqlx::query_scalar("SELECT DISTINCT affinity % 8 FROM ingest_inbox ORDER BY 1")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert!(shards.len() > 1, "forty keys fall in several shards");
+            let mut keys: Vec<String> =
+                sqlx::query_scalar("SELECT unique_key FROM jobs ORDER BY unique_key")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            let mut expected: Vec<String> = shards
+                .iter()
+                .map(|index| format!("ingest.drain:{}:{index}/8", ws.as_uuid()))
+                .collect();
+            keys.sort();
+            expected.sort();
+            assert_eq!(keys, expected);
+            // The statement builds each job itself; it must be the job `drain_job` describes.
+            let trace = TraceContext::root(Cause::api("req"));
+            for index in &shards {
+                let shard = Shard {
+                    index: u32::try_from(*index).unwrap(),
+                    count: 8,
+                };
+                let want = drain_job(ws, shard, &trace);
+                let got: (Value, i16, i32, String, String, Option<Uuid>, Option<String>) =
+                    sqlx::query_as(
+                        "SELECT payload, priority, max_attempts, kind, cause_kind, workspace_id, \
+                                cause_id FROM jobs WHERE unique_key = $1",
+                    )
+                    .bind(want.unique_key.as_deref())
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                assert_eq!(got.0, want.payload);
+                assert_eq!((got.1, got.2), (want.priority, want.max_attempts));
+                assert_eq!(got.3, want.kind);
+                assert_eq!(got.4, want.trace.cause.kind.as_str());
+                assert_eq!(got.5, want.workspace_id.map(|id| id.as_uuid()));
+                assert_eq!(got.6.as_deref(), Some(want.trace.cause.id.as_str()));
+            }
+            // A second append finds every key held and inserts nothing.
+            append(&pool, ws, &trace, &items).await;
+            let held: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(held, i64::try_from(shards.len()).unwrap());
+            let (writes, distinct): (i64, i64) =
+                sqlx::query_as("SELECT count(*), count(DISTINCT client_query) FROM statement_log")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!((writes, distinct), (4, 1), "each append is one statement for its rows and jobs");
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn two_drains_over_one_bucket_with_different_counts_apply_a_key_in_id_order(
+        pool: PgPool,
+    ) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            let trace = TraceContext::root(Cause::api("req"));
+            let items: Vec<IngestItem> = (0..120)
+                .map(|n| identify("k", &format!("m-{n:03}"), json!({ "n": n })))
+                .collect();
+            append(&pool, ws, &trace, &items).await;
+            let bucket: i16 = sqlx::query_scalar("SELECT affinity FROM ingest_inbox LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            let shards = [
+                Shard::of_bucket(bucket, 8),
+                Shard::of_bucket(bucket, 4),
+                Shard::ALL,
+            ];
+
+            let drains = shards.map(|shard| {
+                let pool = pool.clone();
+                tokio::spawn(async move {
+                    while inbox_count(&pool).await > 0 {
+                        drain_batch(&pool, ws, shard, &key(), 5).await.unwrap();
+                        tokio::task::yield_now().await;
+                    }
+                })
+            });
+            for drain in drains {
+                drain.await.unwrap();
+            }
+
+            let last: Option<i64> = sqlx::query_scalar(
+                "SELECT (p.traits->>'n')::bigint FROM people p JOIN identities i \
+                 ON i.person_id = p.id WHERE i.value = 'k'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                last,
+                Some(119),
+                "no row applied after a later one of its key"
+            );
+        })
+        .await;
+    }
+
+    // Holds with row locks alone, which is why the backfill takes no further lock: a run
+    // that waited on another's rows skips them and fills its batch from later rows.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn concurrent_backfills_finish_only_when_no_row_is_left_unbucketed(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            raw_rows(&pool, ws, None, 90, "old").await;
+
+            let runs: Vec<_> = (0..4)
+                .map(|_| {
+                    let pool = pool.clone();
+                    tokio::spawn(async move {
+                        while backfill_affinity(&pool, ws, 7).await.unwrap() >= 7 {}
+                        // This backfill reported done: nothing may still lack a bucket.
+                        sqlx::query_scalar::<_, i64>(
+                            "SELECT count(*) FROM ingest_inbox WHERE affinity IS NULL",
+                        )
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap()
+                    })
+                })
+                .collect();
+
+            for run in runs {
+                assert_eq!(run.await.unwrap(), 0);
+            }
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_take_leaves_out_the_later_rows_of_a_bucket_whose_earlier_row_another_transaction_holds(
+        pool: PgPool,
+    ) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            raw_rows(&pool, ws, Some(0), 3, "held").await;
+            raw_rows(&pool, ws, Some(8), 2, "free").await;
+            let held: Vec<i64> =
+                sqlx::query_scalar("SELECT id FROM ingest_inbox WHERE affinity = 0 ORDER BY id")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            let free: Vec<i64> =
+                sqlx::query_scalar("SELECT id FROM ingest_inbox WHERE affinity = 8 ORDER BY id")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            let mut holder = begin(&pool).await.unwrap();
+            sqlx::query("SELECT id FROM ingest_inbox WHERE id = $1 FOR UPDATE")
+                .bind(held[0])
+                .fetch_all(&mut *holder)
+                .await
+                .unwrap();
+
+            // Two jobs of different counts both cover buckets 0 and 8.
+            for shard in [Shard { index: 0, count: 8 }, Shard::ALL] {
+                let (ids, _) = taken(&pool, ws, shard, 10).await;
+
+                assert_eq!(
+                    ids, free,
+                    "{shard:?}: the later rows of the held bucket wait"
+                );
+            }
+            commit(holder).await.unwrap();
+            let (ids, _) = taken(&pool, ws, Shard::ALL, 10).await;
+            let mut all: Vec<i64> = held.iter().chain(&free).copied().collect();
+            all.sort_unstable();
+            assert_eq!(
+                ids, all,
+                "once released the bucket's rows follow in id order"
+            );
         })
         .await;
     }

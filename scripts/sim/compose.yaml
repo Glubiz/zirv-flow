@@ -158,6 +158,9 @@ services:
     environment:
       <<: *zirv-env
       ZIRV_FLOW_WORKER__CONCURRENCY: "8"
+      # One slot per shard job: the workers' slots together must cover ingest.drain_shards (8),
+      # and each slot adds three connections (see the profile files for the arithmetic).
+      ZIRV_FLOW_WORKER__DRAIN_SLOTS: "${SIM_DRAIN_SLOTS:-4}"
       ZIRV_FLOW_OPS__BIND: 0.0.0.0:9100
       TOKIO_WORKER_THREADS: ${SIM_THREADS_WORKER:-2}
 

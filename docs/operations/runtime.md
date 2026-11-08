@@ -177,11 +177,15 @@ cannot use the other half CPU. Set `TOKIO_WORKER_THREADS` to the limit rounded u
 1.5 CPUs) on `serve` and `worker` processes with fractional limits.
 
 Each of a worker's `worker.concurrency` slots claims up to 32 due jobs at once
-and runs them one after another. The worker also keeps `worker.drain_slots` (default 1) slots
+and runs them one after another. The worker also keeps `worker.drain_slots` slots
 that claim only `ingest.drain`, one job at a time, so an inbox drain, which can run for up to
 20 seconds, never waits behind the other kinds; the general slots do not claim it while
-drain slots run. A drain slot that completes a run enqueues the workspace's next drain at once
-when its inbox still holds rows. With `worker.drain_slots` at 0 the general slots claim the
+drain slots run. A workspace's drain is one job per shard (`ingest.drain_shards` of them, up to
+64), so its shards run in different slots and on different workers. `worker.drain_slots` unset
+means `ingest.drain_shards`, so one worker runs every shard at once; with several workers, set it
+so the slots of all workers together are at least `ingest.drain_shards` (for example 8 shards over
+3 workers: 3 slots each). A drain slot that completes a run enqueues the same shard's next drain at once
+when its buckets still hold rows. With `worker.drain_slots` at 0 the general slots claim the
 drain, and a batch holds at most one, so due drains spread over the slots. A running job holds a lease of
 `worker.lease_seconds`, which its worker extends every third of that while the
 handler runs. A claimed job waits for its turn on the lease from its claim: the

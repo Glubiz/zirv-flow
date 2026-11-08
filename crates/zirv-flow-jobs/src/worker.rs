@@ -24,7 +24,7 @@ use zirv_flow_store::{
     Keyring, MessageRetention, PgConnection, PgPool, RetentionSettings, STEP_JOB_KIND, begin,
     cache_change_readers, claim_jobs, complete_job, complete_jobs, confirm_lease,
     enqueue_drain_if_pending, fail_job, heartbeat_job, listen_for_jobs, lock_lease, observe_pool,
-    release_jobs, sized_like,
+    payload_shard, release_jobs, sized_like,
 };
 
 use crate::JobError;
@@ -95,7 +95,8 @@ pub struct WorkerConfig {
     pub keyring: Option<Arc<Keyring>>,
     /// Inbox rows `ingest.drain` applies per transaction.
     pub ingest_drain_batch_size: u32,
-    /// Concurrent drain loops per workspace in `ingest.drain`.
+    /// The shard count a pre-split `ingest.drain` job (one without a shard) enqueues the shard
+    /// jobs of. A shard job drains the shard its payload names, whatever this is.
     pub ingest_drain_shards: u32,
     /// Messages a `kafka.consume` unit holds before it commits.
     pub kafka_unit_messages: usize,
@@ -162,9 +163,9 @@ impl WorkerConfig {
 
 /// A pool of workers over one database. It runs on pools of its own, so neither the HTTP
 /// server nor running handlers can starve a claim, a handler transaction or a heartbeat:
-/// `slots * (1 + drain_shards) + 1` connections for claims, handler transactions, the
-/// transactions a handler such as the ingest drain commits on its own beside its job
-/// transaction (one per drain shard), and failures, and `slots` for heartbeats and for
+/// `slots * 2 + 1` connections for claims, handler transactions, the transaction a handler
+/// such as the ingest drain commits on its own beside its job transaction (one per drain
+/// shard job), and failures, and `slots` for heartbeats and for
 /// giving back the claimed jobs a slot has not started; `slots` is `concurrency` plus the
 /// drain slots.
 pub struct Worker {
@@ -253,12 +254,7 @@ impl Worker {
         let slots =
             u32::try_from(self.config.concurrency.saturating_add(drain_slots)).unwrap_or(u32::MAX);
         let shared = Arc::new(Shared::new(
-            sized_like(
-                &self.pool,
-                pool_size(slots, self.config.ingest_drain_shards),
-                0,
-                ACQUIRE_TIMEOUT,
-            ),
+            sized_like(&self.pool, pool_size(slots), 0, ACQUIRE_TIMEOUT),
             // A warm pool keeps connecting off the heartbeat's path; a beat may wait one
             // period, and a failed one is retried on the next, before the lease ends.
             sized_like(&self.pool, slots, slots, self.config.lease / 3),
@@ -322,12 +318,10 @@ impl Lane {
 
 const DRAIN_KINDS: [&str; 1] = [DRAIN_JOB_KIND];
 
-/// The shared pool's size: each slot holds its job transaction plus up to `drain_shards`
-/// drain-batch transactions, and one connection is kept for failures.
-fn pool_size(slots: u32, drain_shards: u32) -> u32 {
-    slots
-        .saturating_mul(drain_shards.max(1).saturating_add(1))
-        .saturating_add(1)
+/// The shared pool's size: each slot holds its job transaction plus one drain-batch
+/// transaction, and one connection is kept for failures.
+fn pool_size(slots: u32) -> u32 {
+    slots.saturating_mul(2).saturating_add(1)
 }
 
 /// Publishes the worker pools' gauges, until the task is aborted.
@@ -663,10 +657,12 @@ async fn run_attempt(shared: &Arc<Shared>, job: ClaimedJob) {
     }
 }
 
-/// With drain slots, enqueues the next drain of a workspace whose run just completed while its
-/// inbox still holds rows, as the job's unique key is free only now: the run ended on its time
-/// budget, or rows were appended behind it. Without this the next run waits for the scheduler's
-/// safety net.
+/// With drain slots, enqueues the next drain of the shard whose run just completed while its
+/// buckets still hold rows, as the job's unique key is free only now: the run ended on its time
+/// budget, or rows were appended behind it. An append that raced the run's last empty check had
+/// its enqueue dropped by that key, so this check, made after the key is free, is what keeps a
+/// runnable job for the row. Without this the next run waits for the scheduler's safety net. A
+/// job from before the split names no shard and enqueued the shard jobs itself.
 async fn requeue_drain(shared: &Shared, job: &ClaimedJob) {
     let Some(workspace) = job.workspace_id.filter(|_| job.kind == DRAIN_JOB_KIND) else {
         return;
@@ -674,8 +670,16 @@ async fn requeue_drain(shared: &Shared, job: &ClaimedJob) {
     if shared.drain_slots == 0 {
         return;
     }
-    if let Err(error) =
-        enqueue_drain_if_pending(&shared.pool, WorkspaceId::from_uuid(workspace), &job.trace).await
+    let Ok(Some(shard)) = payload_shard(&job.payload) else {
+        return;
+    };
+    if let Err(error) = enqueue_drain_if_pending(
+        &shared.pool,
+        WorkspaceId::from_uuid(workspace),
+        shard,
+        &job.trace,
+    )
+    .await
     {
         warn!("could not enqueue the next ingest drain: {error}");
     }
@@ -1357,13 +1361,11 @@ mod tests {
     }
 
     #[test]
-    fn the_pool_holds_a_job_transaction_and_a_batch_per_shard_for_every_slot_and_one_spare() {
-        assert_eq!(pool_size(4, 4), 21);
-        assert_eq!(pool_size(4, 8), 37);
-        assert_eq!(pool_size(1, 1), 3);
-        assert_eq!(pool_size(8, 16), 137);
-        assert_eq!(pool_size(2, 0), 5, "no shards still holds one batch");
-        assert_eq!(pool_size(u32::MAX, 16), u32::MAX);
+    fn the_pool_holds_a_job_transaction_and_a_batch_for_every_slot_and_one_spare() {
+        assert_eq!(pool_size(4), 9);
+        assert_eq!(pool_size(1), 3);
+        assert_eq!(pool_size(72), 145);
+        assert_eq!(pool_size(u32::MAX), u32::MAX);
     }
 
     /// Records the job's index in `effects` (primary key: a repeat is an error), failing the
@@ -2785,9 +2787,14 @@ mod tests {
             .id;
         let trace = TraceContext::root(Cause::api("test-request"));
         assert!(
-            zirv_flow_store::enqueue_drain(pool, workspace, &trace)
-                .await
-                .unwrap()
+            zirv_flow_store::enqueue_drain_shard(
+                pool,
+                workspace,
+                zirv_flow_store::Shard::ALL,
+                &trace
+            )
+            .await
+            .unwrap()
         );
     }
 
@@ -2891,6 +2898,163 @@ mod tests {
         assert_eq!(drain_jobs(&pool).await, 1, "the drain was not claimed");
         stop.send(true).unwrap();
         slot.await.unwrap();
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn two_workers_with_drain_slots_drain_different_shards_of_one_workspace_in_order(
+        pool: PgPool,
+    ) {
+        use zirv_flow_store::{IngestItem, IngestPayload, append_inbox};
+
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            migrated(&pool).await;
+            let name = WorkspaceName::parse("ours").unwrap();
+            let slug = Slug::parse("ours").unwrap();
+            let ws = zirv_flow_store::create_workspace(&pool, &name, &slug)
+                .await
+                .unwrap()
+                .id;
+            let mut items = Vec::new();
+            for round in ["free", "basic", "pro"] {
+                for n in 0..300 {
+                    items.push(IngestItem {
+                        identifiers: vec![("external:user_id".into(), format!("u{n}"))],
+                        timestamp: None,
+                        message_id: Some(format!("{round}-{n}")),
+                        payload: IngestPayload::Identify {
+                            traits: json!({ "plan": round }).as_object().unwrap().clone(),
+                        },
+                    });
+                }
+            }
+            let trace = TraceContext::root(Cause::api("test-request"));
+            append_inbox(&pool, ws, uuid::Uuid::now_v7(), &trace, &items)
+                .await
+                .unwrap();
+            // Slots are named by process and slot number, so the two workers' drain slots
+            // (1 and 2 against 3 and 4) tell their claims apart.
+            let mut first = draining_config(1, 2);
+            let mut second = draining_config(3, 2);
+            first.ingest_drain_batch_size = 5;
+            second.ingest_drain_batch_size = 5;
+            let (stop_first, first) = start(&pool, first);
+            let (stop_second, second) = start(&pool, second);
+
+            let pid = std::process::id();
+            let mut owners = std::collections::BTreeSet::new();
+            let mut together = 0;
+            loop {
+                let running: Vec<String> = sqlx::query_scalar(
+                    "SELECT locked_by FROM jobs WHERE kind = 'ingest.drain' AND state = 'running'",
+                )
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+                together = together.max(running.len());
+                owners.extend(running);
+                let left: i64 = sqlx::query_scalar("SELECT count(*) FROM ingest_inbox")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                if left == 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+
+            let by = |slots: [usize; 2]| {
+                slots
+                    .iter()
+                    .any(|slot| owners.contains(&format!("{pid}:{slot}")))
+            };
+            assert!(
+                by([1, 2]) && by([3, 4]),
+                "both workers ran shards: {owners:?}"
+            );
+            assert!(together >= 2, "shards of one workspace ran at once");
+            let plans: Vec<Option<String>> = sqlx::query_scalar(
+                "SELECT p.traits->>'plan' FROM people p JOIN identities i ON i.person_id = p.id",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(plans.len(), 300);
+            assert!(
+                plans.iter().all(|plan| plan.as_deref() == Some("pro")),
+                "every key ended on its last value"
+            );
+            stop_and_join(stop_first, first).await;
+            stop_and_join(stop_second, second).await;
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_completed_shard_job_is_followed_by_the_next_when_a_row_landed_behind_it(
+        pool: PgPool,
+    ) {
+        use zirv_flow_store::{IngestItem, IngestPayload, append_inbox};
+
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            migrated(&pool).await;
+            let name = WorkspaceName::parse("ours").unwrap();
+            let slug = Slug::parse("ours").unwrap();
+            let ws = zirv_flow_store::create_workspace(&pool, &name, &slug)
+                .await
+                .unwrap()
+                .id;
+            let item = IngestItem {
+                identifiers: vec![("external:user_id".into(), "u1".into())],
+                timestamp: None,
+                message_id: Some("first".into()),
+                payload: IngestPayload::Identify {
+                    traits: json!({ "plan": "free" }).as_object().unwrap().clone(),
+                },
+            };
+            let trace = TraceContext::root(Cause::api("test-request"));
+            append_inbox(&pool, ws, uuid::Uuid::now_v7(), &trace, &[item])
+                .await
+                .unwrap();
+            // The run's first batch deletes its row, and in that transaction a row of the same
+            // bucket lands behind it, once: the run ends with the shard no longer empty and the
+            // key held, as when an append races the last empty check.
+            for statement in [
+                "CREATE TABLE once (x int)",
+                "CREATE FUNCTION again() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+                   IF NOT EXISTS (SELECT 1 FROM once) THEN \
+                     INSERT INTO once VALUES (1); \
+                     INSERT INTO ingest_inbox (workspace_id, api_key_id, kind, item, message_id, \
+                                               trace_id, affinity) \
+                     VALUES (OLD.workspace_id, OLD.api_key_id, OLD.kind, OLD.item, 'behind', \
+                             OLD.trace_id, OLD.affinity); \
+                   END IF; RETURN OLD; END $$",
+                "CREATE TRIGGER again AFTER DELETE ON ingest_inbox \
+                 FOR EACH ROW EXECUTE FUNCTION again()",
+            ] {
+                sqlx::query(statement).execute(&pool).await.unwrap();
+            }
+            let (stop, handle) = start(&pool, draining_config(1, 1));
+
+            eventually(
+                "the row behind the run to be drained by the next job",
+                || async {
+                    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM ingest_inbox")
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                    let once: i64 = sqlx::query_scalar("SELECT count(*) FROM once")
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                    once == 1 && left == 0 && drain_jobs(&pool).await == 0
+                },
+            )
+            .await;
+            stop_and_join(stop, handle).await;
+        })
+        .await;
     }
 
     #[test]

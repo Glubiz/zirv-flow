@@ -466,21 +466,34 @@ the writer adds neither marks nor a re-evaluation request.
 As built (identify / track ingestion): `POST /api/v1/ingest/{identify,track,batch}` validate
 structure, charge the key's in-process token bucket (items, per `serve` process), and append
 one row per item to `ingest_inbox` with the request's trace id in a single transaction that
-also enqueues `ingest.drain` for the workspace (`unique_key = ingest.drain:<workspace>`). The
+also enqueues one `ingest.drain` job for each shard its rows fall in (payload `{workspace_id, shard:
+{index, count}}`, `unique_key = ingest.drain:<workspace>:<index>/<count>`, `count` being
+`ingest.drain_shards` as the appender reads it): the same `INSERT` statement writes the rows and
+the jobs. The
 inbox row's `message_id` is the client's or a server-assigned UUID v7. Each row also
 stores `affinity`, the first byte of the SHA-256 of its record key (the strongest identifier)
 modulo 64, fixed forever; rows appended before the column existed, or by a pre-0.29 serve
 during a rolling upgrade, hold NULL. A drain job first buckets the workspace's NULL rows (a
 blocking `FOR UPDATE` in a short transaction of its own, so it waits out an erasure and cannot
-deadlock; the bucket comes from the same function as the append's), then runs
-`ingest.drain_shards` (default 8) loops concurrently, each owning the buckets with `affinity % shards =
-index`, each a tokio task of its own owned by the job (so the shards use several runtime threads,
-and a lost lease aborts them all). A batch is up to `ingest.drain_batch_size` of the
+deadlock; the bucket comes from the same function as the append's; shard jobs that start together share
+the work, since the lock sits below the `LIMIT` and a run that waited on another's rows
+replaces them with later unbucketed ones, so a short batch means none is left and no shard
+starts draining while an older row is unbucketed), then loops batches over the buckets of
+its own shard, those with `affinity % count = index`, until they are empty or its 20 second
+budget ends. `ingest.drain_shards` (default 8, up to 64, one per bucket) is how many jobs a
+workspace's drain splits into; they spread over every worker's drain slots, so the drain is not
+held to one process. A job drains the buckets its payload names whatever count the worker is
+configured with, so a config change or a rolling deploy that leaves appenders and workers on
+different counts stays correct: two jobs may cover one bucket, and `take_rows` skips locked rows
+and leaves out a bucket's rows after a missing one, so a key still applies in id order. The
+requeue and the safety net enqueue by the configured count, so the counts converge. A job queued
+before the split (payload without a shard) enqueues the configured count's jobs for the shards
+that hold rows and completes. A batch is up to `ingest.drain_batch_size` of the
 oldest rows of the shard's buckets, picked through `(workspace_id, affinity, id)`, so a scan
 never walks another shard's backlog. A key lives in one bucket, so its
 rows still apply in id order; two shards may share a person under different keys, and a
-deadlock between them is the retryable `40P01`. The worker pool holds `(concurrency + drain_slots) * (1 +
-shards) + 1` connections. Each loop is `drain_batch`: in one transaction it picks the
+deadlock between them is the retryable `40P01`. The worker pool holds `(concurrency + drain_slots) * 2
++ 1` connections. Each loop is `drain_batch`: in one transaction it picks the
 batch's ids without locking, locks those rows with `FOR UPDATE SKIP LOCKED` (a batch never
 applies past a row it could not lock: the rest of that bucket's picked rows wait for the next
 batch, and a batch that takes nothing ends the loop), applies them in id order through the
@@ -488,10 +501,15 @@ transaction-taking profile and event paths of apply-batch, deletes them and comm
 drainers never apply a row twice. A retryable error retries the batch with jittered backoff;
 any other error applies the batch's rows one at a time, each in a savepoint, and a row that
 still fails becomes an `apply_failed` ingest reject. The job never re-enqueues itself, since it
-holds its unique key; a worker with drain slots (`worker.drain_slots`, default 1, which claim only
-`ingest.drain` while the general slots leave it alone) enqueues the next drain as soon as a run
-completes with rows left in the inbox, and the scheduler leader enqueues a drain for each workspace whose oldest
-row (one `(workspace_id, id)` index probe per workspace) is over 2 seconds old. Row ids come
+holds its unique key; a worker with drain slots (`worker.drain_slots`, default `ingest.drain_shards`,
+each claiming one shard job at a time and only `ingest.drain`, which the general slots leave alone)
+enqueues the same shard's next drain as soon as a run completes with rows left in that shard's
+buckets (a probe of the shard's buckets, made after the key is free, so a row appended behind the
+run's last empty check, whose own enqueue the held key dropped, still gets a job), and the
+scheduler leader enqueues a job for each shard that holds a row of each workspace whose oldest
+row (one `(workspace_id, id)` index probe per workspace) is over 2 seconds old. A single worker
+runs all shards at once with `drain_slots` = `drain_shards`; size slots across workers so their
+sum is at least `drain_shards`, or shards wait for a free slot. Row ids come
 from a sequence, so two requests that commit out of order drain in id order, not commit order.
 
 As built (M3, webhooks): a hook is a source of kind `webhook` (capability `push`, no config, no
