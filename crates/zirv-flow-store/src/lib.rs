@@ -218,9 +218,10 @@ pub use jobs::{
     sample_queue_depths, try_lead,
 };
 pub use lists::{
-    List, ListMember, ListSource, MAX_PEOPLE_PER_CALL, MemberIdentifier, MembershipChange,
-    MembershipError, MembershipOutcome, PersonList, add_members, create_list, delete_list,
-    find_list, list_lists, lists_for, members, membership_history, remove_members, update_list,
+    List, ListCounts, ListMember, ListSource, ListWrite, MAX_PEOPLE_PER_CALL, MemberIdentifier,
+    MembershipChange, MembershipError, MembershipOutcome, PersonList, add_members,
+    add_members_into, create_list, delete_list, find_list, list_lists, lists_for, members,
+    membership_history, remove_members, update_list,
 };
 pub use messages::{
     GateRecord, LoggedMessage, Message, MessageLogCursor, MessageLogFilter, MessageLogPage,

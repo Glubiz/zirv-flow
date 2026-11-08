@@ -12,7 +12,9 @@ use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use super::model::ImportStatus;
 use super::rejects::{ImportPhase, RejectedRow, insert_rejects};
-use crate::lists::{ListSource, MAX_PEOPLE_PER_CALL, MembershipError, add_members};
+use crate::lists::{
+    ListCounts, ListSource, ListWrite, MAX_PEOPLE_PER_CALL, MembershipError, add_members_into,
+};
 use crate::people::{
     ProfileOutcome, ProfileRecord, apply_profile_records, apply_profile_records_singly,
 };
@@ -140,19 +142,19 @@ pub async fn commit_import_batch(
         tally.add(detail, outcome);
     }
 
+    // The counts move last, so the rows of the lists the batch joins are locked for the commit
+    // alone.
+    let mut lists = ListCounts::default();
     for (list, people) in &tally.members {
+        let write = ListWrite {
+            workspace: batch.workspace,
+            list: *list,
+            source: ListSource::Import,
+            actor: None,
+            trace: batch.trace,
+        };
         for chunk in people.chunks(MAX_PEOPLE_PER_CALL) {
-            match add_members(
-                &mut tx,
-                batch.workspace,
-                *list,
-                chunk,
-                ListSource::Import,
-                None,
-                batch.trace,
-            )
-            .await
-            {
+            match add_members_into(&mut tx, &write, chunk, &mut lists).await {
                 Ok(_) => {}
                 Err(MembershipError::NoSuchList) => return Ok(BatchOutcome::ListMissing),
                 Err(MembershipError::TooMany) => return Err(StoreError::poison()),
@@ -204,6 +206,7 @@ pub async fn commit_import_batch(
         .map_err(StoreError::query)?;
     }
     crate::changes::request_reevaluation(&mut tx, batch.workspace).await?;
+    lists.apply(&mut tx).await?;
     commit(tx).await?;
     Ok(BatchOutcome::Committed(BatchProgress {
         rows_done,
