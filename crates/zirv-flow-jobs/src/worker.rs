@@ -2989,6 +2989,73 @@ mod tests {
         .await;
     }
 
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_completed_shard_job_is_followed_by_the_next_when_a_row_landed_behind_it(
+        pool: PgPool,
+    ) {
+        use zirv_flow_store::{IngestItem, IngestPayload, append_inbox};
+
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            migrated(&pool).await;
+            let name = WorkspaceName::parse("ours").unwrap();
+            let slug = Slug::parse("ours").unwrap();
+            let ws = zirv_flow_store::create_workspace(&pool, &name, &slug)
+                .await
+                .unwrap()
+                .id;
+            let item = IngestItem {
+                identifiers: vec![("external:user_id".into(), "u1".into())],
+                timestamp: None,
+                message_id: Some("first".into()),
+                payload: IngestPayload::Identify {
+                    traits: json!({ "plan": "free" }).as_object().unwrap().clone(),
+                },
+            };
+            let trace = TraceContext::root(Cause::api("test-request"));
+            append_inbox(&pool, ws, uuid::Uuid::now_v7(), &trace, &[item])
+                .await
+                .unwrap();
+            // The run's first batch deletes its row, and in that transaction a row of the same
+            // bucket lands behind it, once: the run ends with the shard no longer empty and the
+            // key held, as when an append races the last empty check.
+            for statement in [
+                "CREATE TABLE once (x int)",
+                "CREATE FUNCTION again() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+                   IF NOT EXISTS (SELECT 1 FROM once) THEN \
+                     INSERT INTO once VALUES (1); \
+                     INSERT INTO ingest_inbox (workspace_id, api_key_id, kind, item, message_id, \
+                                               trace_id, affinity) \
+                     VALUES (OLD.workspace_id, OLD.api_key_id, OLD.kind, OLD.item, 'behind', \
+                             OLD.trace_id, OLD.affinity); \
+                   END IF; RETURN OLD; END $$",
+                "CREATE TRIGGER again AFTER DELETE ON ingest_inbox \
+                 FOR EACH ROW EXECUTE FUNCTION again()",
+            ] {
+                sqlx::query(statement).execute(&pool).await.unwrap();
+            }
+            let (stop, handle) = start(&pool, draining_config(1, 1));
+
+            eventually(
+                "the row behind the run to be drained by the next job",
+                || async {
+                    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM ingest_inbox")
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                    let once: i64 = sqlx::query_scalar("SELECT count(*) FROM once")
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                    once == 1 && left == 0 && drain_jobs(&pool).await == 0
+                },
+            )
+            .await;
+            stop_and_join(stop, handle).await;
+        })
+        .await;
+    }
+
     #[test]
     fn drain_slots_default_to_one_and_a_drain_lane_claims_one_job_at_a_time() {
         assert_eq!(WorkerConfig::new(4).drain_slots, 1);

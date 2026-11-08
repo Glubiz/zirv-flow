@@ -6,9 +6,10 @@
 //! and completes it.
 //!
 //! A run first buckets the workspace's rows that have no bucket yet (appended before the column
-//! existed, or by a pre-0.29 serve), so every row joins its key's queue by id. The backfill takes
-//! a per-workspace advisory lock for each of its batches, so jobs that start together run it one
-//! at a time, and no shard starts while an older row has no bucket. Then the run loops batches
+//! existed, or by a pre-0.29 serve), so every row joins its key's queue by id. Its batches lock
+//! the rows they bucket, so jobs that start together share the work, and a run that finds fewer
+//! rows than a batch has seen them all bucketed: no shard starts while an older row has no
+//! bucket. Then the run loops batches
 //! over the shard's buckets until they are empty or the time budget ends. The rows of one record
 //! key share a bucket, so each key applies in id order even when two jobs cover the same bucket:
 //! a batch locks the rows it takes, skips locked ones and leaves out a bucket's rows after a

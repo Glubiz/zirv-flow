@@ -121,10 +121,11 @@ pool. Keep capacity available there for ordinary queries.
 
 Worked example: separate `serve`, `worker` and `scheduler`, each using the current
 [configured default](../../crates/zirv-flow/src/config.rs) D = 10, with C = 4 and
-S = 8 as in [M2 §2.1](../benchmarks/m2-ingestion.md#21-stack-and-tiers), and one drain slot
-(C = 4 + 1). The extra worker budget is (2 + 8) × 5 + 1 = **51** connections; the deployment total is
-3 × 10 + 51 + E = 3 × 10 + 51 + 4 = **85**. Against the benchmark PostgreSQL `max_connections` of **100**
-([M stack](../benchmarks/data/M/sustained-stack.txt)), that leaves **15** before
+S = 8 as in [M2 §2.1](../benchmarks/m2-ingestion.md#21-stack-and-tiers), and the default
+eight drain slots (C = 4 + 8 = 12). The extra worker budget is 3 × 12 + 1 = **37** connections; the
+deployment total is 3 × 10 + 37 + E = 3 × 10 + 37 + 4 = **71**. Against the benchmark PostgreSQL
+`max_connections` of **100**
+([M stack](../benchmarks/data/M/sustained-stack.txt)), that leaves **29** before
 subtracting PostgreSQL reserved slots, monitoring clients, migrations, and the
 admin CLI's own pool. These are calculated ceilings, not a recommended spare
 capacity or observed usage. Count every additional process and concurrent admin

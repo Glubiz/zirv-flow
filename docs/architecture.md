@@ -454,9 +454,10 @@ stores `affinity`, the first byte of the SHA-256 of its record key (the stronges
 modulo 64, fixed forever; rows appended before the column existed, or by a pre-0.29 serve
 during a rolling upgrade, hold NULL. A drain job first buckets the workspace's NULL rows (a
 blocking `FOR UPDATE` in a short transaction of its own, so it waits out an erasure and cannot
-deadlock; the bucket comes from the same function as the append's, and a per-workspace advisory
-lock serialises the backfill batches, so shard jobs that start together run it one at a time and
-none starts draining while an older row is unbucketed), then loops batches over the buckets of
+deadlock; the bucket comes from the same function as the append's; shard jobs that start together share
+the work, since the lock sits below the `LIMIT` and a run that waited on another's rows
+replaces them with later unbucketed ones, so a short batch means none is left and no shard
+starts draining while an older row is unbucketed), then loops batches over the buckets of
 its own shard, those with `affinity % count = index`, until they are empty or its 20 second
 budget ends. `ingest.drain_shards` (default 8, up to 64, one per bucket) is how many jobs a
 workspace's drain splits into; they spread over every worker's drain slots, so the drain is not

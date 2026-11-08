@@ -256,10 +256,9 @@ macro_rules! enqueue_many_ctes {
         "inserted AS (              INSERT INTO jobs                 (id, workspace_id, kind, payload, priority, run_at, max_attempts, unique_key,                  trace_id, cause_kind, cause_id)              SELECT t.id, t.workspace_id, t.kind, t.payload, t.priority, COALESCE(t.run_at, now()),                     t.max_attempts, t.unique_key, t.trace_id, t.cause_kind, t.cause_id              FROM unnest($1::uuid[], $2::uuid[], $3::text[], $4::jsonb[], $5::int2[],                          $6::timestamptz[], $7::int4[], $8::text[], $9::uuid[], $10::text[],                          $11::text[])                   AS t(id, workspace_id, kind, payload, priority, run_at, max_attempts,                        unique_key, trace_id, cause_kind, cause_id)              ON CONFLICT DO NOTHING              RETURNING kind),          notified AS (              SELECT pg_notify($12, k.kind) FROM (SELECT DISTINCT kind FROM inserted) k              WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE state = 'ready' AND kind = k.kind                                AND run_at <= now()))"
     };
 }
-pub(crate) use enqueue_many_ctes;
 
 /// Binds `$1` to `$12` of [`enqueue_many_ctes`].
-pub(crate) fn bind_jobs<'q>(
+fn bind_jobs<'q>(
     query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
     jobs: &'q [NewJob],
 ) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
