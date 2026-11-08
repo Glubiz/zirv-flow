@@ -171,6 +171,11 @@ use it:
 | `zirv-flow scheduler` | Elected leader (an advisory lock; the others stand by and take over within seconds): enqueues due cron schedules, returns jobs with expired leases to the queue, keeps the decision log and event partitions for this and next month, expires person exports hourly, deletes import files and rejects past their retention (see [CSV import](../guide/sources.md#csv-import)), and exports queue gauges. |
 | `zirv-flow all` | `serve`, `worker` and `scheduler` in one process (the default). |
 
+Each process runs as many async runtime threads as the CPUs it may use. A fractional
+container CPU limit is rounded down, so a process limited to 1.5 CPUs gets one thread and
+cannot use the other half CPU. Set `TOKIO_WORKER_THREADS` to the limit rounded up (2 for
+1.5 CPUs) on `serve` and `worker` processes with fractional limits.
+
 Each of a worker's `worker.concurrency` slots claims up to 32 due jobs at once
 and runs them one after another. The worker also keeps `worker.drain_slots` slots
 that claim only `ingest.drain`, one job at a time, so an inbox drain, which can run for up to

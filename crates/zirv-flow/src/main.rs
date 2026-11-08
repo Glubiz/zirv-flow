@@ -526,6 +526,8 @@ async fn run_roles_reporting(
         worker_config.keyring = secrets.as_ref().map(|secrets| Arc::clone(&secrets.keyring));
         worker_config.ingest_drain_batch_size = config.ingest_drain_batch_size();
         worker_config.ingest_drain_shards = config.ingest_drain_shards();
+        worker_config.kafka_unit_messages = config.kafka_unit_messages() as usize;
+        worker_config.sync_unit_records = config.sync_unit_records() as usize;
         worker_config.egress = config.egress_policy();
         worker_config.render_pool = render_pool.clone();
         worker_config.dns = system_resolver();

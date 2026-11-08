@@ -17,6 +17,9 @@ const ENV_PREFIX: &str = "ZIRV_FLOW_";
 
 /// The most drain shards per workspace `ingest.drain_shards` may ask for: one per inbox bucket.
 const MAX_DRAIN_SHARDS: u32 = 64;
+/// The largest Kafka or sync unit: a unit takes an advisory lock per distinct identity, and
+/// several units at once must stay inside PostgreSQL's shared lock table.
+const MAX_UNIT_SIZE: u32 = 1000;
 
 /// The most slots a worker may dedicate to `ingest.drain`.
 const MAX_DRAIN_SLOTS: u32 = 64;
@@ -42,7 +45,7 @@ use zirv_flow_store::{
     JOB_HISTORY_DAYS_BOUNDS, TEST_SEND_MONTHS_BOUNDS,
 };
 
-pub(crate) const CONFIG_KEYS: [&str; 69] = [
+pub(crate) const CONFIG_KEYS: [&str; 71] = [
     "server.bind",
     "server.cookie_secure",
     "server.public_url",
@@ -89,6 +92,8 @@ pub(crate) const CONFIG_KEYS: [&str; 69] = [
     "ingest.burst_per_hook",
     "ingest.drain_batch_size",
     "ingest.drain_shards",
+    "ingest.kafka_unit_messages",
+    "ingest.sync_unit_records",
     "imports.max_file_bytes",
     "assets.max_file_bytes",
     "assets.max_workspace_bytes",
@@ -444,6 +449,10 @@ struct IngestConfig {
     drain_batch_size: u32,
     /// Concurrent drain loops per workspace in `ingest.drain`.
     drain_shards: u32,
+    /// Messages a `kafka.consume` unit commits at.
+    kafka_unit_messages: u32,
+    /// Records a `sync.run` unit commits at.
+    sync_unit_records: u32,
 }
 
 /// The render host: the child processes that render templates with an OS memory limit
@@ -660,6 +669,8 @@ impl Config {
             .merge(Serialized::default("ingest.burst_per_hook", 200_u32))
             .merge(Serialized::default("ingest.drain_batch_size", 50_u32))
             .merge(Serialized::default("ingest.drain_shards", 8_u32))
+            .merge(Serialized::default("ingest.kafka_unit_messages", 100_u32))
+            .merge(Serialized::default("ingest.sync_unit_records", 100_u32))
             .merge(Serialized::default(
                 "imports.max_file_bytes",
                 536_870_912_u64,
@@ -752,6 +763,11 @@ impl Config {
             ("ingest.rate_per_hook", config.ingest.rate_per_hook),
             ("ingest.burst_per_hook", config.ingest.burst_per_hook),
             ("ingest.drain_batch_size", config.ingest.drain_batch_size),
+            (
+                "ingest.kafka_unit_messages",
+                config.ingest.kafka_unit_messages,
+            ),
+            ("ingest.sync_unit_records", config.ingest.sync_unit_records),
             (
                 "explorer.interactive_row_limit",
                 config.explorer.interactive_row_limit,
@@ -1118,6 +1134,14 @@ impl Config {
         if !(1..=MAX_DRAIN_SHARDS).contains(&ingest.drain_shards) {
             return Err(fail("ingest.drain_shards", "must be between 1 and 64"));
         }
+        for (key, value) in [
+            ("ingest.kafka_unit_messages", ingest.kafka_unit_messages),
+            ("ingest.sync_unit_records", ingest.sync_unit_records),
+        ] {
+            if value > MAX_UNIT_SIZE {
+                return Err(fail(key, "must be at most 1000"));
+            }
+        }
         Ok(())
     }
 
@@ -1436,6 +1460,16 @@ impl Config {
     /// Concurrent drain loops per workspace in `ingest.drain`.
     pub(crate) fn ingest_drain_shards(&self) -> u32 {
         self.ingest.drain_shards
+    }
+
+    /// Messages a `kafka.consume` unit commits at.
+    pub(crate) fn kafka_unit_messages(&self) -> u32 {
+        self.ingest.kafka_unit_messages
+    }
+
+    /// Records a `sync.run` unit commits at.
+    pub(crate) fn sync_unit_records(&self) -> u32 {
+        self.ingest.sync_unit_records
     }
 
     /// How long a sending domain may go without a DNS check before the scheduler queues one.
@@ -2733,6 +2767,8 @@ endpoint = \"http://collector:4318\"
         assert_eq!(limits, zirv_flow_api::IngestLimits::default());
         assert_eq!(config.ingest_drain_batch_size(), 50);
         assert_eq!(config.ingest_drain_shards(), 8);
+        assert_eq!(config.kafka_unit_messages(), 100);
+        assert_eq!(config.sync_unit_records(), 100);
         assert!(toml::to_string(&config).unwrap().contains("[ingest]"));
     }
 
@@ -2746,6 +2782,8 @@ endpoint = \"http://collector:4318\"
             ("BURST_PER_KEY", "50"),
             ("DRAIN_BATCH_SIZE", "25"),
             ("DRAIN_SHARDS", "6"),
+            ("KAFKA_UNIT_MESSAGES", "40"),
+            ("SYNC_UNIT_RECORDS", "30"),
         ] {
             env.push((format!("ZIRV_FLOW_INGEST__{key}").into(), value.into()));
         }
@@ -2764,6 +2802,8 @@ endpoint = \"http://collector:4318\"
         );
         assert_eq!(config.ingest_drain_batch_size(), 25);
         assert_eq!(config.ingest_drain_shards(), 6);
+        assert_eq!(config.kafka_unit_messages(), 40);
+        assert_eq!(config.sync_unit_records(), 30);
     }
 
     #[test]
@@ -2828,6 +2868,28 @@ endpoint = \"http://collector:4318\"
 
             assert!(error.contains("ingest.drain_shards"), "{error}");
             assert!(error.contains("between 1 and 64"), "{error}");
+        }
+    }
+
+    #[test]
+    fn unit_sizes_over_a_thousand_name_their_key() {
+        for (var, key) in [
+            (
+                "ZIRV_FLOW_INGEST__KAFKA_UNIT_MESSAGES",
+                "ingest.kafka_unit_messages",
+            ),
+            (
+                "ZIRV_FLOW_INGEST__SYNC_UNIT_RECORDS",
+                "ingest.sync_unit_records",
+            ),
+        ] {
+            let mut env = database_env("postgres://localhost/database");
+            env.push((var.into(), "1001".into()));
+
+            let error = Config::load(None, env).unwrap_err().to_string();
+
+            assert!(error.contains(key), "{error}");
+            assert!(error.contains("at most 1000"), "{error}");
         }
     }
 
@@ -3137,6 +3199,16 @@ output_price_per_mtok = 15000000
             ("ZIRV_FLOW_INGEST__BURST_PER_KEY", "0", "must be at least 1"),
             (
                 "ZIRV_FLOW_INGEST__DRAIN_BATCH_SIZE",
+                "0",
+                "must be at least 1",
+            ),
+            (
+                "ZIRV_FLOW_INGEST__KAFKA_UNIT_MESSAGES",
+                "0",
+                "must be at least 1",
+            ),
+            (
+                "ZIRV_FLOW_INGEST__SYNC_UNIT_RECORDS",
                 "0",
                 "must be at least 1",
             ),
