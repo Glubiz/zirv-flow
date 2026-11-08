@@ -15,3 +15,18 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.265.0 (2026-11-08)
+
+### Fixes
+
+- batch removals defer their list count too
+- removals net into the batch's list counts
+
+### Performance
+
+- webhook rows by person and the list count at commit (investigation L)
+
+### Other
+
+- sim: run two runtime threads per serve and worker under fractional CPU limits
+
