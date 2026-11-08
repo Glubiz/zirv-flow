@@ -11,7 +11,9 @@ use uuid::Uuid;
 use zirv_flow_core::mapping::{Mapping, Target, TraitState, map_json};
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
-use crate::ingest::{Shard, bucket, drain_shards, enqueue_drain_shard, strongest_identifier};
+use crate::ingest::{
+    KnownPeople, Shard, bucket, drain_shards, enqueue_drain_shard, known_people, lane_key,
+};
 use crate::{
     PgPool, StoreError, StreamOutcome, begin, commit, database_now, record_stream_outcome,
 };
@@ -62,15 +64,10 @@ pub async fn find_for_receive(pool: &PgPool, id: Uuid) -> Result<Option<HookRece
     .map_err(StoreError::query)
 }
 
-/// The inbox bucket of a payload: that of the record key the drain will apply it under, the
-/// strongest identifier the identifier columns of the hook's mapping find in it. So one person's
-/// payloads share a bucket, and a drain lane, whichever hooks they come through, and they share
-/// it with the API's rows of the same key; the people of one hook spread over the lanes. The
-/// identifier columns run alone, through the function the drain maps with, so the key is the
-/// drain's whatever the other columns hold. A payload the mapping finds no identifier in now,
-/// or a mapping that does not read, is bucketed by the hook: the drain refuses such a row unless
-/// the mapping is changed first, and a refused row has no person to keep in order.
-fn payload_bucket(hook: Uuid, mapping: Option<&Value>, payload: &Value) -> i16 {
+/// The identifiers the identifier columns of a hook's mapping find in a payload. They run alone,
+/// through the function the drain maps with, so they are the drain's whatever the other columns
+/// hold. Empty when the mapping does not read or the payload yields none.
+fn payload_identifiers(mapping: Option<&Value>, payload: &Value) -> Vec<(String, String)> {
     mapping
         .and_then(|mapping| Mapping::deserialize(mapping).ok())
         .and_then(|mapping| {
@@ -84,8 +81,20 @@ fn payload_bucket(hook: Uuid, mapping: Option<&Value>, payload: &Value) -> i16 {
             };
             let catalog: HashMap<String, TraitState> = HashMap::new();
             let mapped = map_json(&identifying, payload, identifying.root_fields(), &catalog);
-            strongest_identifier(&mapped.ok()?.identifiers)
+            Some(mapped.ok()?.identifiers)
         })
+        .unwrap_or_default()
+}
+
+/// The inbox bucket of a payload: that of the lane key of its identifiers, the one the API's rows
+/// use ([`lane_key`]): the person the identifiers already belong to, else the anonymousId, else
+/// the strongest identifier. So one person's payloads share a lane with each other and with the
+/// API's rows of that person, whichever hooks they come through; the people of one hook spread
+/// over the lanes. A payload the mapping finds no identifier in now, or a mapping that does not
+/// read, is bucketed by the hook: the drain refuses such a row unless the mapping is changed
+/// first, and a refused row has no person to keep in order.
+fn payload_bucket(hook: Uuid, identifiers: &[(String, String)], people: &KnownPeople) -> i16 {
+    lane_key("webhook", identifiers, people)
         .map_or_else(|| bucket(&hook.to_string()), |key| bucket(&key))
 }
 
@@ -108,8 +117,10 @@ pub async fn append_webhook(
         "signed_at": signed_at.and_then(|at| at.format(&Rfc3339).ok()),
     });
     let workspace = hook.workspace();
-    let affinity = payload_bucket(hook.id, hook.mapping.as_ref(), item);
+    let identifiers = payload_identifiers(hook.mapping.as_ref(), item);
     let mut tx = begin(pool).await?;
+    let people = known_people(&mut *tx, workspace, [identifiers.as_slice()]).await?;
+    let affinity = payload_bucket(hook.id, &identifiers, &people);
     sqlx::query(
         "INSERT INTO ingest_inbox \
             (workspace_id, webhook_id, kind, item, message_id, received_at, trace_id, affinity) \
@@ -154,8 +165,9 @@ mod tests {
     use serde_json::json;
     use sqlx::PgPool;
 
-    use super::super::fixtures::{hook, mapping, trace, workspace};
+    use super::super::fixtures::{affinities, hook, mapping, person_with, trace, workspace};
     use super::*;
+    use crate::ingest::strongest_identifier;
     use crate::{StreamSettings, configure_stream, find_stream_by_id};
 
     #[sqlx::test]
@@ -281,6 +293,15 @@ mod tests {
         assert!(stream.last_success_at.is_some());
     }
 
+    /// The bucket of `payload` for a person no identifier of it belongs to yet.
+    fn pb(hook: Uuid, mapping: Option<&Value>, payload: &Value) -> i16 {
+        payload_bucket(
+            hook,
+            &payload_identifiers(mapping, payload),
+            &KnownPeople::new(),
+        )
+    }
+
     /// The bucket the API gives an identify row with `identifiers`.
     fn api_bucket(identifiers: &[(&str, &str)]) -> i16 {
         let pairs: Vec<(String, String)> = identifiers
@@ -315,14 +336,11 @@ mod tests {
         let changed = json!({"contact": {"email": "ada@example.com"}});
 
         let ada = api_bucket(&[("email", "ada@example.com")]);
-        assert_eq!(payload_bucket(form, Some(&form_mapping), &submitted), ada);
-        assert_eq!(
-            payload_bucket(consent, Some(&consent_mapping), &changed),
-            ada
-        );
+        assert_eq!(pb(form, Some(&form_mapping), &submitted), ada);
+        assert_eq!(pb(consent, Some(&consent_mapping), &changed), ada);
         let known = json!({"contact": {"email": "ada@example.com", "crm": "c-1"}});
         assert_eq!(
-            payload_bucket(consent, Some(&consent_mapping), &known),
+            pb(consent, Some(&consent_mapping), &known),
             api_bucket(&[("email", "ada@example.com"), ("external:crm", "c-1")]),
             "the strongest identifier, as for the API's rows"
         );
@@ -330,19 +348,19 @@ mod tests {
         let spread: HashSet<i16> = (0..32)
             .map(|n| {
                 let payload = json!({"email": format!("person{n}@example.com")});
-                payload_bucket(form, Some(&form_mapping), &payload)
+                pb(form, Some(&form_mapping), &payload)
             })
             .collect();
         assert!(spread.len() > 8, "one hook's people spread: {spread:?}");
 
         let by_hook = bucket(&form.to_string());
         let keyless = json!({"plan": "pro"});
-        assert_eq!(payload_bucket(form, Some(&form_mapping), &keyless), by_hook);
+        assert_eq!(pb(form, Some(&form_mapping), &keyless), by_hook);
         let invalid = json!({"email": "not an address"});
-        assert_eq!(payload_bucket(form, Some(&form_mapping), &invalid), by_hook);
+        assert_eq!(pb(form, Some(&form_mapping), &invalid), by_hook);
         let unreadable = json!({"columns": "no"});
-        assert_eq!(payload_bucket(form, Some(&unreadable), &submitted), by_hook);
-        assert_eq!(payload_bucket(form, None, &submitted), by_hook);
+        assert_eq!(pb(form, Some(&unreadable), &submitted), by_hook);
+        assert_eq!(pb(form, None, &submitted), by_hook);
     }
 
     #[sqlx::test]
@@ -378,6 +396,64 @@ mod tests {
         assert_eq!(stored[0], stored[2], "Ada's payloads share a bucket");
         let distinct: HashSet<i16> = stored.iter().copied().collect();
         assert!(distinct.len() > 1, "the hook's people spread: {stored:?}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_payload_a_contact_row_and_an_api_row_of_one_known_person_share_a_lane(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let created = hook(&pool, ws, "orders", Some(&mapping(&[]))).await;
+        let receive = find_for_receive(&pool, created.id).await.unwrap().unwrap();
+        let ada = person_with(
+            &pool,
+            ws,
+            &[("email", "ada@example.com"), ("external:user_id", "u1")],
+            None,
+        )
+        .await;
+        let item = json!({"id": "o-1", "email": "ada@example.com"});
+        append_webhook(&pool, &receive, &trace(), &item, None, "wh:x:o-1", false)
+            .await
+            .unwrap();
+        let api = |identifiers: &[(&str, &str)], payload: crate::IngestPayload| crate::IngestItem {
+            identifiers: identifiers
+                .iter()
+                .map(|(kind, value)| ((*kind).to_owned(), (*value).to_owned()))
+                .collect(),
+            timestamp: None,
+            message_id: None,
+            payload,
+        };
+        let contact = crate::IngestPayload::Contact {
+            traits: serde_json::Map::new(),
+        };
+        let track = crate::IngestPayload::Track {
+            event: "seen".to_owned(),
+            properties: serde_json::Map::new(),
+        };
+        crate::append_inbox(
+            &pool,
+            ws,
+            Uuid::now_v7(),
+            &trace(),
+            &[
+                api(
+                    &[
+                        ("external:contact_key", "c-1"),
+                        ("email", "ada@example.com"),
+                    ],
+                    contact,
+                ),
+                api(&[("external:user_id", "u1")], track),
+            ],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            affinities(&pool).await,
+            [bucket(&format!("person:{ada}")); 3]
+        );
     }
 
     #[sqlx::test]

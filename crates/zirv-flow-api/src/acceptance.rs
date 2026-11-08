@@ -10222,7 +10222,13 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (_, key) = make_key(&router, &owner, &ws, &["read", "ingest"]).await;
-        let held = explorer_pool.acquire().await.unwrap();
+        // The pool's 100 ms timeout is for the busy request; opening its one connection on a
+        // loaded host can take longer, so the hold retries until it has it.
+        let held = loop {
+            if let Ok(connection) = explorer_pool.acquire().await {
+                break connection;
+            }
+        };
 
         let busy = call(
             &router,

@@ -471,11 +471,23 @@ also enqueues one `ingest.drain` job for each shard its rows fall in (payload `{
 `ingest.drain_shards` as the appender reads it): the same `INSERT` statement writes the rows and
 the jobs. The
 inbox row's `message_id` is the client's or a server-assigned UUID v7. Each row also
-stores `affinity`, the first byte of the SHA-256 of its record key (the strongest identifier)
-modulo 64, fixed forever; rows appended before the column existed, or by a pre-0.29 serve
+stores `affinity`, the first byte of the SHA-256 of its lane key modulo 64, fixed at receive. The
+lane key is resolved in one indexed lookup per request batch (`identities` joined to `people`, one hop of
+`merged_into` to the survivor): `person:<id>` when any identifier of the row already belongs to a person
+(the strongest such identifier decides if they differ, and a contact row counts), else a contact's contact
+key, else the anonymousId, else the strongest identifier. So one person's rows from the web, the server and
+the webhooks share a lane once the person exists, and an anonymous visitor's page views share one with the
+identify that names them before it does. A batch with no identifier skips the lookup. Order limits: order
+within one person holds only among rows keyed under one rule, so it is not guaranteed across the first
+resolution (rows from before the person exists sit in the anonymousId or identifier lane, later rows in the
+person lane), across a merge, or across an upgrade (stored buckets keep their old key). A trait or event
+applied out of order across lanes still resolves right, since a trait is chosen by its observed time among
+the person's ledger rows and a late event recomputes from its own time; only exact ties fall to the record
+id. Rows appended before the column existed, or by a pre-0.29 serve
 during a rolling upgrade, hold NULL. A drain job first buckets the workspace's NULL rows (a
 blocking `FOR UPDATE` in a short transaction of its own, so it waits out an erasure and cannot
-deadlock; the bucket comes from the same function as the append's; shard jobs that start together share
+deadlock; the bucket comes from the same function as the append's, with no person lookup: it cannot see
+receive-time state, so it keys by the anonymousId, else the strongest identifier; shard jobs that start together share
 the work, since the lock sits below the `LIMIT` and a run that waited on another's rows
 replaces them with later unbucketed ones, so a short batch means none is left and no shard
 starts draining while an older row is unbucketed), then loops batches over the buckets of
@@ -527,7 +539,8 @@ object and its dedupe value. Only then does one transaction append an `ingest_in
 `webhook` (`webhook_id` set, `api_key_id` NULL, `ON DELETE CASCADE` from the hook; the row's
 `item` is `{"payload", "signed_at"}`; `affinity` is the bucket of the record key the drain will
 give the payload, found by running only the stream's identifier columns through the same
-`map_json` and `strongest_identifier`, so one person's rows, through any hook or the API, drain in
+`map_json`, then keyed by the same lane key as the API's rows (above, resolved in the same one lookup
+before the insert), so one person's rows, through any hook or the API, drain in
 id order in one shard while one hook's people spread across shards; a payload with no valid
 identifier, or a stream whose mapping cannot be read, falls back to the bucket of the hook id.
 The order holds only among rows bucketed under one rule: a row queued before this bucketing was

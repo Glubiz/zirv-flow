@@ -1028,6 +1028,16 @@ mod tests {
     ) {
         zirv_flow_store::decision_testing::checked(pool, |pool| async move {
             let ws = workspace(&pool).await;
+            // Draining a first row makes k a known person, so the next two rows share its lane.
+            append_items(&pool, ws, &[identify("k", "zeroth", "oldest")]).await;
+            for job in claim_all(&pool).await {
+                run_claimed(&pool, &job, key(), 50, 8).await.unwrap();
+                assert!(
+                    zirv_flow_store::complete_job(&pool, job.id, job.lease_token)
+                        .await
+                        .unwrap()
+                );
+            }
             append_items(&pool, ws, &[identify("k", "first", "old")]).await;
             let claimed = claim_all(&pool).await;
             assert_eq!(claimed.len(), 1);

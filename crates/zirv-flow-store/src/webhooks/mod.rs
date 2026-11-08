@@ -38,6 +38,45 @@ pub(crate) mod fixtures {
         set_stream_mapping, upsert_discovered_streams,
     };
 
+    /// A person holding `identifiers`, merged into `survivor` when given.
+    pub(crate) async fn person_with(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        identifiers: &[(&str, &str)],
+        survivor: Option<Uuid>,
+    ) -> Uuid {
+        let id = Uuid::now_v7();
+        sqlx::query("INSERT INTO people (id, workspace_id, merged_into) VALUES ($1, $2, $3)")
+            .bind(id)
+            .bind(ws.as_uuid())
+            .bind(survivor)
+            .execute(pool)
+            .await
+            .unwrap();
+        for (kind, value) in identifiers {
+            sqlx::query(
+                "INSERT INTO identities (id, workspace_id, person_id, kind, value) \
+                 VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(Uuid::now_v7())
+            .bind(ws.as_uuid())
+            .bind(id)
+            .bind(kind)
+            .bind(value)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+        id
+    }
+
+    pub(crate) async fn affinities(pool: &PgPool) -> Vec<i16> {
+        sqlx::query_scalar("SELECT affinity FROM ingest_inbox ORDER BY id")
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
     pub(crate) async fn workspace(pool: &PgPool, slug: &str) -> WorkspaceId {
         crate::migrate(pool).await.unwrap();
         let name = WorkspaceName::parse(slug).unwrap();
