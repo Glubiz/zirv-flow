@@ -6,8 +6,8 @@
 //! `stream_id` and no `run_id` is the firing of a stream's reconciliation schedule: it queues a
 //! reconciliation run of that stream if it is still eligible. A payload with a `run_id` works one
 //! run: it reads the stream from the checkpoint, gathers the source's batches
-//! into units of at least 500 records and commits each unit in ONE transaction of its own that
-//! applies the records, writes the rejects and the decisions and advances the checkpoint, fenced
+//! into units of at least `ingest.sync_unit_records` records and commits each unit in ONE
+//! transaction of its own that applies the records, writes the rejects and the decisions and advances the checkpoint, fenced
 //! on the job's lease and on the run's state. The job's own transaction only holds the lease.
 //! A crash or a lost lease resumes from the run's checkpoint when the job is retried; cancelling
 //! the run stops it at the next unit.
@@ -56,10 +56,6 @@ use super::import_rows::Probe;
 use super::ingest_drain::whole_then_singly;
 use crate::metrics::{RunOutcome, record_sync_events, record_sync_records, record_sync_run};
 use crate::{JobContext, JobError, JobKind};
-
-/// A unit of work commits once it holds at least this many records, or the stream ends. A
-/// single source batch over the size is committed alone: checkpoints are batch-granular.
-pub(crate) const SYNC_BATCH_RECORDS: usize = 500;
 
 /// The longest the source may take to produce its next batch.
 const READ_TIMEOUT: Duration = Duration::from_secs(300);
@@ -895,6 +891,9 @@ async fn run_pass(
         config,
         ..
     } = prepared.as_ref();
+    // A unit commits once it holds this many records or the stream ends. A single source batch over
+    // the size is committed alone: checkpoints are batch-granular.
+    let unit_records = ctx.unit_sizes().sync_records.max(1);
     let planner = prepared.planner();
     // The time the run was started, so a resumed run observes what the first attempt did.
     let observed_at = run.started_at.unwrap_or(run.created_at);
@@ -958,7 +957,7 @@ async fn run_pass(
             Some(Ok(batch)) => {
                 gathered.extend(batch.records);
                 pending = Some(batch.checkpoint);
-                if gathered.len() >= SYNC_BATCH_RECORDS {
+                if gathered.len() >= unit_records {
                     let checkpoint = pending.take().unwrap_or(Checkpoint(Value::Null));
                     if let Unit::Stop = pass
                         .commit(gather(std::mem::take(&mut gathered)), &checkpoint)
@@ -1069,7 +1068,13 @@ mod tests {
     };
 
     use super::*;
-    use crate::context::IngestSettings;
+    use crate::context::{IngestSettings, UnitSizes};
+
+    /// The unit size most tests here were written for; the default is smaller.
+    const UNITS_OF_500: UnitSizes = UnitSizes {
+        kafka_messages: 500,
+        sync_records: 500,
+    };
 
     #[test]
     fn the_kind_name_is_sync_run() {
@@ -1077,8 +1082,8 @@ mod tests {
     }
 
     #[test]
-    fn a_unit_commits_at_five_hundred_records() {
-        assert_eq!(SYNC_BATCH_RECORDS, 500);
+    fn a_unit_commits_at_one_hundred_records_unless_set() {
+        assert_eq!(UnitSizes::default().sync_records, 100);
     }
 
     struct Env {
@@ -1307,6 +1312,19 @@ mod tests {
         egress: Arc<EgressPolicy>,
         keep: bool,
     ) -> Result<(), JobError> {
+        attempt_sized(env, job, probe, keyring, egress, keep, UNITS_OF_500).await
+    }
+
+    /// As [`attempt_with`], with units of the given sizes.
+    async fn attempt_sized(
+        env: &Env,
+        job: &ClaimedJob,
+        probe: &Probe,
+        keyring: Option<Arc<Keyring>>,
+        egress: Arc<EgressPolicy>,
+        keep: bool,
+        units: UnitSizes,
+    ) -> Result<(), JobError> {
         let mut tx = begin(&env.pool).await.unwrap();
         let result = {
             let mut ctx = JobContext::new(&mut tx, job)
@@ -1316,6 +1334,7 @@ mod tests {
                     batch_size: 500,
                     shards: 1,
                 })
+                .with_unit_sizes(units)
                 .with_outbound(keyring, egress, Arc::default());
             run_sync(&mut ctx, &job.payload, probe).await
         };
@@ -1721,6 +1740,42 @@ mod tests {
                 env.count("SELECT count(*) FROM decision_records WHERE action = 'person.created'")
                     .await,
                 1500
+            );
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_unit_of_the_default_size_commits_its_records_and_checkpoint_together(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = setup(&pool, json!({"records": 1500, "batch": 50}), "full_refresh").await;
+            let (run, job) = env.queue().await;
+            let stop = Probe {
+                stop_after: Some(1),
+                before_commit: None,
+            };
+
+            let first = attempt_sized(
+                &env,
+                &job,
+                &stop,
+                None,
+                Arc::default(),
+                false,
+                UnitSizes::default(),
+            )
+            .await;
+
+            assert!(first.is_err());
+            let mid = env.run(run.id).await;
+            assert_eq!((mid.state.as_str(), mid.records_read), ("running", 100));
+            assert_eq!(mid.checkpoint, Some(json!({"offset": 100})));
+            assert_eq!(env.count("SELECT count(*) FROM source_records").await, 100);
+            assert_eq!(
+                env.count("SELECT count(*) FROM decision_records WHERE action = 'person.created'")
+                    .await,
+                100
             );
         })
         .await;
@@ -4595,6 +4650,7 @@ mod tests {
                 batch_size: 500,
                 shards: 1,
             })
+            .with_unit_sizes(UNITS_OF_500)
             .with_outbound(
                 None,
                 if allow { loopback() } else { Arc::default() },
@@ -5374,6 +5430,7 @@ mod tests {
                             batch_size: 500,
                             shards: 1,
                         })
+                        .with_unit_sizes(UNITS_OF_500)
                         .with_outbound(
                             Some(Arc::clone(&self.keyring)),
                             loopback(),
