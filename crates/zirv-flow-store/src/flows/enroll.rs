@@ -181,7 +181,8 @@ pub struct EnrollEntries<'a> {
 ///
 /// An entry whose `(flow, person, occurrence)` already enrolled is a replay and changes nothing.
 /// The flow row is locked `FOR KEY SHARE` and then the flow's enroll lock is taken (see
-/// [`lock_enrolls`]), the order every flow writer uses.
+/// [`lock_enrolls`]), the order every flow writer uses; the enroll takes the flow lock shared and
+/// each person's own, so enrolls of different people run side by side.
 /// A person who appears twice enters once, by their first entry. People are written in id order,
 /// so two enrolls that touch the same people take their rows in the same order. The people are
 /// locked `FOR KEY SHARE` first (see [`lock_people`]), so a merge or an erasure cannot commit
@@ -194,7 +195,7 @@ pub async fn enroll_entries(
     if request.entries.len() > MAX_ENROLL_PEOPLE {
         return Err(EnrollError::TooMany);
     }
-    lock_enrolls(connection, request.flow).await?;
+    lock_enrolls_shared(connection, request.flow).await?;
     let (state, graph, settings, warm) = read_version(connection, request).await?;
     let entry = graph
         .entry()
@@ -207,6 +208,11 @@ pub async fn enroll_entries(
     // anything is read about them or written for them; a person with no row (erased) keeps the
     // id they were named by and is refused below.
     let (resolved, existing) = lock_people(connection, request).await?;
+    // The per-person locks come last, so two enrolls of different people never wait on each other.
+    let mut named_people: Vec<Uuid> = resolved.iter().map(|(entry, _)| entry.person).collect();
+    named_people.sort_unstable();
+    named_people.dedup();
+    lock_enroll_people(connection, request.flow, &named_people).await?;
 
     let mut seen = HashSet::new();
     let mut by_person: Vec<&(EnrollEntry, Uuid)> = resolved
@@ -439,25 +445,79 @@ fn refusal(
     }
 }
 
-/// Serialises the enrolls of one flow against its warm-up and publish changes. The lock order is
-/// the flow row, then this advisory lock: the row is taken `FOR KEY SHARE` first, which a
-/// transaction already holding it `FOR UPDATE` (see `lock_flow`) passes without waiting. An enroll
-/// insert takes that same share lock through its foreign keys, so taking the advisory lock first
-/// would let it wait on a `lock_flow` holder that waits on this advisory lock.
+/// What the flow's enroll lock guarantees, and the order it is taken in.
+///
+/// The invariant: a person enters a flow once per `(flow, person, occurrence)` and by the
+/// re-entry rule, however many enrolls run at once. The checks (`flow_entries`, in-flight
+/// enrollments, replays) and the writes that follow them are per `(flow, person)`, so two enrolls
+/// conflict only where they share a person. The warm-up and publish writers (`start`,
+/// `set_warmup`, `open_warmup`, `discard`) change what every enroll reads, so they conflict with
+/// all of them.
+///
+/// The lock is therefore two-level. [`lock_enrolls_shared`] takes the flow-wide advisory lock in
+/// shared mode (enrolls do not wait for each other; a warm-up writer, which takes it exclusive
+/// with [`lock_enrolls`], waits for them and they wait for it), and [`lock_enroll_people`] takes
+/// one exclusive advisory lock per `(flow, person)` once the people are resolved and locked. The
+/// order is: the flow row, the flow advisory lock, the person rows (`lock_people`), then the
+/// per-person advisory locks in id order. Before 0.269.0 one exclusive lock per flow covered the
+/// whole enroll and queued every enroll of a flow behind the slowest.
+///
+/// The flow row comes first, taken `FOR KEY SHARE`, which a transaction already holding it
+/// `FOR UPDATE` (see `lock_flow`) passes without waiting. An enroll insert takes that same share
+/// lock through its foreign keys, so taking the advisory lock first would let it wait on a
+/// `lock_flow` holder that waits on this advisory lock.
 pub(super) async fn lock_enrolls(
     connection: &mut PgConnection,
     flow: Uuid,
+) -> Result<(), StoreError> {
+    lock_flow_enrolls(connection, flow, "pg_advisory_xact_lock").await
+}
+
+/// The flow lock in shared mode, for the enrolls (see [`lock_enrolls`]).
+pub(super) async fn lock_enrolls_shared(
+    connection: &mut PgConnection,
+    flow: Uuid,
+) -> Result<(), StoreError> {
+    lock_flow_enrolls(connection, flow, "pg_advisory_xact_lock_shared").await
+}
+
+async fn lock_flow_enrolls(
+    connection: &mut PgConnection,
+    flow: Uuid,
+    function: &'static str,
 ) -> Result<(), StoreError> {
     sqlx::query("SELECT 1 FROM flows WHERE id = $1 FOR KEY SHARE")
         .bind(flow)
         .execute(&mut *connection)
         .await
         .map_err(StoreError::query)?;
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('flow.enroll:' || $1::text, 0))")
+    let lock = format!("SELECT {function}(hashtextextended('flow.enroll:' || $1::text, 0))");
+    sqlx::query(sqlx::AssertSqlSafe(lock))
         .bind(flow)
         .execute(connection)
         .await
         .map_err(StoreError::query)?;
+    Ok(())
+}
+
+/// Takes the per-person enroll locks of `people` (see [`lock_enrolls`]), in id order. Taken last,
+/// so the time they are held is the checks and the writes alone.
+async fn lock_enroll_people(
+    connection: &mut PgConnection,
+    flow: Uuid,
+    people: &[Uuid],
+) -> Result<(), StoreError> {
+    if people.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(hashtextextended('flow.enroll:' || $1::text || ':' || s.id, 0))          FROM (SELECT p AS id FROM unnest($2::uuid[]) AS p ORDER BY p) AS s",
+    )
+    .bind(flow)
+    .bind(people)
+    .execute(connection)
+    .await
+    .map_err(StoreError::query)?;
     Ok(())
 }
 
@@ -1047,6 +1107,81 @@ mod tests {
 
         assert_eq!(one.enrolled.len() + two.enrolled.len(), 1);
         assert_eq!(one.skipped.len() + two.skipped.len(), 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn concurrent_enrolls_of_overlapping_people_enroll_each_person_once(pool: PgPool) {
+        let ws = workspace(&pool, "overlap").await;
+        let flow = flow(&pool, ws, json!({"mode": "once_at_a_time"})).await;
+        let (ada, bob, cat) = (
+            person(&pool, ws).await,
+            person(&pool, ws).await,
+            person(&pool, ws).await,
+        );
+
+        let (first, second) = ([ada, bob], [bob, cat]);
+        let (one, two) = tokio::join!(
+            run(&pool, ws, flow, &first, Uuid::now_v7(), NOW),
+            run(&pool, ws, flow, &second, Uuid::now_v7(), NOW)
+        );
+
+        assert_eq!(one.enrolled.len() + two.enrolled.len(), 3);
+        assert_eq!(
+            one.skipped.len() + two.skipped.len(),
+            1,
+            "bob is refused once"
+        );
+        let enrolled: i64 = sqlx::query_scalar("SELECT count(DISTINCT person_id) FROM enrollments")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(enrolled, 3);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_open_enroll_does_not_hold_up_the_enroll_of_other_people(pool: PgPool) {
+        let ws = workspace(&pool, "disjoint").await;
+        let flow = flow(&pool, ws, json!({"mode": "once_at_a_time"})).await;
+        let (ada, bob) = (person(&pool, ws).await, person(&pool, ws).await);
+
+        // The first enroll stays open, as a slow one holds its lock until it commits.
+        let mut first = crate::begin(&pool).await.unwrap();
+        let trace = TraceContext::root(Cause::api("enroll"));
+        let people = [ada];
+        enroll(
+            &mut first,
+            &EnrollRequest {
+                workspace: ws,
+                flow,
+                version: 1,
+                people: &people,
+                occurrence: Occurrence {
+                    trigger: "manual",
+                    id: Uuid::now_v7(),
+                },
+                now: NOW,
+                trace: &trace,
+            },
+        )
+        .await
+        .unwrap();
+
+        let started = std::time::Instant::now();
+        let second = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run(&pool, ws, flow, &[bob], Uuid::now_v7(), NOW),
+        )
+        .await
+        .expect("an enroll of another person waited for the open one");
+        eprintln!(
+            "second enroll while the first is open: {:?}",
+            started.elapsed()
+        );
+
+        assert_eq!(second.enrolled.len(), 1);
+        crate::commit(first).await.unwrap();
     }
 
     /// Waits until the backend `pid` is blocked on a lock, by polling `pg_blocking_pids`.
