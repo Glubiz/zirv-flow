@@ -13,7 +13,9 @@ use zirv_flow_core::flow::{ListChange, TraitChange};
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use crate::changes::request_reevaluation;
-use crate::lists::{ListSource, MembershipError, add_members, remove_members};
+use crate::lists::{
+    ListCounts, ListSource, ListWrite, MembershipError, add_members_into, remove_members,
+};
 use crate::people::{ProfileOutcome, ProfileRecord, apply_profile_record};
 use crate::{StoreError, find_person, list_identities};
 
@@ -159,7 +161,10 @@ fn number(value: f64) -> Option<Value> {
 }
 
 /// Adds the person to a list or removes them, with the list source `flow`. Returns whether
-/// membership changed.
+/// membership changed. An add leaves its count change in `lists`, which the step's transaction
+/// applies right before it commits, so a batch of steps holds the list only `FOR KEY SHARE`
+/// until then. A removal moves the count at once: it holds the list `FOR NO KEY UPDATE` from
+/// the start anyway.
 pub async fn apply_flow_list(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -167,21 +172,20 @@ pub async fn apply_flow_list(
     person: Uuid,
     change: ListChange,
     trace: &TraceContext,
+    lists: &mut ListCounts,
 ) -> Result<bool, EffectError> {
     crate::changes::cache_change_readers(connection, workspace).await?;
     let people = [person];
     let outcome = match change {
         ListChange::Add => {
-            add_members(
-                connection,
+            let write = ListWrite {
                 workspace,
                 list,
-                &people,
-                ListSource::Flow,
-                None,
+                source: ListSource::Flow,
+                actor: None,
                 trace,
-            )
-            .await
+            };
+            add_members_into(connection, &write, &people, lists).await
         }
         ListChange::Remove => {
             remove_members(
@@ -378,15 +382,18 @@ mod tests {
             .await
             .unwrap();
         let mut tx = crate::begin(&pool).await.unwrap();
+        let mut lists = ListCounts::default();
+        let add = ListChange::Add;
 
-        let added = apply_flow_list(&mut tx, ws, list.id, ada, ListChange::Add, &trace())
+        let added = apply_flow_list(&mut tx, ws, list.id, ada, add, &trace(), &mut lists)
             .await
             .unwrap();
-        let again = apply_flow_list(&mut tx, ws, list.id, ada, ListChange::Add, &trace())
+        let again = apply_flow_list(&mut tx, ws, list.id, ada, add, &trace(), &mut lists)
             .await
             .unwrap();
         let ghost =
-            apply_flow_list(&mut tx, ws, Uuid::now_v7(), ada, ListChange::Add, &trace()).await;
+            apply_flow_list(&mut tx, ws, Uuid::now_v7(), ada, add, &trace(), &mut lists).await;
+        lists.apply(&mut tx).await.unwrap();
         crate::commit(tx).await.unwrap();
 
         assert!(added && !again);
@@ -396,6 +403,18 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(source, "flow");
+        let found = crate::find_list(&pool, ws, list.id).await.unwrap().unwrap();
+        assert_eq!(found.member_count, 1);
+
+        let mut tx = crate::begin(&pool).await.unwrap();
+        let remove = ListChange::Remove;
+        let removed = apply_flow_list(&mut tx, ws, list.id, ada, remove, &trace(), &mut lists)
+            .await
+            .unwrap();
+        crate::commit(tx).await.unwrap();
+        assert!(removed);
+        let found = crate::find_list(&pool, ws, list.id).await.unwrap().unwrap();
+        assert_eq!(found.member_count, 0, "a removal moves the count itself");
     }
 
     #[sqlx::test]

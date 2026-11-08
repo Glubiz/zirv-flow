@@ -36,10 +36,10 @@ use zirv_flow_segments::{
 };
 use zirv_flow_store::{
     ClaimedJob, Clock, DecisionBuffer, EffectError, Enrollment, EnrollmentRead, EnrollmentStatus,
-    EnrollmentUpdate, FlowState, FlowTraitWrite, GraphPoint, NewDecision, NewJob, NewStepExecution,
-    NewWait, SEND_JOB_KIND, STEP_JOB_KIND, SYNC_JOB_KIND, StepEnrollment, StepJobInput,
-    StepJobPayload, StepOutcome, StepRecord, StoreError, StoredEvent, WEBHOOK_JOB_KIND,
-    apply_flow_list, apply_flow_trait, clear_waits, enqueue, evaluate_conditions,
+    EnrollmentUpdate, FlowState, FlowTraitWrite, GraphPoint, ListCounts, NewDecision, NewJob,
+    NewStepExecution, NewWait, SEND_JOB_KIND, STEP_JOB_KIND, SYNC_JOB_KIND, StepEnrollment,
+    StepJobInput, StepJobPayload, StepOutcome, StepRecord, StoreError, StoredEvent,
+    WEBHOOK_JOB_KIND, apply_flow_list, apply_flow_trait, clear_waits, enqueue, evaluate_conditions,
     find_event_of_person, find_flow_version, flow_state_for_step, flow_states_for_steps,
     hold_enrollment, lock_read_enrollment, read_enrollment, read_enrollments, record_steps,
     register_wait, release_enrollment, reopen_failed_step, save_enrollment, segment_catalog,
@@ -97,8 +97,20 @@ impl JobKind for FlowStep {
                 alone: true,
             };
             let mut decisions = DecisionBuffer::default();
-            step(conn, &run, read, flow_state, None, &mut decisions).await?;
+            let mut lists = ListCounts::default();
+            step(
+                conn,
+                &run,
+                read,
+                flow_state,
+                None,
+                &mut decisions,
+                &mut lists,
+            )
+            .await?;
             decisions.flush(conn).await?;
+            // Last: the worker only completes the job's own row after it.
+            lists.apply(conn).await?;
             return Ok(());
         };
         // A batch read the clock and every enrollment of its wakes before it locked anything
@@ -124,6 +136,7 @@ impl JobKind for FlowStep {
             flow_state,
             Some(&mut batch.graphs),
             &mut batch.decisions,
+            &mut batch.lists,
         )
         .await
     }
@@ -166,7 +179,8 @@ impl StepRun<'_> {
 }
 
 /// Locks the enrollment `read` found and advances it as the job asks, or holds, releases or
-/// defers it. Every decision goes to `decisions`, for the caller to append.
+/// defers it. Every decision goes to `decisions`, and the count changes of the lists it adds the
+/// person to go to `lists`, for the caller to append and apply.
 async fn step(
     conn: &mut PgConnection,
     run: &StepRun<'_>,
@@ -174,6 +188,7 @@ async fn step(
     flow_state: Option<FlowState>,
     graphs: Option<&mut PinnedGraphs>,
     decisions: &mut DecisionBuffer,
+    lists: &mut ListCounts,
 ) -> Result<(), JobError> {
     let job = run.job;
     let Some(StepEnrollment {
@@ -229,10 +244,19 @@ async fn step(
         record_wake_lateness((now - due).as_seconds_f64());
     }
 
-    let mark = decisions.mark();
+    let mark = (decisions.mark(), lists.mark());
     let mut savepoint = conn.begin().await?;
     let zones = (workspace_zone, person_zone);
-    let walked = advance(&mut savepoint, run, &enrollment, zones, graphs, decisions).await;
+    let walked = advance(
+        &mut savepoint,
+        run,
+        &enrollment,
+        zones,
+        graphs,
+        decisions,
+        lists,
+    )
+    .await;
     match walked {
         Ok(()) => {
             savepoint.commit().await?;
@@ -240,8 +264,9 @@ async fn step(
         }
         Err(failure) => {
             savepoint.rollback().await?;
-            // The walk's decisions go with its writes.
-            decisions.discard_after(mark);
+            // The walk's decisions and count changes go with its writes.
+            decisions.discard_after(mark.0);
+            lists.discard_after(mark.1);
             // A refusal no retry can change ends the enrollment on the first attempt.
             if run.last_attempt || failure.error.refusal().is_some() {
                 fail_enrollment(conn, run, &enrollment, &failure, decisions).await
@@ -273,25 +298,40 @@ pub(crate) struct WakeBatch {
     /// The decisions of the wakes kept so far, in the order they were made, appended in one
     /// statement before the batch commits.
     decisions: DecisionBuffer,
+    /// The count changes of the lists the wakes kept so far added people to, applied last.
+    lists: ListCounts,
+}
+
+/// Where a batch's decisions and list counts stand before a wake, for
+/// [`WakeBatch::discard_after`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct WakeMark {
+    decisions: usize,
+    lists: usize,
 }
 
 impl WakeBatch {
-    /// Where the batch's decisions stand before a wake, for [`WakeBatch::discard_decisions`].
-    pub(crate) fn decisions_mark(&self) -> usize {
-        self.decisions.mark()
+    /// Where the batch stands before a wake.
+    pub(crate) fn mark(&self) -> WakeMark {
+        WakeMark {
+            decisions: self.decisions.mark(),
+            lists: self.lists.mark(),
+        }
     }
 
-    /// Drops the decisions made since `mark`, for a wake whose savepoint rolled back.
-    pub(crate) fn discard_decisions(&mut self, mark: usize) {
-        self.decisions.discard_after(mark);
+    /// Drops the decisions and count changes made since `mark`, for a wake whose savepoint
+    /// rolled back.
+    pub(crate) fn discard_after(&mut self, mark: WakeMark) {
+        self.decisions.discard_after(mark.decisions);
+        self.lists.discard_after(mark.lists);
     }
 
-    /// Appends the decisions of every wake kept, in one statement, in the order they were made.
-    pub(crate) async fn flush_decisions(
-        &mut self,
-        conn: &mut PgConnection,
-    ) -> Result<(), StoreError> {
-        self.decisions.flush(conn).await
+    /// Appends the decisions of every wake kept, in one statement, in the order they were made,
+    /// then moves the counts of the lists they added people to, one statement per list in id
+    /// order: the batch's last statements, so it holds those list rows for its commit alone.
+    pub(crate) async fn flush(&mut self, conn: &mut PgConnection) -> Result<(), StoreError> {
+        self.decisions.flush(conn).await?;
+        self.lists.apply(conn).await
     }
 
     /// Where `job` comes in the order the batch runs its jobs in, the order their steps lock
@@ -314,7 +354,8 @@ fn enrollment_of(job: &ClaimedJob) -> Option<Uuid> {
 /// person-change guard (#397). It reads `clock` once for all of them; one statement reads every
 /// job's enrollment, and one locks all their flows `FOR KEY SHARE` in id order, before any job
 /// locks a person; the transaction holds them until it ends. The caller runs the jobs in
-/// [`WakeBatch::lock_order`] and appends their decisions with [`WakeBatch::flush_decisions`].
+/// [`WakeBatch::lock_order`] and appends their decisions and list counts with
+/// [`WakeBatch::flush`].
 pub(crate) async fn plan_wakes(
     conn: &mut PgConnection,
     clock: &Clock,
@@ -344,6 +385,7 @@ pub(crate) async fn plan_wakes(
         flows,
         graphs: PinnedGraphs::new(),
         decisions: DecisionBuffer::default(),
+        lists: ListCounts::default(),
     })
 }
 
@@ -515,6 +557,9 @@ struct Walk<'a> {
     /// Where the decisions of the walk go, in the order they were made: the job's own, appended
     /// in one statement when the walk ends, or its batch's (#397).
     decisions: &'a mut DecisionBuffer,
+    /// Where the count changes of the lists the walk adds the person to go: the job's own or its
+    /// batch's, applied right before the transaction commits.
+    lists: &'a mut ListCounts,
 }
 
 impl Walk<'_> {
@@ -596,6 +641,7 @@ async fn pinned_graph(
 /// Walks the enrollment from the job's input to the next wait, exit or failure. `zones` are the
 /// workspace's zone and the person's `timezone` trait, as the enrollment's lock read them. The
 /// walk's decisions go to `decisions`; a job alone appends them here, in the walk's savepoint.
+/// Its list count changes go to `lists`.
 async fn advance(
     conn: &mut PgConnection,
     run: &StepRun<'_>,
@@ -603,6 +649,7 @@ async fn advance(
     (workspace_zone, person_zone): (String, Option<String>),
     graphs: Option<&mut PinnedGraphs>,
     decisions: &mut DecisionBuffer,
+    lists: &mut ListCounts,
 ) -> Result<(), StepFailure> {
     let job = run.job;
     let graph = pinned_graph(&mut *conn, graphs, job.workspace, enrollment).await?;
@@ -622,6 +669,7 @@ async fn advance(
         freshness: None,
         steps: HashMap::new(),
         decisions,
+        lists,
     };
 
     walk_steps(conn, &mut walk, job).await?;
@@ -967,6 +1015,7 @@ async fn apply_effect(
                 enrollment.person_id,
                 *change,
                 &enrollment.trace,
+                walk.lists,
             )
             .await
             .map_err(effect_error)?;
@@ -2134,6 +2183,12 @@ pub(super) mod tests {
                 .await
                 .unwrap();
             assert_eq!(sources, ["flow"]);
+            // The step's add moves the count at the end of its transaction.
+            assert_eq!(
+                env.count("SELECT sum(member_count)::bigint FROM lists")
+                    .await,
+                1
+            );
             let mut nodes: Vec<String> = sqlx::query_scalar(
                 "SELECT node_id FROM step_executions WHERE enrollment_id = $1 AND outcome = 'done'",
             )

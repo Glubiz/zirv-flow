@@ -21,7 +21,9 @@ use crate::events::{
     EventBatch, EventOutcome, EventRecord, FailedItem, Refusal, apply_event_record,
     insert_record_rejects, reject_apply_failed,
 };
-use crate::lists::{ListSource, MAX_PEOPLE_PER_CALL, MembershipError, add_members};
+use crate::lists::{
+    ListCounts, ListSource, ListWrite, MAX_PEOPLE_PER_CALL, MembershipError, add_members_into,
+};
 use crate::people::{
     LedgerKey, ProfileOutcome, ProfileRecord, apply_profile_records, apply_profile_records_singly,
     remove_contribution_in,
@@ -236,7 +238,8 @@ pub async fn commit_sync_batch(
     let seen = mark_seen(&mut tx, batch, &seen_keys).await?;
     let events = apply_events(&mut tx, batch, &results, &seen).await?;
     link_event_rejects(&mut tx, batch, &events).await?;
-    if !join_lists(&mut tx, batch, &results).await? {
+    let mut lists = ListCounts::default();
+    if !join_lists(&mut tx, batch, &results, &mut lists).await? {
         return Ok(BatchOutcome::ListMissing);
     }
 
@@ -419,6 +422,8 @@ pub async fn commit_sync_batch(
             .map_err(StoreError::query)?;
     }
     crate::changes::request_reevaluation(&mut tx, batch.workspace).await?;
+    // Last, so the rows of the lists the batch joined are locked for the commit alone.
+    lists.apply(&mut tx).await?;
     commit(tx).await?;
     Ok(BatchOutcome::Committed(BatchProgress {
         batch: counts,
@@ -744,13 +749,15 @@ async fn link_event_rejects(
 }
 
 /// Adds the people of the records whose profile was written or already current to the lists the
-/// mapping names. False when a list does not exist: the caller rolls the batch back.
+/// mapping names, leaving the count changes in `lists` for the batch to apply right before it
+/// commits. False when a list does not exist: the caller rolls the batch back.
 async fn join_lists(
     tx: &mut crate::Tx,
     batch: &SyncBatch<'_>,
     results: &[Option<ProfileOutcome>],
+    lists: &mut ListCounts,
 ) -> Result<bool, StoreError> {
-    // Lists in one order, so two runs never wait on each other's lists.
+    // The people of each list in one order, and the lists in one order.
     let mut by_list: BTreeMap<Uuid, Vec<Uuid>> = BTreeMap::new();
     for (upsert, result) in batch.upserts.iter().zip(results) {
         let Some(
@@ -766,18 +773,15 @@ async fn join_lists(
     for (list, mut people) in by_list {
         people.sort_unstable();
         people.dedup();
+        let write = ListWrite {
+            workspace: batch.workspace,
+            list,
+            source: ListSource::Sync,
+            actor: None,
+            trace: batch.trace,
+        };
         for chunk in people.chunks(MAX_PEOPLE_PER_CALL) {
-            match add_members(
-                tx,
-                batch.workspace,
-                list,
-                chunk,
-                ListSource::Sync,
-                None,
-                batch.trace,
-            )
-            .await
-            {
+            match add_members_into(tx, &write, chunk, lists).await {
                 Ok(_) => {}
                 Err(MembershipError::NoSuchList) => return Ok(false),
                 Err(MembershipError::Store(error)) => return Err(error),

@@ -12,7 +12,7 @@ use serde_json::json;
 use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_core::people::Identifier;
-use zirv_flow_store::{ListSource, MAX_PEOPLE_PER_CALL};
+use zirv_flow_store::{ListCounts, ListSource, ListWrite, MAX_PEOPLE_PER_CALL};
 
 use super::{capped, membership_error};
 use crate::AppState;
@@ -276,20 +276,23 @@ pub(crate) async fn import(
         }
     }
     unmatched.sort_by_key(|unmatched| unmatched.row);
+    // One order across the chunks, so two imports of overlapping people into the list, which
+    // only share-lock them and the list, cannot wait for each other's rows in a cycle.
+    people.sort_unstable();
     let trace = crate::trace::request_trace();
+    let write = ListWrite {
+        workspace: workspace.id,
+        list,
+        source: ListSource::Import,
+        actor: principal.user_id(),
+        trace: &trace,
+    };
+    let mut counts = ListCounts::default();
     let mut added = 0;
     for chunk in people.chunks(MAX_PEOPLE_PER_CALL) {
-        let outcome = zirv_flow_store::add_members(
-            &mut tx,
-            workspace.id,
-            list,
-            chunk,
-            ListSource::Import,
-            principal.user_id(),
-            &trace,
-        )
-        .await
-        .map_err(|error| ApiError::from(membership_error(error)))?;
+        let outcome = zirv_flow_store::add_members_into(&mut tx, &write, chunk, &mut counts)
+            .await
+            .map_err(|error| ApiError::from(membership_error(error)))?;
         added += outcome.changed;
     }
     if dry {
@@ -304,6 +307,8 @@ pub(crate) async fn import(
             json!({"change": "imported", "count": added}),
         )
         .await?;
+        // Last, so the list row is locked for the commit alone.
+        counts.apply(&mut tx).await?;
         zirv_flow_store::commit(tx).await?;
     }
     let (unmatched, unmatched_count) = capped(unmatched);

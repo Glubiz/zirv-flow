@@ -27,6 +27,7 @@ use crate::events::{
     insert_dropped_traits_reject, insert_record_rejects, reject_apply_failed,
 };
 use crate::jobs::{bind_job, enqueue_ctes};
+use crate::lists::ListCounts;
 use crate::people::{
     ProfileOutcome, ProfileRecord, apply_profile_record, apply_profile_record_into,
 };
@@ -785,6 +786,7 @@ pub async fn drain_batch(
         ..DrainOutcome::default()
     };
     let mut events = EventBatch::default();
+    let mut lists = ListCounts::default();
     for row in &rows {
         match map_with(row, &hooks).ok_or_else(StoreError::poison)? {
             Mapped::Profile(record) => {
@@ -810,7 +812,8 @@ pub async fn drain_batch(
             }
             Mapped::Hook(HookMapped::Record(record)) => {
                 let result =
-                    apply_hook_record(&mut tx, workspace, key, &mut events, &record).await?;
+                    apply_hook_record(&mut tx, workspace, key, &mut events, &mut lists, &record)
+                        .await?;
                 tally_hook(&mut outcome, &result);
             }
             Mapped::Hook(HookMapped::Rejected(rejected)) => {
@@ -822,6 +825,8 @@ pub async fn drain_batch(
     events.finish(&mut tx, workspace).await?;
     delete_rows(&mut tx, workspace, &rows).await?;
     crate::changes::request_reevaluation(&mut tx, workspace).await?;
+    // Last, so the rows of the lists the batch added to are locked for the commit alone.
+    lists.apply(&mut tx).await?;
     commit(tx).await?;
     Ok(outcome)
 }
@@ -846,8 +851,10 @@ pub async fn drain_batch_singly(
         more,
         ..DrainOutcome::default()
     };
+    let mut lists = ListCounts::default();
     for row in &rows {
         let mapped = map_with(row, &hooks);
+        let mark = lists.mark();
         let mut savepoint = tx.begin().await.map_err(StoreError::query)?;
         let mut unstorable = Map::new();
         let applied = match &mapped {
@@ -881,7 +888,16 @@ pub async fn drain_batch_singly(
             }
             Some(Mapped::Hook(HookMapped::Record(record))) => {
                 let mut events = EventBatch::default();
-                match apply_hook_record(&mut savepoint, workspace, key, &mut events, record).await {
+                match apply_hook_record(
+                    &mut savepoint,
+                    workspace,
+                    key,
+                    &mut events,
+                    &mut lists,
+                    record,
+                )
+                .await
+                {
                     Ok(result) => {
                         tally_hook(&mut outcome, &result);
                         events.finish(&mut savepoint, workspace).await
@@ -906,6 +922,7 @@ pub async fn drain_batch_singly(
                 // What a single write answers `422` for: the row is rejected whole, with the
                 // keys and codes of the fields as its sample.
                 savepoint.rollback().await.map_err(StoreError::query)?;
+                lists.discard_after(mark);
                 if let Some(Mapped::Contact(record)) = &mapped {
                     let mut rejected = record.clone();
                     rejected.traits = unstorable;
@@ -924,6 +941,7 @@ pub async fn drain_batch_singly(
             Err(error) if error.is_retryable() => return Err(error),
             Err(_) => {
                 savepoint.rollback().await.map_err(StoreError::query)?;
+                lists.discard_after(mark);
                 reject_row(&mut tx, workspace, key, row, mapped.as_ref(), &hooks).await?;
                 let kind = if row.kind == "webhook" {
                     "webhook"
@@ -940,6 +958,7 @@ pub async fn drain_batch_singly(
     }
     delete_rows(&mut tx, workspace, &rows).await?;
     crate::changes::request_reevaluation(&mut tx, workspace).await?;
+    lists.apply(&mut tx).await?;
     commit(tx).await?;
     Ok(outcome)
 }

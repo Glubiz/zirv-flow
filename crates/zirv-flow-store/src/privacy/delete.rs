@@ -372,7 +372,9 @@ async fn strip_enrolls(
 }
 
 /// Removes the people from their lists and keeps each list's member count exact. The lists
-/// are locked in id order first, like a merge does.
+/// are locked in id order first, `FOR NO KEY UPDATE` like a merge's rewrite: an open add holds
+/// a list only `FOR KEY SHARE`, which this does not wait for, and moves the count when it
+/// commits. The people are locked already, so no add of theirs is open.
 async fn remove_from_lists(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -381,7 +383,7 @@ async fn remove_from_lists(
     sqlx::query(
         "SELECT id FROM lists WHERE workspace_id = $1 AND id IN \
             (SELECT list_id FROM list_members WHERE workspace_id = $1 AND person_id = ANY($2)) \
-         ORDER BY id FOR UPDATE",
+         ORDER BY id FOR NO KEY UPDATE",
     )
     .bind(workspace.as_uuid())
     .bind(people)
