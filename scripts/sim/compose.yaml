@@ -87,7 +87,9 @@ services:
       - -c
       - wal_compression=lz4
       - -c
-      - checkpoint_timeout=15min
+      - checkpoint_timeout=${SIM_PG_CHECKPOINT_TIMEOUT:-15min}
+      - -c
+      - jit=${SIM_PG_JIT:-on}
       - -c
       - max_connections=250
       - -c
