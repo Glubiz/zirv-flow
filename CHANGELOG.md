@@ -15,3 +15,13 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.263.0 (2026-11-08)
+
+### Fixes
+
+- the rewrite closes a merged person's remaining segment rows
+
+### Performance
+
+- no segment or list locks in the drain's merges (investigation K)
+
