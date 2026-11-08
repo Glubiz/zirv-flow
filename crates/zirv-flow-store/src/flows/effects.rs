@@ -13,7 +13,9 @@ use zirv_flow_core::flow::{ListChange, TraitChange};
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use crate::changes::request_reevaluation;
-use crate::lists::{ListSource, MembershipError, add_members, remove_members};
+use crate::lists::{
+    ListCounts, ListSource, ListWrite, MembershipError, add_members_into, remove_members_into,
+};
 use crate::people::{ProfileOutcome, ProfileRecord, apply_profile_record};
 use crate::{StoreError, find_person, list_identities};
 
@@ -159,7 +161,11 @@ fn number(value: f64) -> Option<Value> {
 }
 
 /// Adds the person to a list or removes them, with the list source `flow`. Returns whether
-/// membership changed.
+/// membership changed. Either change holds the list only `FOR KEY SHARE` and leaves its count
+/// change in `lists`, which the step's transaction applies right before it commits, in list-id
+/// order: those updates are the only exclusive list locks the transaction takes, and a removal of
+/// someone an earlier step of the transaction added nets against that add's change instead of
+/// taking the stored count below zero.
 pub async fn apply_flow_list(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -167,34 +173,20 @@ pub async fn apply_flow_list(
     person: Uuid,
     change: ListChange,
     trace: &TraceContext,
+    lists: &mut ListCounts,
 ) -> Result<bool, EffectError> {
     crate::changes::cache_change_readers(connection, workspace).await?;
     let people = [person];
+    let write = ListWrite {
+        workspace,
+        list,
+        source: ListSource::Flow,
+        actor: None,
+        trace,
+    };
     let outcome = match change {
-        ListChange::Add => {
-            add_members(
-                connection,
-                workspace,
-                list,
-                &people,
-                ListSource::Flow,
-                None,
-                trace,
-            )
-            .await
-        }
-        ListChange::Remove => {
-            remove_members(
-                connection,
-                workspace,
-                list,
-                &people,
-                ListSource::Flow,
-                None,
-                trace,
-            )
-            .await
-        }
+        ListChange::Add => add_members_into(connection, &write, &people, lists).await,
+        ListChange::Remove => remove_members_into(connection, &write, &people, lists).await,
     };
     match outcome {
         Ok(outcome) => Ok(outcome.changed > 0),
@@ -378,15 +370,18 @@ mod tests {
             .await
             .unwrap();
         let mut tx = crate::begin(&pool).await.unwrap();
+        let mut lists = ListCounts::default();
+        let add = ListChange::Add;
 
-        let added = apply_flow_list(&mut tx, ws, list.id, ada, ListChange::Add, &trace())
+        let added = apply_flow_list(&mut tx, ws, list.id, ada, add, &trace(), &mut lists)
             .await
             .unwrap();
-        let again = apply_flow_list(&mut tx, ws, list.id, ada, ListChange::Add, &trace())
+        let again = apply_flow_list(&mut tx, ws, list.id, ada, add, &trace(), &mut lists)
             .await
             .unwrap();
         let ghost =
-            apply_flow_list(&mut tx, ws, Uuid::now_v7(), ada, ListChange::Add, &trace()).await;
+            apply_flow_list(&mut tx, ws, Uuid::now_v7(), ada, add, &trace(), &mut lists).await;
+        lists.apply(&mut tx).await.unwrap();
         crate::commit(tx).await.unwrap();
 
         assert!(added && !again);
@@ -396,6 +391,132 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(source, "flow");
+        let found = crate::find_list(&pool, ws, list.id).await.unwrap().unwrap();
+        assert_eq!(found.member_count, 1);
+
+        let mut tx = crate::begin(&pool).await.unwrap();
+        let remove = ListChange::Remove;
+        let removed = apply_flow_list(&mut tx, ws, list.id, ada, remove, &trace(), &mut lists)
+            .await
+            .unwrap();
+        lists.apply(&mut tx).await.unwrap();
+        crate::commit(tx).await.unwrap();
+        assert!(removed);
+        let found = crate::find_list(&pool, ws, list.id).await.unwrap().unwrap();
+        assert_eq!(
+            found.member_count, 0,
+            "a removal's count moves at the end too"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_add_and_a_removal_of_one_person_in_one_transaction_leave_the_count_exact(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "lists").await;
+        let ada = person(&pool, ws, "ada@example.com", json!({})).await;
+        let bob = person(&pool, ws, "bob@example.com", json!({})).await;
+        let list = crate::create_list(&pool, ws, "Welcomed", "", None)
+            .await
+            .unwrap();
+        let (add, remove) = (ListChange::Add, ListChange::Remove);
+        let mut tx = crate::begin(&pool).await.unwrap();
+        let mut lists = ListCounts::default();
+
+        // The stored count is 0 throughout: each removal takes out a member only an add of this
+        // transaction put in.
+        let mut changed = Vec::new();
+        for (person, change) in [
+            (ada, add),
+            (ada, remove),
+            (bob, add),
+            (bob, remove),
+            (bob, add),
+        ] {
+            let made = apply_flow_list(&mut tx, ws, list.id, person, change, &trace(), &mut lists)
+                .await
+                .unwrap();
+            changed.push(made);
+        }
+        lists.apply(&mut tx).await.unwrap();
+        crate::commit(tx).await.unwrap();
+
+        assert_eq!(changed, [true; 5]);
+        let members: Vec<Uuid> = sqlx::query_scalar("SELECT person_id FROM list_members")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(members, [bob]);
+        let found = crate::find_list(&pool, ws, list.id).await.unwrap().unwrap();
+        assert_eq!(found.member_count, 1);
+    }
+
+    /// Ends a transaction of flow list changes as a step or a wake batch does.
+    async fn end(mut tx: crate::Tx, mut lists: ListCounts) -> Result<(), StoreError> {
+        lists.apply(&mut tx).await?;
+        crate::commit(tx).await
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn two_transactions_that_remove_from_one_list_and_add_to_the_other_cross_without_deadlock(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "lists").await;
+        let x = person(&pool, ws, "x@example.com", json!({})).await;
+        let y = person(&pool, ws, "y@example.com", json!({})).await;
+        let z = person(&pool, ws, "z@example.com", json!({})).await;
+        let w = person(&pool, ws, "w@example.com", json!({})).await;
+        let a = crate::create_list(&pool, ws, "A", "", None)
+            .await
+            .unwrap()
+            .id;
+        let b = crate::create_list(&pool, ws, "B", "", None)
+            .await
+            .unwrap()
+            .id;
+        let (add, remove) = (ListChange::Add, ListChange::Remove);
+        let mut tx = crate::begin(&pool).await.unwrap();
+        let mut lists = ListCounts::default();
+        for (list, person) in [(b, x), (a, z)] {
+            apply_flow_list(&mut tx, ws, list, person, add, &trace(), &mut lists)
+                .await
+                .unwrap();
+        }
+        end(tx, lists).await.unwrap();
+
+        // Each takes out a member of its first list, then adds to the other, so each holds its
+        // first list before the other moves its counts.
+        let (mut one, mut one_lists) = (crate::begin(&pool).await.unwrap(), ListCounts::default());
+        let (mut two, mut two_lists) = (crate::begin(&pool).await.unwrap(), ListCounts::default());
+        apply_flow_list(&mut one, ws, b, x, remove, &trace(), &mut one_lists)
+            .await
+            .unwrap();
+        apply_flow_list(&mut two, ws, a, z, remove, &trace(), &mut two_lists)
+            .await
+            .unwrap();
+        apply_flow_list(&mut one, ws, a, y, add, &trace(), &mut one_lists)
+            .await
+            .unwrap();
+        apply_flow_list(&mut two, ws, b, w, add, &trace(), &mut two_lists)
+            .await
+            .unwrap();
+        let ended = tokio::join!(end(one, one_lists), end(two, two_lists));
+
+        assert!(ended.0.is_ok() && ended.1.is_ok(), "both commit: {ended:?}");
+        let members: Vec<(Uuid, Uuid)> =
+            sqlx::query_as("SELECT list_id, person_id FROM list_members ORDER BY 1, 2")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let mut expected = vec![(a, y), (b, w)];
+        expected.sort_unstable();
+        assert_eq!(members, expected);
+        for list in [a, b] {
+            let found = crate::find_list(&pool, ws, list).await.unwrap().unwrap();
+            assert_eq!(found.member_count, 1);
+        }
     }
 
     #[sqlx::test]

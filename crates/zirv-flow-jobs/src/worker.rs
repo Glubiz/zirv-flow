@@ -1167,8 +1167,9 @@ async fn record_failure(
 
 /// The end of a batch transaction that can still commit: deletes the jobs of the wakes that
 /// completed, each fenced on its lease, in one statement ([`complete_jobs`]), then appends the
-/// decisions of the wakes kept, in one statement. Returns the wakes that completed but lost their
-/// lease, so the batch must not commit, or `None` when a statement failed.
+/// decisions of the wakes kept, in one statement, and moves the counts of the lists they changed,
+/// by each list's net. Returns the wakes that completed but lost their lease, so the batch must not
+/// commit, or `None` when a statement failed.
 async fn complete_wakes(
     tx: &mut PgConnection,
     batch: &mut WakeBatch,
@@ -1186,7 +1187,7 @@ async fn complete_wakes(
         .filter(|id| !deleted.contains(id))
         .collect();
     if lost.is_empty() {
-        batch.flush_decisions(tx).await.ok()?;
+        batch.flush(tx).await.ok()?;
     }
     Some(lost)
 }
@@ -1201,7 +1202,7 @@ async fn run_wake(
     job: &ClaimedJob,
     batch: &mut WakeBatch,
 ) -> Option<(Attempt, Option<AbortOnDrop<()>>)> {
-    let mark = batch.decisions_mark();
+    let mark = batch.mark();
     let mut savepoint = tx.begin().await.ok()?;
     let (attempt, heartbeat) = match lock_lease(&mut savepoint, job.id, job.lease_token).await {
         Ok(true) => attempt_wake(shared, kind, &mut savepoint, job, batch).await,
@@ -1214,7 +1215,7 @@ async fn run_wake(
     let ended = match attempt {
         Attempt::Completed => savepoint.commit().await,
         Attempt::LeaseLost | Attempt::Failed(..) | Attempt::Recorded(..) => {
-            batch.discard_decisions(mark);
+            batch.discard_after(mark);
             savepoint.rollback().await
         }
     };

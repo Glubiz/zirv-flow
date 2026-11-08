@@ -16,7 +16,7 @@ use zirv_flow_core::{HmacKey, WorkspaceId};
 
 use crate::events::{EventBatch, EventOutcome, EventRecord, apply_event_record};
 use crate::ingest::{InboxRow, strongest_identifier};
-use crate::lists::{ListSource, MembershipError, add_members};
+use crate::lists::{ListCounts, ListSource, ListWrite, MembershipError, add_members_into};
 use crate::people::{
     ProfileOutcome, ProfileRecord, apply_profile_record_into, list_trait_definitions,
 };
@@ -251,13 +251,15 @@ pub(crate) struct HookResult {
 }
 
 /// Applies a hook record: the profile, then the event when the profile is current (written or
-/// already so), then the list memberships of the person. A list that no longer exists is an
-/// error, so the batch rolls back and the row is isolated singly.
+/// already so), then the list memberships of the person, whose count changes go to `lists` for
+/// the batch to apply right before it commits. A list that no longer exists is an error, so the
+/// batch rolls back and the row is isolated singly.
 pub(crate) async fn apply_hook_record(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     key: &HmacKey,
     events: &mut EventBatch,
+    lists: &mut ListCounts,
     record: &HookRecord,
 ) -> Result<HookResult, StoreError> {
     let mut current = record.profile.clone();
@@ -279,21 +281,18 @@ pub(crate) async fn apply_hook_record(
         Some(event) => Some(apply_event_record(connection, workspace, key, events, event).await?),
         None => None,
     };
-    let mut lists = record.lists.clone();
-    lists.sort_unstable();
-    lists.dedup();
-    for list in lists {
-        match add_members(
-            connection,
+    let mut joins = record.lists.clone();
+    joins.sort_unstable();
+    joins.dedup();
+    for list in joins {
+        let write = ListWrite {
             workspace,
             list,
-            &[person],
-            ListSource::Sync,
-            None,
-            &record.profile.trace,
-        )
-        .await
-        {
+            source: ListSource::Sync,
+            actor: None,
+            trace: &record.profile.trace,
+        };
+        match add_members_into(connection, &write, &[person], lists).await {
             Ok(_) => {}
             Err(MembershipError::Store(error)) => return Err(error),
             Err(MembershipError::NoSuchList | MembershipError::TooMany) => {
@@ -603,6 +602,242 @@ mod tests {
             .unwrap();
 
         assert_eq!(count(&pool, "SELECT count(*) FROM events").await, 2);
+    }
+
+    /// A batch's transaction that has applied `payload` of `created` the way `drain_batch` applies
+    /// a row, and is still open: it holds the person and its lists as such a batch does.
+    struct OpenBatch {
+        tx: crate::Tx,
+        events: EventBatch,
+        lists: ListCounts,
+    }
+
+    impl OpenBatch {
+        async fn applied(
+            pool: &PgPool,
+            ws: WorkspaceId,
+            created: &Webhook,
+            payload: Value,
+        ) -> Self {
+            let row = InboxRow {
+                id: 0,
+                api_key_id: None,
+                webhook_id: Some(created.id),
+                kind: "webhook".to_owned(),
+                item: json!({"payload": payload, "signed_at": null}),
+                message_id: format!("wh:{}:open", created.id),
+                received_at: OffsetDateTime::now_utc(),
+                trace_id: Uuid::now_v7(),
+            };
+            let mut tx = crate::begin(pool).await.unwrap();
+            crate::changes::cache_change_readers(&mut tx, ws)
+                .await
+                .unwrap();
+            let configs = HookConfigs::load(&mut tx, ws, std::slice::from_ref(&row))
+                .await
+                .unwrap();
+            let Some(HookMapped::Record(record)) = map_hook_row(&row, &configs) else {
+                panic!("the payload maps");
+            };
+            let mut events = EventBatch::default();
+            let mut lists = ListCounts::default();
+            apply_hook_record(&mut tx, ws, &key(), &mut events, &mut lists, &record)
+                .await
+                .unwrap();
+            Self { tx, events, lists }
+        }
+
+        /// Ends the batch as `drain_batch` does.
+        async fn commit(mut self, ws: WorkspaceId) {
+            self.events.finish(&mut self.tx, ws).await.unwrap();
+            self.lists.apply(&mut self.tx).await.unwrap();
+            crate::commit(self.tx).await.unwrap();
+        }
+    }
+
+    async fn member_count(pool: &PgPool, ws: WorkspaceId, list: Uuid) -> Option<i64> {
+        crate::find_list(pool, ws, list)
+            .await
+            .unwrap()
+            .map(|list| list.member_count)
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn two_batches_that_add_to_one_list_do_not_wait_for_each_other_and_count_exactly(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        plan_trait(&pool, ws).await;
+        let list = create_list(&pool, ws, "newsletter", "", None)
+            .await
+            .unwrap();
+        let created = hook(&pool, ws, "forms", Some(&mapping(&[list.id]))).await;
+        // An earlier order, so the event's schema row is in: the first of a name is inserted
+        // by the batch that sees it, and a second batch waits for that insert.
+        push(
+            &pool,
+            &created,
+            order("o-0", "cyd@example.com", "pro"),
+            None,
+        )
+        .await;
+        drain_batch(&pool, ws, Shard::ALL, &key(), 100)
+            .await
+            .unwrap();
+        let first =
+            OpenBatch::applied(&pool, ws, &created, order("o-1", "ada@example.com", "pro")).await;
+        push(
+            &pool,
+            &created,
+            order("o-2", "bob@example.com", "pro"),
+            None,
+        )
+        .await;
+
+        let second = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            drain_batch(&pool, ws, Shard::ALL, &key(), 100),
+        )
+        .await;
+
+        let second = second.expect("the second batch commits while the first is open");
+        assert_eq!(
+            second.unwrap().applied.get(&("webhook", "applied")),
+            Some(&1)
+        );
+        first.commit(ws).await;
+        assert_eq!(count(&pool, "SELECT count(*) FROM list_members").await, 3);
+        assert_eq!(member_count(&pool, ws, list.id).await, Some(3));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_list_deleted_beside_a_batch_that_adds_to_it_keeps_no_member_and_neither_deadlocks(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        plan_trait(&pool, ws).await;
+        let wait = std::time::Duration::from_millis(500);
+        let delete = |list: Uuid| {
+            let pool = pool.clone();
+            async move {
+                let mut tx = crate::begin(&pool).await.unwrap();
+                let deleted = crate::delete_list(&mut tx, ws, list).await.unwrap();
+                crate::commit(tx).await.unwrap();
+                deleted
+            }
+        };
+
+        // The add first: the delete waits for the batch, then takes what it added.
+        let early = create_list(&pool, ws, "early", "", None).await.unwrap();
+        let created = hook(&pool, ws, "forms", Some(&mapping(&[early.id]))).await;
+        let open =
+            OpenBatch::applied(&pool, ws, &created, order("o-1", "ada@example.com", "pro")).await;
+        let deleting = tokio::spawn(delete(early.id));
+        tokio::time::sleep(wait).await;
+        assert!(!deleting.is_finished(), "the delete waits for the open add");
+        open.commit(ws).await;
+        let deleted = tokio::time::timeout(std::time::Duration::from_secs(10), deleting)
+            .await
+            .expect("the delete goes on once the batch commits")
+            .unwrap();
+        assert!(deleted.is_some());
+        assert_eq!(count(&pool, "SELECT count(*) FROM list_members").await, 0);
+
+        // The delete first: the batch waits for it, finds no list and isolates the row.
+        let late = create_list(&pool, ws, "late", "", None).await.unwrap();
+        let other = hook(&pool, ws, "signups", Some(&mapping(&[late.id]))).await;
+        push(&pool, &other, order("o-2", "bob@example.com", "pro"), None).await;
+        let mut deleting = crate::begin(&pool).await.unwrap();
+        crate::delete_list(&mut deleting, ws, late.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let draining = tokio::spawn({
+            let pool = pool.clone();
+            async move { drain_batch(&pool, ws, Shard::ALL, &key(), 100).await }
+        });
+        tokio::time::sleep(wait).await;
+        assert!(!draining.is_finished(), "the add waits for the open delete");
+        crate::commit(deleting).await.unwrap();
+        let batch = tokio::time::timeout(std::time::Duration::from_secs(10), draining)
+            .await
+            .expect("the batch goes on once the delete commits")
+            .unwrap();
+        assert!(batch.is_err(), "the list is gone, so the row is poison");
+        let singly = drain_batch_singly(&pool, ws, Shard::ALL, &key(), 100)
+            .await
+            .unwrap();
+        assert_eq!(singly.applied.get(&("webhook", "apply_failed")), Some(&1));
+        assert_eq!(count(&pool, "SELECT count(*) FROM list_members").await, 0);
+        assert_eq!(member_count(&pool, ws, late.id).await, None);
+    }
+
+    /// A hook whose payloads carry an `email` and yield the event `name`.
+    fn event_mapping(name: &str) -> Value {
+        json!({
+            "columns": [{"column": "email", "target": {"type": "identifier", "kind": "email"}}],
+            "event": {"name": name}
+        })
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn one_persons_rows_through_two_hooks_drain_in_the_order_they_arrived(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let form = hook(&pool, ws, "form", Some(&event_mapping("form_submitted"))).await;
+        let consent = hook(
+            &pool,
+            ws,
+            "consent",
+            Some(&event_mapping("consent_changed")),
+        )
+        .await;
+        push(
+            &pool,
+            &form,
+            json!({"id": "f-1", "email": "ada@example.com"}),
+            None,
+        )
+        .await;
+        push(
+            &pool,
+            &consent,
+            json!({"id": "c-1", "email": "ada@example.com"}),
+            None,
+        )
+        .await;
+        let affinity: i16 =
+            sqlx::query_scalar("SELECT affinity FROM ingest_inbox WHERE webhook_id = $1")
+                .bind(consent.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        // The lane of the consent change's bucket alone, one row per batch.
+        let lane = Shard {
+            index: u32::try_from(affinity).unwrap(),
+            count: 64,
+        };
+        let names = || async {
+            let names: Vec<String> = sqlx::query_scalar("SELECT name FROM events ORDER BY name")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+            names
+        };
+
+        let first = drain_batch(&pool, ws, lane, &key(), 1).await.unwrap();
+
+        assert_eq!(first.rows, 1);
+        assert_eq!(
+            names().await,
+            ["form_submitted"],
+            "the form submit applies first"
+        );
+        drain_batch(&pool, ws, lane, &key(), 1).await.unwrap();
+        assert_eq!(names().await, ["consent_changed", "form_submitted"]);
+        assert_eq!(count(&pool, "SELECT count(*) FROM ingest_inbox").await, 0);
     }
 
     #[sqlx::test]

@@ -349,15 +349,36 @@ erDiagram
 | AI settings | Per-workspace enablement, provider/model choice, budget, the opt-in transcript window (off by default) and PII opt-in. Deployment configuration declares the permitted providers and models. |
 | AI call log | Audit record for each assistant call: workspace, user, feature, provider, model, tokens, estimated cost, latency, outcome and resulting draft id; transcript content is kept only inside the workspace's opt-in window (13.4). |
 
-As built (lists): `lists` holds `member_count`, kept exact under a row lock on the list;
+As built (lists): `lists` holds `member_count`, kept exact by the transactions that change it;
 `list_members` is keyed `(list_id, person_id)` and `list_member_changes` is the history.
 `store::lists` adds and removes in one transaction that locks the people (resolved through
 `merged_into`, re-resolved if a merge wins the race) before the list, the same order a merge's
 rewrite uses, and writes one history row and one `list.membership` decision (ids only) per real
-change. The merge itself takes no list lock: the `person.merge.rewrite` job calls
-`lists::move_on_merge` last, which locks the merged person's lists in id order, gives the
-survivor the union of both memberships with the earlier `added_at`, deletes the merged person's
-rows, corrects the counts, re-points its history and marks the survivor in the `lists` class; a
+change. An add holds its list only `FOR KEY SHARE` and leaves the count to a `ListCounts` it
+fills: a transaction that adds (an inbox drain batch, a sync or import batch, a flow step or wake
+batch, a list's CSV import) applies it as its last statement, one `member_count = member_count +
+delta` per list in list-id order, so adds to one list from concurrent batches never wait for each
+other and hold the list row's write lock only for their commit. That update, a `FOR NO KEY
+UPDATE`, conflicts with no key share, and a locker that already shares the row upgrades without
+queuing behind a waiter, so the end of a batch cannot deadlock with another batch's add. A flow
+step's or wake batch's removal also holds its list only `FOR KEY SHARE` and nets its count into
+the same `ListCounts` (a step that adds and then removes a person moves the count by the net,
+once, at the end; moving it at once could take the stored count below zero while the add's is
+still pending), so the final updates in list-id order are the only exclusive list locks a batch
+takes and two batches that each removed from one list and added to the other cannot wait for
+each other in a cycle. It locks its people `FOR UPDATE` (a step holds its person so already),
+which a merge's rewrite waits for. A removal can only delete a committed member row, whose
+adder moved the count in its own commit, or one its own transaction added, whose `+1` is in the
+same buffer, and its `DELETE` locks the row, so the count never goes below zero. The API's
+removal, `move_on_merge` and an erasure lock their lists `FOR NO KEY UPDATE` (in id order, after
+their people, holding no list while they wait for a person) and correct the count at once: they
+wait for one another, never for an open add or a batch's removal. A list's deletion
+(`FOR UPDATE`, then `ON DELETE CASCADE`) waits for the open adds and removes what they wrote; an
+add that comes after it finds no list and fails (`NoSuchList`; an inbox row becomes
+`apply_failed`). Lists have no archive state. The merge itself takes no list lock: the
+`person.merge.rewrite` job calls `lists::move_on_merge` last, which locks the merged person's
+lists in id order, gives the survivor the union of both memberships with the earlier `added_at`,
+deletes the merged person's rows, corrects the counts, re-points its history and marks the survivor in the `lists` class; a
 second run moves nothing. Until it runs the merged person's rows stand for the survivor: an add
 of the survivor to such a list writes nothing, a removal deletes them too, list audiences
 resolve each row to the survivor and enroll it once, and `member_count` counts the rows until
@@ -486,8 +507,16 @@ at most one bucket per stored hook), the body read with the same cap, the secret
 zeroizing buffer, the signature and timestamp verified with a constant-time compare, then the JSON
 object and its dedupe value. Only then does one transaction append an `ingest_inbox` row of kind
 `webhook` (`webhook_id` set, `api_key_id` NULL, `ON DELETE CASCADE` from the hook; the row's
-`item` is `{"payload", "signed_at"}`; `affinity` is the bucket of the hook id, so one hook
-drains in id order in one shard), enqueue `ingest.drain` and, at most once a minute per hook per
+`item` is `{"payload", "signed_at"}`; `affinity` is the bucket of the record key the drain will
+give the payload, found by running only the stream's identifier columns through the same
+`map_json` and `strongest_identifier`, so one person's rows, through any hook or the API, drain in
+id order in one shard while one hook's people spread across shards; a payload with no valid
+identifier, or a stream whose mapping cannot be read, falls back to the bucket of the hook id.
+The order holds only among rows bucketed under one rule: a row queued before this bucketing was
+deployed (bucketed by the hook id), or before a mapping edit that changed the identifier columns,
+can drain in another lane than a row of the same person received after it, so with rows queued
+across a deploy or such an edit, one person's rows are not guaranteed to apply in arrival order),
+enqueue `ingest.drain` and, at most once a minute per hook per
 process, report the stream through `record_stream_outcome`. Mapping runs in the drain, not at the
 endpoint: it loads each batch's hooks and the trait catalog once, maps a payload with
 `core::mapping::map_json` (the declared fields are `Mapping::root_fields`, so an absent field is
@@ -2789,8 +2818,9 @@ Every lock a batch takes follows one order: flows by id, then the people of each
 wake by wake in ascending order of lock group, which is the order in which merge, erasure and the
 flow lifecycle jobs lock people (`ORDER BY id FOR UPDATE`); resume and archive lock their one flow
 before any person. A batch therefore waits for another batch, a merge or an erasure, or they wait
-for it, without a deadlock. Outside that order are the list rows a step's list change holds until
-the commit, the unique-key insert of a re-evaluation, and lock groups that interleave after merges.
+for it, without a deadlock. Outside that order are the list rows a step's list changes hold until
+the commit (a key share for an add or a removal, then the update of the batch's net counts in
+list-id order after its decisions, the only exclusive list locks it takes), the unique-key insert of a re-evaluation, and lock groups that interleave after merges.
 A deadlock among those is found after `deadlock_timeout` (1 s by default) and PostgreSQL aborts the
 statement of one side; in a batch that is one wake, which rolls back to its savepoint and retries
 alone, while the wait has used the hold limit, so the batch gives its unbegun wakes back.
