@@ -15,3 +15,13 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.262.0 (2026-11-08)
+
+### Performance
+
+- no savepoint per event and no lease holding an xid (investigation K)
+
+### Chores
+
+- simplify the subxid change
+
