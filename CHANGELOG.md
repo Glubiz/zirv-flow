@@ -15,3 +15,21 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.266.0 (2026-11-08)
+
+### Fixes
+
+- enqueue only missing shard jobs, sim drain slots, tests
+
+### Performance
+
+- one drain job per shard so the drain spreads over workers (investigation L)
+
+### Chores
+
+- put the backfill test's comment above it so the invariant scan sees its wrapper
+
+### Other
+
+- sim: count the serve explorer pools in the drain slot arithmetic
+
