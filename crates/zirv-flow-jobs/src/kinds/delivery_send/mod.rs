@@ -1570,7 +1570,8 @@ mod tests {
                 [("delivered".to_owned(), 1)]
             );
             let trail = env.decisions(&["send.gate", "message.send"]).await;
-            assert_eq!(trail.len(), 12, "{trail:?}");
+            // A passed gate writes no row: the sent message implies every gate passed.
+            assert_eq!(trail.len(), 1, "{trail:?}");
             assert_eq!(
                 trail.last().unwrap(),
                 &("message.send".to_owned(), "sent".to_owned(), None)

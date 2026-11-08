@@ -353,7 +353,7 @@ mod tests {
             );
         }
         let mut broken = records;
-        broken[16]["cause"]["id"] = json!("unreachable");
+        broken[10]["cause"]["id"] = json!("unreachable");
         assert!(
             failing_complete(&broken)
                 .unwrap_err()
