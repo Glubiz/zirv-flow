@@ -1,5 +1,6 @@
-//! Reading a segment's members and their history, and keeping the rows right when a person is
-//! merged or deleted. The refresh writes the rows (see `refresh`).
+//! Reading a segment's members and their history, and keeping the counts right when a person is
+//! deleted. The refresh and the pass write the rows, a merged-away person's closing included
+//! (see `refresh`); the merge's rewrite closes whatever rows of that person remain.
 
 use sqlx::PgConnection;
 use time::{Date, Duration, OffsetDateTime, Time};
@@ -233,17 +234,28 @@ async fn size_per_day_until(
     }))
 }
 
-/// Closes the open rows of a merged person, in the caller's transaction: `exited_at` is the
-/// merge time (never before the row's own entry), the cause is `data_change` and the trace is the
-/// merge's. No event is written; the survivor enters at the next refresh if they belong. The
-/// segments' counts drop with the rows.
+/// Closes every open row a merged person still holds, in any segment, in the transaction of the
+/// merge's rewrite job, and returns how many. The pass that consumes the merge's mark closes the
+/// rows of the segments it evaluates; this closes the rest: those of an archived segment or of
+/// one whose definition no longer compiles, which no pass writes, and any a pass has not reached
+/// yet. They close as a pass closes a merged person's row: `exited_at` is now (never before the
+/// row's own entry), the cause is `data_change` on `trace` and no event, decision or flow trigger
+/// is written; the segments' counts drop with them.
+///
+/// The segments are locked first, in the order of a pass ([`super::lock_segments_of_people`]), so
+/// a pass or a refresh that writes the same rows runs entirely before or after this. The caller
+/// takes these locks last: it holds the people `FOR KEY SHARE`, which a pass's claim does not
+/// wait for, and its other locks (lists, the survivor's mark) are none a pass takes after its
+/// segment locks. A merged person's row is never opened again (no compiled set holds a merged
+/// person), so a second run finds nothing.
 pub(crate) async fn close_on_merge(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
-    loser: Uuid,
+    merged: Uuid,
     trace: &TraceContext,
-) -> Result<(), StoreError> {
-    sqlx::query(
+) -> Result<u64, StoreError> {
+    super::lock_segments_of_people(connection, workspace, &[merged]).await?;
+    let closed: Vec<i64> = sqlx::query_scalar(
         "WITH closed AS ( \
              UPDATE segment_members SET exited_version = version, \
                  exited_at = GREATEST(now(), entered_at), exited_trace_id = $3, \
@@ -252,15 +264,19 @@ pub(crate) async fn close_on_merge(
              RETURNING segment_id), \
          counts AS (SELECT segment_id, count(*) AS n FROM closed GROUP BY segment_id) \
          UPDATE segments s SET member_count = s.member_count - counts.n \
-         FROM counts WHERE s.id = counts.segment_id AND s.workspace_id = $1",
+         FROM counts WHERE s.id = counts.segment_id AND s.workspace_id = $1 \
+         RETURNING counts.n",
     )
     .bind(workspace.as_uuid())
-    .bind(loser)
+    .bind(merged)
     .bind(trace.trace_id.as_uuid())
-    .execute(connection)
+    .fetch_all(connection)
     .await
     .map_err(StoreError::query)?;
-    Ok(())
+    Ok(closed
+        .into_iter()
+        .map(|n| u64::try_from(n).unwrap_or(0))
+        .sum())
 }
 
 /// Takes the people's open rows out of the segments' counts. Deleting the rows themselves is the
@@ -292,7 +308,6 @@ pub(crate) async fn forget_people(
 mod tests {
     use sqlx::PgPool;
     use time::Duration;
-    use zirv_flow_core::Cause;
 
     use super::*;
     use crate::segments::tests_support::{person, segment, workspace};
@@ -507,68 +522,6 @@ mod tests {
         assert_eq!(one.days, [(today, 1)]);
         assert_eq!((one.from, one.to, one.current), (today, today, 1));
         assert!(foreign.is_none() && unknown.is_none());
-    }
-
-    #[sqlx::test]
-    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_merge_never_stamps_an_exit_before_the_rows_entry(pool: PgPool) {
-        let ws = workspace(&pool, "one").await;
-        let seg = segment(&pool, ws, "Pros", 60).await;
-        let ada = person(&pool, ws, "ada@example.com", "pro").await;
-        // A pass that committed after the merge began opened the row ahead of the merge's now().
-        let ahead = OffsetDateTime::now_utc() + Duration::seconds(1);
-        enter(&pool, ws, seg.id, ada, ahead).await;
-        let trace = TraceContext::root(Cause::api("merge"));
-
-        let mut tx = begin(&pool).await.unwrap();
-        close_on_merge(&mut tx, ws, ada, &trace).await.unwrap();
-        commit(tx).await.unwrap();
-
-        let ordered: bool = sqlx::query_scalar(
-            "SELECT exited_at >= entered_at FROM segment_members WHERE person_id = $1",
-        )
-        .bind(ada)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert!(ordered);
-    }
-
-    #[sqlx::test]
-    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_merge_closes_the_losers_open_rows_with_the_merges_trace_and_drops_the_count(
-        pool: PgPool,
-    ) {
-        let ws = workspace(&pool, "one").await;
-        let seg = segment(&pool, ws, "Pros", 60).await;
-        let ada = person(&pool, ws, "ada@example.com", "pro").await;
-        let bob = person(&pool, ws, "bob@example.com", "pro").await;
-        enter(&pool, ws, seg.id, ada, OffsetDateTime::now_utc()).await;
-        enter(&pool, ws, seg.id, bob, OffsetDateTime::now_utc()).await;
-        let trace = TraceContext::root(Cause::api("merge"));
-
-        let mut tx = begin(&pool).await.unwrap();
-        close_on_merge(&mut tx, ws, ada, &trace).await.unwrap();
-        commit(tx).await.unwrap();
-
-        let (cause, trace_id, count): (String, Uuid, i32) = sqlx::query_as(
-            "SELECT m.exited_cause, m.exited_trace_id, s.member_count FROM segment_members m \
-             JOIN segments s ON s.id = m.segment_id WHERE m.person_id = $1",
-        )
-        .bind(ada)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(
-            (cause.as_str(), trace_id, count),
-            ("data_change", trace.trace_id.as_uuid(), 1)
-        );
-        let events: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM events WHERE name LIKE 'segment.%'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(events, 0);
     }
 
     #[sqlx::test]

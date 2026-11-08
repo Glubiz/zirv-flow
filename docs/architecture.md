@@ -339,7 +339,7 @@ erDiagram
 | Decision log | Append-only, time-partitioned typed records for derived actions and their causes. It stores durable ids and reasons but no personal-data values; `trace_id` links the tree across jobs, events, messages and forwarding. |
 | Consent | Recorded consent: state per `(person, channel, topic)`: `subscribed`, `unsubscribed`, `pending_confirmation`, `unknown`; plus append-only history with source and evidence. It is the input to the workspace consent policy (10.1), which decides effective consent. |
 | Suppression | Identifier-level block (hard bounce, complaint, manual, erased), stored as an HMAC of the normalized identifier so it outlives erasure. |
-| List; segment, version, membership | Static set of people (manual, CSV, API, flow action). Segment definition AST; membership rows with `entered_at`/`exited_at`, current members `exited_at IS NULL` (partial unique index). Erasure and person deletion remove a person's membership rows; a merge closes the merged person's rows, and the survivor's `merge` change class (7.1) re-evaluates it. |
+| List; segment, version, membership | Static set of people (manual, CSV, API, flow action). Segment definition AST; membership rows with `entered_at`/`exited_at`, current members `exited_at IS NULL` (partial unique index). Erasure and person deletion remove a person's membership rows. A merge marks both people in the `merge` change class (7.1): the next re-evaluation pass closes the merged person's open rows without a `segment.exited` (the person is still there as the survivor) and evaluates the survivor, and the merge's rewrite job moves the list memberships and closes, the same way, any segment row the pass left open (an archived segment, one whose definition no longer compiles, one the pass has not reached). |
 | Workspace | Isolation unit. `workspaces.timezone` is an IANA zone name, default `UTC`, set by an Admin. It is the fallback zone for `wait.until_time` (9.1). |
 | Flow, version, enrollment; message | Versions are immutable once published and enrollments are pinned to one. The enrollment context holds ids only (9.3). `flow_entries(flow_id, person_id, entries, last_entered_at)` records each person's entries for the re-entry rule, and a partial unique index allows one active enrollment per flow and person (9.4). One message row per send attempt; `messages.idempotency_key` is unique. The message records the exact template, snippet and theme versions it was rendered from. |
 | Template, template version | Channel (`email`, `webhook`; `sms`, `push`, `in_app` reserved), category, mode (`blocks` or `code`) and a versioned content document (section 11). Versions are immutable once published. |
@@ -352,11 +352,22 @@ erDiagram
 As built (lists): `lists` holds `member_count`, kept exact under a row lock on the list;
 `list_members` is keyed `(list_id, person_id)` and `list_member_changes` is the history.
 `store::lists` adds and removes in one transaction that locks the people (resolved through
-`merged_into`, re-resolved if a merge wins the race) before the list, the same order a merge
-uses, and writes one history row and one `list.membership` decision (ids only) per real
-change. `merge_people` calls `lists::move_on_merge`, which gives the survivor the union of
-both memberships with the earlier `added_at`, deletes the loser's rows, corrects the counts
-and re-points the loser's history. Reads need `read`; writes need `write` (any member for a
+`merged_into`, re-resolved if a merge wins the race) before the list, the same order a merge's
+rewrite uses, and writes one history row and one `list.membership` decision (ids only) per real
+change. The merge itself takes no list lock: the `person.merge.rewrite` job calls
+`lists::move_on_merge` last, which locks the merged person's lists in id order, gives the
+survivor the union of both memberships with the earlier `added_at`, deletes the merged person's
+rows, corrects the counts, re-points its history and marks the survivor in the `lists` class; a
+second run moves nothing. Until it runs the merged person's rows stand for the survivor: an add
+of the survivor to such a list writes nothing, a removal deletes them too, list audiences
+resolve each row to the survivor and enroll it once, and `member_count` counts the rows until
+the move. The reads show the state from before the merge until then: the list's members page
+lists the merged person and the survivor as two members, `lists_for` the survivor (the
+person's lists) and segment explain leave out the merged person's lists, and its history
+stays on the merged id. If the job fails for good, that state stays. A dead job is kept with
+state `dead` and raises `ZirvFlowJobsDead` (`zirv_flow_jobs{kind="person.merge.rewrite",
+state="dead"}` above 0 for 10 minutes; runbook `docs/operations/runbooks.md#zirvflowjobsdead`),
+and `GET /api/v1/admin/jobs/dead` lists it for a retry. Reads need `read`; writes need `write` (any member for a
 session) and CSRF. Identifier values on the member page use the same masking as conflict
 review. The CSV import resolves identifiers to existing people and never creates one; its
 dry run runs the real transaction and rolls it back, so its counts are exact.
@@ -648,7 +659,7 @@ Deterministic matching only, with rules per identifier kind:
 | Merge policy | Whether a match may merge two existing people | allowed unless a uniqueness rule would break |
 
 - **Blocked merge:** the record attaches to the person matched by the strongest identifier, and an **identity conflict** is recorded for review in the UI (shared family or role addresses are the common case). A review ends in one of two outcomes: keep the people separate, or move the identifier to one of them.
-- **Merge:** the older person survives. One transaction moves identities, contributions, list memberships and consent, recomputes traits and sets `merged_into`. Consent takes the most recent explicit decision per channel/topic (`unsubscribed` wins ties). A `person.merge.rewrite` job then re-points identity conflicts in batches; enrollments and messages stay on the old id on purpose, and message history follows `person_merges` (segment membership rows are closed instead, 6); meanwhile reads follow `merged_into` (one hop, chains compressed). Duplicate active enrollments in one flow keep the older and exit the other with reason `merged`. Each merge records its provenance (the moved ids in a merge record, plus a decision record). There is no unmerge in v1 (OQ-3).
+- **Merge:** the older person survives. One transaction moves identities, contributions and consent, recomputes traits, sets `merged_into` and marks both people in the `merge` change class; it takes no segment or list lock. A `person.merge.rewrite` job then re-points identity conflicts in batches, moves the list memberships and closes any segment row the pass left open; the next re-evaluation pass closes the merged person's segment rows without an exit and evaluates the survivor (6); enrollments and messages stay on the old id on purpose, and message history follows `person_merges`; meanwhile reads follow `merged_into` (one hop, chains compressed). Duplicate active enrollments in one flow keep the older and exit the other with reason `merged`. Each merge records its provenance (the moved ids in a merge record, plus a decision record). There is no unmerge in v1 (OQ-3).
 - **Races:** concurrent creation of the same person is serialized by the unique identity index; the loser retries resolution.
 - **Precedence:** each trait value is computed from all sources' contributions under the registry policy `latest` (by source observation time, default), `source_priority` (ordered sources) or `first`. Flow actions and the API write as sources (`flow:<id>`, `api`). The profile shows which source supplied each value.
 
@@ -689,13 +700,28 @@ As built (merges and conflict review):
   oldest person (`created_at`, then id) survives, and in the record's transaction each loser's
   identities and source records move, its traits are cleared, `merged_into` is set and chains
   are compressed, open conflicts among the merged people close as `merged`, a `person_merges`
-  row, a `person.merge` decision and the `person.merge.rewrite` job are written, and the
-  survivor's traits are recomputed. Blocked: the `identity_conflicts` row carries the reason
-  and the shared `identity_id`, and an `identity.conflict` decision is appended.
+  row, a `person.merge` decision and the `person.merge.rewrite` job are written, the
+  survivor's traits are recomputed and both people are marked in the `merge` class. The
+  transaction takes no segment or list lock, so a merge in a drain batch never waits for one
+  that another batch or a re-evaluation pass holds (investigation K). The pass that consumes
+  the marks closes the merged person's open rows with cause `data_change` on the merge's trace
+  and no `segment.exited` event, decision or flow trigger (a full refresh that meets such a row
+  closes it the same way), and evaluates the survivor on everything it now holds: a segment it
+  was already in keeps its row, one it newly qualifies for is an entry. Blocked: the
+  `identity_conflicts` row carries the reason and the shared `identity_id`, and an
+  `identity.conflict` decision is appended.
 - **Rewrite job.** `person.merge.rewrite` (payload `{workspace_id, merged_person_id}`)
   re-points `identity_conflicts.person_id` and `other_person_id` in batches of 1,000 rows per
-  statement to the person the merged one now points at, then appends a
-  `person.merge.rewrite` decision. A re-run moves nothing. Other person-scoped tables (events)
+  statement to the person the merged one now points at, moves the list memberships (6, as
+  built: lists), closes every segment row the merged person still holds open (cause
+  `data_change` on the job's trace, which is the merge's, no exit; the pass skips an archived segment and one whose
+  definition no longer compiles, and may not have run yet) and appends a
+  `person.merge.rewrite` decision. The segment locks come last, in the order of a pass
+  (`lock_segments_of_people`), after the people (`FOR KEY SHARE`, which a pass's claim does not
+  wait for), the lists and the survivor's mark, none of which a pass takes once it holds a
+  segment lock, so the job and a pass never wait on each other. It follows `merged_into` when it
+  runs, so for a chained merge (A into B, then B into C before either job ran) both jobs move
+  to C, in either order. A re-run moves nothing. Other person-scoped tables (events)
   join the target list in `store::people::merge` when they exist.
 - **Review.** Conflicts are listed newest first by keyset (`status=open|resolved`).
   Resolving needs the admin role (or an `admin` key) and CSRF. `keep_separate` closes the
@@ -974,7 +1000,7 @@ targets (OQ-2).
 - **Preview:** count and sample under a `statement_timeout` fixed at 20 s (no setting; the timeout is an execution ceiling above the section 19 targets, which measure performance), always with data age. A read replica (`database.read_url`) is deferred: in M4 preview and explain use the primary under `statement_timeout`, and the replica comes only if the M4 benchmark (#127) shows preview load harming ingestion.
 - **Planning:** the compiled preview, refresh and re-evaluation statements run unnamed (`persistent(false)`), so each execution is planned with its bound values and never switches to a generic plan. A trait slot that reaches `ready` is followed by an `ANALYZE` of its column, in a job that runs after the `ready` commit; a failure only logs.
 - **Explain:** evaluates each AST node for one person and returns a pass/fail tree with observed values ("2 orders in window, needs 2 or more"); it answers "why is this person in or out" on the profile. The store loads one bounded **snapshot** of the person in one read-only, consistent transaction: traits; events, limited to the referenced names and the widest window and capped; lists, consent and identifier kinds; and current memberships. The reference evaluator (8.2) runs over the snapshot at the same evaluation time the SQL would use. Leaves are two-valued, so a node is unknown only when it hit a cap: it reports "unable to explain", never a false pass or fail, and unknown propagates unless the known children decide the outcome.
-- **Membership refresh:** compute the new set, diff against current members, insert entries, close exits, write `segment.entered`/`segment.exited` events (properties: segment id, version, cause `data_change`, `time`, `definition_change`, `manual` or `initial`), and enqueue batched flow triggers, all in one transaction. The full refresh derives the cause and trace from state: a segment never computed is `initial` and one computed from an older version is `definition_change` (both on the trace of the request that saved the version); otherwise the trigger decides (`schedule` and `save` give `time`, `manual` gives `manual`, a referenced segment's change gives `data_change`), on the refresh job's own trace.
+- **Membership refresh:** compute the new set, diff against current members, insert entries, close exits, write `segment.entered`/`segment.exited` events (properties: segment id, version, cause `data_change`, `time`, `definition_change`, `manual` or `initial`), and enqueue batched flow triggers, all in one transaction. The full refresh derives the cause and trace from state: a segment never computed is `initial` and one computed from an older version is `definition_change` (both on the trace of the request that saved the version); otherwise the trigger decides (`schedule` and `save` give `time`, `manual` gives `manual`, a referenced segment's change gives `data_change`), on the refresh job's own trace. The open row of a person merged away is closed with cause `data_change` and no event or decision, by a full refresh or a pass alike: the person it stood for is still there as the survivor, whom the same diff judges on its own row.
 
 ### 8.4 Recompute and versioning
 

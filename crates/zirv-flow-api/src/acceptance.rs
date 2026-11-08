@@ -4727,6 +4727,14 @@ mod tests {
         )
         .await
         .unwrap();
+        // The merge's rewrite job moves the memberships, as a worker runs it.
+        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+        let rewrite = zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("rewrite"));
+        let merged = visitor.parse().unwrap();
+        zirv_flow_store::rewrite_merged_person(&mut tx, workspace_id, merged, &rewrite, None)
+            .await
+            .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
         let person_lists = |person: &str| format!("/api/v1/workspaces/{ws}/people/{person}/lists");
 
         let lists = call(

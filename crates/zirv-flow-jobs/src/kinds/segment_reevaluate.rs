@@ -188,7 +188,7 @@ mod tests {
     use zirv_flow_core::{Cause, HmacPurpose, HmacRoot, MasterKey, Slug, WorkspaceName};
     use zirv_flow_segments::normalize;
     use zirv_flow_store::{
-        EventRecord, ManualClock, NewEventSchema, NewJob, NewSegment, NewSegmentVersion,
+        EventRecord, ManualClock, NewEventSchema, NewFlow, NewJob, NewSegment, NewSegmentVersion,
         NewTraitDefinition, ProfileOutcome, ProfileRecord, Segment, SegmentPatch,
         TraitDefinitionUpdate,
     };
@@ -688,78 +688,268 @@ mod tests {
         .await;
     }
 
+    /// Applies one profile record with `emails` and `traits`, under `trace`, and returns its person.
+    async fn profile(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        key: &str,
+        emails: &[&str],
+        traits: Value,
+        trace: &TraceContext,
+    ) -> Uuid {
+        let record = ProfileRecord {
+            source: "crm".into(),
+            stream: "contacts".into(),
+            record_key: key.into(),
+            identifiers: emails
+                .iter()
+                .map(|email| ("email".into(), (*email).into()))
+                .collect(),
+            traits: traits.as_object().cloned().unwrap(),
+            observed_at: OffsetDateTime::now_utc(),
+            trace: trace.clone(),
+        };
+        match &zirv_flow_store::apply_profile_batch(pool, ws, &[record])
+            .await
+            .unwrap()[0]
+        {
+            ProfileOutcome::Applied { person_id, .. }
+            | ProfileOutcome::Unchanged { person_id, .. } => *person_id,
+            ProfileOutcome::Rejected { reason } => panic!("rejected: {reason}"),
+        }
+    }
+
+    /// A published flow that the entries (`on` is `entered`) or exits of `segment` start.
+    async fn segment_flow(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        segment: Uuid,
+        on: &str,
+        clock: &Clock,
+    ) -> Uuid {
+        let id = Uuid::now_v7();
+        let mut connection = pool.acquire().await.unwrap();
+        zirv_flow_store::create_flow(
+            &mut connection,
+            ws,
+            &NewFlow {
+                id,
+                name: format!("On {on}"),
+                graph: json!({"v": 1, "nodes": [{"id": "end", "type": "exit"}], "edges": []}),
+                settings: json!({
+                    "trigger": {"type": "segment", "segment_id": segment, "on": on},
+                    "reentry": {"mode": "once"}
+                }),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        zirv_flow_store::set_warmup(&mut connection, ws, id, false, 300)
+            .await
+            .unwrap();
+        drop(connection);
+        let mut tx = zirv_flow_store::begin(pool).await.unwrap();
+        let locked = zirv_flow_store::lock_flow(&mut tx, ws, id).await.unwrap();
+        let trace = TraceContext::root(Cause::api("publish"));
+        zirv_flow_store::publish_flow(&mut tx, clock, ws, &locked, None, &trace)
+            .await
+            .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+        id
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_merge_that_raced_a_full_refresh_is_closed_by_the_next_pass(pool: PgPool) {
+    async fn after_a_merge_the_pass_closes_the_losers_rows_without_an_exit_and_enters_what_is_new(
+        pool: PgPool,
+    ) {
         zirv_flow_store::decision_testing::checked(pool, |pool| async move {
             zirv_flow_store::migrate(&pool).await.unwrap();
             let ws = workspace(&pool).await;
             define_trait(&pool, ws, "plan").await;
+            define_trait(&pool, ws, "tier").await;
             let clock = clock();
-            let seg = create(&pool, ws, "Pro", plan_is("pro")).await;
+            let pro = create(&pool, ws, "Pro", plan_is("pro")).await;
+            let vip = create(
+                &pool,
+                ws,
+                "VIP",
+                json!({"op": "eq", "trait": "tier", "value": "vip", "v": 1}),
+            )
+            .await;
+            full_refresh(&pool, ws, pro.id, &clock).await;
+            full_refresh(&pool, ws, vip.id, &clock).await;
+            for on in ["exited", "entered"] {
+                segment_flow(&pool, ws, pro.id, on, &clock).await;
+            }
             let trace = TraceContext::root(Cause::api("t"));
-            let ada = identify(&pool, ws, PERSONAL_DATA.email, "pro", &trace).await;
-            full_refresh(&pool, ws, seg.id, &clock).await;
+            let other = "bob@example.com";
+            let pro_only = json!({"plan": "pro"});
+            let survivor = profile(
+                &pool,
+                ws,
+                "1",
+                &[PERSONAL_DATA.email],
+                pro_only.clone(),
+                &trace,
+            );
+            let survivor = survivor.await;
+            let both = json!({"plan": "pro", "tier": "vip"});
+            let loser = profile(&pool, ws, "2", &[other], both, &trace).await;
             reevaluate(&pool, ws, &clock).await;
-            assert_eq!(open(&pool, seg.id).await, [ada]);
-
-            // A second record joins Ada with a second person through a shared identifier.
-            let bob = identify(&pool, ws, "bob@example.com", "pro", &trace).await;
-            reevaluate(&pool, ws, &clock).await;
-            assert_eq!(count_of(&pool, seg.id).await, 2);
-            let joined = ProfileRecord {
-                source: "crm".into(),
-                stream: "contacts".into(),
-                record_key: "joined".into(),
-                identifiers: vec![
-                    ("email".into(), PERSONAL_DATA.email.into()),
-                    ("email".into(), "bob@example.com".into()),
-                ],
-                traits: json!({"plan": "pro"}).as_object().cloned().unwrap(),
-                observed_at: OffsetDateTime::now_utc(),
-                trace: trace.clone(),
+            let mut pair = vec![survivor, loser];
+            pair.sort_unstable();
+            assert_eq!(open(&pool, pro.id).await, pair);
+            assert_eq!(open(&pool, vip.id).await, [loser]);
+            let row_of = |segment: Uuid| {
+                let pool = pool.clone();
+                async move {
+                    sqlx::query_scalar::<_, i64>(
+                        "SELECT id FROM segment_members WHERE segment_id = $1 AND person_id = $2 \
+                         AND exited_at IS NULL",
+                    )
+                    .bind(segment)
+                    .bind(survivor)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+                }
             };
-            zirv_flow_store::apply_profile_batch(&pool, ws, &[joined])
-                .await
-                .unwrap();
-            let merged: Vec<Uuid> = sqlx::query_scalar(
-                "SELECT id FROM people WHERE workspace_id = $1 AND merged_into IS NOT NULL",
-            )
-            .bind(ws.as_uuid())
-            .fetch_all(&pool)
-            .await
-            .unwrap();
-            assert_eq!(merged.len(), 1);
-            let loser = merged[0];
-            assert!([ada, bob].contains(&loser));
-
-            // The refresh that was running beside the merge opened a row for the loser after the
-            // merge closed its rows. Count is as that refresh left it.
-            sqlx::query(
-                "INSERT INTO segment_members (workspace_id, segment_id, person_id, version, \
-                 entered_at, entered_trace_id, entered_cause) \
-             VALUES ($1, $2, $3, 1, now(), gen_random_uuid(), 'time')",
-            )
-            .bind(ws.as_uuid())
-            .bind(seg.id)
-            .bind(loser)
-            .execute(&pool)
-            .await
-            .unwrap();
-            sqlx::query("UPDATE segments SET member_count = member_count + 1 WHERE id = $1")
-                .bind(seg.id)
+            let kept = row_of(pro.id).await;
+            sqlx::query("DELETE FROM jobs WHERE kind = 'flow.enroll'")
                 .execute(&pool)
                 .await
                 .unwrap();
-            // The merge marked the loser before; the next pass consumes that mark.
+
+            let merge = TraceContext::root(Cause::api("merge"));
+            let emails = [PERSONAL_DATA.email, other];
+            let joined = profile(&pool, ws, "3", &emails, pro_only, &merge).await;
+            assert_eq!(joined, survivor);
+            // The drain's merge wrote no membership: the pass does.
+            assert_eq!(open(&pool, pro.id).await, pair);
+            assert_eq!(open(&pool, vip.id).await, [loser]);
             reevaluate(&pool, ws, &clock).await;
 
-            let open_rows = open(&pool, seg.id).await;
-            assert!(!open_rows.contains(&loser));
+            assert_eq!(open(&pool, pro.id).await, [survivor]);
+            assert_eq!(row_of(pro.id).await, kept, "the survivor did not re-enter");
+            assert_eq!(open(&pool, vip.id).await, [survivor]);
             assert_eq!(
-                i64::from(count_of(&pool, seg.id).await),
-                i64::try_from(open_rows.len()).unwrap()
+                (count_of(&pool, pro.id).await, count_of(&pool, vip.id).await),
+                (1, 1)
             );
+            let events: Vec<(String, Uuid, String)> = sqlx::query_as(
+                "SELECT name, person_id, properties ->> 'segment_id' FROM events \
+                 WHERE name LIKE 'segment.%' AND trace_id = $1",
+            )
+            .bind(merge.trace_id.as_uuid())
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                events,
+                [("segment.entered".to_owned(), survivor, vip.id.to_string())]
+            );
+            let decisions: Vec<(String, String)> = sqlx::query_as(
+                "SELECT action, subject_ids ->> 'person' FROM decision_records \
+                 WHERE action IN ('segment.entered', 'segment.exited') AND trace_id = $1",
+            )
+            .bind(merge.trace_id.as_uuid())
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                decisions,
+                [("segment.entered".to_owned(), survivor.to_string())]
+            );
+            let closed: Vec<(Option<String>, Option<Uuid>)> = sqlx::query_as(
+                "SELECT exited_cause, exited_trace_id FROM segment_members WHERE person_id = $1",
+            )
+            .bind(loser)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            let by_merge = (
+                Some("data_change".to_owned()),
+                Some(merge.trace_id.as_uuid()),
+            );
+            assert_eq!(closed, [by_merge.clone(), by_merge]);
+            let started: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = 'flow.enroll'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(started, 0, "neither flow of Pro is started by the merge");
+            assert_eq!(dirty(&pool).await, 0);
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_merged_persons_row_in_a_segment_that_no_longer_compiles_is_closed_by_the_rewrite(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            zirv_flow_store::migrate(&pool).await.unwrap();
+            let ws = workspace(&pool).await;
+            define_trait(&pool, ws, "plan").await;
+            define_trait(&pool, ws, "tier").await;
+            let clock = clock();
+            let gold = json!({"op": "eq", "trait": "tier", "value": "gold", "v": 1});
+            let broken = create(&pool, ws, "Gold", gold).await;
+            full_refresh(&pool, ws, broken.id, &clock).await;
+            let trace = TraceContext::root(Cause::api("t"));
+            let other = "bob@example.com";
+            let pro = json!({"plan": "pro"});
+            let survivor = profile(&pool, ws, "1", &[PERSONAL_DATA.email], pro, &trace).await;
+            let loser = profile(&pool, ws, "2", &[other], json!({"tier": "gold"}), &trace).await;
+            reevaluate(&pool, ws, &clock).await;
+            assert_eq!(open(&pool, broken.id).await, [loser]);
+            // The trait it reads is archived: the definition no longer compiles.
+            zirv_flow_store::update_trait_definition(
+                &pool,
+                ws,
+                "tier",
+                &TraitDefinitionUpdate {
+                    archived: Some(true),
+                    ..TraitDefinitionUpdate::default()
+                },
+            )
+            .await
+            .unwrap();
+            let merge = TraceContext::root(Cause::api("merge"));
+            let emails = [PERSONAL_DATA.email, other];
+            let joined = profile(&pool, ws, "3", &emails, json!({}), &merge).await;
+            assert_eq!(joined, survivor);
+            reevaluate(&pool, ws, &clock).await;
+            // The pass consumed the merge's marks and left the segment it cannot compile alone.
+            assert_eq!(dirty(&pool).await, 0);
+            assert_eq!(open(&pool, broken.id).await, [loser]);
+
+            let payload = json!({"workspace_id": ws, "merged_person_id": loser});
+            let rewrite = super::super::person_merge_rewrite::PersonMergeRewrite;
+            run_kind(&rewrite, &pool, ws, payload, &clock).await;
+
+            assert!(open(&pool, broken.id).await.is_empty());
+            assert_eq!(count_of(&pool, broken.id).await, 0);
+            let closed: (Option<String>, Option<Uuid>) = sqlx::query_as(
+                "SELECT exited_cause, exited_trace_id FROM segment_members WHERE person_id = $1",
+            )
+            .bind(loser)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(closed.0.as_deref(), Some("data_change"));
+            assert!(closed.1.is_some());
+            let exits: i64 = sqlx::query_scalar(
+                "SELECT (SELECT count(*) FROM events WHERE name = 'segment.exited') \
+                      + (SELECT count(*) FROM decision_records WHERE action = 'segment.exited')",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(exits, 0, "the merged person's row closes without an exit");
         })
         .await;
     }
@@ -1222,6 +1412,147 @@ mod tests {
             })
             .await;
             assert_eq!(failures, 0, "a transaction failed, a deadlock (40P01)");
+        })
+        .await;
+    }
+
+    /// A drain batch of two merges, each joining the two people of a pair by their emails.
+    async fn merge_batch(pool: PgPool, ws: WorkspaceId, pairs: [[String; 2]; 2]) -> bool {
+        let records: Vec<ProfileRecord> = pairs
+            .iter()
+            .map(|[one, two]| ProfileRecord {
+                source: "crm".into(),
+                stream: "contacts".into(),
+                record_key: format!("join-{one}"),
+                identifiers: vec![("email".into(), one.clone()), ("email".into(), two.clone())],
+                traits: serde_json::Map::new(),
+                observed_at: OffsetDateTime::now_utc(),
+                trace: TraceContext::root(Cause::api("join")),
+            })
+            .collect();
+        zirv_flow_store::apply_profile_batch(&pool, ws, &records)
+            .await
+            .is_ok()
+    }
+
+    /// How many backends wait for a lock the backend `pid` holds.
+    async fn waiting_for(pool: &PgPool, pid: i32) -> i64 {
+        sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))",
+        )
+        .bind(pid)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn drain_merges_over_two_segments_in_opposite_orders_beside_a_pass_never_deadlock(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            zirv_flow_store::migrate(&pool).await.unwrap();
+            let ws = workspace(&pool).await;
+            define_trait(&pool, ws, "plan").await;
+            let clock = clock();
+            let low = create_with_id(&pool, ws, Uuid::from_u128(1), "One", plan_is("one")).await;
+            let high = create_with_id(&pool, ws, Uuid::from_u128(2), "Two", plan_is("two")).await;
+            full_refresh(&pool, ws, low.id, &clock).await;
+            full_refresh(&pool, ws, high.id, &clock).await;
+            let trace = TraceContext::root(Cause::api("t"));
+            let run = Run {
+                workspace: ws,
+                clock: clock.clone(),
+                job: (Uuid::new_v4(), 1),
+                trace: trace.clone(),
+            };
+            for round in 0..2 {
+                // Each pair is an older person and a newer one open in a segment. Batch X merges
+                // a member of Two, then one of One; batch Y one of One, then one of Two.
+                let pair = |name: &str| {
+                    [
+                        format!("{name}{round}@example.com"),
+                        format!("{name}{round}-new@example.com"),
+                    ]
+                };
+                let (x, y) = ([pair("a"), pair("b")], [pair("c"), pair("d")]);
+                let segments = [high.id, low.id, low.id, high.id];
+                for ([older, newer], segment) in x.iter().chain(&y).zip(segments) {
+                    identify(&pool, ws, older, "none", &trace).await;
+                    let plan = if segment == low.id { "one" } else { "two" };
+                    let member = identify(&pool, ws, newer, plan, &trace).await;
+                    while run.pass(&pool).await.unwrap() > 0 {}
+                    assert!(open(&pool, segment).await.contains(&member));
+                }
+                let (one, two, pass) = if round == 0 {
+                    // A pass that holds One and is about to take Two, with both batches let loose
+                    // until each has finished or waits for it: the interleaving a deadlock needs.
+                    let mut pass = zirv_flow_store::begin(&pool).await.unwrap();
+                    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                        .fetch_one(&mut *pass)
+                        .await
+                        .unwrap();
+                    zirv_flow_store::lock_segment_refresh(&mut pass, low.id)
+                        .await
+                        .unwrap();
+                    let one = tokio::spawn(merge_batch(pool.clone(), ws, x));
+                    let two = tokio::spawn(merge_batch(pool.clone(), ws, y));
+                    let deadline = Instant::now() + Duration::from_secs(20);
+                    loop {
+                        let running = i64::from(!one.is_finished()) + i64::from(!two.is_finished());
+                        if running == 0 || waiting_for(&pool, pid).await >= running {
+                            break;
+                        }
+                        assert!(Instant::now() < deadline, "the batches neither ended nor waited");
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    let passed = match zirv_flow_store::lock_segment_refresh(&mut pass, high.id)
+                        .await
+                    {
+                        Ok(()) => zirv_flow_store::commit(pass).await.is_ok(),
+                        Err(_) => false,
+                    };
+                    (one.await.unwrap(), two.await.unwrap(), passed)
+                } else {
+                    // The real pass, with a crowd of its own to evaluate, beside both batches.
+                    for crowd in 0..20 {
+                        let plan = if crowd % 2 == 0 { "one" } else { "two" };
+                        identify(&pool, ws, &format!("e{crowd}@example.com"), plan, &trace).await;
+                    }
+                    let (pass, one, two) = tokio::join!(
+                        run.pass(&pool),
+                        merge_batch(pool.clone(), ws, x),
+                        merge_batch(pool.clone(), ws, y)
+                    );
+                    (one, two, pass.is_ok())
+                };
+
+                assert_eq!((one, two, pass), (true, true, true), "a transaction failed (40P01)");
+                while run.pass(&pool).await.unwrap() > 0 {}
+                for segment in [low.id, high.id] {
+                    let rows = open(&pool, segment).await;
+                    assert_eq!(
+                        i64::from(count_of(&pool, segment).await),
+                        i64::try_from(rows.len()).unwrap()
+                    );
+                    let merged: i64 = sqlx::query_scalar(
+                        "SELECT count(*) FROM segment_members m JOIN people p ON p.id = m.person_id \
+                         WHERE m.segment_id = $1 AND m.exited_at IS NULL \
+                           AND p.merged_into IS NOT NULL",
+                    )
+                    .bind(segment)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                    assert_eq!(merged, 0, "a merged person stays an open member");
+                }
+            }
+            let merges: i64 = sqlx::query_scalar("SELECT count(*) FROM person_merges")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(merges, 8);
         })
         .await;
     }
