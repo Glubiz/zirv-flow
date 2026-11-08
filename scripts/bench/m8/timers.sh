@@ -37,7 +37,8 @@ for mode in noload loaded; do
   host_pg -v seconds="$seconds" -v lead="$lead" -v enrollments="$M8_ENROLLMENTS" \
     -f "$m8_dir/timers-rearm.sql"
   # Pools per docs/operations/sizing.md: D (database.max_connections) stays at the shipped 10 and S
-  # (ingest.drain_shards) at 8; the worker then needs at most D + (2 + S) * C + 1 connections.
+  # (ingest.drain_shards) at 8, whose default drain slots add S slots to the C general ones; the
+  # worker then needs at most D + 3 * (C + S) + 1 connections.
   python3 -I - "$dest" "$worker_concurrency" <<'PY2'
 import json, pathlib, sys
 dest, c = pathlib.Path(sys.argv[1]), int(sys.argv[2])
@@ -45,7 +46,7 @@ d, s = 10, 8
 (dest / 'worker.yaml').write_text(json.dumps({'services': {'zirv-flow-worker': {'environment': {
     'ZIRV_FLOW_WORKER__CONCURRENCY': str(c)}}}}) + '\n')
 (dest / 'worker-sizing.json').write_text(json.dumps(dict(concurrency=c, database_max_connections=d,
-    drain_shards=s, worker_connection_ceiling=d + (2 + s) * c + 1), indent=2) + '\n')
+    drain_shards=s, worker_connection_ceiling=d + 3 * (c + s) + 1), indent=2) + '\n')
 PY2
   compose -f "$dest/worker.yaml" up -d --no-build --no-deps --force-recreate zirv-flow-worker
   worker_stopped=''

@@ -11,7 +11,9 @@ use uuid::Uuid;
 use zirv_flow_core::mapping::{Mapping, Target, TraitState, map_json};
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
-use crate::ingest::{KnownPeople, bucket, enqueue_drain, known_people, lane_key};
+use crate::ingest::{
+    KnownPeople, Shard, bucket, drain_shards, enqueue_drain_shard, known_people, lane_key,
+};
 use crate::{
     PgPool, StoreError, StreamOutcome, begin, commit, database_now, record_stream_outcome,
 };
@@ -96,7 +98,7 @@ fn payload_bucket(hook: Uuid, identifiers: &[(String, String)], people: &KnownPe
         .map_or_else(|| bucket(&hook.to_string()), |key| bucket(&key))
 }
 
-/// Appends one verified payload to the inbox, enqueues the workspace's drain and, when `report`
+/// Appends one verified payload to the inbox, enqueues the drain of its bucket's shard and, when `report`
 /// is set, reports the stream as succeeded now, all in one transaction. The row is stamped
 /// `received_at` with the database's clock and bucketed by its person ([`payload_bucket`]).
 /// `message_id` is the namespaced dedupe value (`wh:{hook}:{value}`); `signed_at` is the signed
@@ -118,6 +120,7 @@ pub async fn append_webhook(
     let identifiers = payload_identifiers(hook.mapping.as_ref(), item);
     let mut tx = begin(pool).await?;
     let people = known_people(&mut *tx, workspace, [identifiers.as_slice()]).await?;
+    let affinity = payload_bucket(hook.id, &identifiers, &people);
     sqlx::query(
         "INSERT INTO ingest_inbox \
             (workspace_id, webhook_id, kind, item, message_id, received_at, trace_id, affinity) \
@@ -128,11 +131,17 @@ pub async fn append_webhook(
     .bind(&stored)
     .bind(message_id)
     .bind(trace.trace_id.as_uuid())
-    .bind(payload_bucket(hook.id, &identifiers, &people))
+    .bind(affinity)
     .execute(&mut *tx)
     .await
     .map_err(StoreError::query)?;
-    enqueue_drain(&mut *tx, workspace, trace).await?;
+    enqueue_drain_shard(
+        &mut *tx,
+        workspace,
+        Shard::of_bucket(affinity, drain_shards()),
+        trace,
+    )
+    .await?;
     if report {
         let at = database_now(&mut *tx).await?;
         record_stream_outcome(

@@ -104,6 +104,7 @@ async fn run(
             return 2;
         }
     };
+    zirv_flow_store::set_drain_shards(config.ingest_drain_shards());
 
     if matches!(command, Command::Config(ConfigCommand::Check)) {
         match toml::to_string_pretty(&config) {

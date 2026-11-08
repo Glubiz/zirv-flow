@@ -204,8 +204,9 @@ pub use imports::{
 };
 pub use ingest::{
     DRAIN_JOB_KIND, DrainOutcome, InboxHead, IngestItem, IngestPayload, Shard, append_inbox,
-    backfill_affinity, drain_batch, drain_batch_singly, enqueue_drain, enqueue_drain_if_pending,
-    inbox_heads,
+    backfill_affinity, drain_batch, drain_batch_singly, drain_shards, enqueue_drain_if_pending,
+    enqueue_drain_shard, enqueue_pending_drains, inbox_heads, payload_shard, set_drain_shards,
+    shard_pending,
 };
 pub use jobs::{
     ClaimedJob, DEFAULT_MAX_ATTEMPTS, DeadCursor, FailOutcome, Job, JobListener, JobSummary,
