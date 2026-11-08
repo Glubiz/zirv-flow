@@ -8,17 +8,21 @@
 //!   transactions that add to one list do not wait for each other, and a delete waits for every
 //!   open add and then takes what they added with the list; an add that comes after the delete
 //!   finds no list.
-//! - The count an add owes moves at the end of its transaction ([`ListCounts::apply`]): one
-//!   `UPDATE` per list, in list-id order, the last statement before the commit. Its
-//!   `FOR NO KEY UPDATE` does not conflict with `FOR KEY SHARE`, so two transactions that both
-//!   added to a list cannot wait for each other's add lock at the end, and the id order keeps
-//!   two that hold several lists from crossing.
-//! - A removal, a merge's rewrite ([`move_on_merge`]) and an erasure lock the list
-//!   `FOR NO KEY UPDATE`: they wait for each other and for a count update, never for an add.
-//! - A removal's count nets into the transaction's [`ListCounts`] with its adds
-//!   ([`remove_members_into`]): an add's is still pending, so moving the removal's at once could
-//!   take the stored count below zero. The removal holds the row already, so the update at the
-//!   end takes no new lock. The rewrite and an erasure move theirs at once: they add no one.
+//! - A removal in a transaction that keeps its counts in a [`ListCounts`] (a flow step or a wake
+//!   batch, [`remove_members_into`]) locks the list `FOR KEY SHARE` too, and its people
+//!   `FOR UPDATE`, which serializes it with a merge's rewrite. Its count nets with the
+//!   transaction's adds: moving it at once could take the stored count below zero while an add's
+//!   is still pending.
+//! - Those counts move at the end of the transaction ([`ListCounts::apply`]): one `UPDATE` per
+//!   list, in list-id order, the last statement before the commit, and the only exclusive list
+//!   locks such a transaction takes. Its `FOR NO KEY UPDATE` does not conflict with
+//!   `FOR KEY SHARE`, so two transactions that changed one list cannot wait for each other's
+//!   earlier locks at the end, and the id order keeps two that hold several lists from crossing.
+//! - A removal in a short transaction of its own ([`remove_members`], the API's), a merge's
+//!   rewrite ([`move_on_merge`]) and an erasure lock the list `FOR NO KEY UPDATE` and move the
+//!   count at once: they wait for each other and for a count update, never for an add. Each
+//!   locks its people first and then its lists in id order, and holds no list while it waits
+//!   for a person, so it cannot close a cycle with a batch whose count update waits for it.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -213,25 +217,51 @@ impl Change {
             Self::Removed => &decision_actions::LIST_MEMBERSHIP_REMOVED,
         }
     }
+}
 
-    /// How the change locks its list; see the module doc.
+/// How a membership write holds its people and its list until its transaction ends; see the
+/// module doc.
+#[derive(Clone, Copy)]
+enum Hold {
+    /// An add: the people `FOR SHARE`, the list `FOR KEY SHARE`; its count waits in a
+    /// [`ListCounts`].
+    Add,
+    /// A removal whose count waits in a [`ListCounts`]: the people `FOR UPDATE`, which a merge's
+    /// rewrite waits for, and the list `FOR KEY SHARE`.
+    DeferredRemoval,
+    /// A removal in a short transaction of its own that moves the count at once: the people
+    /// `FOR SHARE` and the list `FOR NO KEY UPDATE`, which a merge's rewrite takes too.
+    Removal,
+}
+
+impl Hold {
+    const fn people(self) -> PersonLock {
+        match self {
+            Self::Add | Self::Removal => PersonLock::Share,
+            Self::DeferredRemoval => PersonLock::Update,
+        }
+    }
+
     const fn list_lock(self) -> &'static str {
         match self {
-            Self::Added => "SELECT id FROM lists WHERE workspace_id = $1 AND id = $2 FOR KEY SHARE",
-            Self::Removed => {
+            Self::Add | Self::DeferredRemoval => {
+                "SELECT id FROM lists WHERE workspace_id = $1 AND id = $2 FOR KEY SHARE"
+            }
+            Self::Removal => {
                 "SELECT id FROM lists WHERE workspace_id = $1 AND id = $2 FOR NO KEY UPDATE"
             }
         }
     }
 }
 
-/// Resolves each person to the one that stands for it now and locks those people, so a merge
-/// of them cannot commit while this transaction writes them. Keyed by the id given; people
-/// that do not exist are absent.
+/// Resolves each person to the one that stands for it now and locks those people with `lock`, so
+/// a merge of them cannot commit while this transaction writes them. Keyed by the id given;
+/// people that do not exist are absent.
 async fn lock_current_people(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     people: &[Uuid],
+    lock: PersonLock,
 ) -> Result<HashMap<Uuid, Uuid>, StoreError> {
     for _ in 0..RESOLVE_ATTEMPTS {
         let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
@@ -246,8 +276,7 @@ async fn lock_current_people(
         let mut targets: Vec<Uuid> = rows.iter().map(|(_, current)| *current).collect();
         targets.sort_unstable();
         targets.dedup();
-        let locked =
-            lock_people_in_order(&mut *connection, workspace, &targets, PersonLock::Share).await?;
+        let locked = lock_people_in_order(&mut *connection, workspace, &targets, lock).await?;
         // A person merged away while the lock was awaited is resolved again.
         if locked.len() == targets.len() && locked.iter().all(|(_, merged)| merged.is_none()) {
             return Ok(rows.into_iter().collect());
@@ -257,21 +286,22 @@ async fn lock_current_people(
 }
 
 /// The distinct current people to change, and an outcome that already counts every existing
-/// person as unchanged and lists the missing ones. The list is locked for the rest of the
-/// transaction, after the people, which is the order a merge's rewrite locks in, and in the
-/// change's mode (module doc). A removal and the rewrite that moves a merged person's rows of
-/// this list take the same mode, so one waits for the other; an add waits for neither.
+/// person as unchanged and lists the missing ones. The people and then the list are locked for
+/// the rest of the transaction as `hold` says (module doc), which is the order a merge's rewrite
+/// locks in. A removal waits for the rewrite that moves a merged person's rows of this list, or
+/// the rewrite for it: on the list for [`Hold::Removal`], on the people for
+/// [`Hold::DeferredRemoval`]. An add waits for neither.
 async fn prepare(
     connection: &mut PgConnection,
     write: &ListWrite<'_>,
-    change: Change,
+    hold: Hold,
     people: &[Uuid],
 ) -> Result<(Vec<Uuid>, MembershipOutcome), MembershipError> {
     if people.len() > MAX_PEOPLE_PER_CALL {
         return Err(MembershipError::TooMany);
     }
-    let current = lock_current_people(connection, write.workspace, people).await?;
-    let locked: Option<Uuid> = sqlx::query_scalar(change.list_lock())
+    let current = lock_current_people(connection, write.workspace, people, hold.people()).await?;
+    let locked: Option<Uuid> = sqlx::query_scalar(hold.list_lock())
         .bind(write.workspace.as_uuid())
         .bind(write.list)
         .fetch_optional(&mut *connection)
@@ -394,7 +424,7 @@ pub async fn add_members_into(
 ) -> Result<MembershipOutcome, MembershipError> {
     let (workspace, list) = (write.workspace, write.list);
     crate::changes::cache_change_readers(connection, workspace).await?;
-    let (targets, mut outcome) = prepare(connection, write, Change::Added, people).await?;
+    let (targets, mut outcome) = prepare(connection, write, Hold::Add, people).await?;
     let added: Vec<Uuid> = sqlx::query_scalar(
         "INSERT INTO list_members (workspace_id, list_id, person_id, source) \
          SELECT $1, $2, t.person_id, $4 FROM unnest($3::uuid[]) AS t(person_id) \
@@ -423,9 +453,10 @@ pub async fn add_members_into(
 
 /// Removes `people` from a list, following merges. Removing a non-member writes nothing. The
 /// rows of the people merged into them go too: until the merge's rewrite moves such a row it is
-/// the person's membership, and moving it afterwards would put the person back. The count moves
-/// in the last statement; a transaction that goes on writing, or has added people before, uses
-/// [`remove_members_into`].
+/// the person's membership, and moving it afterwards would put the person back. For a short
+/// transaction of its own (the API's removal): the list is held `FOR NO KEY UPDATE` from the
+/// start and the count moves in the last statement. A transaction that goes on writing, or has
+/// added people before, uses [`remove_members_into`].
 pub async fn remove_members(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -443,25 +474,48 @@ pub async fn remove_members(
         trace,
     };
     let mut counts = ListCounts::default();
-    let outcome = remove_members_into(connection, &write, people, &mut counts).await?;
+    let outcome = remove(connection, &write, Hold::Removal, people, &mut counts).await?;
     counts.apply(connection).await?;
     Ok(outcome)
 }
 
-/// [`remove_members`] for a transaction that keeps its count changes in `counts`: the removal
-/// nets into them with the transaction's adds, which have not moved the stored count yet, so a
-/// removal of someone an earlier add of the transaction put in cannot take it below zero. The
-/// list is locked `FOR NO KEY UPDATE` here, after the people, and held until the commit, so the
-/// count update [`ListCounts::apply`] makes for it at the end takes no new lock.
+/// [`remove_members`] for a transaction that keeps its count changes in `counts`, a flow step or
+/// a wake batch: the removal nets into them with the transaction's adds, which have not moved the
+/// stored count yet, so a removal of someone an earlier add of the transaction put in cannot take
+/// it below zero. Like an add, it holds the list only `FOR KEY SHARE`, so the only exclusive list
+/// locks such a transaction takes are the count updates of [`ListCounts::apply`], in list-id
+/// order: two that each removed from one list and added to the other cannot wait for each other.
+/// It locks the people `FOR UPDATE` instead (a step holds its person so already), so a merge's
+/// rewrite, which shares them, waits for the removal or the removal for it, as it waits on the
+/// list for [`remove_members`]: otherwise the rewrite could copy a merged person's row to the
+/// survivor while this removal deletes it, and the copy would stay, uncounted.
 pub(crate) async fn remove_members_into(
     connection: &mut PgConnection,
     write: &ListWrite<'_>,
     people: &[Uuid],
     counts: &mut ListCounts,
 ) -> Result<MembershipOutcome, MembershipError> {
+    remove(connection, write, Hold::DeferredRemoval, people, counts).await
+}
+
+/// A removal under `hold`, its count change left in `counts`.
+///
+/// The count stays exact and never below zero: a removal deletes only member rows that are
+/// committed or that its own transaction added, and its `DELETE` locks each row, so no two
+/// transactions take one membership out. The transaction that added a committed row moved the
+/// count in its own commit, and one that added the row itself holds its `+1` in the same
+/// `counts`, so when the removal's `-1` is applied the stored count already holds every row it
+/// takes out, and the result is the rows that are left.
+async fn remove(
+    connection: &mut PgConnection,
+    write: &ListWrite<'_>,
+    hold: Hold,
+    people: &[Uuid],
+    counts: &mut ListCounts,
+) -> Result<MembershipOutcome, MembershipError> {
     let (workspace, list) = (write.workspace, write.list);
     crate::changes::cache_change_readers(connection, workspace).await?;
-    let (targets, mut outcome) = prepare(connection, write, Change::Removed, people).await?;
+    let (targets, mut outcome) = prepare(connection, write, hold, people).await?;
     // One row per membership removed, named by the person it now stands for.
     let gone: Vec<Uuid> = sqlx::query_scalar(
         "WITH gone AS ( \
@@ -664,8 +718,10 @@ pub async fn membership_history<'e>(
 /// Moves the memberships and history of `loser` to `survivor`, in the transaction of the merge's
 /// rewrite job, which holds both people `FOR KEY SHARE` and the person-change guard. The loser's
 /// lists are locked `FOR NO KEY UPDATE` first, in id order and in one statement, after the
-/// people as every list writer locks. A removal takes the same lock, so a removal of the
-/// survivor waits for the move or the move for it. An add holds a list only `FOR KEY SHARE` and
+/// people as every list writer locks. A removal of the survivor waits for the move or the move
+/// for it: [`remove_members`] takes the same list lock, and a removal whose count waits in a
+/// [`ListCounts`] holds the survivor `FOR UPDATE`, which the job's share conflicts with. An add
+/// holds a list only `FOR KEY SHARE` and
 /// neither waits: it writes nothing for the survivor while the loser holds the list, and a
 /// merged-away person gains no membership, so the set cannot grow before the move. A
 /// `FOR UPDATE` here would wait for a moment with no add open on the list, which a busy list
@@ -1636,6 +1692,59 @@ mod tests {
             expected
         );
         assert_eq!(count(&pool, ws, list).await, 3);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_merges_move_waits_for_an_open_batch_removal_of_the_survivor_and_the_count_stays_exact(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let list = create_list(&pool, ws, "VIPs", "", None).await.unwrap().id;
+        let survivor = person(&pool, ws, "4", &[("external:crm", "1")]).await;
+        let loser = person(&pool, ws, "5", &[("anonymous_id", "a")]).await;
+        add(&pool, ws, list, &[loser]).await.unwrap();
+        let joined = person(
+            &pool,
+            ws,
+            "6",
+            &[("external:crm", "1"), ("anonymous_id", "a")],
+        );
+        assert_eq!(joined.await, survivor);
+        let trace = trace();
+        let write = ListWrite {
+            workspace: ws,
+            list,
+            source: ListSource::Flow,
+            actor: None,
+            trace: &trace,
+        };
+        // A batch that took the survivor out, which takes the merged person's row with it.
+        let mut open = begin(&pool).await.unwrap();
+        let mut counts = ListCounts::default();
+        let removed = remove_members_into(&mut open, &write, &[survivor], &mut counts)
+            .await
+            .unwrap();
+        assert_eq!(removed.changed, 1);
+
+        let moving = tokio::spawn({
+            let (pool, trace) = (pool.clone(), trace.clone());
+            async move { rewrite(&pool, ws, loser, &trace).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(!moving.is_finished(), "the move waits for the batch");
+        counts.apply(&mut open).await.unwrap();
+        commit(open).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), moving)
+            .await
+            .expect("the move goes on once the batch commits")
+            .unwrap();
+
+        assert_eq!(
+            memberships(&pool, &[survivor, loser]).await,
+            Vec::<(Uuid, Uuid)>::new()
+        );
+        assert_eq!(count(&pool, ws, list).await, 0);
     }
 
     #[sqlx::test]

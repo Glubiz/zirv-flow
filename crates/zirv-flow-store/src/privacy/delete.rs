@@ -372,9 +372,9 @@ async fn strip_enrolls(
 }
 
 /// Removes the people from their lists and keeps each list's member count exact. The lists
-/// are locked in id order first, `FOR NO KEY UPDATE` like a merge's rewrite: an open add holds
-/// a list only `FOR KEY SHARE`, which this does not wait for, and moves the count when it
-/// commits. The people are locked already, so no add of theirs is open.
+/// are locked in id order first, `FOR NO KEY UPDATE` like a merge's rewrite: an open add, or a
+/// batch's removal, holds a list only `FOR KEY SHARE`, which this does not wait for, and moves
+/// the count when it commits. The people are locked already, so no change of theirs is open.
 async fn remove_from_lists(
     connection: &mut PgConnection,
     workspace: WorkspaceId,

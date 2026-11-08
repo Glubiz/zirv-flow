@@ -360,20 +360,25 @@ batch, a list's CSV import) applies it as its last statement, one `member_count 
 delta` per list in list-id order, so adds to one list from concurrent batches never wait for each
 other and hold the list row's write lock only for their commit. That update, a `FOR NO KEY
 UPDATE`, conflicts with no key share, and a locker that already shares the row upgrades without
-queuing behind a waiter, so the end of a batch cannot deadlock with another batch's add. A removal,
-`move_on_merge` and an erasure lock their lists `FOR NO KEY UPDATE` (in id order): they wait for
-one another, never for an open add. A removal's count nets into the same `ListCounts` as its
-transaction's adds (a flow step or wake batch that adds and then removes a person moves the count
-by the net, once, at the end; moving it at once could take the stored count below zero while
-the add's is still pending); it holds that list row already, so the update at the end takes no
-new lock. `move_on_merge` and an erasure correct the count at once, in transactions that add no
-one. A list's deletion
+queuing behind a waiter, so the end of a batch cannot deadlock with another batch's add. A flow
+step's or wake batch's removal also holds its list only `FOR KEY SHARE` and nets its count into
+the same `ListCounts` (a step that adds and then removes a person moves the count by the net,
+once, at the end; moving it at once could take the stored count below zero while the add's is
+still pending), so the final updates in list-id order are the only exclusive list locks a batch
+takes and two batches that each removed from one list and added to the other cannot wait for
+each other in a cycle. It locks its people `FOR UPDATE` (a step holds its person so already),
+which a merge's rewrite waits for. A removal can only delete a committed member row, whose
+adder moved the count in its own commit, or one its own transaction added, whose `+1` is in the
+same buffer, and its `DELETE` locks the row, so the count never goes below zero. The API's
+removal, `move_on_merge` and an erasure lock their lists `FOR NO KEY UPDATE` (in id order, after
+their people, holding no list while they wait for a person) and correct the count at once: they
+wait for one another, never for an open add or a batch's removal. A list's deletion
 (`FOR UPDATE`, then `ON DELETE CASCADE`) waits for the open adds and removes what they wrote; an
 add that comes after it finds no list and fails (`NoSuchList`; an inbox row becomes
 `apply_failed`). Lists have no archive state. The merge itself takes no list lock: the
 `person.merge.rewrite` job calls `lists::move_on_merge` last, which locks the merged person's
-lists in id order, gives the survivor the union of both memberships with the earlier `added_at`, deletes the merged person's
-rows, corrects the counts, re-points its history and marks the survivor in the `lists` class; a
+lists in id order, gives the survivor the union of both memberships with the earlier `added_at`,
+deletes the merged person's rows, corrects the counts, re-points its history and marks the survivor in the `lists` class; a
 second run moves nothing. Until it runs the merged person's rows stand for the survivor: an add
 of the survivor to such a list writes nothing, a removal deletes them too, list audiences
 resolve each row to the survivor and enroll it once, and `member_count` counts the rows until
@@ -2813,9 +2818,9 @@ Every lock a batch takes follows one order: flows by id, then the people of each
 wake by wake in ascending order of lock group, which is the order in which merge, erasure and the
 flow lifecycle jobs lock people (`ORDER BY id FOR UPDATE`); resume and archive lock their one flow
 before any person. A batch therefore waits for another batch, a merge or an erasure, or they wait
-for it, without a deadlock. Outside that order are the list rows a step's list change holds until
-the commit (a key share for an add, a no-key update for a removal; the batch applies their net
-counts in list-id order after its decisions), the unique-key insert of a re-evaluation, and lock groups that interleave after merges.
+for it, without a deadlock. Outside that order are the list rows a step's list changes hold until
+the commit (a key share for an add or a removal, then the update of the batch's net counts in
+list-id order after its decisions, the only exclusive list locks it takes), the unique-key insert of a re-evaluation, and lock groups that interleave after merges.
 A deadlock among those is found after `deadlock_timeout` (1 s by default) and PostgreSQL aborts the
 statement of one side; in a batch that is one wake, which rolls back to its savepoint and retries
 alone, while the wait has used the hold limit, so the batch gives its unbegun wakes back.
