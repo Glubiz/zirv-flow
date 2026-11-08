@@ -1107,8 +1107,8 @@ mod tests {
         assert_eq!(duplicates, 70);
     }
 
-    /// `pg_stat_get_backend_subxact` (PostgreSQL 16, by backend id) reports the open subtransactions of a
-    /// backend that hold an id, and whether they overflowed the 64 a snapshot caches.
+    /// `pg_stat_get_backend_subxact` (PostgreSQL 16, by backend id) reports the open
+    /// subtransactions of a backend that hold an id, and whether they overflowed the 64 a snapshot caches.
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_batch_of_more_than_sixty_four_events_opens_no_subtransaction(pool: PgPool) {
@@ -1133,7 +1133,10 @@ mod tests {
                 .all(|outcome| matches!(outcome, EventOutcome::Accepted { .. }))
         );
         let (subxacts, overflowed): (i32, bool) = sqlx::query_as(
-            "SELECT s.subxact_count, s.subxact_overflowed \n             FROM pg_stat_get_backend_idset() AS id, pg_stat_get_backend_pid(id) AS pid, \n                  pg_stat_get_backend_subxact(id) AS s \n             WHERE pid = pg_backend_pid()",
+            "SELECT s.subxact_count, s.subxact_overflowed \
+             FROM pg_stat_get_backend_idset() AS id, pg_stat_get_backend_pid(id) AS pid, \
+                  pg_stat_get_backend_subxact(id) AS s \
+             WHERE pid = pg_backend_pid()",
         )
         .fetch_one(&mut *tx)
         .await
