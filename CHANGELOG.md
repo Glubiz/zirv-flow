@@ -15,3 +15,19 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.267.0 (2026-11-08)
+
+### Performance
+
+- key drain lanes by the resolved person (investigation L)
+
+### Documentation
+
+- append_inbox now makes a person lookup before its insert
+
+### Chores
+
+- let the busy-explorer test's hold wait for the pool's one connection
+- make k a known person before the empty-check race so both rows share its lane
+- share the lane tests' person fixtures, flatten lane_key, unbreak the lookup SQL
+
