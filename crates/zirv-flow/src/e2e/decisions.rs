@@ -35,6 +35,8 @@ mod tests {
 
     /// Why a historical-only row has no producer.
     const NO_LONGER_WRITTEN: &str = "historical: no code writes it since 0.231.0 (#397); rows written before still read in the timeline and trace view";
+    /// Why `send.gate` / `passed` has no producer.
+    const GATE_PASSED_NO_LONGER_WRITTEN: &str = "historical: no code writes it since 0.269.0 (`message.send` / `sent` implies every gate passed); rows written before still read in the trace view";
 
     /// Registry rows kept only so the rows that earlier versions wrote still read, render,
     /// export and erase. No production code constructs them, and the source scan allows exactly
@@ -43,6 +45,7 @@ mod tests {
         ("EVENT_ACCEPTED_VALID", NO_LONGER_WRITTEN),
         ("EVENT_ACCEPTED_FLAGGED", NO_LONGER_WRITTEN),
         ("EVENT_ACCEPTED_UNPLANNED", NO_LONGER_WRITTEN),
+        ("SEND_GATE_PASSED", GATE_PASSED_NO_LONGER_WRITTEN),
     ];
 
     const SEND_PATH: &str = "the_send_path_and_its_trace_hold_end_to_end";
@@ -119,7 +122,7 @@ mod tests {
         ("FLOW_BRANCH_ELSE", Test("flow_branch_else")),
         ("FLOW_BRANCH_CONDITION_MATCHED", Test("a_branch_sees_the_internal_effect_applied_earlier_in_the_same_step")),
         ("FLOW_BRANCH_CONDITION_UNMATCHED", Test("flow_branch_else")),
-        ("SEND_GATE_PASSED", Test(SEND_PATH)),
+        ("SEND_GATE_PASSED", Untestable(GATE_PASSED_NO_LONGER_WRITTEN)),
         ("SEND_GATE_BLOCKED", Test(SEND_PATH)),
         ("MESSAGE_SEND_SENT", Test(SEND_PATH)),
         ("MESSAGE_SEND_SKIPPED", Test(SEND_PATH)),
@@ -142,7 +145,7 @@ mod tests {
         ("SYNC_REMOVE_FAILED", Test("a_4xx_is_terminal_and_the_last_attempt_of_a_5xx_is_recorded_as_a_failure")),
         ("EVENT_FORWARD_RETRY", Test("a_retry_reuses_the_key_backs_off_and_leaves_a_job_for_the_next_attempt")),
         ("EVENT_FORWARD_DEAD", Test("a_terminal_answer_is_dead_at_once_and_a_redrive_delivers_it_without_a_flow")),
-        ("SYNC_RECORD_APPLIED", Test("a_batch_applies_deletes_and_rejects_and_records_each_under_the_run_trace")),
+        ("SYNC_RECORD_APPLIED", Test("a_record_that_changed_traits_has_trait_change_and_an_identifier_only_one_keeps_applied")),
         ("SYNC_RECORD_DELETED", Test("a_removed_record_appends_a_deleted_decision_with_the_reason_it_was_removed_for")),
         ("SYNC_RECORD_REJECTED", Test("a_batch_applies_deletes_and_rejects_and_records_each_under_the_run_trace")),
         ("SEGMENT_ENTERED", Test(SEND_PATH)),

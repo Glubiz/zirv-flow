@@ -345,7 +345,6 @@ mod tests {
             let id = run.id.to_string();
             rooted_tree(&records, &id);
             for (action, outcome) in [
-                ("sync.record", "applied"),
                 ("trait.change", "changed"),
                 ("segment.entered", "entered"),
                 ("flow.enroll", "enrolled"),
