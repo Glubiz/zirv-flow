@@ -92,9 +92,9 @@ impl DirtyBatch {
 
 /// The one total order every writer that touches several segments' rows locks them in: a
 /// segment comes after every segment it references, ties go by id, and archived segments are
-/// ordered with the rest. The passes and erasures lock through it, so no two of them can wait
-/// on each other. A merge takes no segment lock: the pass its mark schedules closes the merged
-/// person's rows.
+/// ordered with the rest. The passes, erasures and merge rewrites lock through it, so no two of
+/// them can wait on each other. A merge takes no segment lock: the pass its mark schedules closes
+/// the merged person's rows, and its rewrite job closes any that remain.
 async fn lock_order(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -153,8 +153,8 @@ pub async fn lock_reevaluation(
 }
 
 /// Takes, in the same order as a pass, the refresh lock of every segment in which one of
-/// `people` has an open row, for the rest of the transaction. An erasure calls this before it
-/// writes any segment row, so it never waits on a pass that waits on it.
+/// `people` has an open row, for the rest of the transaction. An erasure and a merge's rewrite
+/// call this before they write any segment row, so neither waits on a pass that waits on it.
 pub(crate) async fn lock_segments_of_people(
     connection: &mut PgConnection,
     workspace: WorkspaceId,

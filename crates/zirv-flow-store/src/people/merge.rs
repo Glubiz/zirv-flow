@@ -2,8 +2,8 @@
 //! of the record that joined them, and the job that re-points the rest afterwards.
 //!
 //! Consent moves in [`merge_people`] too. List memberships move in the rewrite job, and the
-//! merged people's segment rows are closed by the next re-evaluation pass, so a merge inside a
-//! drain batch takes no list or segment lock.
+//! merged people's segment rows are closed by the next re-evaluation pass and, for whatever it
+//! leaves, by the rewrite job, so a merge inside a drain batch takes no list or segment lock.
 
 use sqlx::{PgConnection, PgExecutor};
 use uuid::Uuid;
@@ -61,8 +61,8 @@ pub async fn current_person<'e>(
 /// It writes no segment or list row and takes no segment or list lock: a drain batch applies
 /// many records in one transaction, and a lock taken per merge would be taken out of order
 /// across them. The losers' open segment rows are closed by the pass their merge mark
-/// schedules, and their list memberships move in the rewrite job, which this transaction
-/// enqueues.
+/// schedules (the rewrite job closes any it leaves), and their list memberships move in the
+/// rewrite job, which this transaction enqueues.
 pub(super) async fn merge_people(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -390,6 +390,13 @@ async fn lock_merged_and_survivor(
 /// audiences follow `merged_into` from them. The person-change guard is taken first, because a
 /// moved membership marks the survivor.
 ///
+/// Then every open segment row the merged person still holds closes, with no exit
+/// ([`crate::segments::close_on_merge`]): the pass the merge's mark schedules skips an archived
+/// segment and one whose definition no longer compiles, and may not have run yet. Its segment
+/// locks are taken last, in the order of a pass, after the people (`FOR KEY SHARE`, which a
+/// pass's claim does not wait for), the lists and the survivor's mark, none of which a pass
+/// takes once it holds a segment lock. Those rows count in the result.
+///
 /// The flow tables, one by one:
 /// - `flow_entries` is **folded** into the survivor's row for the same flow in the merge
 ///   transaction ([`merge_people`]), not here: the two were one human, so a `once` flow that
@@ -460,6 +467,7 @@ pub async fn rewrite_merged_person(
         }
     }
     total += crate::lists::move_on_merge(connection, workspace, merged, survivor, trace).await?;
+    total += crate::segments::close_on_merge(connection, workspace, merged, trace).await?;
     // A conflict between two people that have both been merged into the survivor is now
     // between one person and itself.
     sqlx::query(
@@ -1222,6 +1230,107 @@ mod tests {
             "one per direction between the survivor and the other person"
         );
         assert_eq!(closed, ["merged", "merged"]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_rewrite_closes_the_merged_persons_rows_left_open_in_any_segment_without_an_exit(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let identified = record("crm", "1", &[("external:crm", "1")], json!({}));
+        let survivor = apply_one(&pool, ws, identified).await;
+        let anonymous = record("web", "2", &[("anonymous_id", "a")], json!({}));
+        let loser = apply_one(&pool, ws, anonymous).await;
+        let live = crate::segments::tests_support::segment(&pool, ws, "Live", 60).await;
+        let archived = crate::segments::tests_support::segment(&pool, ws, "Old", 60).await;
+        // Both people are open members of both segments; then one segment is archived, and no
+        // pass runs: the live segment stands for one a pass has not reached.
+        for segment in [live.id, archived.id] {
+            sqlx::query(
+                "INSERT INTO segment_members (workspace_id, segment_id, person_id, version, \
+                     entered_at, entered_trace_id, entered_cause) \
+                 SELECT $1, $2, t.id, 1, now(), gen_random_uuid(), 'initial' \
+                 FROM unnest($3::uuid[]) AS t(id)",
+            )
+            .bind(ws.as_uuid())
+            .bind(segment)
+            .bind([survivor, loser].as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query("UPDATE segments SET member_count = 2 WHERE id = $1")
+                .bind(segment)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let mut tx = crate::begin(&pool).await.unwrap();
+        crate::lock_segments(&mut tx, ws).await.unwrap();
+        crate::archive_segment(&mut tx, ws, archived.id)
+            .await
+            .unwrap();
+        crate::commit(tx).await.unwrap();
+        let both = &[("external:crm", "1"), ("anonymous_id", "a")];
+        assert_eq!(
+            apply_one(&pool, ws, record("crm", "3", both, json!({}))).await,
+            survivor
+        );
+        let trace = TraceContext::root(Cause::api("rewrite"));
+
+        let mut runs = Vec::new();
+        for _ in 0..2 {
+            let mut tx = crate::begin(&pool).await.unwrap();
+            let moved = rewrite_merged_person(&mut tx, ws, loser, &trace, None)
+                .await
+                .unwrap();
+            crate::commit(tx).await.unwrap();
+            runs.push(moved);
+        }
+
+        assert_eq!(runs[0], 2, "one row closed in each segment");
+        assert_eq!(runs[1], 0, "a second run closes nothing");
+        // Archived first, the survivor before the loser in each segment.
+        // Segment, person, exit cause, exit trace, and whether the exit is not before the entry.
+        type Row = (Uuid, Uuid, Option<String>, Option<Uuid>, bool);
+        let rows: Vec<Row> = sqlx::query_as(
+            "SELECT segment_id, person_id, exited_cause, exited_trace_id, \
+                    exited_at IS NULL OR exited_at >= entered_at \
+             FROM segment_members ORDER BY segment_id = $1, person_id = $2",
+        )
+        .bind(live.id)
+        .bind(loser)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let closed = (
+            Some("data_change".to_owned()),
+            Some(trace.trace_id.as_uuid()),
+        );
+        assert_eq!(
+            rows,
+            [
+                (archived.id, survivor, None, None, true),
+                (archived.id, loser, closed.0.clone(), closed.1, true),
+                (live.id, survivor, None, None, true),
+                (live.id, loser, closed.0, closed.1, true),
+            ]
+        );
+        let counts: Vec<i32> =
+            sqlx::query_scalar("SELECT member_count FROM segments WHERE id = ANY($1) ORDER BY id")
+                .bind([live.id, archived.id].as_slice())
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(counts, [1, 1]);
+        let exits: i64 = sqlx::query_scalar(
+            "SELECT (SELECT count(*) FROM events WHERE name = 'segment.exited') \
+                  + (SELECT count(*) FROM decision_records WHERE action = 'segment.exited')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(exits, 0);
     }
 
     #[sqlx::test]

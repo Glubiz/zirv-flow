@@ -1,11 +1,11 @@
 //! Reading a segment's members and their history, and keeping the counts right when a person is
 //! deleted. The refresh and the pass write the rows, a merged-away person's closing included
-//! (see `refresh`).
+//! (see `refresh`); the merge's rewrite closes whatever rows of that person remain.
 
 use sqlx::PgConnection;
 use time::{Date, Duration, OffsetDateTime, Time};
 use uuid::Uuid;
-use zirv_flow_core::WorkspaceId;
+use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use crate::StoreError;
 use crate::people::strongest_identifiers;
@@ -232,6 +232,51 @@ async fn size_per_day_until(
         days: rows.into_iter().map(|(day, size, _)| (day, size)).collect(),
         current,
     }))
+}
+
+/// Closes every open row a merged person still holds, in any segment, in the transaction of the
+/// merge's rewrite job, and returns how many. The pass that consumes the merge's mark closes the
+/// rows of the segments it evaluates; this closes the rest: those of an archived segment or of
+/// one whose definition no longer compiles, which no pass writes, and any a pass has not reached
+/// yet. They close as a pass closes a merged person's row: `exited_at` is now (never before the
+/// row's own entry), the cause is `data_change` on `trace` and no event, decision or flow trigger
+/// is written; the segments' counts drop with them.
+///
+/// The segments are locked first, in the order of a pass ([`super::lock_segments_of_people`]), so
+/// a pass or a refresh that writes the same rows runs entirely before or after this. The caller
+/// takes these locks last: it holds the people `FOR KEY SHARE`, which a pass's claim does not
+/// wait for, and its other locks (lists, the survivor's mark) are none a pass takes after its
+/// segment locks. A merged person's row is never opened again (no compiled set holds a merged
+/// person), so a second run finds nothing.
+pub(crate) async fn close_on_merge(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    merged: Uuid,
+    trace: &TraceContext,
+) -> Result<u64, StoreError> {
+    super::lock_segments_of_people(connection, workspace, &[merged]).await?;
+    let closed: Vec<i64> = sqlx::query_scalar(
+        "WITH closed AS ( \
+             UPDATE segment_members SET exited_version = version, \
+                 exited_at = GREATEST(now(), entered_at), exited_trace_id = $3, \
+                 exited_cause = 'data_change' \
+             WHERE workspace_id = $1 AND person_id = $2 AND exited_at IS NULL \
+             RETURNING segment_id), \
+         counts AS (SELECT segment_id, count(*) AS n FROM closed GROUP BY segment_id) \
+         UPDATE segments s SET member_count = s.member_count - counts.n \
+         FROM counts WHERE s.id = counts.segment_id AND s.workspace_id = $1 \
+         RETURNING counts.n",
+    )
+    .bind(workspace.as_uuid())
+    .bind(merged)
+    .bind(trace.trace_id.as_uuid())
+    .fetch_all(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(closed
+        .into_iter()
+        .map(|n| u64::try_from(n).unwrap_or(0))
+        .sum())
 }
 
 /// Takes the people's open rows out of the segments' counts. Deleting the rows themselves is the

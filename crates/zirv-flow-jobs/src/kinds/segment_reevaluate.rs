@@ -887,6 +887,75 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_merged_persons_row_in_a_segment_that_no_longer_compiles_is_closed_by_the_rewrite(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            zirv_flow_store::migrate(&pool).await.unwrap();
+            let ws = workspace(&pool).await;
+            define_trait(&pool, ws, "plan").await;
+            define_trait(&pool, ws, "tier").await;
+            let clock = clock();
+            let gold = json!({"op": "eq", "trait": "tier", "value": "gold", "v": 1});
+            let broken = create(&pool, ws, "Gold", gold).await;
+            full_refresh(&pool, ws, broken.id, &clock).await;
+            let trace = TraceContext::root(Cause::api("t"));
+            let other = "bob@example.com";
+            let pro = json!({"plan": "pro"});
+            let survivor = profile(&pool, ws, "1", &[PERSONAL_DATA.email], pro, &trace).await;
+            let loser = profile(&pool, ws, "2", &[other], json!({"tier": "gold"}), &trace).await;
+            reevaluate(&pool, ws, &clock).await;
+            assert_eq!(open(&pool, broken.id).await, [loser]);
+            // The trait it reads is archived: the definition no longer compiles.
+            zirv_flow_store::update_trait_definition(
+                &pool,
+                ws,
+                "tier",
+                &TraitDefinitionUpdate {
+                    archived: Some(true),
+                    ..TraitDefinitionUpdate::default()
+                },
+            )
+            .await
+            .unwrap();
+            let merge = TraceContext::root(Cause::api("merge"));
+            let emails = [PERSONAL_DATA.email, other];
+            let joined = profile(&pool, ws, "3", &emails, json!({}), &merge).await;
+            assert_eq!(joined, survivor);
+            reevaluate(&pool, ws, &clock).await;
+            // The pass consumed the merge's marks and left the segment it cannot compile alone.
+            assert_eq!(dirty(&pool).await, 0);
+            assert_eq!(open(&pool, broken.id).await, [loser]);
+
+            let payload = json!({"workspace_id": ws, "merged_person_id": loser});
+            let rewrite = super::super::person_merge_rewrite::PersonMergeRewrite;
+            run_kind(&rewrite, &pool, ws, payload, &clock).await;
+
+            assert!(open(&pool, broken.id).await.is_empty());
+            assert_eq!(count_of(&pool, broken.id).await, 0);
+            let closed: (Option<String>, Option<Uuid>) = sqlx::query_as(
+                "SELECT exited_cause, exited_trace_id FROM segment_members WHERE person_id = $1",
+            )
+            .bind(loser)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(closed.0.as_deref(), Some("data_change"));
+            assert!(closed.1.is_some());
+            let exits: i64 = sqlx::query_scalar(
+                "SELECT (SELECT count(*) FROM events WHERE name = 'segment.exited') \
+                      + (SELECT count(*) FROM decision_records WHERE action = 'segment.exited')",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(exits, 0, "the merged person's row closes without an exit");
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn two_runs_at_once_take_disjoint_people_and_leave_exact_membership(pool: PgPool) {
         zirv_flow_store::decision_testing::checked(pool, |pool| async move {
             zirv_flow_store::migrate(&pool).await.unwrap();

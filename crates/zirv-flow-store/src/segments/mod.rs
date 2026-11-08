@@ -34,11 +34,11 @@ pub use explain::{
     ClearFields, EXPLAIN_EVENT_CAP, ExplainConsent, ExplainEvent, ExplainEventScope, ExplainPerson,
     explain_clear_fields, load_explain_person,
 };
-pub(crate) use members::forget_people;
 pub use members::{
     HistoryCursor, HistoryRow, MAX_SIZE_DAYS, MemberRow, SizePerDay, segment_history_page,
     segment_members_page, segment_size_per_day,
 };
+pub(crate) use members::{close_on_merge, forget_people};
 #[cfg(any(test, feature = "test-support"))]
 pub use preview::run_segment_ids;
 pub use preview::{
