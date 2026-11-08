@@ -208,7 +208,6 @@ macro_rules! enqueue_ctes {
                                AND run_at <= now()))"
     };
 }
-pub(crate) use enqueue_ctes;
 
 /// Binds `$1` to `$12` of [`enqueue_ctes`].
 pub(crate) fn bind_job<'q>(
@@ -249,16 +248,21 @@ pub async fn enqueue<'e>(executor: impl PgExecutor<'e>, job: &NewJob) -> Result<
     Ok(notified.is_some())
 }
 
-/// Enqueues many jobs with one statement; returns how many rows were inserted (a job whose unique
-/// key is held is skipped, as in [`enqueue`]). One wake-up notification goes out per kind, in the
-/// caller's transaction.
-pub async fn enqueue_many<'e>(
-    executor: impl PgExecutor<'e>,
-    jobs: &[NewJob],
-) -> Result<u64, StoreError> {
-    if jobs.is_empty() {
-        return Ok(0);
-    }
+/// The CTEs of a many-job enqueue, `inserted` and `notified`, over the twelve parameters
+/// [`bind_jobs`] binds as `$1` to `$12`. A statement that appends them to its own takes
+/// parameters from `$13` and must read `notified`, or the wake-up is never sent.
+macro_rules! enqueue_many_ctes {
+    () => {
+        "inserted AS (              INSERT INTO jobs                 (id, workspace_id, kind, payload, priority, run_at, max_attempts, unique_key,                  trace_id, cause_kind, cause_id)              SELECT t.id, t.workspace_id, t.kind, t.payload, t.priority, COALESCE(t.run_at, now()),                     t.max_attempts, t.unique_key, t.trace_id, t.cause_kind, t.cause_id              FROM unnest($1::uuid[], $2::uuid[], $3::text[], $4::jsonb[], $5::int2[],                          $6::timestamptz[], $7::int4[], $8::text[], $9::uuid[], $10::text[],                          $11::text[])                   AS t(id, workspace_id, kind, payload, priority, run_at, max_attempts,                        unique_key, trace_id, cause_kind, cause_id)              ON CONFLICT DO NOTHING              RETURNING kind),          notified AS (              SELECT pg_notify($12, k.kind) FROM (SELECT DISTINCT kind FROM inserted) k              WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE state = 'ready' AND kind = k.kind                                AND run_at <= now()))"
+    };
+}
+pub(crate) use enqueue_many_ctes;
+
+/// Binds `$1` to `$12` of [`enqueue_many_ctes`].
+pub(crate) fn bind_jobs<'q>(
+    query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+    jobs: &'q [NewJob],
+) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
     let ids: Vec<Uuid> = jobs.iter().map(|_| Uuid::new_v4()).collect();
     let workspaces: Vec<Option<Uuid>> = jobs
         .iter()
@@ -279,38 +283,39 @@ pub async fn enqueue_many<'e>(
         .map(|job| job.trace.cause.kind.as_str())
         .collect();
     let cause_ids: Vec<&str> = jobs.iter().map(|job| job.trace.cause.id.as_str()).collect();
-    let inserted: Vec<String> = sqlx::query_scalar(
-        "WITH inserted AS ( \
-             INSERT INTO jobs \
-                (id, workspace_id, kind, payload, priority, run_at, max_attempts, unique_key, \
-                 trace_id, cause_kind, cause_id) \
-             SELECT t.id, t.workspace_id, t.kind, t.payload, t.priority, COALESCE(t.run_at, now()), \
-                    t.max_attempts, t.unique_key, t.trace_id, t.cause_kind, t.cause_id \
-             FROM unnest($1::uuid[], $2::uuid[], $3::text[], $4::jsonb[], $5::int2[], \
-                         $6::timestamptz[], $7::int4[], $8::text[], $9::uuid[], $10::text[], \
-                         $11::text[]) \
-                  AS t(id, workspace_id, kind, payload, priority, run_at, max_attempts, \
-                       unique_key, trace_id, cause_kind, cause_id) \
-             ON CONFLICT DO NOTHING \
-             RETURNING kind), \
-         notified AS ( \
-             SELECT pg_notify($12, k.kind) FROM (SELECT DISTINCT kind FROM inserted) k \
-             WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE state = 'ready' AND kind = k.kind \
-                               AND run_at <= now())) \
-         SELECT kind FROM inserted, (SELECT count(*) FROM notified) AS n",
+    query
+        .bind(ids)
+        .bind(workspaces)
+        .bind(kinds)
+        .bind(payloads)
+        .bind(priorities)
+        .bind(run_ats)
+        .bind(attempts)
+        .bind(keys)
+        .bind(traces)
+        .bind(cause_kinds)
+        .bind(cause_ids)
+        .bind(NOTIFY_CHANNEL)
+}
+
+/// Enqueues many jobs with one statement; returns how many rows were inserted (a job whose unique
+/// key is held is skipped, as in [`enqueue`]). One wake-up notification goes out per kind, in the
+/// caller's transaction.
+pub async fn enqueue_many<'e>(
+    executor: impl PgExecutor<'e>,
+    jobs: &[NewJob],
+) -> Result<u64, StoreError> {
+    if jobs.is_empty() {
+        return Ok(0);
+    }
+    let inserted = bind_jobs(
+        sqlx::query(concat!(
+            "WITH ",
+            enqueue_many_ctes!(),
+            " SELECT kind FROM inserted, (SELECT count(*) FROM notified) AS n"
+        )),
+        jobs,
     )
-    .bind(&ids)
-    .bind(&workspaces)
-    .bind(&kinds)
-    .bind(&payloads)
-    .bind(&priorities)
-    .bind(&run_ats)
-    .bind(&attempts)
-    .bind(&keys)
-    .bind(&traces)
-    .bind(&cause_kinds)
-    .bind(&cause_ids)
-    .bind(NOTIFY_CHANNEL)
     .fetch_all(executor)
     .await
     .map_err(StoreError::query)?;
@@ -4993,9 +4998,14 @@ mod tests {
     async fn a_claim_takes_at_most_one_drain_and_fills_up_with_other_due_jobs(pool: PgPool) {
         for n in 0..32 {
             let ws = workspace(&pool, &format!("w{n}")).await;
-            crate::enqueue_drain(&pool, ws, &TraceContext::root(Cause::api("req")))
-                .await
-                .unwrap();
+            crate::enqueue_drain_shard(
+                &pool,
+                ws,
+                crate::Shard::ALL,
+                &TraceContext::root(Cause::api("req")),
+            )
+            .await
+            .unwrap();
             for _ in 0..4 {
                 let mut other = job("a.kind");
                 other.workspace_id = Some(ws);

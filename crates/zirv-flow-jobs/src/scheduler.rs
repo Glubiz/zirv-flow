@@ -13,12 +13,12 @@ use zirv_flow_store::{
     EnrollmentSample, JOB_DEAD, Leadership, NewJob, PgPool, QueueCounts, Reaped, RetentionSettings,
     Schedule, StoreError, abandon_orphaned_test_sends, advance_schedule, begin, database_now,
     delete_expired_import_data, destination_report, dirty_backlog, dirty_heads, disable_schedule,
-    due_schedules, due_sending_domains, end_orphaned_messages, enqueue, enqueue_domain_verify,
-    enqueue_drain, enqueue_reevaluate, ensure_decision_partitions, ensure_event_partitions,
-    ensure_forward_job, expire_api_idempotency, expire_contact_idempotency, expire_exports,
-    fail_orphaned_runs, forwarding_report, inbox_heads, prune_debugger_feed, reap_expired,
-    reconcile_flow_schedules, reconcile_segment_schedules, record_retention_run,
-    sample_enrollments, sample_queue_depths, stream_freshness, try_lead,
+    drain_shards, due_schedules, due_sending_domains, end_orphaned_messages, enqueue,
+    enqueue_domain_verify, enqueue_pending_drains, enqueue_reevaluate, ensure_decision_partitions,
+    ensure_event_partitions, ensure_forward_job, expire_api_idempotency,
+    expire_contact_idempotency, expire_exports, fail_orphaned_runs, forwarding_report, inbox_heads,
+    prune_debugger_feed, reap_expired, reconcile_flow_schedules, reconcile_segment_schedules,
+    record_retention_run, sample_enrollments, sample_queue_depths, stream_freshness, try_lead,
 };
 
 use crate::metrics::{
@@ -631,9 +631,9 @@ impl Scheduler {
         })
     }
 
-    /// The ingest safety net: enqueues `ingest.drain` for every workspace whose oldest
-    /// inbox row has waited more than [`STALE_INBOX`]. The unique key makes it a no-op
-    /// while a drain is ready or running. It covers an append that landed as a drain
+    /// The ingest safety net: enqueues `ingest.drain` for each shard that holds a row, in every
+    /// workspace whose oldest inbox row has waited more than [`STALE_INBOX`]. The unique key
+    /// makes it a no-op for a shard whose drain is ready or running. It covers an append that landed as a drain
     /// finished, and a drain that ran out of its time budget. Also publishes the age of
     /// the oldest row anywhere. Returns the drains enqueued.
     async fn wake_stale_inboxes(&self) -> Result<u64, StoreError> {
@@ -652,9 +652,9 @@ impl Scheduler {
                 CauseKind::Api,
                 "ingest.safety_net".to_owned(),
             ));
-            if enqueue_drain(&self.pool, head.workspace_id, &trace).await? {
-                enqueued += 1;
-            }
+            enqueued +=
+                enqueue_pending_drains(&self.pool, head.workspace_id, drain_shards(), &trace)
+                    .await?;
         }
         Ok(enqueued)
     }
@@ -1768,10 +1768,36 @@ mod tests {
         let first = led(scheduler.tick_at(BASE).await.unwrap());
         let second = led(scheduler.tick_at(BASE).await.unwrap());
 
-        assert_eq!((first.drains, second.drains), (1, 0));
+        // Rows without a bucket belong to every shard, so each gets a job.
+        assert_eq!((first.drains, second.drains), (8, 0));
+        let mut expected: Vec<Option<String>> = (0..8)
+            .map(|index| Some(format!("ingest.drain:{}:{index}/8", stale.as_uuid())))
+            .collect();
+        expected.sort();
+        let mut found = drain_jobs(&pool).await;
+        found.sort();
+        assert_eq!(found, expected);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_safety_net_enqueues_only_the_shards_that_hold_a_row(pool: PgPool) {
+        migrated(&pool).await;
+        let ws = inbox_workspace(&pool, "stale").await;
+        put_in_inbox(&pool, ws, 5).await;
+        put_in_inbox(&pool, ws, 5).await;
+        sqlx::query("UPDATE ingest_inbox SET affinity = 3 + 8 * (id % 2)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut scheduler = scheduler(&pool);
+
+        let report = led(scheduler.tick_at(BASE).await.unwrap());
+
+        assert_eq!(report.drains, 1, "both rows fall in shard 3 of 8");
         assert_eq!(
             drain_jobs(&pool).await,
-            [Some(format!("ingest.drain:{}", stale.as_uuid()))]
+            [Some(format!("ingest.drain:{}:3/8", ws.as_uuid()))]
         );
     }
 
@@ -1795,7 +1821,7 @@ mod tests {
         put_in_inbox(&pool, ws, 0).await;
         let old = led(scheduler.tick_at(BASE).await.unwrap());
 
-        assert_eq!((young.drains, old.drains), (0, 1));
+        assert_eq!((young.drains, old.drains), (0, 8));
     }
 
     #[sqlx::test]

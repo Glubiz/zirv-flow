@@ -660,12 +660,12 @@ of blocking the workspace's inbox.
 **Operation.** The `ingest.drain` job applies up to `ingest.drain_batch_size` inbox rows per
 transaction, in arrival order, and deletes them in that transaction. Rows are bucketed by
 record key (the strongest identifier) when they are appended, and the job runs
-`ingest.drain_shards` loops at once, one per share of the buckets, so a single workspace is
-not bound by one transaction's round trips; the rows of one record key always land in one
+`ingest.drain_shards` jobs at once, one per share of the buckets, spread over the workers' drain slots, so a single workspace is
+not bound by one transaction's round trips or one process; the rows of one record key always land in one
 loop and still apply in arrival order. A batch is up to `ingest.drain_batch_size` of the oldest rows of the
 shard's buckets. Legacy rows without a bucket are bucketed first so they join their key's queue by id;
 rolling upgrades are not supported. The worker's pools together allow
-`(2 + ingest.drain_shards) * (worker.concurrency + worker.drain_slots) + 1` connections (51 at the defaults),
+`3 * (worker.concurrency + worker.drain_slots) + 1` connections (37 at the defaults),
 in addition to the main database pool; see [Background jobs](operations/runtime.md#background-jobs). Concurrent workers never apply a row twice. The
 scheduler leader enqueues a drain for any workspace whose oldest row has waited more than 2 seconds, which covers an append that lands as a drain finishes. The
 inbox holds the raw item only until it is applied. Metrics: a `serve` process exports

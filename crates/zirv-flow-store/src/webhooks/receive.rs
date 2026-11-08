@@ -8,7 +8,7 @@ use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
-use crate::ingest::{bucket, enqueue_drain};
+use crate::ingest::{Shard, bucket, drain_shards, enqueue_drain_shard};
 use crate::{
     PgPool, StoreError, StreamOutcome, begin, commit, database_now, record_stream_outcome,
 };
@@ -57,7 +57,7 @@ pub async fn find_for_receive(pool: &PgPool, id: Uuid) -> Result<Option<HookRece
     .map_err(StoreError::query)
 }
 
-/// Appends one verified payload to the inbox, enqueues the workspace's drain and, when `report`
+/// Appends one verified payload to the inbox, enqueues the drain of the hook's shard and, when `report`
 /// is set, reports the stream as succeeded now, all in one transaction. The row is stamped
 /// `received_at` with the database's clock. `message_id` is the namespaced dedupe value
 /// (`wh:{hook}:{value}`); `signed_at` is the signed timestamp of the timestamped scheme.
@@ -75,6 +75,7 @@ pub async fn append_webhook(
         "signed_at": signed_at.and_then(|at| at.format(&Rfc3339).ok()),
     });
     let workspace = hook.workspace();
+    let hook_bucket = bucket(&hook.id.to_string());
     let mut tx = begin(pool).await?;
     sqlx::query(
         "INSERT INTO ingest_inbox \
@@ -86,11 +87,17 @@ pub async fn append_webhook(
     .bind(&stored)
     .bind(message_id)
     .bind(trace.trace_id.as_uuid())
-    .bind(bucket(&hook.id.to_string()))
+    .bind(hook_bucket)
     .execute(&mut *tx)
     .await
     .map_err(StoreError::query)?;
-    enqueue_drain(&mut *tx, workspace, trace).await?;
+    enqueue_drain_shard(
+        &mut *tx,
+        workspace,
+        Shard::of_bucket(hook_bucket, drain_shards()),
+        trace,
+    )
+    .await?;
     if report {
         let at = database_now(&mut *tx).await?;
         record_stream_outcome(

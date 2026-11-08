@@ -50,7 +50,7 @@ flows run late; for `segment.refresh` segments are stale; for sends, messages go
 1. Start the missing workers: `zirv-flow worker` (or `zirv-flow all`). Check `GET /readyz` on
    `ops.bind`.
 2. Add worker processes, or raise `worker.concurrency` and restart. Each worker adds
-   `(2 + ingest.drain_shards) * (worker.concurrency + worker.drain_slots) + 1` database connections, so check the
+   `3 * (worker.concurrency + worker.drain_slots) + 1` database connections, so check the
    database connection limit first.
 3. Set `worker.max_running_per_workspace` so one workspace cannot take every worker, and restart.
 4. For a stuck handler, read the worker logs for the kind and fix its cause; a job whose lease
@@ -225,9 +225,10 @@ yet. Nothing is lost: the rows stay in the inbox until applied.
 ### Fix
 
 1. Get workers running and keep them healthy.
-2. Raise `ingest.drain_shards` (1 to 16) for more concurrent drain loops per workspace, or
-   `ingest.drain_batch_size`, and restart the workers. More shards need more connections per
-   worker.
+2. Raise `ingest.drain_shards` (1 to 64) for more drain jobs per workspace, or
+   `ingest.drain_batch_size`, and restart. Shard jobs run in the workers' drain slots, so keep the
+   sum of `worker.drain_slots` over the workers at least `ingest.drain_shards`, or add workers.
+   More slots need more connections per worker.
 3. Retry dead `ingest.drain` jobs once the cause is fixed.
 
 ### Fixed when

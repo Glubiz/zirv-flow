@@ -92,7 +92,7 @@ scheduler 4, 10 M people), in the [M8 validation report](../benchmarks/m8-valida
 deployment. A process running a worker also opens separate jobs and heartbeat
 pools, and a process running `serve` opens an explorer pool. Let D be its main pool
 limit, E be `explorer.max_connections` (default 4), C be `worker.concurrency` plus
-`worker.drain_slots` (default 1) and S be `ingest.drain_shards`. The maximum is:
+`worker.drain_slots` (default `ingest.drain_shards`). The maximum is:
 
 - `scheduler`: D.
 - `serve`: D + E. The explorer pool serves every explorer query and CSV export page,
@@ -107,8 +107,8 @@ limit, E be `explorer.max_connections` (default 4), C be `worker.concurrency` pl
   holds one page in memory: the decoded rows and their CSV text. The CSV text alone is about
   3 to 5 MB at 300 to 500 bytes a row, and the decoded rows take a multiple of that, more for
   large `properties`; budget it per `explorer.max_exports` (not yet measured).
-- `worker`: D + C × (S + 1) + 1 for the jobs pool + C for heartbeats,
-  or D + (2 + S) × C + 1. `all` adds E to that.
+- `worker`: D + 2 × C + 1 for the jobs pool + C for heartbeats,
+  or D + 3 × C + 1. `all` adds E to that.
 
 This is configured pool arithmetic from the
 [worker implementation](../../crates/zirv-flow-jobs/src/worker.rs), not measured

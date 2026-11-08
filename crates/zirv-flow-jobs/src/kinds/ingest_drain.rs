@@ -1,35 +1,44 @@
-//! `ingest.drain`: applies a workspace's ingestion inbox (architecture section 7.1). Each
-//! batch is one transaction of its own that applies the oldest rows in id order and deletes
-//! them, so the job's transaction only confirms the lease, with no row lock, and completes it.
+//! `ingest.drain`: applies one shard of a workspace's ingestion inbox (architecture section 7.1).
+//! The payload names the shard, `index` of `count`, and the job's unique key is per workspace and
+//! shard, so a workspace's drain is several jobs that spread over the workers' drain slots. Each
+//! batch is one transaction of its own that applies the oldest rows of the shard's buckets in id
+//! order and deletes them, so the job's transaction only confirms the lease, with no row lock,
+//! and completes it.
 //!
-//! A run first buckets the workspace's rows that have no bucket yet (appended before the
-//! column existed, or by a pre-0.29 serve), so every row joins its key's queue by id. Then
-//! `shards` loops drain the buckets concurrently, one shard each; the rows of one record key
-//! share a bucket, so each key still applies in id order. Each loop is a tokio task of its own,
-//! owned by the handler in a `JoinSet`, so the shards spread over the runtime threads instead of
-//! polling in one task. Losing the lease drops the handler, which aborts every shard task and
-//! rolls back their transactions.
+//! A run first buckets the workspace's rows that have no bucket yet (appended before the column
+//! existed, or by a pre-0.29 serve), so every row joins its key's queue by id. The backfill takes
+//! a per-workspace advisory lock for each of its batches, so jobs that start together run it one
+//! at a time, and no shard starts while an older row has no bucket. Then the run loops batches
+//! over the shard's buckets until they are empty or the time budget ends. The rows of one record
+//! key share a bucket, so each key applies in id order even when two jobs cover the same bucket:
+//! a batch locks the rows it takes, skips locked ones and leaves out a bucket's rows after a
+//! missing one.
+//!
+//! The run drains the buckets its payload names, whatever shard count the worker is configured
+//! with: a count that differs, in a config change or a rolling deploy, still drains the rows it
+//! was enqueued for, and the worker's own requeue and the scheduler's safety net enqueue by the
+//! configured count, so any bucket left over gets a job of the new count and the two converge.
+//!
+//! A payload without a shard, queued before the drain was split, enqueues the configured
+//! count's jobs for the shards that hold rows and completes.
 //!
 //! A batch that fails with a retryable error is retried with jittered backoff. A batch that
 //! fails otherwise holds a poison row: its rows are applied one at a time, and the row that
 //! still fails becomes an `apply_failed` ingest reject, so one bad row never blocks a
-//! workspace's inbox. The job never re-enqueues itself, since it still holds its unique key;
-//! the scheduler leader's safety net picks up what is left.
+//! workspace's inbox. The job never re-enqueues itself, since it still holds its unique key; the
+//! worker's requeue after completion and the scheduler leader's safety net pick up what is left.
 //!
 //! Nothing here logs an identifier, a value or an event name.
 
 use std::future::Future;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use tokio::task::JoinSet;
-use tracing::{Instrument, Span};
 use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
 use zirv_flow_store::{
     DRAIN_JOB_KIND, DrainOutcome, HmacKey, PgPool, Shard, StoreError, backfill_affinity,
-    drain_batch, drain_batch_singly,
+    drain_batch, drain_batch_singly, enqueue_pending_drains, payload_shard,
 };
 
 use crate::metrics::record_drained;
@@ -65,9 +74,17 @@ impl JobKind for IngestDrain {
             .and_then(|text| Uuid::parse_str(text).ok())
             .map(WorkspaceId::from_uuid)
             .ok_or(JobError::new("the payload has no workspace_id"))?;
+        let shard = payload_shard(&payload).map_err(JobError::new)?;
         let settings = ctx
             .ingest()
             .ok_or(JobError::new("the worker has no pool for the ingest drain"))?;
+        let pool = &settings.pool;
+        let Some(shard) = shard else {
+            enqueue_pending_drains(pool, workspace, settings.shards, ctx.trace())
+                .await
+                .map_err(|_| JobError::new("the shard jobs could not be enqueued"))?;
+            return Ok(());
+        };
         let key = settings
             .redaction_key
             .clone()
@@ -75,44 +92,13 @@ impl JobKind for IngestDrain {
         let limit = i64::from(settings.batch_size.max(1));
 
         let started = Instant::now();
-        let pool = &settings.pool;
         if !backfill(pool, workspace, limit, started, TIME_BUDGET).await? {
             return Ok(());
         }
-        let shards = settings.shards.max(1);
-        // The set owns the tasks: dropping it, as a lost lease drops this future, aborts them all.
-        let mut tasks = JoinSet::new();
-        for index in 0..shards {
-            let shard = Shard {
-                index,
-                count: shards,
-            };
-            let (pool, key) = (pool.clone(), Arc::clone(&key));
-            tasks.spawn(
-                async move {
-                    drain_shard(&pool, workspace, &key, shard, limit, started, TIME_BUDGET).await
-                }
-                .instrument(Span::current()),
-            );
-        }
-        join_shards(tasks).await
+        drain_shard(pool, workspace, &key, shard, limit, started, TIME_BUDGET)
+            .await
+            .map(drop)
     }
-}
-
-/// Waits for every shard task to end; the batches the others committed stand. Returns the
-/// first error, and a task that panicked counts as one.
-async fn join_shards(mut tasks: JoinSet<Result<bool, JobError>>) -> Result<(), JobError> {
-    let mut first = Ok(());
-    while let Some(joined) = tasks.join_next().await {
-        let result = match joined {
-            Ok(result) => result.map(drop),
-            Err(_) => Err(JobError::new("a drain shard panicked")),
-        };
-        if first.is_ok() {
-            first = result;
-        }
-    }
-    first
 }
 
 /// Buckets the workspace's unbucketed rows until none are left. Returns whether it finished
@@ -285,7 +271,8 @@ mod tests {
         trace
     }
 
-    /// Claims the drain job the append enqueued and runs the handler on it.
+    /// Claims every ready drain job the appends enqueued, one per shard the rows fall in, and
+    /// runs the handler on each in turn. Returns the first error, after running them all.
     async fn run_job(
         pool: &PgPool,
         key: Option<std::sync::Arc<HmacKey>>,
@@ -300,18 +287,47 @@ mod tests {
         batch_size: u32,
         shards: u32,
     ) -> Result<(), JobError> {
-        let claimed = zirv_flow_store::claim_job(
-            pool,
-            "w",
-            &[IngestDrain::KIND],
-            Duration::from_secs(30),
-            None,
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let mut first = Ok(());
+        for claimed in claim_all(pool).await {
+            let result = run_claimed(pool, &claimed, key.clone(), batch_size, shards).await;
+            if first.is_ok() {
+                first = result;
+            }
+        }
+        first
+    }
+
+    /// Claims every ready drain job. A claim takes at most one, so it claims until none is left.
+    async fn claim_all(pool: &PgPool) -> Vec<zirv_flow_store::ClaimedJob> {
+        let mut claimed = Vec::new();
+        loop {
+            let batch = zirv_flow_store::claim_jobs(
+                pool,
+                "w",
+                &[IngestDrain::KIND],
+                Duration::from_secs(30),
+                None,
+                100,
+            )
+            .await
+            .unwrap();
+            if batch.is_empty() {
+                return claimed;
+            }
+            claimed.extend(batch);
+        }
+    }
+
+    /// Runs the handler on `claimed`; `shards` is the count the worker is configured with.
+    async fn run_claimed(
+        pool: &PgPool,
+        claimed: &zirv_flow_store::ClaimedJob,
+        key: Option<std::sync::Arc<HmacKey>>,
+        batch_size: u32,
+        shards: u32,
+    ) -> Result<(), JobError> {
         let mut tx = zirv_flow_store::begin(pool).await.unwrap();
-        let mut ctx = JobContext::new(&mut tx, &claimed).with_ingest(IngestSettings {
+        let mut ctx = JobContext::new(&mut tx, claimed).with_ingest(IngestSettings {
             pool: pool.clone(),
             redaction_key: key,
             batch_size,
@@ -390,15 +406,20 @@ mod tests {
         zirv_flow_store::decision_testing::checked(pool, |pool| async move {
             let ws = workspace(&pool).await;
             append(&pool, ws, 3).await;
+            let count = || async {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM jobs WHERE kind = 'ingest.drain'",
+                )
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            };
+            let enqueued = count().await;
+            assert!(enqueued >= 1);
 
             run_job(&pool, key(), 1).await.unwrap();
 
-            let jobs: i64 =
-                sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = 'ingest.drain'")
-                    .fetch_one(&pool)
-                    .await
-                    .unwrap();
-            assert_eq!(jobs, 1, "only the running job itself");
+            assert_eq!(count().await, enqueued, "only the running jobs themselves");
         })
         .await;
     }
@@ -628,20 +649,6 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn one_shard_drains_everything_too(pool: PgPool) {
-        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
-            let ws = workspace(&pool).await;
-            append(&pool, ws, 30).await;
-
-            run_job_with(&pool, key(), 4, 1).await.unwrap();
-
-            assert_eq!(inbox(&pool).await, 0);
-        })
-        .await;
-    }
-
-    #[sqlx::test]
-    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_row_an_old_serve_appended_after_a_bucketed_one_of_its_key_applies_after_it(
         pool: PgPool,
     ) {
@@ -718,41 +725,6 @@ mod tests {
         .await;
     }
 
-    #[tokio::test]
-    async fn a_shard_task_that_panics_fails_the_job_after_the_others_ended() {
-        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let mut tasks = JoinSet::new();
-        tasks.spawn(async { panic!("a shard blew up") });
-        tasks.spawn({
-            let finished = Arc::clone(&finished);
-            async move {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                finished.store(true, std::sync::atomic::Ordering::SeqCst);
-                Ok(true)
-            }
-        });
-
-        let error = join_shards(tasks).await.unwrap_err();
-
-        assert_eq!(error.message(), "a drain shard panicked");
-        assert!(
-            finished.load(std::sync::atomic::Ordering::SeqCst),
-            "the other task ended first"
-        );
-    }
-
-    #[tokio::test]
-    async fn the_first_error_is_returned_and_a_later_one_does_not_replace_it() {
-        let mut tasks = JoinSet::new();
-        tasks.spawn(async { Err(CONFLICTED) });
-        tasks.spawn(async {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            Err(JobError::new("later"))
-        });
-
-        assert_eq!(join_shards(tasks).await.unwrap_err(), CONFLICTED);
-    }
-
     /// Queries that are not idle on other connections of the test's database.
     async fn busy_connections(pool: &PgPool) -> i64 {
         sqlx::query_scalar(
@@ -766,7 +738,7 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn dropping_the_handler_aborts_every_shard_task(pool: PgPool) {
+    async fn dropping_the_handler_aborts_the_drain(pool: PgPool) {
         zirv_flow_store::decision_testing::checked(pool, |pool| async move {
             let ws = workspace(&pool).await;
             append(&pool, ws, 4000).await;
@@ -787,7 +759,7 @@ mod tests {
             while pool.num_idle() != pool.size() as usize {
                 assert!(
                     Instant::now() < deadline,
-                    "a shard still holds a connection"
+                    "the drain still holds a connection"
                 );
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
@@ -804,13 +776,13 @@ mod tests {
             }
             let left = inbox(&pool).await;
             assert!(left > 0, "the run was cut off with rows remaining");
-            // A shard that outlived the handler, even one asleep in its longest retry backoff
+            // A drain that outlived the handler, even one asleep in its longest retry backoff
             // (400 ms), would commit another one-row batch within this window.
             tokio::time::sleep(Duration::from_secs(1)).await;
             assert_eq!(
                 inbox(&pool).await,
                 left,
-                "no shard committed after the drop"
+                "no batch committed after the drop"
             );
             assert_eq!(
                 busy_connections(&pool).await,
@@ -855,6 +827,242 @@ mod tests {
                 failing,
                 "the other shards drained theirs"
             );
+        })
+        .await;
+    }
+
+    /// The shard indexes (of `count`) the inbox's rows fall in.
+    async fn shards_with_rows(pool: &PgPool, count: i32) -> Vec<i32> {
+        sqlx::query_scalar("SELECT DISTINCT affinity::int % $1 FROM ingest_inbox ORDER BY 1")
+            .bind(count)
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_job_without_a_shard_enqueues_the_shard_jobs_that_hold_rows_and_completes(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool).await;
+            append(&pool, ws, 12).await;
+            sqlx::query("DELETE FROM jobs")
+                .execute(&pool)
+                .await
+                .unwrap();
+            let mut old = NewJob::new(IngestDrain::KIND, TraceContext::root(Cause::api("req")));
+            old.workspace_id = Some(ws);
+            old.payload = json!({ "workspace_id": ws.as_uuid() });
+            old.unique_key = Some(format!("ingest.drain:{}", ws.as_uuid()));
+            zirv_flow_store::enqueue(&pool, &old).await.unwrap();
+            let claimed = claim_all(&pool).await;
+            assert_eq!(claimed.len(), 1);
+
+            run_claimed(&pool, &claimed[0], key(), 50, 4).await.unwrap();
+
+            assert_eq!(inbox(&pool).await, 12, "the old job drains nothing itself");
+            let mut keys: Vec<String> = sqlx::query_scalar(
+                "SELECT unique_key FROM jobs WHERE state = 'ready' ORDER BY unique_key",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            let mut expected: Vec<String> = shards_with_rows(&pool, 4)
+                .await
+                .iter()
+                .map(|index| format!("ingest.drain:{}:{index}/4", ws.as_uuid()))
+                .collect();
+            keys.sort();
+            expected.sort();
+            assert_eq!(keys, expected);
+
+            run_job(&pool, key(), 50).await.unwrap();
+            assert_eq!(inbox(&pool).await, 0, "the shard jobs drain what is left");
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_job_drains_the_buckets_its_payload_names_whatever_count_the_worker_has(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool).await;
+            append(&pool, ws, 60).await;
+            let claimed = claim_all(&pool).await;
+            let first = claimed
+                .iter()
+                .find(|job| job.payload["shard"]["index"] == 0)
+                .expect("a job for shard 0 of 8");
+            assert_eq!(first.payload["shard"]["count"], 8);
+            let before = inbox(&pool).await;
+
+            run_claimed(&pool, first, key(), 500, 3).await.unwrap();
+
+            let left: Vec<i16> =
+                sqlx::query_scalar("SELECT affinity FROM ingest_inbox ORDER BY id")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert!(i64::try_from(left.len()).unwrap() < before);
+            assert!(
+                left.iter().all(|bucket| bucket % 8 != 0),
+                "every bucket of shard 0 of 8 is empty"
+            );
+            assert!(
+                left.iter().any(|bucket| bucket % 3 == 0),
+                "the worker's own three shards were not drained"
+            );
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_payload_naming_a_shard_that_owns_no_buckets_fails_the_job(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool).await;
+            for (index, count) in [(0, 0), (4, 4), (0, 65)] {
+                sqlx::query("DELETE FROM jobs")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                let mut new = NewJob::new(IngestDrain::KIND, TraceContext::root(Cause::api("r")));
+                new.payload = json!({
+                    "workspace_id": ws.as_uuid(),
+                    "shard": { "index": index, "count": count },
+                });
+                zirv_flow_store::enqueue(&pool, &new).await.unwrap();
+
+                let error = run_job(&pool, key(), 50).await.unwrap_err();
+
+                assert_eq!(
+                    error.message(),
+                    "the payload names a shard that owns no buckets"
+                );
+            }
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn jobs_of_different_counts_over_the_same_buckets_keep_every_key_in_order(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool).await;
+            let mut items = Vec::new();
+            for round in ["free", "basic", "pro"] {
+                for n in 0..100 {
+                    items.push(identify(&format!("u{n}"), &format!("{round}-{n}"), round));
+                }
+            }
+            append_items(&pool, ws, &items).await;
+            let trace = TraceContext::root(Cause::api("req"));
+            zirv_flow_store::enqueue_pending_drains(&pool, ws, 4, &trace)
+                .await
+                .unwrap();
+            let claimed = claim_all(&pool).await;
+            let counts: std::collections::BTreeSet<i64> = claimed
+                .iter()
+                .filter_map(|job| job.payload["shard"]["count"].as_i64())
+                .collect();
+            assert_eq!(
+                counts,
+                [4, 8].into(),
+                "jobs of both counts cover the buckets"
+            );
+
+            // Neighbours in this order share buckets; the permits keep the test pool from running
+            // dry (a job holds its transaction and a batch).
+            let mut claimed = claimed;
+            claimed.sort_by_key(|job| {
+                (
+                    job.payload["shard"]["index"].as_i64(),
+                    job.payload["shard"]["count"].as_i64(),
+                )
+            });
+            let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(3));
+            let mut runs = tokio::task::JoinSet::new();
+            for job in claimed {
+                let (pool, permits) = (pool.clone(), std::sync::Arc::clone(&permits));
+                runs.spawn(async move {
+                    let _permit = permits.acquire().await.unwrap();
+                    run_claimed(&pool, &job, key(), 7, 8).await
+                });
+            }
+            while let Some(done) = runs.join_next().await {
+                done.unwrap().unwrap();
+            }
+            // Batches that found their rows locked by the other count's job took nothing and
+            // left them: finish what is left the way the requeue would.
+            while inbox(&pool).await > 0 {
+                sqlx::query("DELETE FROM jobs")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                zirv_flow_store::enqueue_pending_drains(&pool, ws, 8, &trace)
+                    .await
+                    .unwrap();
+                run_job(&pool, key(), 7).await.unwrap();
+            }
+
+            for n in 0..100 {
+                assert_eq!(
+                    plan_of(&pool, &format!("u{n}")).await.as_deref(),
+                    Some("pro"),
+                    "u{n} ended on its last value"
+                );
+            }
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_append_behind_a_jobs_last_empty_check_leaves_that_shard_a_runnable_job(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool).await;
+            append_items(&pool, ws, &[identify("k", "first", "old")]).await;
+            let claimed = claim_all(&pool).await;
+            assert_eq!(claimed.len(), 1);
+            let job = &claimed[0];
+            let shard = zirv_flow_store::payload_shard(&job.payload)
+                .unwrap()
+                .unwrap();
+
+            run_claimed(&pool, job, key(), 50, 8).await.unwrap();
+            assert_eq!(inbox(&pool).await, 0, "the last batch emptied the shard");
+            // The row lands after the final empty check, while the job still holds its key.
+            append_items(&pool, ws, &[identify("k", "second", "new")]).await;
+            let ready: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE state = 'ready'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(
+                ready, 0,
+                "the running job's key dropped the append's enqueue"
+            );
+
+            assert!(
+                zirv_flow_store::complete_job(&pool, job.id, job.lease_token)
+                    .await
+                    .unwrap()
+            );
+            let trace = TraceContext::root(Cause::api("req"));
+            assert!(
+                zirv_flow_store::enqueue_drain_if_pending(&pool, ws, shard, &trace)
+                    .await
+                    .unwrap(),
+                "the requeue after completion finds the row and enqueues the shard"
+            );
+
+            run_job(&pool, key(), 50).await.unwrap();
+            assert_eq!(plan_of(&pool, "k").await.as_deref(), Some("new"));
         })
         .await;
     }

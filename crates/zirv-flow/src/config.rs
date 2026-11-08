@@ -15,11 +15,11 @@ use url::{Url, form_urlencoded};
 
 const ENV_PREFIX: &str = "ZIRV_FLOW_";
 
-/// The most concurrent drain loops per workspace `ingest.drain_shards` may ask for.
-const MAX_DRAIN_SHARDS: u32 = 16;
+/// The most drain shards per workspace `ingest.drain_shards` may ask for: one per inbox bucket.
+const MAX_DRAIN_SHARDS: u32 = 64;
 
 /// The most slots a worker may dedicate to `ingest.drain`.
-const MAX_DRAIN_SLOTS: u32 = 16;
+const MAX_DRAIN_SLOTS: u32 = 64;
 
 /// The most render-host children `render.pool_size` may ask for.
 const MAX_RENDER_POOL: u32 = 32;
@@ -370,9 +370,11 @@ struct DatabaseConfig {
 #[serde(deny_unknown_fields)]
 struct WorkerConfig {
     concurrency: u32,
-    /// Slots beside `concurrency` that claim only `ingest.drain`; 0 leaves the drain to the
-    /// general slots.
-    drain_slots: u32,
+    /// Slots beside `concurrency` that claim only `ingest.drain`, one shard job each; 0 leaves the
+    /// drain to the general slots. Unset means `ingest.drain_shards`, so a lone worker runs every
+    /// shard at once.
+    #[serde(default)]
+    drain_slots: Option<u32>,
     lease_seconds: u32,
     /// Unset means unlimited.
     #[serde(default)]
@@ -629,7 +631,6 @@ impl Config {
             .merge(Serialized::default("database.max_connections", 10_u32))
             .merge(Serialized::default("database.migrate_on_start", false))
             .merge(Serialized::default("worker.concurrency", 4_u32))
-            .merge(Serialized::default("worker.drain_slots", 1_u32))
             .merge(Serialized::default("worker.lease_seconds", 30_u32))
             .merge(Serialized::default("events.retention_days", 760_u32))
             .merge(Serialized::default("events.min_retention_days", 30_u32))
@@ -778,10 +779,14 @@ impl Config {
             }
         }
 
-        if config.worker.drain_slots > MAX_DRAIN_SLOTS {
+        if config
+            .worker
+            .drain_slots
+            .is_some_and(|slots| slots > MAX_DRAIN_SLOTS)
+        {
             return Err(ConfigError::new(
                 "worker.drain_slots",
-                "must be between 0 and 16",
+                "must be between 0 and 64",
                 source_for("worker.drain_slots", path, &env_sources),
             ));
         }
@@ -1111,7 +1116,7 @@ impl Config {
             ));
         }
         if !(1..=MAX_DRAIN_SHARDS).contains(&ingest.drain_shards) {
-            return Err(fail("ingest.drain_shards", "must be between 1 and 16"));
+            return Err(fail("ingest.drain_shards", "must be between 1 and 64"));
         }
         Ok(())
     }
@@ -1295,9 +1300,10 @@ impl Config {
         self.worker.concurrency
     }
 
-    /// Slots a worker process dedicates to `ingest.drain`, beside its general slots.
+    /// Slots a worker process dedicates to `ingest.drain`, beside its general slots: those
+    /// configured, else one per drain shard.
     pub(crate) fn worker_drain_slots(&self) -> u32 {
-        self.worker.drain_slots
+        self.worker.drain_slots.unwrap_or(self.ingest.drain_shards)
     }
 
     /// How long a claimed job's lease lasts without a heartbeat.
@@ -2273,11 +2279,15 @@ cookie_secure = false
     }
 
     #[test]
-    fn the_drain_slots_default_to_one_and_can_be_set_to_zero_or_sixteen_but_not_more() {
+    fn the_drain_slots_default_to_the_drain_shards_and_can_be_set_to_zero_or_sixty_four_but_not_more()
+     {
         let config = Config::load(None, database_env("postgres://localhost/database")).unwrap();
-        assert_eq!(config.worker_drain_slots(), 1);
+        assert_eq!(config.worker_drain_slots(), 8);
+        let mut env = database_env("postgres://localhost/database");
+        env.push(("ZIRV_FLOW_INGEST__DRAIN_SHARDS".into(), "12".into()));
+        assert_eq!(Config::load(None, env).unwrap().worker_drain_slots(), 12);
 
-        for (value, slots) in [("0", 0), ("16", 16)] {
+        for (value, slots) in [("0", 0), ("64", 64)] {
             let mut env = database_env("postgres://localhost/database");
             env.push(("ZIRV_FLOW_WORKER__DRAIN_SLOTS".into(), value.into()));
             let config = Config::load(None, env).unwrap();
@@ -2285,10 +2295,10 @@ cookie_secure = false
         }
 
         let mut env = database_env("postgres://localhost/database");
-        env.push(("ZIRV_FLOW_WORKER__DRAIN_SLOTS".into(), "17".into()));
+        env.push(("ZIRV_FLOW_WORKER__DRAIN_SLOTS".into(), "65".into()));
         let error = Config::load(None, env).unwrap_err().to_string();
         assert!(error.contains("worker.drain_slots"), "{error}");
-        assert!(error.contains("between 0 and 16"), "{error}");
+        assert!(error.contains("between 0 and 64"), "{error}");
     }
 
     #[test]
@@ -2805,15 +2815,19 @@ endpoint = \"http://collector:4318\"
     }
 
     #[test]
-    fn drain_shards_outside_one_to_sixteen_name_their_key() {
-        for value in ["0", "17"] {
+    fn drain_shards_up_to_sixty_four_are_accepted_and_others_name_their_key() {
+        let mut env = database_env("postgres://localhost/database");
+        env.push(("ZIRV_FLOW_INGEST__DRAIN_SHARDS".into(), "64".into()));
+        assert_eq!(Config::load(None, env).unwrap().ingest_drain_shards(), 64);
+
+        for value in ["0", "65"] {
             let mut env = database_env("postgres://localhost/database");
             env.push(("ZIRV_FLOW_INGEST__DRAIN_SHARDS".into(), value.into()));
 
             let error = Config::load(None, env).unwrap_err().to_string();
 
             assert!(error.contains("ingest.drain_shards"), "{error}");
-            assert!(error.contains("between 1 and 16"), "{error}");
+            assert!(error.contains("between 1 and 64"), "{error}");
         }
     }
 
