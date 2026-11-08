@@ -18,8 +18,14 @@ use super::resolve::MAX_MERGE_HOPS;
 use crate::StoreError;
 
 /// How many advisory locks a workspace's unowned identities are spread over. A batch takes at
-/// most this many, whatever its size: advisory locks share the lock table with every other lock.
-const IDENTITY_BUCKETS: u8 = 64;
+/// most one per distinct identity, so at most its record count times its identities per record,
+/// and never more than this. Advisory locks share the lock table with every other lock (it holds
+/// `max_locks_per_transaction * (max_connections + prepared transactions)`, 6,400 by default, and
+/// one transaction may take more than its share), so a unit of a few hundred records is far below
+/// it. At 64 buckets two units of 100 new identities each always shared one and ran one after the
+/// other; at 4,096 a pair of identities shares one 1 time in 4,096, so units collide less often
+/// and a smaller unit collides less again.
+const IDENTITY_BUCKETS: u16 = 4096;
 
 /// A ledger row by its key.
 #[derive(Clone, Copy, Debug)]
@@ -29,14 +35,15 @@ pub(crate) struct LedgerKey<'a> {
     pub(crate) record_key: &'a str,
 }
 
-/// The bucket of an identity: the first byte of the SHA-256 of its kind and value, modulo
+/// The bucket of an identity: the first two bytes of the SHA-256 of its kind and value, modulo
 /// [`IDENTITY_BUCKETS`].
 fn identity_bucket(kind: &str, value: &str) -> i32 {
     let mut hash = Sha256::new();
     hash.update(kind.as_bytes());
     hash.update([0]);
     hash.update(value.as_bytes());
-    i32::from(hash.finalize()[0] % IDENTITY_BUCKETS)
+    let digest = hash.finalize();
+    i32::from(u16::from_be_bytes([digest[0], digest[1]]) % IDENTITY_BUCKETS)
 }
 
 /// Takes, before a batch applies its first record, the locks its records would otherwise take one
@@ -368,6 +375,17 @@ mod tests {
 
         assert!((0..i32::from(IDENTITY_BUCKETS)).contains(&bucket));
         assert_eq!(bucket, identity_bucket("email", "a@example.com"));
+    }
+
+    #[test]
+    fn new_identities_spread_over_far_more_buckets_than_sixty_four() {
+        let buckets: BTreeSet<i32> = (0..2000)
+            .map(|n| identity_bucket("email", &format!("person-{n}@example.com")))
+            .collect();
+
+        assert_eq!(IDENTITY_BUCKETS, 4096);
+        assert!(buckets.len() > 1000, "{}", buckets.len());
+        assert!(buckets.iter().any(|bucket| *bucket >= 64));
     }
 
     #[sqlx::test]

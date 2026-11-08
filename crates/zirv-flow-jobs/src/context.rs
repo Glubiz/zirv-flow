@@ -37,6 +37,27 @@ pub(crate) struct IngestSettings {
     pub(crate) shards: u32,
 }
 
+/// How many messages a `kafka.consume` unit and how many records a `sync.run` unit hold before they
+/// commit. A unit takes its people locks up front and holds them to its commit, so the size is how
+/// long a drain lane may wait on one of its people.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct UnitSizes {
+    pub(crate) kafka_messages: usize,
+    pub(crate) sync_records: usize,
+}
+
+/// The unit size when the operator sets none (`ingest.kafka_unit_messages`, `ingest.sync_unit_records`).
+pub(crate) const DEFAULT_UNIT_SIZE: usize = 100;
+
+impl Default for UnitSizes {
+    fn default() -> Self {
+        Self {
+            kafka_messages: DEFAULT_UNIT_SIZE,
+            sync_records: DEFAULT_UNIT_SIZE,
+        }
+    }
+}
+
 /// The handler's view of one claimed job and the transaction it runs in.
 ///
 /// Everything the handler writes through [`conn`](Self::conn), and every job it enqueues,
@@ -53,6 +74,7 @@ pub struct JobContext<'a> {
     job_history_days: u32,
     audit_days: u32,
     ingest: Option<IngestSettings>,
+    unit_sizes: UnitSizes,
     identifier_key: Option<Arc<HmacKey>>,
     ledger_dir: Option<Arc<PathBuf>>,
     keyring: Option<Arc<Keyring>>,
@@ -80,6 +102,7 @@ impl<'a> JobContext<'a> {
             job_history_days: DEFAULT_JOB_HISTORY_DAYS,
             audit_days: DEFAULT_AUDIT_DAYS,
             ingest: None,
+            unit_sizes: UnitSizes::default(),
             identifier_key: None,
             ledger_dir: None,
             keyring: None,
@@ -243,6 +266,12 @@ impl<'a> JobContext<'a> {
         self
     }
 
+    /// Gives the handler the sizes its Kafka and sync units commit at.
+    pub(crate) fn with_unit_sizes(mut self, sizes: UnitSizes) -> Self {
+        self.unit_sizes = sizes;
+        self
+    }
+
     /// Gives the handler the key that hashes identifiers.
     pub(crate) fn with_identifier_key(mut self, key: Option<Arc<HmacKey>>) -> Self {
         self.identifier_key = key;
@@ -308,6 +337,11 @@ impl<'a> JobContext<'a> {
     /// Where completed erasures are copied; none when `privacy.ledger_dir` is unset.
     pub(crate) fn ledger_dir(&self) -> Option<Arc<PathBuf>> {
         self.ledger_dir.clone()
+    }
+
+    /// The sizes `kafka.consume` and `sync.run` units commit at.
+    pub(crate) fn unit_sizes(&self) -> UnitSizes {
+        self.unit_sizes
     }
 
     /// The ingest drain's settings; none when the worker was given no pool for them.

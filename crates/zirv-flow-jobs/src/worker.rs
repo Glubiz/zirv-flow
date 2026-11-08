@@ -97,6 +97,10 @@ pub struct WorkerConfig {
     pub ingest_drain_batch_size: u32,
     /// Concurrent drain loops per workspace in `ingest.drain`.
     pub ingest_drain_shards: u32,
+    /// Messages a `kafka.consume` unit holds before it commits.
+    pub kafka_unit_messages: usize,
+    /// Records a `sync.run` unit holds before it commits.
+    pub sync_unit_records: usize,
     /// Which non-public destinations outbound connections may reach.
     pub egress: Arc<EgressPolicy>,
     /// The rate-limit buckets of outbound source calls, shared by every run in this process.
@@ -142,6 +146,8 @@ impl WorkerConfig {
             keyring: None,
             ingest_drain_batch_size: 500,
             ingest_drain_shards: 8,
+            kafka_unit_messages: crate::context::DEFAULT_UNIT_SIZE,
+            sync_unit_records: crate::context::DEFAULT_UNIT_SIZE,
             egress: Arc::default(),
             rate_limits: Arc::default(),
             rate_gates: Arc::default(),
@@ -785,6 +791,10 @@ fn configured<'a>(shared: &Shared, ctx: JobContext<'a>) -> JobContext<'a> {
             redaction_key: config.redaction_key.clone(),
             batch_size: config.ingest_drain_batch_size,
             shards: config.ingest_drain_shards,
+        })
+        .with_unit_sizes(crate::context::UnitSizes {
+            kafka_messages: config.kafka_unit_messages,
+            sync_records: config.sync_unit_records,
         })
 }
 
@@ -1531,6 +1541,8 @@ mod tests {
             keyring: None,
             ingest_drain_batch_size: 500,
             ingest_drain_shards: 4,
+            kafka_unit_messages: 100,
+            sync_unit_records: 100,
             egress: Arc::default(),
             rate_limits: Arc::default(),
             rate_gates: Arc::default(),
