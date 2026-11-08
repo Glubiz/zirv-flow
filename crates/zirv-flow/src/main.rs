@@ -502,6 +502,8 @@ async fn run_roles_reporting(
             zirv_flow_jobs::WorkerConfig::new(config.worker_concurrency() as usize);
         worker_config.lease = Duration::from_secs(u64::from(config.worker_lease_seconds()));
         worker_config.max_running_per_workspace = config.worker_max_running_per_workspace();
+        worker_config.drain_slots =
+            usize::try_from(config.worker_drain_slots()).unwrap_or(usize::MAX);
         worker_config.event_retention = config.events_retention();
         worker_config.export_max_bytes = config.export_max_bytes();
         worker_config.message_retention = config.messages_retention();

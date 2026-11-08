@@ -416,7 +416,7 @@ As built (consent, topics and suppressions):
 | Contacts API (push) | Create, update and delete contacts by key, singly or in bulk, through the inbox like identify (7.6) | Idempotency key, else contact key plus payload hash | Oldest unprocessed inbox row |
 | Kafka stream | A long-running consumer job per stream, not a `sync.run` batch (7.6, 14); the partition offsets are the stream checkpoint, committed in the apply-batch transaction (7.6) | Topic, partition and offset | Consumer lag per partition |
 
-Every path ends in **apply-batch**, one transaction per batch (default 500
+Every path ends in **apply-batch**, one transaction per batch (default 50
 records): normalize identifiers; resolve or create the person (merging if
 needed); upsert ledger contributions and recompute affected traits; insert
 events with dedupe; write coalesced dirty marks (`person_changes`) when a live
@@ -452,7 +452,7 @@ and a lost lease aborts them all). A batch is up to `ingest.drain_batch_size` of
 oldest rows of the shard's buckets, picked through `(workspace_id, affinity, id)`, so a scan
 never walks another shard's backlog. A key lives in one bucket, so its
 rows still apply in id order; two shards may share a person under different keys, and a
-deadlock between them is the retryable `40P01`. The worker pool holds `concurrency * (1 +
+deadlock between them is the retryable `40P01`. The worker pool holds `(concurrency + drain_slots) * (1 +
 shards) + 1` connections. Each loop is `drain_batch`: in one transaction it picks the
 batch's ids without locking, locks those rows with `FOR UPDATE SKIP LOCKED` (a batch never
 applies past a row it could not lock: the rest of that bucket's picked rows wait for the next
@@ -461,7 +461,9 @@ transaction-taking profile and event paths of apply-batch, deletes them and comm
 drainers never apply a row twice. A retryable error retries the batch with jittered backoff;
 any other error applies the batch's rows one at a time, each in a savepoint, and a row that
 still fails becomes an `apply_failed` ingest reject. The job never re-enqueues itself, since it
-holds its unique key; the scheduler leader enqueues a drain for each workspace whose oldest
+holds its unique key; a worker with drain slots (`worker.drain_slots`, default 1, which claim only
+`ingest.drain` while the general slots leave it alone) enqueues the next drain as soon as a run
+completes with rows left in the inbox, and the scheduler leader enqueues a drain for each workspace whose oldest
 row (one `(workspace_id, id)` index probe per workspace) is over 2 seconds old. Row ids come
 from a sequence, so two requests that commit out of order drain in id order, not commit order.
 
@@ -3714,7 +3716,7 @@ they were ruled as their capabilities were added to the plan.
   stays in `jsonb`. `string_list` traits stay in `jsonb`. The promotion is built in the
   segment milestone (M4); until the slots exist the `jsonb_path_ops` index stays, and it is reconsidered once promoted
   traits cover the equality searches. The slots are live (#125): states `backfilling`, `ready` and `retiring`; writers take the shared slot lock before they read the assignments and assignment changes take the exclusive one, so a backfill never leaves a stale value (`people/slots.rs`); the routes are `POST` and `DELETE /traits/{key}/index`.
-  Known limitation and upgrade decision: keep released migration 0033 and its checksum. Its initial `ALTER TABLE` holds ACCESS EXCLUSIVE on `people` through all 30 partial index builds, blocking reads and writes. Populated upgrades stop all roles and budget the full build when upgrading from before 0033; `v0.187.0` already contains it. No populated build timing is recorded. Rehearse at the installation's row counts before setting the downtime window; see the [lock review](operations/upgrade.md#lock-review-through-0090). This supports stopped upgrades only; online and mixed-version upgrades remain OQ-17.
+  Known limitation and upgrade decision: keep released migration 0033 and its checksum. Its initial `ALTER TABLE` holds ACCESS EXCLUSIVE on `people` through all 30 partial index builds, blocking reads and writes. Populated upgrades stop all roles and budget the full build when upgrading from before 0033; `v0.187.0` already contains it. No populated build timing is recorded. Rehearse at the installation's row counts before setting the downtime window; see the [lock review](operations/upgrade.md#lock-review-through-0091). This supports stopped upgrades only; online and mixed-version upgrades remain OQ-17.
   Details in [docs/benchmarks/m2-ingestion.md](benchmarks/m2-ingestion.md).
 
 - **OQ-8:** A per-workspace running cap in the claim query

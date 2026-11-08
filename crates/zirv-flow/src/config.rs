@@ -18,6 +18,9 @@ const ENV_PREFIX: &str = "ZIRV_FLOW_";
 /// The most concurrent drain loops per workspace `ingest.drain_shards` may ask for.
 const MAX_DRAIN_SHARDS: u32 = 16;
 
+/// The most slots a worker may dedicate to `ingest.drain`.
+const MAX_DRAIN_SLOTS: u32 = 16;
+
 /// The most render-host children `render.pool_size` may ask for.
 const MAX_RENDER_POOL: u32 = 32;
 
@@ -39,7 +42,7 @@ use zirv_flow_store::{
     JOB_HISTORY_DAYS_BOUNDS, TEST_SEND_MONTHS_BOUNDS,
 };
 
-pub(crate) const CONFIG_KEYS: [&str; 68] = [
+pub(crate) const CONFIG_KEYS: [&str; 69] = [
     "server.bind",
     "server.cookie_secure",
     "server.public_url",
@@ -58,6 +61,7 @@ pub(crate) const CONFIG_KEYS: [&str; 68] = [
     "database.max_connections",
     "database.migrate_on_start",
     "worker.concurrency",
+    "worker.drain_slots",
     "worker.lease_seconds",
     "worker.max_running_per_workspace",
     "events.retention_days",
@@ -366,6 +370,9 @@ struct DatabaseConfig {
 #[serde(deny_unknown_fields)]
 struct WorkerConfig {
     concurrency: u32,
+    /// Slots beside `concurrency` that claim only `ingest.drain`; 0 leaves the drain to the
+    /// general slots.
+    drain_slots: u32,
     lease_seconds: u32,
     /// Unset means unlimited.
     #[serde(default)]
@@ -622,6 +629,7 @@ impl Config {
             .merge(Serialized::default("database.max_connections", 10_u32))
             .merge(Serialized::default("database.migrate_on_start", false))
             .merge(Serialized::default("worker.concurrency", 4_u32))
+            .merge(Serialized::default("worker.drain_slots", 1_u32))
             .merge(Serialized::default("worker.lease_seconds", 30_u32))
             .merge(Serialized::default("events.retention_days", 760_u32))
             .merge(Serialized::default("events.min_retention_days", 30_u32))
@@ -649,7 +657,7 @@ impl Config {
             .merge(Serialized::default("ingest.max_webhook_bytes", 262_144_u64))
             .merge(Serialized::default("ingest.rate_per_hook", 50_u32))
             .merge(Serialized::default("ingest.burst_per_hook", 200_u32))
-            .merge(Serialized::default("ingest.drain_batch_size", 500_u32))
+            .merge(Serialized::default("ingest.drain_batch_size", 50_u32))
             .merge(Serialized::default("ingest.drain_shards", 8_u32))
             .merge(Serialized::default(
                 "imports.max_file_bytes",
@@ -768,6 +776,14 @@ impl Config {
                     source_for(key, path, &env_sources),
                 ));
             }
+        }
+
+        if config.worker.drain_slots > MAX_DRAIN_SLOTS {
+            return Err(ConfigError::new(
+                "worker.drain_slots",
+                "must be between 0 and 16",
+                source_for("worker.drain_slots", path, &env_sources),
+            ));
         }
 
         for (key, value) in [
@@ -1277,6 +1293,11 @@ impl Config {
     /// Jobs a worker process runs at once.
     pub(crate) fn worker_concurrency(&self) -> u32 {
         self.worker.concurrency
+    }
+
+    /// Slots a worker process dedicates to `ingest.drain`, beside its general slots.
+    pub(crate) fn worker_drain_slots(&self) -> u32 {
+        self.worker.drain_slots
     }
 
     /// How long a claimed job's lease lasts without a heartbeat.
@@ -2252,6 +2273,25 @@ cookie_secure = false
     }
 
     #[test]
+    fn the_drain_slots_default_to_one_and_can_be_set_to_zero_or_sixteen_but_not_more() {
+        let config = Config::load(None, database_env("postgres://localhost/database")).unwrap();
+        assert_eq!(config.worker_drain_slots(), 1);
+
+        for (value, slots) in [("0", 0), ("16", 16)] {
+            let mut env = database_env("postgres://localhost/database");
+            env.push(("ZIRV_FLOW_WORKER__DRAIN_SLOTS".into(), value.into()));
+            let config = Config::load(None, env).unwrap();
+            assert_eq!(config.worker_drain_slots(), slots);
+        }
+
+        let mut env = database_env("postgres://localhost/database");
+        env.push(("ZIRV_FLOW_WORKER__DRAIN_SLOTS".into(), "17".into()));
+        let error = Config::load(None, env).unwrap_err().to_string();
+        assert!(error.contains("worker.drain_slots"), "{error}");
+        assert!(error.contains("between 0 and 16"), "{error}");
+    }
+
+    #[test]
     fn the_lease_and_the_workspace_cap_can_be_set_and_must_be_at_least_one() {
         let mut env = database_env("postgres://localhost/database");
         env.push(("ZIRV_FLOW_WORKER__LEASE_SECONDS".into(), "90".into()));
@@ -2681,7 +2721,7 @@ endpoint = \"http://collector:4318\"
         let limits = config.ingest_limits();
 
         assert_eq!(limits, zirv_flow_api::IngestLimits::default());
-        assert_eq!(config.ingest_drain_batch_size(), 500);
+        assert_eq!(config.ingest_drain_batch_size(), 50);
         assert_eq!(config.ingest_drain_shards(), 8);
         assert!(toml::to_string(&config).unwrap().contains("[ingest]"));
     }
