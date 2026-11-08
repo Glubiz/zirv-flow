@@ -674,3 +674,9 @@ a `worker` process exports `zirv_flow_ingest_applied_total{kind,outcome}` (`vali
 `unplanned`, `rejected`, `duplicate`, `apply_failed`) and `zirv_flow_ingest_late_total`; the
 scheduler leader exports `zirv_flow_ingest_inbox_age_seconds`, the age of the oldest row.
 
+`kafka.consume` and `sync.run` commit a unit of `ingest.kafka_unit_messages` messages (default 100) and
+`ingest.sync_unit_records` records (default 100) at a time, each at least 1. A unit takes the locks of
+its people before its first record and holds them to its commit, so a drain lane that touches one of
+them waits for the whole unit: a smaller unit shortens that wait. A source batch larger than
+`ingest.sync_unit_records` still commits alone.
+

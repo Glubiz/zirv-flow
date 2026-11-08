@@ -3,8 +3,8 @@
 //!
 //! A consumer run is `running` for days and is worked by a chain of these jobs. A slice reads the
 //! topic for [`KAFKA_SLICE_BUDGET`], gathers messages and commits them in ONE transaction of
-//! their own per unit (500 messages or 2 seconds): the records, the retractions, the rejects,
-//! the decisions and the per-partition offsets, fenced on the job's lease and on the run's state.
+//! their own per unit (`ingest.kafka_unit_messages` messages or 2 seconds): the records,
+//! the retractions, the rejects, the decisions and the per-partition offsets, fenced on the job's lease and on the run's state.
 //! A crash or a lost lease therefore re-reads exactly the uncommitted messages, and each
 //! committed message applies once. At the end of the slice the job reports lag (which decides
 //! the stream's freshness) and enqueues its successor, in the transaction that completes it.
@@ -43,10 +43,8 @@ use crate::{JobContext, JobError, JobKind};
 /// so a shorter slice means a quicker clean stop.
 pub(crate) const KAFKA_SLICE_BUDGET: Duration = Duration::from_secs(60);
 
-/// A unit commits once it holds this many messages ...
-const COMMIT_MESSAGES: usize = 500;
-
-/// ... or this long after its first message, whichever comes first.
+/// A unit commits once it holds `ingest.kafka_unit_messages` messages, or this long after its
+/// first message, whichever comes first.
 const COMMIT_AFTER: Duration = Duration::from_secs(2);
 
 /// How often a slice reports lag while it runs. The end of a slice always reports.
@@ -186,6 +184,8 @@ struct Consumer<'a> {
     committed: BTreeMap<i32, i64>,
     /// The positions after everything the source has handed over.
     latest: Positions,
+    /// The messages a unit holds before it commits.
+    unit_messages: usize,
 }
 
 impl Consumer<'_> {
@@ -237,7 +237,7 @@ impl Consumer<'_> {
                 self.keys.insert(record.key.clone());
             }
             self.items.push(item);
-            if self.items.len() >= COMMIT_MESSAGES {
+            if self.items.len() >= self.unit_messages {
                 // A big batch commits in units of its own: only a prefix of it is in hand.
                 if let Unit::Stop = self.flush(false).await? {
                     return Ok(Unit::Stop);
@@ -245,7 +245,7 @@ impl Consumer<'_> {
             }
         }
         self.latest = positions;
-        let due = self.items.len() >= COMMIT_MESSAGES
+        let due = self.items.len() >= self.unit_messages
             || self
                 .first_at
                 .is_some_and(|first| first.elapsed() >= COMMIT_AFTER);
@@ -496,6 +496,7 @@ async fn slice(
         observed_at: OffsetDateTime::now_utc(),
         committed: BTreeMap::new(),
         latest: Positions::default(),
+        unit_messages: ctx.unit_sizes().kafka_messages.max(1),
     };
 
     // The credential is opened right before the read and dropped with it.
@@ -631,7 +632,7 @@ mod tests {
     #[test]
     fn the_slice_is_shorter_than_the_usual_shutdown_wait() {
         const { assert!(KAFKA_SLICE_BUDGET.as_secs() <= 60) };
-        const { assert!(COMMIT_MESSAGES == 500) };
+        assert_eq!(crate::context::UnitSizes::default().kafka_messages, 100);
         assert_eq!(COMMIT_AFTER, Duration::from_secs(2));
     }
 }
@@ -1042,6 +1043,10 @@ mod broker_tests {
                     redaction_key: None,
                     batch_size: 500,
                     shards: 1,
+                })
+                .with_unit_sizes(crate::context::UnitSizes {
+                    kafka_messages: 500,
+                    sync_records: 500,
                 })
                 .with_outbound(None, policy(allow_loopback), Arc::default());
             run_consume(&mut ctx, &job.payload, probe, budget).await
