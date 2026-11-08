@@ -17,7 +17,7 @@ use zirv_flow_core::WorkspaceId;
 use super::resolve::MAX_MERGE_HOPS;
 use crate::StoreError;
 
-/// How many advisory locks a workspace.s unowned identities are spread over. A batch takes at
+/// How many advisory locks a workspace's unowned identities are spread over. A batch takes at
 /// most one per distinct identity, so at most its record count times its identities per record,
 /// and never more than this. Advisory locks share the lock table with every other lock (it holds
 /// `max_locks_per_transaction * (max_connections + prepared transactions)`, 6,400 by default, and

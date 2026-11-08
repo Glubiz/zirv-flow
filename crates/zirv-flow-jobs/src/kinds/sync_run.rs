@@ -6,8 +6,8 @@
 //! `stream_id` and no `run_id` is the firing of a stream's reconciliation schedule: it queues a
 //! reconciliation run of that stream if it is still eligible. A payload with a `run_id` works one
 //! run: it reads the stream from the checkpoint, gathers the source's batches
-//! into units of at least `ingest.sync_unit_records` records and commits each unit in ONE transaction of its own that
-//! applies the records, writes the rejects and the decisions and advances the checkpoint, fenced
+//! into units of at least `ingest.sync_unit_records` records and commits each unit in ONE
+//! transaction of its own that applies the records, writes the rejects and the decisions and advances the checkpoint, fenced
 //! on the job's lease and on the run's state. The job's own transaction only holds the lease.
 //! A crash or a lost lease resumes from the run's checkpoint when the job is retried; cancelling
 //! the run stops it at the next unit.

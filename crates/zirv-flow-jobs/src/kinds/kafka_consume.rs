@@ -3,8 +3,9 @@
 //!
 //! A consumer run is `running` for days and is worked by a chain of these jobs. A slice reads the
 //! topic for [`KAFKA_SLICE_BUDGET`], gathers messages and commits them in ONE transaction of
-//! their own per unit (`ingest.kafka_unit_messages` messages or 2 seconds): the records,
-//! the retractions, the rejects, the decisions and the per-partition offsets, fenced on the job's lease and on the run's state.
+//! their own per unit (`ingest.kafka_unit_messages` messages or 2 seconds): the records, the
+//! retractions, the rejects, the decisions and the per-partition offsets, fenced on the job's
+//! lease and on the run's state.
 //! A crash or a lost lease therefore re-reads exactly the uncommitted messages, and each
 //! committed message applies once. At the end of the slice the job reports lag (which decides
 //! the stream's freshness) and enqueues its successor, in the transaction that completes it.
