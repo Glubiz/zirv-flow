@@ -470,7 +470,7 @@ pub(super) async fn lock_enrolls(
     connection: &mut PgConnection,
     flow: Uuid,
 ) -> Result<(), StoreError> {
-    lock_flow_enrolls(connection, flow, "pg_advisory_xact_lock").await
+    lock_flow_enrolls(connection, flow, EXCLUSIVE_FLOW_LOCK).await
 }
 
 /// The flow lock in shared mode, for the enrolls (see [`lock_enrolls`]).
@@ -478,8 +478,13 @@ pub(super) async fn lock_enrolls_shared(
     connection: &mut PgConnection,
     flow: Uuid,
 ) -> Result<(), StoreError> {
-    lock_flow_enrolls(connection, flow, "pg_advisory_xact_lock_shared").await
+    lock_flow_enrolls(connection, flow, SHARED_FLOW_LOCK).await
 }
+
+const EXCLUSIVE_FLOW_LOCK: &str =
+    "SELECT pg_advisory_xact_lock(hashtextextended('flow.enroll:' || $1::text, 0))";
+const SHARED_FLOW_LOCK: &str =
+    "SELECT pg_advisory_xact_lock_shared(hashtextextended('flow.enroll:' || $1::text, 0))";
 
 async fn lock_flow_enrolls(
     connection: &mut PgConnection,
@@ -511,7 +516,8 @@ async fn lock_enroll_people(
         return Ok(());
     }
     sqlx::query(
-        "SELECT pg_advisory_xact_lock(hashtextextended('flow.enroll:' || $1::text || ':' || s.id, 0))          FROM (SELECT p AS id FROM unnest($2::uuid[]) AS p ORDER BY p) AS s",
+        "SELECT pg_advisory_xact_lock(hashtextextended('flow.enroll:' || $1::text || ':' || s.id, 0)) \
+            FROM (SELECT p AS id FROM unnest($2::uuid[]) AS p ORDER BY p) AS s",
     )
     .bind(flow)
     .bind(people)

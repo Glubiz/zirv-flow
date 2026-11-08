@@ -1093,7 +1093,8 @@ mod tests {
             assert!(matches!(outcome, BatchOutcome::Committed(_)));
 
             let rows: Vec<(String, String, Value)> = sqlx::query_as(
-                "SELECT action, outcome, subject_ids FROM decision_records                  WHERE action IN ('sync.record', 'trait.change') ORDER BY action, outcome",
+                "SELECT action, outcome, subject_ids FROM decision_records \
+                    WHERE action IN ('sync.record', 'trait.change') ORDER BY action, outcome",
             )
             .fetch_all(&pool)
             .await

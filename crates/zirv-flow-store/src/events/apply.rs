@@ -187,7 +187,10 @@ impl EventBatch {
         ids.sort_unstable();
         let (messages, repeats): (Vec<&str>, Vec<i32>) = ids.into_iter().unzip();
         let found: Vec<(String, Uuid)> = sqlx::query_as(
-            "UPDATE event_dedupe d SET duplicates = d.duplicates + v.repeats              FROM unnest($2::text[], $3::int4[]) AS v(message_id, repeats)              WHERE d.workspace_id = $1 AND d.message_id = v.message_id              RETURNING d.message_id, d.event_id",
+            "UPDATE event_dedupe d SET duplicates = d.duplicates + v.repeats \
+                FROM unnest($2::text[], $3::int4[]) AS v(message_id, repeats) \
+                WHERE d.workspace_id = $1 AND d.message_id = v.message_id \
+                RETURNING d.message_id, d.event_id",
         )
         .bind(workspace.as_uuid())
         .bind(&messages)
