@@ -15,3 +15,9 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.260.0 (2026-11-08)
+
+### Performance
+
+- a reserved drain lane in each worker (investigation K)
+
