@@ -3452,11 +3452,11 @@ mod tests {
         .await;
     }
 
+    // Holds with row locks alone, which is why the backfill takes no further lock: a run
+    // that waited on another's rows skips them and fills its batch from later rows.
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn concurrent_backfills_finish_only_when_no_row_is_left_unbucketed(pool: PgPool) {
-        // Holds with row locks alone, which is why the backfill takes no further lock: a run
-        // that waited on another's rows skips them and fills its batch from later rows.
         crate::decision_testing::checked(pool, |pool| async move {
             let ws = workspace(&pool, "ours").await;
             raw_rows(&pool, ws, None, 90, "old").await;
