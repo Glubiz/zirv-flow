@@ -50,7 +50,7 @@ flows run late; for `segment.refresh` segments are stale; for sends, messages go
 1. Start the missing workers: `zirv-flow worker` (or `zirv-flow all`). Check `GET /readyz` on
    `ops.bind`.
 2. Add worker processes, or raise `worker.concurrency` and restart. Each worker adds
-   `(2 + ingest.drain_shards) * worker.concurrency + 1` database connections, so check the
+   `(2 + ingest.drain_shards) * (worker.concurrency + worker.drain_slots) + 1` database connections, so check the
    database connection limit first.
 3. Set `worker.max_running_per_workspace` so one workspace cannot take every worker, and restart.
 4. For a stuck handler, read the worker logs for the kind and fix its cause; a job whose lease
