@@ -8,6 +8,8 @@
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 
+use hashbrown::{HashMap, HashSet};
+
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::Connection;
@@ -105,31 +107,117 @@ impl Shard {
     }
 }
 
-/// The bucket of a record key: the first byte of its SHA-256, modulo [`BUCKETS`]. Stored
-/// buckets must match those of later rows of the same key, so the algorithm never changes.
+/// The bucket of a lane key: the first byte of its SHA-256, modulo [`BUCKETS`]. A stored bucket
+/// is never recomputed, so a row keeps the lane it was received into whatever the key rule was
+/// then or has become since (architecture 7.1 lists what that does to order).
 pub(crate) fn bucket(record_key: &str) -> i16 {
     let digest = Sha256::digest(record_key.as_bytes());
     i16::from(digest[0] % BUCKETS)
 }
 
-/// The bucket of the record key of a row of `kind` with `identifiers`: the contact key for a
-/// contact, else the strongest identifier; bucket 0 when there is none, since such a row is
-/// poison anyway. The append and the backfill both go through here, so they cannot diverge.
-fn record_bucket(kind: &str, identifiers: &[(String, String)]) -> i16 {
-    let key = if kind == "contact" {
-        identifiers
-            .iter()
-            .find(|(kind, _)| kind == contacts::KEY_KIND)
-            .map(|(_, value)| value.clone())
-    } else {
-        strongest_identifier(identifiers)
-    };
-    key.map_or(0, |key| bucket(&key))
+/// The people a batch's identifiers already belong to, by normalized `kind:value` text, each
+/// resolved to the survivor of a merge.
+pub(crate) type KnownPeople = HashMap<String, Uuid>;
+
+/// Looks up, in ONE statement over `identities (workspace_id, kind, value)` joined to `people`,
+/// the person each identifier of `rows` belongs to. A person merged into another resolves to the
+/// survivor by one hop of `people.merged_into`: a merge points the loser at the survivor, and a
+/// survivor merged in turn is rare enough that a stale lane costs only ordering, which 7.1
+/// already does not promise across a merge. A batch with no valid identifier skips the query.
+pub(crate) async fn known_people<'a, 'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+    workspace: WorkspaceId,
+    rows: impl IntoIterator<Item = &'a [(String, String)]>,
+) -> Result<KnownPeople, StoreError> {
+    let mut wanted: HashSet<(String, String)> = HashSet::new();
+    for identifiers in rows {
+        for (kind, value) in identifiers {
+            if let Ok(identifier) = Identifier::parse(kind, value) {
+                wanted.insert((
+                    identifier.kind().as_text().to_owned(),
+                    identifier.value().to_owned(),
+                ));
+            }
+        }
+    }
+    if wanted.is_empty() {
+        return Ok(KnownPeople::new());
+    }
+    let (kinds, values): (Vec<String>, Vec<String>) = wanted.into_iter().unzip();
+    let found: Vec<(String, String, Uuid)> = sqlx::query_as(
+        "SELECT i.kind, i.value, COALESCE(p.merged_into, p.id)          FROM unnest($2::text[], $3::text[]) AS q(kind, value)          JOIN identities i            ON i.workspace_id = $1 AND i.kind = q.kind AND i.value = q.value          JOIN people p ON p.id = i.person_id",
+    )
+    .bind(workspace.as_uuid())
+    .bind(&kinds)
+    .bind(&values)
+    .fetch_all(executor)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(found
+        .into_iter()
+        .map(|(kind, value, person)| (format!("{kind}:{value}"), person))
+        .collect())
 }
 
-/// The bucket of `item`'s record key.
-fn item_bucket(item: &IngestItem) -> i16 {
-    record_bucket(item.payload.kind(), &item.identifiers)
+/// The lane key of a row of `kind` with `identifiers`, given the `people` its batch resolved:
+/// 1. the person of the strongest identifier that already belongs to one (`person:<id>`), a
+///    contact row included, so a person's rows from every channel share a lane;
+/// 2. else, for a contact, its contact key;
+/// 3. else the anonymousId, which an identify then shares with the page views before it, or the
+///    strongest identifier.
+///
+/// `None` when no identifier is valid: such a row is poison anyway.
+pub(crate) fn lane_key(
+    kind: &str,
+    identifiers: &[(String, String)],
+    people: &KnownPeople,
+) -> Option<String> {
+    let parsed: Vec<(u8, String, bool)> = identifiers
+        .iter()
+        .filter_map(|(kind, value)| Identifier::parse(kind, value).ok())
+        .map(|identifier| {
+            let text = format!("{}:{}", identifier.kind().as_text(), identifier.value());
+            let anonymous = identifier.kind().as_text() == "anonymous_id";
+            (identifier.kind().strength(), text, anonymous)
+        })
+        .collect();
+    let strongest = |keep: &dyn Fn(&(u8, String, bool)) -> bool| {
+        parsed
+            .iter()
+            .filter(|entry| keep(entry))
+            .min_by_key(|(strength, text, _)| (Reverse(*strength), text.clone()))
+            .map(|(_, text, _)| text.clone())
+    };
+    if let Some(person) =
+        strongest(&|(_, text, _)| people.contains_key(text)).and_then(|text| people.get(&text))
+    {
+        return Some(format!("person:{person}"));
+    }
+    if kind == "contact" {
+        let contact_key = identifiers
+            .iter()
+            .find(|(kind, _)| kind == contacts::KEY_KIND)
+            .map(|(_, value)| value.clone());
+        if contact_key.is_some() {
+            return contact_key;
+        }
+    }
+    strongest(&|(_, _, anonymous)| *anonymous).or_else(|| strongest(&|_| true))
+}
+
+/// The bucket of a row's lane key; bucket 0 when it has none. The append, the webhook receive
+/// and the backfill all go through here, so they cannot diverge.
+pub(crate) fn record_bucket(
+    kind: &str,
+    identifiers: &[(String, String)],
+    people: &KnownPeople,
+) -> i16 {
+    lane_key(kind, identifiers, people).map_or(0, |key| bucket(&key))
+}
+
+/// The bucket of `item`'s lane key.
+fn item_bucket(item: &IngestItem, people: &KnownPeople) -> i16 {
+    record_bucket(item.payload.kind(), &item.identifiers, people)
 }
 
 /// Buckets up to `limit` of the workspace's rows that have none, the oldest first, in a
@@ -157,7 +245,9 @@ pub async fn backfill_affinity(
     let buckets: Vec<i16> = rows
         .iter()
         .map(|(_, kind, item)| {
-            StoredItem::parse(item).map_or(0, |stored| record_bucket(kind, &stored.identifiers))
+            StoredItem::parse(item).map_or(0, |stored| {
+                record_bucket(kind, &stored.identifiers, &KnownPeople::new())
+            })
         })
         .collect();
     sqlx::query(
@@ -257,7 +347,16 @@ pub async fn append_inbox(
         })
         .collect();
 
-    let affinities: Vec<i16> = items.iter().map(item_bucket).collect();
+    let people = known_people(
+        pool,
+        workspace,
+        items.iter().map(|item| item.identifiers.as_slice()),
+    )
+    .await?;
+    let affinities: Vec<i16> = items
+        .iter()
+        .map(|item| item_bucket(item, &people))
+        .collect();
 
     let job = drain_job(workspace, trace);
     let row = bind_job(
@@ -2726,10 +2825,10 @@ mod tests {
     fn an_items_bucket_is_that_of_its_strongest_identifier_whatever_the_order() {
         let mut item = identify("u1", "m-1", json!({}));
         item.identifiers = pairs(&[("external:user_id", "u1"), ("email", "Ada@Example.com")]);
-        let one = item_bucket(&item);
+        let one = item_bucket(&item, &KnownPeople::new());
         item.identifiers.reverse();
 
-        assert_eq!(item_bucket(&item), one);
+        assert_eq!(item_bucket(&item, &KnownPeople::new()), one);
         assert_eq!(one, bucket("external:user_id:u1"));
     }
 
@@ -2738,9 +2837,9 @@ mod tests {
         let mut item = identify("u1", "m-1", json!({}));
         item.identifiers = pairs(&[("not-a-kind", "x")]);
 
-        assert_eq!(item_bucket(&item), 0);
+        assert_eq!(item_bucket(&item, &KnownPeople::new()), 0);
         item.identifiers.clear();
-        assert_eq!(item_bucket(&item), 0);
+        assert_eq!(item_bucket(&item, &KnownPeople::new()), 0);
     }
 
     #[test]
@@ -2756,11 +2855,213 @@ mod tests {
             }
         };
 
-        assert_eq!(item_bucket(&contact(&[])), bucket("c-1"));
         assert_eq!(
-            item_bucket(&contact(&[("email", PERSONAL_DATA.email)])),
+            item_bucket(&contact(&[]), &KnownPeople::new()),
             bucket("c-1")
         );
+        assert_eq!(
+            item_bucket(
+                &contact(&[("email", PERSONAL_DATA.email)]),
+                &KnownPeople::new()
+            ),
+            bucket("c-1")
+        );
+    }
+
+    /// A person holding `identifiers`, merged into `survivor` when given.
+    async fn person_with(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        identifiers: &[(&str, &str)],
+        survivor: Option<Uuid>,
+    ) -> Uuid {
+        let id = Uuid::now_v7();
+        sqlx::query("INSERT INTO people (id, workspace_id, merged_into) VALUES ($1, $2, $3)")
+            .bind(id)
+            .bind(ws.as_uuid())
+            .bind(survivor)
+            .execute(pool)
+            .await
+            .unwrap();
+        for (kind, value) in identifiers {
+            sqlx::query(
+                "INSERT INTO identities (id, workspace_id, person_id, kind, value) \
+                 VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(Uuid::now_v7())
+            .bind(ws.as_uuid())
+            .bind(id)
+            .bind(kind)
+            .bind(value)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+        id
+    }
+
+    async fn affinities(pool: &PgPool) -> Vec<i16> {
+        sqlx::query_scalar("SELECT affinity FROM ingest_inbox ORDER BY id")
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    fn web(anonymous: &str, message_id: &str) -> IngestItem {
+        let mut item = track("-", message_id, "viewed", json!({}));
+        item.identifiers = pairs(&[("anonymous_id", anonymous)]);
+        item
+    }
+
+    fn known(entries: &[(&str, Uuid)]) -> KnownPeople {
+        entries
+            .iter()
+            .map(|(text, person)| ((*text).to_owned(), *person))
+            .collect()
+    }
+
+    #[test]
+    fn a_lane_key_is_the_person_else_the_contact_key_else_the_anonymous_id_else_the_strongest() {
+        let (ada, other) = (Uuid::now_v7(), Uuid::now_v7());
+        let none = KnownPeople::new();
+        let both = pairs(&[("email", "ada@example.com"), ("anonymous_id", "a-1")]);
+
+        assert_eq!(
+            lane_key("identify", &both, &none).unwrap(),
+            "anonymous_id:a-1"
+        );
+        let people = known(&[("anonymous_id:a-1", ada)]);
+        assert_eq!(
+            lane_key("identify", &both, &people),
+            Some(format!("person:{ada}"))
+        );
+        // Two people: the strongest linked identifier decides.
+        let split = known(&[("anonymous_id:a-1", ada), ("email:ada@example.com", other)]);
+        assert_eq!(
+            lane_key("identify", &both, &split),
+            Some(format!("person:{other}"))
+        );
+        let contact = pairs(&[(contacts::KEY_KIND, "c-1"), ("email", "ada@example.com")]);
+        assert_eq!(lane_key("contact", &contact, &none).unwrap(), "c-1");
+        let email = known(&[("email:ada@example.com", ada)]);
+        assert_eq!(
+            lane_key("contact", &contact, &email),
+            Some(format!("person:{ada}"))
+        );
+        assert_eq!(lane_key("identify", &pairs(&[("fax", "1")]), &none), None);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_page_view_and_the_identify_naming_its_visitor_share_a_lane_before_the_person_exists(
+        pool: PgPool,
+    ) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            let trace = TraceContext::root(Cause::api("req"));
+            let mut named = identify("-", "m-2", json!({}));
+            named.identifiers = pairs(&[
+                ("anonymous_id", "a-1"),
+                ("email", "ada@example.com"),
+                ("external:user_id", "u1"),
+            ]);
+
+            append(&pool, ws, &trace, &[web("a-1", "m-1"), named]).await;
+
+            let stored = affinities(&pool).await;
+            assert_eq!(stored[0], stored[1]);
+            assert_eq!(stored[0], bucket("anonymous_id:a-1"));
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn once_the_person_exists_a_server_row_and_a_web_row_share_its_lane(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            let trace = TraceContext::root(Cause::api("req"));
+            let ada = person_with(
+                &pool,
+                ws,
+                &[("anonymous_id", "a-1"), ("external:user_id", "u1")],
+                None,
+            )
+            .await;
+
+            append(
+                &pool,
+                ws,
+                &trace,
+                &[web("a-1", "m-1"), track("u1", "m-2", "bought", json!({}))],
+            )
+            .await;
+
+            let stored = affinities(&pool).await;
+            assert_eq!(stored, [bucket(&format!("person:{ada}")); 2]);
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_row_of_a_merged_person_and_a_contact_of_a_known_person_key_by_the_survivor(
+        pool: PgPool,
+    ) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            let trace = TraceContext::root(Cause::api("req"));
+            let survivor = person_with(&pool, ws, &[("email", "ada@example.com")], None).await;
+            person_with(&pool, ws, &[("external:user_id", "u9")], Some(survivor)).await;
+            let mut contact = identify("-", "m-2", json!({}));
+            contact.identifiers =
+                pairs(&[(contacts::KEY_KIND, "c-1"), ("email", "ada@example.com")]);
+            contact.payload = IngestPayload::Contact { traits: Map::new() };
+
+            append(
+                &pool,
+                ws,
+                &trace,
+                &[track("u9", "m-1", "seen", json!({})), contact],
+            )
+            .await;
+
+            let expected = bucket(&format!("person:{survivor}"));
+            assert_eq!(affinities(&pool).await, [expected; 2]);
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_batch_resolves_its_people_in_one_lookup_and_a_batch_without_identifiers_skips_it(
+        pool: PgPool,
+    ) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            let ada = person_with(&pool, ws, &[("external:user_id", "u1")], None).await;
+            let rows: Vec<Vec<(String, String)>> = (0..50)
+                .map(|n| pairs(&[("external:user_id", &format!("u{}", n % 2 + 1))]))
+                .collect();
+
+            let found = known_people(&pool, ws, rows.iter().map(Vec::as_slice))
+                .await
+                .unwrap();
+
+            assert_eq!(found.len(), 1);
+            assert_eq!(found["external:user_id:u1"], ada);
+            // `known_people` runs that one statement and no other: a pool that reaches no
+            // database refuses it, and the batch without identifiers still answers.
+            let nowhere = PgPool::connect_lazy("postgres://nobody@127.0.0.1:1/none").unwrap();
+            let none: Vec<&[(String, String)]> = vec![&[]];
+            assert!(known_people(&nowhere, ws, none).await.unwrap().is_empty());
+            assert!(
+                known_people(&nowhere, ws, rows.iter().map(Vec::as_slice))
+                    .await
+                    .is_err()
+            );
+        })
+        .await;
     }
 
     #[sqlx::test]
