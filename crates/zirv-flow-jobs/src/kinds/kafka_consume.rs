@@ -67,6 +67,13 @@ pub(crate) struct KafkaConsume;
 impl JobKind for KafkaConsume {
     const KIND: &'static str = SYNC_CONSUME_JOB_KIND;
 
+    /// A slice commits all of its work on transactions of its own, fenced on the lease and the
+    /// run, and only enqueues its successor (under a unique key) in the job transaction at the
+    /// end. So the job transaction takes no id while the slice reads, which would otherwise
+    /// hold the xmin horizon back for the whole slice. A late slice that overlaps a new one
+    /// commits nothing: its batches fail the fence.
+    const LOCKS_LEASE: bool = false;
+
     async fn run(&self, ctx: &mut JobContext<'_>, payload: Value) -> Result<(), JobError> {
         run_consume(ctx, &payload, &Probe::default(), KAFKA_SLICE_BUDGET).await
     }

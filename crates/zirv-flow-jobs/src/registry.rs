@@ -177,15 +177,28 @@ mod tests {
     }
 
     #[test]
-    fn only_the_ingest_drain_confirms_its_lease_without_locking_the_job() {
-        let unlocked: Vec<&str> = Registry::built_in()
+    fn only_kinds_that_commit_on_transactions_of_their_own_confirm_their_lease_without_locking() {
+        let mut unlocked: Vec<&str> = Registry::built_in()
             .kinds
             .iter()
             .filter(|kind| !kind.locks_lease())
             .map(|kind| kind.kind())
             .collect();
+        unlocked.sort_unstable();
 
-        assert_eq!(unlocked, ["ingest.drain"]);
+        assert_eq!(
+            unlocked,
+            [
+                "audit.retention",
+                "decisions.retention",
+                "events.retention",
+                "ingest.drain",
+                "jobs.retention",
+                "kafka.consume",
+                "messages.retention",
+                "sync.run",
+            ]
+        );
         assert!(
             First.locks_lease(),
             "a kind locks its lease unless it says otherwise"
