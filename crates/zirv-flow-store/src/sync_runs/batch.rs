@@ -1083,7 +1083,10 @@ mod tests {
             let fx = fixture(&pool, "one", "full_refresh").await;
             let source = fx.source_id.to_string();
             let mut with_traits = upsert(&fx, "traits", "a@example.com");
-            with_traits.record.traits.insert("plan".into(), json!("pro"));
+            with_traits
+                .record
+                .traits
+                .insert("plan".into(), json!("pro"));
             let identifier_only = upsert(&fx, "bare", "b@example.com");
             let upserts = [with_traits, identifier_only];
             let checkpoint = json!({"offset": 2});
