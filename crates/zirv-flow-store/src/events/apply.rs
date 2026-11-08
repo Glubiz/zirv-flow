@@ -99,6 +99,10 @@ pub(crate) async fn apply_event_records(
 ) -> Result<Vec<EventOutcome>, StoreError> {
     crate::changes::cache_change_readers(connection, workspace).await?;
     let mut batch = EventBatch::default();
+    batch.readers_cached(workspace);
+    batch
+        .prefetch_duplicates(connection, workspace, records)
+        .await?;
     let mut outcomes = Vec::with_capacity(records.len());
     for record in records {
         outcomes.push(apply_event_record(connection, workspace, key, &mut batch, record).await?);
@@ -126,6 +130,19 @@ pub(crate) struct EventBatch {
     pub(crate) decisions: DecisionBuffer,
     /// Every accepted event is flagged `no_triggers`: the batch is the first sync of a stream.
     no_triggers: bool,
+    /// The workspaces whose change readers the batch's transaction cached before the first
+    /// record, so a record skips the cache check. Only a caller that cached them outside any
+    /// savepoint says so, with [`EventBatch::readers_cached`].
+    cached_readers: HashSet<Uuid>,
+    /// The `messageId`s [`EventBatch::prefetch_duplicates`] looked up: a record whose id is not
+    /// here still probes.
+    prefetched: HashSet<String>,
+    /// The prefetched ids that already had an event, with the event they repeat. Their repeats
+    /// were counted when they were prefetched.
+    known_duplicates: HashMap<String, Uuid>,
+    /// The ids this batch claimed after a prefetch: a later record with one is a repeat the
+    /// prefetch could not see.
+    claimed: HashSet<String>,
 }
 
 impl EventBatch {
@@ -135,6 +152,69 @@ impl EventBatch {
             no_triggers: true,
             ..Self::default()
         }
+    }
+
+    /// Records that the caller's transaction already cached the change readers of `workspace`
+    /// (outside any savepoint), so no record asks again.
+    pub(crate) fn readers_cached(&mut self, workspace: WorkspaceId) {
+        self.cached_readers.insert(workspace.as_uuid());
+    }
+
+    /// Looks up the `messageId`s of `records` that a record would probe, in one statement, and
+    /// counts each repeat of an existing event. A record then probes only for an id this batch
+    /// claimed itself, or one the prefetch did not cover. A record the input checks refuse is
+    /// not probed and is left out here too. Call it once, before the first record, in the
+    /// transaction that holds them.
+    pub(crate) async fn prefetch_duplicates<'a>(
+        &mut self,
+        connection: &mut PgConnection,
+        workspace: WorkspaceId,
+        records: impl IntoIterator<Item = &'a EventRecord>,
+    ) -> Result<(), StoreError> {
+        let mut seen: HashMap<&str, i32> = HashMap::new();
+        for record in records {
+            if let Some(message_id) = &record.message_id
+                && checked_input(record).is_ok()
+            {
+                *seen.entry(message_id.as_str()).or_default() += 1;
+            }
+        }
+        if seen.is_empty() {
+            return Ok(());
+        }
+        // Sorted, so two batches that repeat the same ids take the rows in one order.
+        let mut ids: Vec<(&str, i32)> = seen.into_iter().collect();
+        ids.sort_unstable();
+        let (messages, repeats): (Vec<&str>, Vec<i32>) = ids.into_iter().unzip();
+        let found: Vec<(String, Uuid)> = sqlx::query_as(
+            "UPDATE event_dedupe d SET duplicates = d.duplicates + v.repeats              FROM unnest($2::text[], $3::int4[]) AS v(message_id, repeats)              WHERE d.workspace_id = $1 AND d.message_id = v.message_id              RETURNING d.message_id, d.event_id",
+        )
+        .bind(workspace.as_uuid())
+        .bind(&messages)
+        .bind(&repeats)
+        .fetch_all(connection)
+        .await
+        .map_err(StoreError::query)?;
+        self.known_duplicates.extend(found);
+        self.prefetched
+            .extend(messages.into_iter().map(str::to_owned));
+        Ok(())
+    }
+
+    /// The event `message_id` repeats, counting the repeat, or `None` when it is new.
+    async fn count_duplicate(
+        &mut self,
+        connection: &mut PgConnection,
+        workspace: WorkspaceId,
+        message_id: &str,
+    ) -> Result<Option<Uuid>, StoreError> {
+        if let Some(original) = self.known_duplicates.get(message_id) {
+            return Ok(Some(*original));
+        }
+        if self.prefetched.contains(message_id) && !self.claimed.contains(message_id) {
+            return Ok(None);
+        }
+        count_duplicate(connection, workspace, message_id).await
     }
 
     /// Ends the batch: one statement appends its decisions, one query matches the accepted events
@@ -214,7 +294,9 @@ pub(crate) async fn apply_event_record(
     batch: &mut EventBatch,
     record: &EventRecord,
 ) -> Result<EventOutcome, StoreError> {
-    crate::changes::cache_change_readers(connection, workspace).await?;
+    if !batch.cached_readers.contains(&workspace.as_uuid()) {
+        crate::changes::cache_change_readers(connection, workspace).await?;
+    }
     let outcome = judge_event_record(connection, workspace, key, batch, record).await?;
     if let EventOutcome::Accepted {
         event_id,
@@ -335,7 +417,9 @@ async fn judge_event_record(
     };
 
     if let Some(message_id) = &record.message_id
-        && let Some(original) = count_duplicate(connection, workspace, message_id).await?
+        && let Some(original) = batch
+            .count_duplicate(connection, workspace, message_id)
+            .await?
     {
         return Ok(EventOutcome::Duplicate {
             original_event_id: original,
@@ -445,6 +529,9 @@ async fn judge_event_record(
         .map_err(StoreError::query)?;
         if claimed.rows_affected() == 0 {
             return Err(StoreError::retryable_race());
+        }
+        if !batch.prefetched.is_empty() {
+            batch.claimed.insert(message_id.clone());
         }
     }
 
@@ -1105,6 +1192,138 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(duplicates, 70);
+    }
+
+    fn with_message(mut record: EventRecord, message_id: &str) -> EventRecord {
+        record.message_id = Some(message_id.to_owned());
+        record
+    }
+
+    async fn duplicates_of(pool: &PgPool, message_id: &str) -> i32 {
+        sqlx::query_scalar("SELECT duplicates FROM event_dedupe WHERE message_id = $1")
+            .bind(message_id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_batch_counts_each_repeat_of_a_stored_id_and_not_a_refused_record(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let first = apply_one(&pool, ws, with_message(event("a", json!({})), "m-1")).await;
+        let EventOutcome::Accepted { event_id, .. } = first else {
+            panic!("not accepted");
+        };
+        let repeat = with_message(event("a", json!({})), "m-1");
+        // Refused by the input checks before any probe, so its repeat of `m-1` is not counted.
+        let refused = with_message(event("", json!({})), "m-1");
+        let fresh = with_message(event("a", json!({})), "m-2");
+
+        let outcomes = apply_event_batch(
+            &pool,
+            ws,
+            &key(),
+            &[
+                repeat.clone(),
+                refused,
+                repeat,
+                fresh.clone(),
+                fresh,
+                with_message(event("a", json!({})), "m-1"),
+            ],
+        )
+        .await
+        .unwrap();
+
+        let original = EventOutcome::Duplicate {
+            original_event_id: event_id,
+        };
+        assert_eq!(outcomes[0], original);
+        assert!(matches!(outcomes[1], EventOutcome::Rejected { .. }));
+        assert_eq!(outcomes[2], original);
+        assert!(matches!(outcomes[3], EventOutcome::Accepted { .. }));
+        let EventOutcome::Accepted {
+            event_id: second, ..
+        } = outcomes[3]
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            outcomes[4],
+            EventOutcome::Duplicate {
+                original_event_id: second
+            }
+        );
+        assert_eq!(outcomes[5], original);
+        assert_eq!(duplicates_of(&pool, "m-1").await, 3);
+        assert_eq!(duplicates_of(&pool, "m-2").await, 1);
+        assert_eq!(count(&pool, "events").await, 2);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_prefetched_batch_does_not_probe_an_id_it_found_new(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let record = with_message(event("a", json!({})), "m-9");
+        let mut tx = begin(&pool).await.unwrap();
+        crate::changes::cache_change_readers(&mut tx, ws)
+            .await
+            .unwrap();
+        let mut batch = EventBatch::default();
+        batch
+            .prefetch_duplicates(&mut tx, ws, [&record])
+            .await
+            .unwrap();
+        // Another writer claims the id after the prefetch. A probe would answer `Duplicate`;
+        // without one the claim finds the row and fails the batch as a retryable race, whose
+        // retry counts the repeat.
+        sqlx::query(
+            "INSERT INTO event_dedupe (workspace_id, message_id, event_id, event_occurred_at) \
+             VALUES ($1, 'm-9', $2, now())",
+        )
+        .bind(ws.as_uuid())
+        .bind(Uuid::now_v7())
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+
+        let result = apply_event_record(&mut tx, ws, &key(), &mut batch, &record).await;
+
+        assert!(result.is_err_and(|error| error.is_retryable()));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_batch_that_cached_the_change_readers_does_not_check_them_per_record(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let record = with_message(event("a", json!({})), "m-1");
+        let wiped = "SELECT NULLIF(current_setting('zirv_flow.change_readers', true), '') IS NULL";
+        for told in [true, false] {
+            let mut tx = begin(&pool).await.unwrap();
+            crate::changes::cache_change_readers(&mut tx, ws)
+                .await
+                .unwrap();
+            let mut batch = EventBatch::default();
+            if told {
+                batch.readers_cached(ws);
+            }
+            apply_event_record(&mut tx, ws, &key(), &mut batch, &record)
+                .await
+                .unwrap();
+            // Wipes the transaction's cache; the next record rebuilds it only if it checks.
+            sqlx::query("SELECT set_config('zirv_flow.change_readers', '', true)")
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            let again = apply_event_record(&mut tx, ws, &key(), &mut batch, &record)
+                .await
+                .unwrap();
+            assert!(matches!(again, EventOutcome::Duplicate { .. }));
+            let still_wiped: bool = sqlx::query_scalar(wiped).fetch_one(&mut *tx).await.unwrap();
+            assert_eq!(still_wiped, told, "told={told}");
+            // Rolled back, so the next round claims `m-1` again.
+        }
     }
 
     /// `pg_stat_get_backend_subxact` (PostgreSQL 16, by backend id) reports the open
