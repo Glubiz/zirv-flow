@@ -165,7 +165,7 @@ mod tests {
     use serde_json::json;
     use sqlx::PgPool;
 
-    use super::super::fixtures::{hook, mapping, trace, workspace};
+    use super::super::fixtures::{affinities, hook, mapping, person_with, trace, workspace};
     use super::*;
     use crate::ingest::strongest_identifier;
     use crate::{StreamSettings, configure_stream, find_stream_by_id};
@@ -396,45 +396,6 @@ mod tests {
         assert_eq!(stored[0], stored[2], "Ada's payloads share a bucket");
         let distinct: HashSet<i16> = stored.iter().copied().collect();
         assert!(distinct.len() > 1, "the hook's people spread: {stored:?}");
-    }
-
-    /// A person holding `identifiers`, merged into `survivor` when given.
-    async fn person_with(
-        pool: &PgPool,
-        ws: WorkspaceId,
-        identifiers: &[(&str, &str)],
-        survivor: Option<Uuid>,
-    ) -> Uuid {
-        let id = Uuid::now_v7();
-        sqlx::query("INSERT INTO people (id, workspace_id, merged_into) VALUES ($1, $2, $3)")
-            .bind(id)
-            .bind(ws.as_uuid())
-            .bind(survivor)
-            .execute(pool)
-            .await
-            .unwrap();
-        for (kind, value) in identifiers {
-            sqlx::query(
-                "INSERT INTO identities (id, workspace_id, person_id, kind, value) \
-                 VALUES ($1, $2, $3, $4, $5)",
-            )
-            .bind(Uuid::now_v7())
-            .bind(ws.as_uuid())
-            .bind(id)
-            .bind(kind)
-            .bind(value)
-            .execute(pool)
-            .await
-            .unwrap();
-        }
-        id
-    }
-
-    async fn affinities(pool: &PgPool) -> Vec<i16> {
-        sqlx::query_scalar("SELECT affinity FROM ingest_inbox ORDER BY id")
-            .fetch_all(pool)
-            .await
-            .unwrap()
     }
 
     #[sqlx::test]

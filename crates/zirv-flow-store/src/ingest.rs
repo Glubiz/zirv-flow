@@ -206,37 +206,31 @@ pub(crate) fn lane_key(
     identifiers: &[(String, String)],
     people: &KnownPeople,
 ) -> Option<String> {
-    let parsed: Vec<(u8, String, bool)> = identifiers
+    // Strongest first, equal strengths by text, so the key ignores the order the client listed
+    // the identifiers in.
+    let mut parsed: Vec<(Reverse<u8>, String)> = identifiers
         .iter()
         .filter_map(|(kind, value)| Identifier::parse(kind, value).ok())
         .map(|identifier| {
             let text = format!("{}:{}", identifier.kind().as_text(), identifier.value());
-            let anonymous = identifier.kind().as_text() == "anonymous_id";
-            (identifier.kind().strength(), text, anonymous)
+            (Reverse(identifier.kind().strength()), text)
         })
         .collect();
-    let strongest = |keep: &dyn Fn(&(u8, String, bool)) -> bool| {
-        parsed
-            .iter()
-            .filter(|entry| keep(entry))
-            .min_by_key(|(strength, text, _)| (Reverse(*strength), text.clone()))
-            .map(|(_, text, _)| text.clone())
-    };
-    if let Some(person) =
-        strongest(&|(_, text, _)| people.contains_key(text)).and_then(|text| people.get(&text))
-    {
+    parsed.sort();
+    if let Some(person) = parsed.iter().find_map(|(_, text)| people.get(text)) {
         return Some(format!("person:{person}"));
     }
-    if kind == "contact" {
-        let contact_key = identifiers
+    if kind == "contact"
+        && let Some((_, key)) = identifiers
             .iter()
             .find(|(kind, _)| kind == contacts::KEY_KIND)
-            .map(|(_, value)| value.clone());
-        if contact_key.is_some() {
-            return contact_key;
-        }
+    {
+        return Some(key.clone());
     }
-    strongest(&|(_, _, anonymous)| *anonymous).or_else(|| strongest(&|_| true))
+    let anonymous = parsed
+        .iter()
+        .find(|(_, text)| text.starts_with("anonymous_id:"));
+    anonymous.or(parsed.first()).map(|(_, text)| text.clone())
 }
 
 /// The bucket of a row's lane key; bucket 0 when it has none. The append, the webhook receive
@@ -1301,6 +1295,7 @@ async fn reject_row(
 #[cfg(test)]
 mod tests {
     use crate::decision_testing::PERSONAL_DATA;
+    use crate::webhooks::fixtures::{affinities, person_with};
 
     use serde_json::json;
     use sqlx::PgPool;
@@ -3053,45 +3048,6 @@ mod tests {
             ),
             bucket("c-1")
         );
-    }
-
-    /// A person holding `identifiers`, merged into `survivor` when given.
-    async fn person_with(
-        pool: &PgPool,
-        ws: WorkspaceId,
-        identifiers: &[(&str, &str)],
-        survivor: Option<Uuid>,
-    ) -> Uuid {
-        let id = Uuid::now_v7();
-        sqlx::query("INSERT INTO people (id, workspace_id, merged_into) VALUES ($1, $2, $3)")
-            .bind(id)
-            .bind(ws.as_uuid())
-            .bind(survivor)
-            .execute(pool)
-            .await
-            .unwrap();
-        for (kind, value) in identifiers {
-            sqlx::query(
-                "INSERT INTO identities (id, workspace_id, person_id, kind, value) \
-                 VALUES ($1, $2, $3, $4, $5)",
-            )
-            .bind(Uuid::now_v7())
-            .bind(ws.as_uuid())
-            .bind(id)
-            .bind(kind)
-            .bind(value)
-            .execute(pool)
-            .await
-            .unwrap();
-        }
-        id
-    }
-
-    async fn affinities(pool: &PgPool) -> Vec<i16> {
-        sqlx::query_scalar("SELECT affinity FROM ingest_inbox ORDER BY id")
-            .fetch_all(pool)
-            .await
-            .unwrap()
     }
 
     fn web(anonymous: &str, message_id: &str) -> IngestItem {
