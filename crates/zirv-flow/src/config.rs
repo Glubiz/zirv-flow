@@ -17,6 +17,9 @@ const ENV_PREFIX: &str = "ZIRV_FLOW_";
 
 /// The most concurrent drain loops per workspace `ingest.drain_shards` may ask for.
 const MAX_DRAIN_SHARDS: u32 = 16;
+/// The largest Kafka or sync unit: a unit takes an advisory lock per distinct identity, and
+/// several units at once must stay inside PostgreSQL's shared lock table.
+const MAX_UNIT_SIZE: u32 = 1000;
 
 /// The most slots a worker may dedicate to `ingest.drain`.
 const MAX_DRAIN_SLOTS: u32 = 16;
@@ -1125,6 +1128,14 @@ impl Config {
         }
         if !(1..=MAX_DRAIN_SHARDS).contains(&ingest.drain_shards) {
             return Err(fail("ingest.drain_shards", "must be between 1 and 16"));
+        }
+        for (key, value) in [
+            ("ingest.kafka_unit_messages", ingest.kafka_unit_messages),
+            ("ingest.sync_unit_records", ingest.sync_unit_records),
+        ] {
+            if value > MAX_UNIT_SIZE {
+                return Err(fail(key, "must be at most 1000"));
+            }
         }
         Ok(())
     }
@@ -2843,6 +2854,28 @@ endpoint = \"http://collector:4318\"
 
             assert!(error.contains("ingest.drain_shards"), "{error}");
             assert!(error.contains("between 1 and 16"), "{error}");
+        }
+    }
+
+    #[test]
+    fn unit_sizes_over_a_thousand_name_their_key() {
+        for (var, key) in [
+            (
+                "ZIRV_FLOW_INGEST__KAFKA_UNIT_MESSAGES",
+                "ingest.kafka_unit_messages",
+            ),
+            (
+                "ZIRV_FLOW_INGEST__SYNC_UNIT_RECORDS",
+                "ingest.sync_unit_records",
+            ),
+        ] {
+            let mut env = database_env("postgres://localhost/database");
+            env.push((var.into(), "1001".into()));
+
+            let error = Config::load(None, env).unwrap_err().to_string();
+
+            assert!(error.contains(key), "{error}");
+            assert!(error.contains("at most 1000"), "{error}");
         }
     }
 
