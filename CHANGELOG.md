@@ -15,3 +15,17 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.264.0 (2026-11-08)
+
+### Fixes
+
+- cap Kafka and sync units at 1000
+
+### Performance
+
+- smaller Kafka and sync units and more identity buckets (investigation L)
+
+### Chores
+
+- simplify the unit-size change
+
