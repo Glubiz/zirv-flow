@@ -167,13 +167,17 @@ use it:
 
 | Command | What it does |
 |---------|--------------|
-| `zirv-flow worker` | Claims and runs jobs, `worker.concurrency` at a time. Run as many as you like. |
+| `zirv-flow worker` | Claims and runs jobs, `worker.concurrency` at a time, plus `worker.drain_slots` slots that run only `ingest.drain`. Run as many as you like. |
 | `zirv-flow scheduler` | Elected leader (an advisory lock; the others stand by and take over within seconds): enqueues due cron schedules, returns jobs with expired leases to the queue, keeps the decision log and event partitions for this and next month, expires person exports hourly, deletes import files and rejects past their retention (see [CSV import](../guide/sources.md#csv-import)), and exports queue gauges. |
 | `zirv-flow all` | `serve`, `worker` and `scheduler` in one process (the default). |
 
 Each of a worker's `worker.concurrency` slots claims up to 32 due jobs at once
-and runs them one after another. A batch holds at most one inbox drain, which
-can run for up to 20 seconds, so due drains spread over the slots. A running job holds a lease of
+and runs them one after another. The worker also keeps `worker.drain_slots` (default 1) slots
+that claim only `ingest.drain`, one job at a time, so an inbox drain, which can run for up to
+20 seconds, never waits behind the other kinds; the general slots do not claim it while
+drain slots run. A drain slot that completes a run enqueues the workspace's next drain at once
+when its inbox still holds rows. With `worker.drain_slots` at 0 the general slots claim the
+drain, and a batch holds at most one, so due drains spread over the slots. A running job holds a lease of
 `worker.lease_seconds`, which its worker extends every third of that while the
 handler runs. A claimed job waits for its turn on the lease from its claim: the
 slot gives the jobs it has not started back to the queue a sixth of the lease (at

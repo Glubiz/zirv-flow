@@ -104,7 +104,7 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `database.url` | URL, secret | required | scheme `postgres` or `postgresql` |
 | `database.max_connections` | u32 | 10 | at least 1 |
 | `database.migrate_on_start` | bool | false | none |
-| `worker.concurrency` | u32 | 4 | at least 1 |
+| `worker.concurrency` | u32 | 4 | at least 1; `worker.drain_slots` (default 1, 0 to 16) adds slots that claim only `ingest.drain`, and 0 leaves it to these |
 | `worker.lease_seconds` | u32 | 30 | at least 1 |
 | `worker.max_running_per_workspace` | u32 | unlimited | at least 1 when set |
 | `events.retention_days` | u32 | 760 | at least 1; within the two bounds below; see [Retention windows](docs/people.md#retention-windows) |
@@ -130,7 +130,7 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `ingest.max_webhook_bytes` | u64 | 262144 | at least 1; a larger webhook body is refused with 413 |
 | `ingest.rate_per_hook` | u32 | 50 | at least 1; requests per second each webhook may receive, per `serve` process |
 | `ingest.burst_per_hook` | u32 | 200 | at least 1; requests a webhook may receive at once after a quiet period, per `serve` process |
-| `ingest.drain_batch_size` | u32 | 500 | at least 1; inbox rows `ingest.drain` applies per transaction |
+| `ingest.drain_batch_size` | u32 | 50 | at least 1; inbox rows `ingest.drain` applies per transaction |
 | `ingest.drain_shards` | u32 | 8 | 1 to 16; concurrent drain loops per workspace in `ingest.drain` |
 | `imports.max_file_bytes` | u64 | 536870912 | at least 1; a larger CSV upload is refused with 413 |
 | `assets.max_file_bytes` | u64 | 5242880 | at least 1; a larger image upload is refused with 413 (`asset_too_large`) |

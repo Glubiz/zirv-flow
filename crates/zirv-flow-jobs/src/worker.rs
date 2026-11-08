@@ -20,10 +20,11 @@ use zirv_flow_core::egress::EgressPolicy;
 use zirv_flow_core::schedule::backoff;
 use zirv_flow_render::RenderPool;
 use zirv_flow_store::{
-    ClaimedJob, Clock, DecisionRetention, EventRetention, FailOutcome, HmacKey, Keyring,
-    MessageRetention, PgConnection, PgPool, RetentionSettings, STEP_JOB_KIND, begin,
-    cache_change_readers, claim_jobs, complete_job, complete_jobs, confirm_lease, fail_job,
-    heartbeat_job, listen_for_jobs, lock_lease, observe_pool, release_jobs, sized_like,
+    ClaimedJob, Clock, DRAIN_JOB_KIND, DecisionRetention, EventRetention, FailOutcome, HmacKey,
+    Keyring, MessageRetention, PgConnection, PgPool, RetentionSettings, STEP_JOB_KIND, begin,
+    cache_change_readers, claim_jobs, complete_job, complete_jobs, confirm_lease,
+    enqueue_drain_if_pending, fail_job, heartbeat_job, listen_for_jobs, lock_lease, observe_pool,
+    release_jobs, sized_like,
 };
 
 use crate::JobError;
@@ -55,6 +56,10 @@ const MAX_HOLD: Duration = Duration::from_secs(4);
 pub struct WorkerConfig {
     /// Jobs run at once.
     pub concurrency: usize,
+    /// Slots beside `concurrency` that claim only `ingest.drain` jobs, which the general slots
+    /// then leave alone, so a drain never waits behind the other kinds in the queue. None keeps
+    /// the drain with the general slots.
+    pub drain_slots: usize,
     /// How long a claim lasts without a heartbeat.
     pub lease: Duration,
     /// How long an idle worker waits before looking again, when no notification arrives.
@@ -118,6 +123,7 @@ impl WorkerConfig {
     pub fn new(concurrency: usize) -> Self {
         Self {
             concurrency: concurrency.max(1),
+            drain_slots: 1,
             lease: Duration::from_secs(30),
             poll_interval: Duration::from_secs(1),
             max_running_per_workspace: None,
@@ -150,10 +156,11 @@ impl WorkerConfig {
 
 /// A pool of workers over one database. It runs on pools of its own, so neither the HTTP
 /// server nor running handlers can starve a claim, a handler transaction or a heartbeat:
-/// `concurrency * (1 + drain_shards) + 1` connections for claims, handler transactions, the
+/// `slots * (1 + drain_shards) + 1` connections for claims, handler transactions, the
 /// transactions a handler such as the ingest drain commits on its own beside its job
-/// transaction (one per drain shard), and failures, and `concurrency` for heartbeats and for
-/// giving back the claimed jobs a slot has not started.
+/// transaction (one per drain shard), and failures, and `slots` for heartbeats and for
+/// giving back the claimed jobs a slot has not started; `slots` is `concurrency` plus the
+/// drain slots.
 pub struct Worker {
     pool: PgPool,
     registry: Registry,
@@ -169,7 +176,10 @@ struct Shared {
     listener_pool: PgPool,
     registry: Registry,
     config: WorkerConfig,
+    /// What the general slots claim: every kind, less `ingest.drain` while drain slots run.
     kinds: Vec<&'static str>,
+    /// How many slots claim only `ingest.drain`; none when the registry has no such kind.
+    drain_slots: usize,
     /// Woken when a job is enqueued; polling covers a missed wake-up.
     wake: Notify,
     /// Woken once for each job of a workspace that leaves running under a per-workspace cap,
@@ -186,8 +196,14 @@ impl Shared {
         registry: Registry,
         config: WorkerConfig,
     ) -> Self {
+        let drain_slots = effective_drain_slots(&registry, &config);
+        let mut kinds = registry.kinds();
+        if drain_slots > 0 {
+            kinds.retain(|kind| *kind != DRAIN_JOB_KIND);
+        }
         Self {
-            kinds: registry.kinds(),
+            kinds,
+            drain_slots,
             pool,
             heartbeat_pool,
             listener_pool,
@@ -227,7 +243,9 @@ impl Worker {
     /// finish. The caller bounds the wait; a handler still running when this future is
     /// dropped is cancelled and left to the reaper.
     pub async fn run(self, stop: watch::Receiver<bool>) {
-        let slots = u32::try_from(self.config.concurrency).unwrap_or(u32::MAX);
+        let drain_slots = effective_drain_slots(&self.registry, &self.config);
+        let slots =
+            u32::try_from(self.config.concurrency.saturating_add(drain_slots)).unwrap_or(u32::MAX);
         let shared = Arc::new(Shared::new(
             sized_like(
                 &self.pool,
@@ -247,13 +265,56 @@ impl Worker {
         let sampler = AbortOnDrop(tokio::spawn(sample_pools(Arc::clone(&shared))));
         let mut slots = JoinSet::new();
         for slot in 0..shared.config.concurrency {
-            slots.spawn(work(Arc::clone(&shared), slot, stop.clone()));
+            slots.spawn(work(Arc::clone(&shared), slot, Lane::General, stop.clone()));
+        }
+        for slot in 0..shared.drain_slots {
+            let slot = shared.config.concurrency + slot;
+            slots.spawn(work(Arc::clone(&shared), slot, Lane::Drain, stop.clone()));
         }
         while slots.join_next().await.is_some() {}
         drop(listener);
         drop(sampler);
     }
 }
+
+/// The drain slots a worker runs: those configured, when the registry has the kind they claim.
+fn effective_drain_slots(registry: &Registry, config: &WorkerConfig) -> usize {
+    if registry.get(DRAIN_JOB_KIND).is_some() {
+        config.drain_slots
+    } else {
+        0
+    }
+}
+
+/// What a slot claims.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Lane {
+    /// Every kind the worker runs, less `ingest.drain` when the worker has drain slots.
+    General,
+    /// Only `ingest.drain`: a drain slot never waits behind another kind.
+    Drain,
+}
+
+impl Lane {
+    /// The kinds a slot of this lane claims.
+    fn kinds(self, shared: &Shared) -> &[&'static str] {
+        match self {
+            Self::General => &shared.kinds,
+            Self::Drain => &DRAIN_KINDS,
+        }
+    }
+
+    /// How many jobs a claim takes: a drain slot runs one drain at a time, so the rest stay
+    /// ready for the other drain slots instead of being held behind a long run.
+    fn batch(self) -> u32 {
+        match self {
+            Self::General => CLAIM_BATCH,
+            Self::Drain => 1,
+        }
+    }
+}
+
+const DRAIN_KINDS: [&str; 1] = [DRAIN_JOB_KIND];
 
 /// The shared pool's size: each slot holds its job transaction plus up to `drain_shards`
 /// drain-batch transactions, and one connection is kept for failures.
@@ -321,7 +382,7 @@ async fn listen(shared: Arc<Shared>, mut stop: watch::Receiver<bool>) {
 /// worker to leave running (#397): a claim finds nothing while the due jobs' workspaces are at
 /// their caps, and each job that leaves running wakes one waiting slot, so the room it frees is
 /// claimed without waiting for the poll.
-async fn work(shared: Arc<Shared>, slot: usize, mut stop: watch::Receiver<bool>) {
+async fn work(shared: Arc<Shared>, slot: usize, lane: Lane, mut stop: watch::Receiver<bool>) {
     let name = format!("{}:{slot}", std::process::id());
     let capped = shared.capped();
     while !*stop.borrow() {
@@ -341,10 +402,10 @@ async fn work(shared: Arc<Shared>, slot: usize, mut stop: watch::Receiver<bool>)
             match claim_jobs(
                 &shared.pool,
                 &name,
-                &shared.kinds,
+                lane.kinds(&shared),
                 shared.config.lease,
                 shared.config.max_running_per_workspace,
-                CLAIM_BATCH,
+                lane.batch(),
             )
             .await
             {
@@ -589,8 +650,29 @@ async fn run_attempt(shared: &Arc<Shared>, job: ClaimedJob) {
         Ok(attempt) => attempt,
         Err(_) => Attempt::Failed("the job handler panicked".into(), None),
     };
-    settle(shared, &job, attempt, started.elapsed()).await;
+    let outcome = settle(shared, &job, attempt, started.elapsed()).await;
     shared.left_running(&job);
+    if outcome == Outcome::Completed {
+        requeue_drain(shared, &job).await;
+    }
+}
+
+/// With drain slots, enqueues the next drain of a workspace whose run just completed while its
+/// inbox still holds rows, as the job's unique key is free only now: the run ended on its time
+/// budget, or rows were appended behind it. Without this the next run waits for the scheduler's
+/// safety net.
+async fn requeue_drain(shared: &Shared, job: &ClaimedJob) {
+    let Some(workspace) = job.workspace_id.filter(|_| job.kind == DRAIN_JOB_KIND) else {
+        return;
+    };
+    if shared.drain_slots == 0 {
+        return;
+    }
+    if let Err(error) =
+        enqueue_drain_if_pending(&shared.pool, WorkspaceId::from_uuid(workspace), &job.trace).await
+    {
+        warn!("could not enqueue the next ingest drain: {error}");
+    }
 }
 
 /// Settles an attempt that ended, then logs and counts it; `ran` is how long it ran before.
@@ -1229,7 +1311,9 @@ mod tests {
     use serde_json::{Value, json};
     use sqlx::PgPool;
     use uuid::Uuid;
-    use zirv_flow_core::{Cause, TraceContext};
+    use zirv_flow_core::{
+        Cause, HmacPurpose, HmacRoot, MasterKey, Slug, TraceContext, WorkspaceName,
+    };
     use zirv_flow_store::{NewJob, QueueCounts, claim_job, enqueue, find_job, queue_counts};
 
     use super::*;
@@ -1427,6 +1511,7 @@ mod tests {
     fn test_config(concurrency: usize) -> WorkerConfig {
         WorkerConfig {
             concurrency,
+            drain_slots: 0,
             lease: Duration::from_secs(30),
             poll_interval: Duration::from_millis(20),
             max_running_per_workspace: None,
@@ -2665,5 +2750,144 @@ mod tests {
 
         wait_for(&pool, |counts| counts == QueueCounts::default()).await;
         stop_and_join(stop, handle).await;
+    }
+
+    /// A config whose `ingest.drain` runs to completion on an empty inbox.
+    fn draining_config(concurrency: usize, drain_slots: usize) -> WorkerConfig {
+        let mut config = test_config(concurrency);
+        config.drain_slots = drain_slots;
+        config.redaction_key = Some(Arc::new(
+            HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction),
+        ));
+        config
+    }
+
+    /// Enqueues an `ingest.drain` job for a new workspace with an empty inbox.
+    async fn enqueue_drain_job(pool: &PgPool) {
+        let name = WorkspaceName::parse("ours").unwrap();
+        let slug = Slug::parse("ours").unwrap();
+        let workspace = zirv_flow_store::create_workspace(pool, &name, &slug)
+            .await
+            .unwrap()
+            .id;
+        let trace = TraceContext::root(Cause::api("test-request"));
+        assert!(
+            zirv_flow_store::enqueue_drain(pool, workspace, &trace)
+                .await
+                .unwrap()
+        );
+    }
+
+    async fn drain_jobs(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = 'ingest.drain'")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// Gives each of `slots` running general slots a `test.gated` job that waits on its shut gate.
+    /// The jobs are enqueued one at a time, so no slot claims two.
+    async fn busy_on_gated_jobs(pool: &PgPool, slots: usize) {
+        sqlx::query("CREATE TABLE gate (open boolean)")
+            .execute(pool)
+            .await
+            .unwrap();
+        for index in 0..slots {
+            let mut job = new_job("test.gated");
+            job.payload = json!({ "index": index });
+            enqueue(pool, &job).await.unwrap();
+            let running = i64::try_from(index + 1).unwrap();
+            wait_for(pool, |counts| counts.running == running).await;
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_drain_slot_runs_a_drain_while_every_general_slot_is_busy_on_another_kind(
+        pool: PgPool,
+    ) {
+        migrated(&pool).await;
+        let (stop, handle) = start(&pool, draining_config(2, 1));
+        busy_on_gated_jobs(&pool, 2).await;
+
+        enqueue_drain_job(&pool).await;
+
+        eventually("the drain to be claimed and run", || async {
+            drain_jobs(&pool).await == 0
+        })
+        .await;
+        let counts = queue_counts(&pool).await.unwrap();
+        assert_eq!(counts.running, 2, "the general slots still hold their jobs");
+        sqlx::query("INSERT INTO gate VALUES (true)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        stop_and_join(stop, handle).await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn without_drain_slots_a_drain_waits_behind_busy_general_slots(pool: PgPool) {
+        migrated(&pool).await;
+        let (stop, handle) = start(&pool, draining_config(2, 0));
+        busy_on_gated_jobs(&pool, 2).await;
+
+        enqueue_drain_job(&pool).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        assert_eq!(drain_jobs(&pool).await, 1, "the drain is still queued");
+        sqlx::query("INSERT INTO gate VALUES (true)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        eventually("the general slots to claim the freed drain", || async {
+            drain_jobs(&pool).await == 0
+        })
+        .await;
+        stop_and_join(stop, handle).await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn general_slots_leave_the_drain_to_the_drain_slots(pool: PgPool) {
+        migrated(&pool).await;
+        let given = pool.clone();
+        let shared = Arc::new(Shared::new(
+            pool.clone(),
+            pool.clone(),
+            given,
+            registry(),
+            draining_config(2, 1),
+        ));
+        assert!(!shared.kinds.contains(&DRAIN_JOB_KIND));
+        assert_eq!(Lane::Drain.kinds(&shared), [DRAIN_JOB_KIND]);
+        // Only general slots run: an effect completes, the drain beside it is never claimed.
+        let (stop, stopped) = watch::channel(false);
+        let slot = tokio::spawn(work(Arc::clone(&shared), 0, Lane::General, stopped));
+        enqueue_drain_job(&pool).await;
+        let mut effect = new_job("test.effect");
+        effect.payload = json!({"index": 1});
+        enqueue(&pool, &effect).await.unwrap();
+
+        eventually("the effect to run", || async {
+            effect_count(&pool).await == 1
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        assert_eq!(drain_jobs(&pool).await, 1, "the drain was not claimed");
+        stop.send(true).unwrap();
+        slot.await.unwrap();
+    }
+
+    #[test]
+    fn drain_slots_default_to_one_and_a_drain_lane_claims_one_job_at_a_time() {
+        assert_eq!(WorkerConfig::new(4).drain_slots, 1);
+        assert_eq!(
+            effective_drain_slots(&Registry::built_in(), &WorkerConfig::new(4)),
+            1
+        );
+        assert_eq!(Lane::Drain.batch(), 1);
+        assert_eq!(Lane::General.batch(), CLAIM_BATCH);
     }
 }

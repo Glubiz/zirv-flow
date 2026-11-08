@@ -299,6 +299,26 @@ pub async fn enqueue_drain<'e>(
     enqueue(executor, &drain_job(workspace, trace)).await
 }
 
+/// Enqueues the workspace's drain when its inbox still holds a row, and reports whether it did.
+/// A worker calls it once a drain run has completed, so a run that ended on its time budget, or
+/// that rows were appended behind, is followed by the next at once instead of at the safety net.
+pub async fn enqueue_drain_if_pending(
+    pool: &PgPool,
+    workspace: WorkspaceId,
+    trace: &TraceContext,
+) -> Result<bool, StoreError> {
+    let pending: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM ingest_inbox WHERE workspace_id = $1)")
+            .bind(workspace.as_uuid())
+            .fetch_one(pool)
+            .await
+            .map_err(StoreError::query)?;
+    if !pending {
+        return Ok(false);
+    }
+    enqueue_drain(pool, workspace, trace).await
+}
+
 fn drain_job(workspace: WorkspaceId, trace: &TraceContext) -> NewJob {
     let mut job = NewJob::new(DRAIN_JOB_KIND, trace.clone());
     job.workspace_id = Some(workspace);
@@ -1352,6 +1372,54 @@ mod tests {
     /// behind older due wakes like any job (supervisor ruling 98e6546e): a band of its own ahead of
     /// the wakes let more backlogged workspaces than slots, each draining for up to 20 s, starve
     /// every other kind.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_next_drain_is_enqueued_only_while_the_inbox_holds_a_row(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            let trace = TraceContext::root(Cause::api("req-1"));
+            let jobs = || async {
+                sqlx::query_scalar::<_, i64>("SELECT count(*) FROM jobs WHERE kind = $1")
+                    .bind(DRAIN_JOB_KIND)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+            };
+            assert!(
+                !enqueue_drain_if_pending(&pool, ws, &trace).await.unwrap(),
+                "an empty inbox needs no drain"
+            );
+            assert_eq!(jobs().await, 0);
+
+            append_inbox(
+                &pool,
+                ws,
+                Uuid::now_v7(),
+                &trace,
+                &[identify("u1", "m-1", json!({"plan": "free"}))],
+            )
+            .await
+            .unwrap();
+            assert_eq!(jobs().await, 1, "the append enqueued a drain");
+            assert!(
+                !enqueue_drain_if_pending(&pool, ws, &trace).await.unwrap(),
+                "a drain that is ready holds the key"
+            );
+
+            sqlx::query("DELETE FROM jobs WHERE kind = $1")
+                .bind(DRAIN_JOB_KIND)
+                .execute(&pool)
+                .await
+                .unwrap();
+            assert!(
+                enqueue_drain_if_pending(&pool, ws, &trace).await.unwrap(),
+                "a completed run that left a row is followed by the next drain"
+            );
+            assert_eq!(jobs().await, 1);
+        })
+        .await;
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_drain_enqueued_behind_due_wakes_waits_its_turn(pool: PgPool) {
