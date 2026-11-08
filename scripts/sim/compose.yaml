@@ -141,6 +141,8 @@ services:
     environment:
       <<: *zirv-env
       ZIRV_FLOW_DATABASE__MAX_CONNECTIONS: "24"
+      # The runtime's default thread count rounds a fractional CPU limit down (1.5 -> 1).
+      TOKIO_WORKER_THREADS: ${SIM_THREADS_SERVE:-2}
 
   zf-serve-2:
     <<: *serve
@@ -157,6 +159,7 @@ services:
       <<: *zirv-env
       ZIRV_FLOW_WORKER__CONCURRENCY: "8"
       ZIRV_FLOW_OPS__BIND: 0.0.0.0:9100
+      TOKIO_WORKER_THREADS: ${SIM_THREADS_WORKER:-2}
 
   zf-worker-2:
     <<: *worker
