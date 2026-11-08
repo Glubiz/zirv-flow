@@ -489,15 +489,14 @@ const SHARED_FLOW_LOCK: &str =
 async fn lock_flow_enrolls(
     connection: &mut PgConnection,
     flow: Uuid,
-    function: &'static str,
+    lock: &'static str,
 ) -> Result<(), StoreError> {
     sqlx::query("SELECT 1 FROM flows WHERE id = $1 FOR KEY SHARE")
         .bind(flow)
         .execute(&mut *connection)
         .await
         .map_err(StoreError::query)?;
-    let lock = format!("SELECT {function}(hashtextextended('flow.enroll:' || $1::text, 0))");
-    sqlx::query(sqlx::AssertSqlSafe(lock))
+    sqlx::query(lock)
         .bind(flow)
         .execute(connection)
         .await
