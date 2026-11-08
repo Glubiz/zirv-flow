@@ -298,7 +298,8 @@ pub(crate) struct WakeBatch {
     /// The decisions of the wakes kept so far, in the order they were made, appended in one
     /// statement before the batch commits.
     decisions: DecisionBuffer,
-    /// The count changes of the lists the wakes kept so far added people to, applied last.
+    /// The count changes of the lists the wakes kept so far added people to or removed them from,
+    /// netted per list and applied last.
     lists: ListCounts,
 }
 
@@ -327,8 +328,9 @@ impl WakeBatch {
     }
 
     /// Appends the decisions of every wake kept, in one statement, in the order they were made,
-    /// then moves the counts of the lists they added people to, one statement per list in id
-    /// order: the batch's last statements, so it holds those list rows for its commit alone.
+    /// then moves the counts of the lists they changed by each list's net, one statement per list
+    /// in id order: the batch's last statements, so it holds the rows of the lists it only added
+    /// to for its commit alone.
     pub(crate) async fn flush(&mut self, conn: &mut PgConnection) -> Result<(), StoreError> {
         self.decisions.flush(conn).await?;
         self.lists.apply(conn).await
@@ -557,8 +559,8 @@ struct Walk<'a> {
     /// Where the decisions of the walk go, in the order they were made: the job's own, appended
     /// in one statement when the walk ends, or its batch's (#397).
     decisions: &'a mut DecisionBuffer,
-    /// Where the count changes of the lists the walk adds the person to go: the job's own or its
-    /// batch's, applied right before the transaction commits.
+    /// Where the count changes of the lists the walk adds the person to or removes them from go:
+    /// the job's own or its batch's, applied right before the transaction commits.
     lists: &'a mut ListCounts,
 }
 
@@ -4335,6 +4337,53 @@ pub(super) mod tests {
     /// A batch appends the decisions of all its wakes in one statement before it commits (#397).
     /// A wake that fails in the middle of the batch rolls back to its savepoint, and the decisions
     /// it made go with it; the wakes before and after it keep theirs, in the order they made them.
+    /// A wait of a minute, then the list change `change` ("add" or "remove") on `list`.
+    fn list_graph(list: Uuid, change: &str) -> Value {
+        json!({"v": 1, "nodes": [
+            {"id": "w", "type": "wait.duration", "seconds": 60},
+            {"id": "l", "type": "action.list", "list_id": list, "change": change},
+            {"id": "end", "type": "exit"}
+        ], "edges": [edge("e1", "w", "next", "l"), edge("e2", "l", "next", "end")]})
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_batch_whose_later_wake_removes_whom_an_earlier_one_added_keeps_the_count_exact(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            let list = env.list("Welcomed").await;
+            let ada = env.person(PERSONAL_DATA.email, json!({})).await;
+            let adds = env.flow("Adds", list_graph(list, "add")).await;
+            let removes = env.flow("Removes", list_graph(list, "remove")).await;
+            let added = env.enroll(adds, 1, &[ada]).await.enrolled.remove(0);
+            let removed = env.enroll(removes, 1, &[ada]).await.enrolled.remove(0);
+            env.run_due().await;
+            env.advance(61);
+            env.hold_others(Some("wake"), None).await;
+            // Both wakes lock Ada alone, so the batch keeps the order they are handed in.
+            let wakes = wakes_of(&[added, removed], &claim_wakes(&env, 2).await);
+
+            let outcomes = spawn_batch(&env, wakes.clone()).await.unwrap();
+
+            use crate::metrics::Outcome::Completed;
+            assert_eq!(outcomes_of(&wakes, &outcomes), [Completed; 2]);
+            assert_eq!(env.count("SELECT count(*) FROM list_members").await, 0);
+            assert_eq!(
+                env.count("SELECT sum(member_count)::bigint FROM lists")
+                    .await,
+                0
+            );
+            assert_eq!(
+                env.count("SELECT count(*) FROM list_member_changes").await,
+                2,
+                "an add and a removal"
+            );
+        })
+        .await;
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_batch_appends_its_decisions_once_without_those_of_a_wake_that_rolled_back(

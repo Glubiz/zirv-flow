@@ -361,8 +361,13 @@ delta` per list in list-id order, so adds to one list from concurrent batches ne
 other and hold the list row's write lock only for their commit. That update, a `FOR NO KEY
 UPDATE`, conflicts with no key share, and a locker that already shares the row upgrades without
 queuing behind a waiter, so the end of a batch cannot deadlock with another batch's add. A removal,
-`move_on_merge` and an erasure lock their lists `FOR NO KEY UPDATE` (in id order) and correct the
-count under that lock: they wait for one another, never for an open add. A list's deletion
+`move_on_merge` and an erasure lock their lists `FOR NO KEY UPDATE` (in id order): they wait for
+one another, never for an open add. A removal's count nets into the same `ListCounts` as its
+transaction's adds (a flow step or wake batch that adds and then removes a person moves the count
+by the net, once, at the end; moving it at once could take the stored count below zero while
+the add's is still pending); it holds that list row already, so the update at the end takes no
+new lock. `move_on_merge` and an erasure correct the count at once, in transactions that add no
+one. A list's deletion
 (`FOR UPDATE`, then `ON DELETE CASCADE`) waits for the open adds and removes what they wrote; an
 add that comes after it finds no list and fails (`NoSuchList`; an inbox row becomes
 `apply_failed`). Lists have no archive state. The merge itself takes no list lock: the
@@ -501,9 +506,12 @@ object and its dedupe value. Only then does one transaction append an `ingest_in
 give the payload, found by running only the stream's identifier columns through the same
 `map_json` and `strongest_identifier`, so one person's rows, through any hook or the API, drain in
 id order in one shard while one hook's people spread across shards; a payload with no valid
-identifier, or a stream whose mapping cannot be read, falls back to the bucket of the hook id. A
-mapping edit that changes the identifier columns while rows wait can move a person's later rows to
-another bucket for that window), enqueue `ingest.drain` and, at most once a minute per hook per
+identifier, or a stream whose mapping cannot be read, falls back to the bucket of the hook id.
+The order holds only among rows bucketed under one rule: a row queued before this bucketing was
+deployed (bucketed by the hook id), or before a mapping edit that changed the identifier columns,
+can drain in another lane than a row of the same person received after it, so with rows queued
+across a deploy or such an edit, one person's rows are not guaranteed to apply in arrival order),
+enqueue `ingest.drain` and, at most once a minute per hook per
 process, report the stream through `record_stream_outcome`. Mapping runs in the drain, not at the
 endpoint: it loads each batch's hooks and the trait catalog once, maps a payload with
 `core::mapping::map_json` (the declared fields are `Mapping::root_fields`, so an absent field is
@@ -2806,8 +2814,8 @@ wake by wake in ascending order of lock group, which is the order in which merge
 flow lifecycle jobs lock people (`ORDER BY id FOR UPDATE`); resume and archive lock their one flow
 before any person. A batch therefore waits for another batch, a merge or an erasure, or they wait
 for it, without a deadlock. Outside that order are the list rows a step's list change holds until
-the commit (a key share for an add, whose count the batch applies in list-id order after its
-decisions; a no-key update for a removal), the unique-key insert of a re-evaluation, and lock groups that interleave after merges.
+the commit (a key share for an add, a no-key update for a removal; the batch applies their net
+counts in list-id order after its decisions), the unique-key insert of a re-evaluation, and lock groups that interleave after merges.
 A deadlock among those is found after `deadlock_timeout` (1 s by default) and PostgreSQL aborts the
 statement of one side; in a batch that is one wake, which rolls back to its savepoint and retries
 alone, while the wait has used the hold limit, so the batch gives its unbegun wakes back.

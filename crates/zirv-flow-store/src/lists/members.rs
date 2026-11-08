@@ -15,6 +15,10 @@
 //!   two that hold several lists from crossing.
 //! - A removal, a merge's rewrite ([`move_on_merge`]) and an erasure lock the list
 //!   `FOR NO KEY UPDATE`: they wait for each other and for a count update, never for an add.
+//! - A removal's count nets into the transaction's [`ListCounts`] with its adds
+//!   ([`remove_members_into`]): an add's is still pending, so moving the removal's at once could
+//!   take the stored count below zero. The removal holds the row already, so the update at the
+//!   end takes no new lock. The rewrite and an erasure move theirs at once: they add no one.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -419,8 +423,9 @@ pub async fn add_members_into(
 
 /// Removes `people` from a list, following merges. Removing a non-member writes nothing. The
 /// rows of the people merged into them go too: until the merge's rewrite moves such a row it is
-/// the person's membership, and moving it afterwards would put the person back. The list is held
-/// `FOR NO KEY UPDATE` from the start, so the count moves at once, in the last statement.
+/// the person's membership, and moving it afterwards would put the person back. The count moves
+/// in the last statement; a transaction that goes on writing, or has added people before, uses
+/// [`remove_members_into`].
 pub async fn remove_members(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -430,7 +435,6 @@ pub async fn remove_members(
     actor: Option<UserId>,
     trace: &TraceContext,
 ) -> Result<MembershipOutcome, MembershipError> {
-    crate::changes::cache_change_readers(connection, workspace).await?;
     let write = ListWrite {
         workspace,
         list,
@@ -438,7 +442,26 @@ pub async fn remove_members(
         actor,
         trace,
     };
-    let (targets, mut outcome) = prepare(connection, &write, Change::Removed, people).await?;
+    let mut counts = ListCounts::default();
+    let outcome = remove_members_into(connection, &write, people, &mut counts).await?;
+    counts.apply(connection).await?;
+    Ok(outcome)
+}
+
+/// [`remove_members`] for a transaction that keeps its count changes in `counts`: the removal
+/// nets into them with the transaction's adds, which have not moved the stored count yet, so a
+/// removal of someone an earlier add of the transaction put in cannot take it below zero. The
+/// list is locked `FOR NO KEY UPDATE` here, after the people, and held until the commit, so the
+/// count update [`ListCounts::apply`] makes for it at the end takes no new lock.
+pub(crate) async fn remove_members_into(
+    connection: &mut PgConnection,
+    write: &ListWrite<'_>,
+    people: &[Uuid],
+    counts: &mut ListCounts,
+) -> Result<MembershipOutcome, MembershipError> {
+    let (workspace, list) = (write.workspace, write.list);
+    crate::changes::cache_change_readers(connection, workspace).await?;
+    let (targets, mut outcome) = prepare(connection, write, Change::Removed, people).await?;
     // One row per membership removed, named by the person it now stands for.
     let gone: Vec<Uuid> = sqlx::query_scalar(
         "WITH gone AS ( \
@@ -461,20 +484,10 @@ pub async fn remove_members(
     let mut removed = gone;
     removed.sort_unstable();
     removed.dedup();
-    let mut counts = ListCounts::default();
-    record_changes(
-        connection,
-        &write,
-        Change::Removed,
-        &removed,
-        rows,
-        &mut counts,
-    )
-    .await?;
+    record_changes(connection, write, Change::Removed, &removed, rows, counts).await?;
     if !removed.is_empty() {
         request_reevaluation(connection, workspace).await?;
     }
-    counts.apply(connection).await?;
     outcome.changed = removed.len();
     outcome.unchanged -= removed.len();
     Ok(outcome)

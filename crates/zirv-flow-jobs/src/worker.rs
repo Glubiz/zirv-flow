@@ -1157,8 +1157,8 @@ async fn record_failure(
 
 /// The end of a batch transaction that can still commit: deletes the jobs of the wakes that
 /// completed, each fenced on its lease, in one statement ([`complete_jobs`]), then appends the
-/// decisions of the wakes kept, in one statement, and moves the counts of the lists they added
-/// people to. Returns the wakes that completed but lost their lease, so the batch must not
+/// decisions of the wakes kept, in one statement, and moves the counts of the lists they changed,
+/// by each list's net. Returns the wakes that completed but lost their lease, so the batch must not
 /// commit, or `None` when a statement failed.
 async fn complete_wakes(
     tx: &mut PgConnection,
