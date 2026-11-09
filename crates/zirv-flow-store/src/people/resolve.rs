@@ -17,6 +17,7 @@ use zirv_flow_core::people::{BlockReason, Identifier, IdentifierKind, merge_allo
 use zirv_flow_core::segment::ChangeClasses;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
+use super::batch::{Held, ProfileBatch};
 use super::merge::merge_people;
 use crate::StoreError;
 use crate::changes::mark_person;
@@ -69,16 +70,20 @@ struct LockedPerson {
 /// was merged away while it was being locked, re-runs the resolution, up to three attempts
 /// in all, and then fails with a retryable error. A person deleted while it was being locked
 /// fails with a retryable error at once, for the caller to run the batch again.
+///
+/// The people `batch` holds already are neither locked again nor looked up a second time: an
+/// identity of a person this transaction holds cannot move or go under it, since every writer
+/// that moves or deletes one locks its person first.
 pub(crate) async fn resolve_person(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     identifiers: &[Identifier],
     existing: Option<Uuid>,
     trace: &TraceContext,
+    batch: &mut ProfileBatch,
 ) -> Result<Resolution, StoreError> {
-    crate::changes::cache_change_readers(connection, workspace).await?;
     // After the segment guard, take the slot lock before a merge or a new person writes traits.
-    super::slots::lock_slots_shared(connection, workspace).await?;
+    batch.guard(connection, workspace).await?;
     let mut attempt = 0;
     loop {
         let owners = lookup_owners(connection, workspace, identifiers).await?;
@@ -89,7 +94,34 @@ pub(crate) async fn resolve_person(
         to_lock.extend(existing);
         to_lock.sort();
         to_lock.dedup();
-        let locked = lock_people(connection, workspace, &to_lock).await?;
+        // Every one held since before the lookup: what it found cannot have changed.
+        let held: Option<Vec<LockedPerson>> = to_lock
+            .iter()
+            .map(|id| {
+                batch.held(*id).map(|held| LockedPerson {
+                    id: *id,
+                    merged_into: held.merged_into,
+                    created_at: held.created_at,
+                })
+            })
+            .collect();
+        let settled = held.is_some();
+        let locked = match held {
+            Some(locked) => locked,
+            None => {
+                let locked = lock_people(connection, workspace, &to_lock).await?;
+                for person in &locked {
+                    batch.hold(
+                        person.id,
+                        Held {
+                            merged_into: person.merged_into,
+                            created_at: person.created_at,
+                        },
+                    );
+                }
+                locked
+            }
+        };
         if locked.len() < to_lock.len() {
             // A person was deleted (erased) while this waited for the lock. Retrying the
             // batch looks the identifiers up again and resolves into a new person.
@@ -98,7 +130,8 @@ pub(crate) async fn resolve_person(
         // A merge committed after the lookup (the identities now name the survivor), or an
         // identity was deleted or moved while the people were being locked: look again.
         if locked.iter().any(|person| person.merged_into.is_some())
-            || (!owners.is_empty()
+            || (!settled
+                && !owners.is_empty()
                 && !same_owners(&owners, connection, workspace, identifiers).await?)
         {
             attempt += 1;
@@ -122,7 +155,7 @@ pub(crate) async fn resolve_person(
             Some((survivor, _)) => (*survivor, false),
             None => match choose(identifiers, &owners, existing).or(existing) {
                 Some(person_id) => (person_id, false),
-                None => (create_person(connection, workspace).await?, true),
+                None => (create_person(connection, workspace, batch).await?, true),
             },
         };
         let mut missing: Vec<&Identifier> = identifiers
@@ -145,7 +178,7 @@ pub(crate) async fn resolve_person(
                     // The record is not this person: it starts its own, and what it shares
                     // stays with its owners.
                     split_from = Some(person_id);
-                    person_id = create_person(connection, workspace).await?;
+                    person_id = create_person(connection, workspace, batch).await?;
                     created = true;
                     blocked = Some(BlockReason::UniqueKind.as_str());
                 }
@@ -164,6 +197,7 @@ pub(crate) async fn resolve_person(
             // this pass, then look again: the winner's identity now resolves.
             if created {
                 delete_new_person(connection, workspace, person_id).await?;
+                batch.released(person_id);
             }
             continue;
         }
@@ -180,7 +214,16 @@ pub(crate) async fn resolve_person(
         }
         let merged = match merge {
             Some((survivor, losers)) => {
-                merge_people(connection, workspace, survivor, &losers, trace).await?;
+                merge_people(
+                    connection,
+                    workspace,
+                    survivor,
+                    &losers,
+                    trace,
+                    &mut batch.definitions,
+                )
+                .await?;
+                batch.merged(survivor, &losers);
                 losers
             }
             None => Vec::new(),
@@ -412,17 +455,28 @@ fn conflicts(
     found
 }
 
+/// Inserts a person, which this transaction then holds: no other can see it before the commit.
 async fn create_person(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
+    batch: &mut ProfileBatch,
 ) -> Result<Uuid, StoreError> {
     let id = Uuid::now_v7();
-    sqlx::query("INSERT INTO people (id, workspace_id) VALUES ($1, $2)")
-        .bind(id)
-        .bind(workspace.as_uuid())
-        .execute(connection)
-        .await
-        .map_err(StoreError::query)?;
+    let created_at: OffsetDateTime = sqlx::query_scalar(
+        "INSERT INTO people (id, workspace_id) VALUES ($1, $2) RETURNING created_at",
+    )
+    .bind(id)
+    .bind(workspace.as_uuid())
+    .fetch_one(connection)
+    .await
+    .map_err(StoreError::query)?;
+    batch.hold(
+        id,
+        Held {
+            merged_into: None,
+            created_at,
+        },
+    );
     Ok(id)
 }
 
@@ -582,12 +636,20 @@ mod tests {
             std::slice::from_ref(&email),
             None,
             &trace(),
+            &mut ProfileBatch::default(),
         )
         .await
         .unwrap();
-        let second = resolve_person(&mut connection, ws, &[email, phone], None, &trace())
-            .await
-            .unwrap();
+        let second = resolve_person(
+            &mut connection,
+            ws,
+            &[email, phone],
+            None,
+            &trace(),
+            &mut ProfileBatch::default(),
+        )
+        .await
+        .unwrap();
         crate::commit(connection).await.unwrap();
 
         assert!(first.created && !second.created);
@@ -620,9 +682,16 @@ mod tests {
             let (pool, barrier, email) = (pool.clone(), barrier.clone(), email.clone());
             tokio::spawn(async move {
                 let mut tx = pool.begin().await.unwrap();
-                let resolution = resolve_person(&mut tx, ws, &[email], None, &trace())
-                    .await
-                    .unwrap();
+                let resolution = resolve_person(
+                    &mut tx,
+                    ws,
+                    &[email],
+                    None,
+                    &trace(),
+                    &mut ProfileBatch::default(),
+                )
+                .await
+                .unwrap();
                 barrier.wait().await;
                 let mut blocked = false;
                 for _ in 0..400 {
@@ -652,9 +721,16 @@ mod tests {
             tokio::spawn(async move {
                 barrier.wait().await;
                 let mut tx = pool.begin().await.unwrap();
-                let resolution = resolve_person(&mut tx, ws, &[email], None, &trace())
-                    .await
-                    .unwrap();
+                let resolution = resolve_person(
+                    &mut tx,
+                    ws,
+                    &[email],
+                    None,
+                    &trace(),
+                    &mut ProfileBatch::default(),
+                )
+                .await
+                .unwrap();
                 tx.commit().await.unwrap();
                 resolution
             })
@@ -689,6 +765,7 @@ mod tests {
             &[identifier("email", "old@example.com")],
             None,
             &trace(),
+            &mut ProfileBatch::default(),
         )
         .await
         .unwrap();
@@ -699,6 +776,7 @@ mod tests {
             &[identifier("email", "new@example.com")],
             Some(first.person_id),
             &trace(),
+            &mut ProfileBatch::default(),
         )
         .await
         .unwrap();

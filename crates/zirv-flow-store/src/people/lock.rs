@@ -59,13 +59,14 @@ fn identity_bucket(kind: &str, value: &str) -> i32 {
 /// 3. every person who owns one of the identities or one of the ledger rows of `ledger`, and every
 ///    person one of them was merged into, in id order.
 ///
-/// What a record locks afterwards is held already, or a person it creates.
+/// What a record locks afterwards is held already, or a person it creates. Returns the people it
+/// locked, so the batch neither locks them again nor looks their identities up twice.
 pub(super) async fn lock_batch(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     identities: &[Vec<(String, String)>],
     ledger: &[LedgerKey<'_>],
-) -> Result<(), StoreError> {
+) -> Result<Vec<LockedRow>, StoreError> {
     let mut records: Vec<i32> = Vec::new();
     let mut kinds: Vec<&str> = Vec::new();
     let mut values: Vec<&str> = Vec::new();
@@ -161,6 +162,7 @@ pub(super) async fn lock_batch(
             .filter_map(|(person, named)| named.then_some(person)),
     );
     let mut locked: BTreeSet<Uuid> = BTreeSet::new();
+    let mut held: Vec<LockedRow> = Vec::new();
     for _ in 0..MAX_MERGE_HOPS {
         wanted.retain(|person| !locked.contains(person));
         wanted.sort_unstable();
@@ -168,14 +170,20 @@ pub(super) async fn lock_batch(
         if wanted.is_empty() {
             break;
         }
-        let rows = lock_people_in_order(connection, workspace, &wanted, PersonLock::Update).await?;
+        let rows: Vec<LockedRow> = sqlx::query_as(UPDATE_WITH_CREATED)
+            .bind(workspace.as_uuid())
+            .bind(&wanted)
+            .fetch_all(&mut *connection)
+            .await
+            .map_err(StoreError::query)?;
         locked.extend(wanted.iter().copied());
         wanted = rows
-            .into_iter()
-            .filter_map(|(_, merged_into)| merged_into)
+            .iter()
+            .filter_map(|(_, merged_into, _)| *merged_into)
             .collect();
+        held.extend(rows);
     }
-    Ok(())
+    Ok(held)
 }
 
 /// The row-level lock a caller takes on the people it names.
@@ -222,6 +230,23 @@ const UPDATE_WITH_ZONE: &str = "WITH locked AS MATERIALIZED ( \
          SELECT id, workspace_id, merged_into, traits ->> 'timezone' AS zone FROM people \
          WHERE id = ANY($2) ORDER BY id FOR UPDATE) \
      SELECT id, merged_into, zone FROM locked WHERE workspace_id = $1 ORDER BY id";
+
+/// [`PersonLock::Update`] that also returns when each locked row was created, which a batch keeps
+/// for the merges its records may make ([`super::batch::ProfileBatch`]).
+const UPDATE_WITH_CREATED: &str = "WITH locked AS MATERIALIZED ( \
+         SELECT id, workspace_id, merged_into, created_at FROM people \
+         WHERE id = ANY($2) ORDER BY id FOR UPDATE) \
+     SELECT id, merged_into, created_at FROM locked WHERE workspace_id = $1 ORDER BY id";
+
+/// [`PersonLock::Update`] that also returns each locked row's materialized traits and their
+/// sources, for a recompute.
+pub(super) const UPDATE_WITH_TRAITS: &str = "WITH locked AS MATERIALIZED ( \
+         SELECT id, workspace_id, traits, trait_sources FROM people \
+         WHERE id = ANY($2) ORDER BY id FOR UPDATE) \
+     SELECT id, traits, trait_sources FROM locked WHERE workspace_id = $1 ORDER BY id";
+
+/// A person locked `FOR UPDATE`, with the person it was merged into and when it was created.
+pub(super) type LockedRow = (Uuid, Option<Uuid>, time::OffsetDateTime);
 
 /// Locks the people of `workspace` among `ids` in id order, and returns each with the person it
 /// was merged into. A missing person, and one of another workspace, is absent.
@@ -312,7 +337,11 @@ mod tests {
         let statements = [PersonLock::KeyShare, PersonLock::Share, PersonLock::Update]
             .map(|lock| (format!("{lock:?}"), lock.sql()))
             .into_iter()
-            .chain([("UpdateWithZone".to_owned(), UPDATE_WITH_ZONE)]);
+            .chain([
+                ("UpdateWithZone".to_owned(), UPDATE_WITH_ZONE),
+                ("UpdateWithCreated".to_owned(), UPDATE_WITH_CREATED),
+                ("UpdateWithTraits".to_owned(), UPDATE_WITH_TRAITS),
+            ]);
         for (lock, sql) in statements {
             let sql = format!("EXPLAIN (FORMAT JSON) {sql}");
             let plan: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))

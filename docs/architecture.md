@@ -453,6 +453,18 @@ the stream checkpoint. Customer-event schema validation, redaction, reject
 handling, lateness and trace propagation are defined once in section 12 and
 used by every ingestion path.
 
+The trait recompute runs once per batch, not per record (`people/batch.rs`). Each record upserts
+its ledger row and owes the keys it touched; when the batch ends, one statement locks and reads
+its people (`FOR UPDATE` in id order, rows the batch already holds), one reads their live ledger
+contributions for those keys only, and one writes every person whose value or source changed.
+So no person lock is held across a per-person recompute loop, and the lock order is unchanged:
+people in id order, list and segment locks after them, `ListCounts::apply` last. A record's
+`changed` and its `trait.change` decision are judged from the person as the batch found it to
+the person as the batch leaves it, and the decision keeps the record's place in its trace. One
+batch also takes the segment guard and the shared slot lock once, reads each trait definition
+once, and does not lock again, or look the identities up a second time, for a record whose
+people it already holds. A path that applies records in savepoints gives each its own batch.
+
 The dirty set is `person_changes`, one row per `(workspace_id, person_id)`. Each row carries a
 `smallint` change-class bitmask (traits, events, lists, consent, identifiers, merge), OR-ed
 on conflict, so repeated marks coalesce and keep every class that changed. A mark made after

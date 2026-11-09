@@ -30,7 +30,9 @@ use super::schemas::{
 use crate::changes::mark_person;
 use crate::decisions::DecisionBuffer;
 use crate::flows::{Arrival, enqueue_arrivals};
-use crate::people::{find_known_person, normalize_identifiers, record_resolution, resolve_person};
+use crate::people::{
+    ProfileBatch, find_known_person, normalize_identifiers, record_resolution, resolve_person,
+};
 use crate::{NewDecision, PgPool, StoreError, append_decision, begin, commit};
 
 const MAX_MESSAGE_ID_CHARS: usize = 256;
@@ -128,6 +130,9 @@ pub(crate) struct EventBatch {
     /// The decisions of the batch, appended in one statement by `finish`. A drain batch queues the
     /// decisions of its profile records here too, so a trace keeps the order they were made in.
     pub(crate) decisions: DecisionBuffer,
+    /// What the batch's events and profile records share: the guards, the people it holds and
+    /// the recomputes its profile records owe, which `finish` runs before the decisions go.
+    pub(crate) profiles: ProfileBatch,
     /// Every accepted event is flagged `no_triggers`: the batch is the first sync of a stream.
     no_triggers: bool,
     /// The workspaces whose change readers the batch's transaction cached before the first
@@ -220,14 +225,19 @@ impl EventBatch {
         count_duplicate(connection, workspace, message_id).await
     }
 
-    /// Ends the batch: one statement appends its decisions, one query matches the accepted events
-    /// against the event waits of enrollments (a `flow.step` job per match), and one notification
-    /// goes to the debugger if it wrote feed rows. Call it once after the last record, in the transaction that holds them.
+    /// Ends the batch: the trait recomputes its profile records owe run together
+    /// ([`ProfileBatch::finish`]), one statement appends its decisions, one query matches the
+    /// accepted events against the event waits of enrollments (a `flow.step` job per match), and
+    /// one notification goes to the debugger if it wrote feed rows. Call it once after the last
+    /// record, in the transaction that holds them.
     pub(crate) async fn finish(
         &mut self,
         connection: &mut PgConnection,
         workspace: WorkspaceId,
     ) -> Result<(), StoreError> {
+        self.profiles
+            .finish(connection, workspace, &mut self.decisions)
+            .await?;
         self.decisions.flush(connection).await?;
         let arrivals = std::mem::take(&mut self.arrivals);
         enqueue_arrivals(connection, workspace, &arrivals).await?;
@@ -493,6 +503,7 @@ async fn judge_event_record(
         &identifiers,
         None,
         &record.trace,
+        &mut batch.profiles,
     )
     .await?;
     let person_id = resolution.person_id;

@@ -356,6 +356,12 @@ impl DecisionBuffer {
         self.pending.push((Uuid::now_v7(), decision));
     }
 
+    /// Pushes a record with an id taken earlier (`Uuid::now_v7()`), for a decision made where the
+    /// id was taken but known only later: it keeps that place among the others.
+    pub(crate) fn push_as(&mut self, id: Uuid, decision: NewDecision) {
+        self.pending.push((id, decision));
+    }
+
     pub fn extend(&mut self, decisions: impl IntoIterator<Item = NewDecision>) {
         for decision in decisions {
             self.push(decision);

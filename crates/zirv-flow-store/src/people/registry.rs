@@ -1,5 +1,6 @@
 //! The field registry: the trait definitions of one workspace (architecture section 7.1).
 
+use hashbrown::HashMap;
 use sqlx::PgExecutor;
 use sqlx::prelude::FromRow;
 use time::OffsetDateTime;
@@ -118,6 +119,73 @@ pub async fn list_trait_definitions<'e>(
     rows.into_iter()
         .map(DefinitionRow::into_definition)
         .collect()
+}
+
+/// The definitions a batch has read, by key: `None` is a key with no definition. A batch reads
+/// every key it has not read yet in one query ([`Definitions::load`]), and once per transaction:
+/// a definition another transaction changes meanwhile is picked up by the next batch (a rule
+/// change also enqueues `traits.recompute`). Use it in one workspace and one transaction with no
+/// savepoint rolled back under it; a definition this transaction infers goes in through
+/// [`Definitions::reload`].
+#[derive(Debug, Default)]
+pub(crate) struct Definitions {
+    by_key: HashMap<String, Option<TraitDefinition>>,
+}
+
+impl Definitions {
+    /// Reads the definitions of `keys` that are not read yet, in one query.
+    pub(crate) async fn load<'k>(
+        &mut self,
+        connection: &mut sqlx::PgConnection,
+        workspace: WorkspaceId,
+        keys: impl IntoIterator<Item = &'k str>,
+    ) -> Result<(), StoreError> {
+        let mut missing: Vec<&str> = keys
+            .into_iter()
+            .filter(|key| !self.by_key.contains_key(*key))
+            .collect();
+        missing.sort_unstable();
+        missing.dedup();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let rows: Vec<DefinitionRow> = sqlx::query_as(concat!(
+            "SELECT ",
+            definition_columns!(),
+            " FROM trait_definitions WHERE workspace_id = $1 AND key = ANY($2)"
+        ))
+        .bind(workspace.as_uuid())
+        .bind(&missing)
+        .fetch_all(connection)
+        .await
+        .map_err(StoreError::query)?;
+        for key in missing {
+            self.by_key.insert(key.to_owned(), None);
+        }
+        for row in rows {
+            let definition = row.into_definition()?;
+            self.by_key.insert(definition.key.clone(), Some(definition));
+        }
+        Ok(())
+    }
+
+    /// Reads `key` again, after this transaction registered it.
+    pub(crate) async fn reload(
+        &mut self,
+        connection: &mut sqlx::PgConnection,
+        workspace: WorkspaceId,
+        key: &str,
+    ) -> Result<(), StoreError> {
+        let found = find_trait_definition(connection, workspace, key).await?;
+        self.by_key.insert(key.to_owned(), found);
+        Ok(())
+    }
+
+    /// The definition of a key [`Definitions::load`] has read; `None` when it has none or was
+    /// never loaded.
+    pub(crate) fn get(&self, key: &str) -> Option<&TraitDefinition> {
+        self.by_key.get(key).and_then(Option::as_ref)
+    }
 }
 
 pub async fn find_trait_definition<'e>(
