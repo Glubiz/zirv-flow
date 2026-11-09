@@ -467,9 +467,10 @@ const CLAIM: &str = concat!(
 /// `segment.reevaluate` (ruling 86c4df91): only the oldest offered is kept, and its offers do not
 /// set `best`, so the other workspaces' offers are not dropped for being a later band. A
 /// reevaluate is not offered with its workspace's jobs but picked on its own (`reeval`): the
-/// oldest due one of a workspace below its cap, with one place of that workspace's room kept for
-/// it, so the cap holds. A workspace's other jobs may therefore run before its reevaluate, which
-/// is claimed by a later batch; it comes first in the batch that takes it.
+/// oldest due one of a workspace below its cap. It competes in band and age order with the
+/// workspace's other offers, and `wnth` (the rank within the workspace) against `room` (the cap
+/// less its running jobs) drops what no longer fits, so the cap holds and a lower band is never
+/// passed over for it.
 const CLAIM_CAPPED: &str = concat!(
     "WITH RECURSIVE running AS MATERIALIZED ( \
         SELECT workspace_id, count(*) AS running FROM jobs \
@@ -517,13 +518,15 @@ const CLAIM_CAPPED: &str = concat!(
         AND NOT EXISTS (SELECT FROM running WHERE running > $5 - $4) THEN ",
     claim_first_due!(),
     " ELSE ARRAY(SELECT l.id FROM ( \
-        SELECT c.id, c.run_at FROM ( \
-        SELECT c.id, c.run_at, c.drain, c.reeval, \
-            row_number() OVER (PARTITION BY c.drain, c.reeval ORDER BY c.run_at) AS nth FROM ( \
-        SELECT c.id, c.priority, c.run_at, c.drain, c.reeval, \
+        SELECT c.id, c.priority, c.run_at FROM ( \
+        SELECT c.id, c.priority, c.run_at, c.drain, c.reeval, c.room, \
+            row_number() OVER (PARTITION BY c.drain, c.reeval ORDER BY c.run_at) AS nth, \
+            row_number() OVER (PARTITION BY c.workspace_id \
+                ORDER BY c.priority, c.run_at) AS wnth FROM ( \
+        SELECT c.id, c.workspace_id, c.priority, c.run_at, c.drain, c.reeval, c.room, \
             min(c.priority) FILTER (WHERE NOT c.reeval) OVER () AS best FROM ( \
-            SELECT o.id, h.priority, o.run_at, o.kind = 'ingest.drain' AS drain, \
-                false AS reeval FROM heads h \
+            SELECT o.id, h.workspace_id, h.priority, o.run_at, o.kind = 'ingest.drain' AS drain, \
+                false AS reeval, $5 - COALESCE(r.running, 0) AS room FROM heads h \
             LEFT JOIN running r ON r.workspace_id = h.workspace_id \
             CROSS JOIN LATERAL ( \
                 SELECT f.id, f.run_at, f.kind FROM ( \
@@ -532,15 +535,17 @@ const CLAIM_CAPPED: &str = concat!(
                     AND ROW(j.workspace_id, j.priority) >= ROW(h.workspace_id, h.priority) \
                     AND (j.kind = ANY($3)) IS TRUE AND j.kind <> 'segment.reevaluate' \
                     ORDER BY j.workspace_id, j.priority, j.run_at \
-                    LIMIT LEAST($4, $5 - COALESCE(r.running, 0) \
-                        - (h.workspace_id IN (SELECT workspace_id FROM reeval))::int)) f \
+                    LIMIT LEAST($4, $5 - COALESCE(r.running, 0))) f \
                 WHERE f.workspace_id = h.workspace_id AND f.priority = h.priority \
                 AND f.run_at <= now()) o \
             WHERE h.id IS NOT NULL \
             UNION ALL \
-            SELECT r.id, r.priority, r.run_at, false, true FROM reeval r \
+            SELECT r.id, r.workspace_id, r.priority, r.run_at, false, true, \
+                $5 - COALESCE((SELECT x.running FROM running x \
+                    WHERE x.workspace_id = r.workspace_id), 0) FROM reeval r \
             UNION ALL \
-            (SELECT i.id, b.priority, i.run_at, i.kind = 'ingest.drain', false FROM instance_bands b \
+            (SELECT i.id, NULL::uuid, b.priority, i.run_at, i.kind = 'ingest.drain', false, \
+                NULL::bigint FROM instance_bands b \
              CROSS JOIN LATERAL ( \
                 SELECT j.id, j.run_at, j.kind FROM jobs j \
                 WHERE j.state = 'ready' AND j.workspace_id IS NULL AND j.priority = b.priority \
@@ -548,8 +553,9 @@ const CLAIM_CAPPED: &str = concat!(
                 ORDER BY j.run_at LIMIT $4) i \
              LIMIT $4)) c) c \
         WHERE c.priority = c.best OR c.reeval) c \
-        WHERE NOT (c.drain OR c.reeval) OR c.nth = 1 \
-        ORDER BY c.reeval DESC, c.run_at) c \
+        WHERE (NOT (c.drain OR c.reeval) OR c.nth = 1) \
+        AND (c.room IS NULL OR c.wnth <= c.room) \
+        ORDER BY c.priority, c.run_at) c \
     CROSS JOIN LATERAL ( \
         SELECT j.id FROM jobs j WHERE j.id = c.id AND j.state = 'ready' \
         FOR UPDATE SKIP LOCKED) l \
@@ -5138,7 +5144,7 @@ mod tests {
         );
     }
 
-    /// The capped claim keeps one place of a workspace's cap for its reevaluate: with the cap at
+    /// The capped claim holds the cap with a reevaluate: with the cap at
     /// two and one job running, the reevaluate takes the last place and the workspace's other
     /// jobs wait; at the cap nothing of the workspace is claimed, the reevaluate included.
     #[sqlx::test]
@@ -5173,6 +5179,48 @@ mod tests {
             .await
             .unwrap();
         assert!(third.is_empty());
+    }
+
+    /// A reevaluate (priority -1) competes in band order: a due job in a lower band (-10) of the
+    /// same workspace is claimed first, with the cap at one and with room to spare, another workspace being at its cap.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_reevaluate_does_not_jump_a_lower_band_in_a_capped_claim(pool: PgPool) {
+        let ws = workspace(&pool, "w").await;
+        let mut urgent = job("urgent.kind");
+        urgent.workspace_id = Some(ws);
+        urgent.priority = -10;
+        enqueue(&pool, &urgent).await.unwrap();
+        crate::enqueue_reevaluate(&pool, ws, &TraceContext::root(Cause::api("req")))
+            .await
+            .unwrap();
+        let kinds = [crate::REEVALUATE_JOB_KIND, "urgent.kind"];
+        // Another workspace at its cap keeps the claim off the fast path for the uncapped case.
+        let busy = workspace(&pool, "busy").await;
+        let mut running = job("busy.kind");
+        running.workspace_id = Some(busy);
+        enqueue(&pool, &running).await.unwrap();
+        let held = claim_jobs(&pool, "w", &["busy.kind"], LEASE, Some(1), 1)
+            .await
+            .unwrap();
+        assert_eq!(held.len(), 1);
+
+        for cap in [Some(1), Some(64)] {
+            let claimed = claim_jobs(&pool, "w", &kinds, LEASE, cap, 1).await.unwrap();
+            assert_eq!(
+                claimed
+                    .iter()
+                    .map(|job| job.kind.as_str())
+                    .collect::<Vec<_>>(),
+                ["urgent.kind"],
+                "cap {cap:?}"
+            );
+            let held: Vec<(Uuid, Uuid)> = claimed
+                .iter()
+                .map(|job| (job.id, job.lease_token))
+                .collect();
+            release_jobs(&pool, &held).await.unwrap();
+        }
     }
 
     /// The claims name the drain kind as a literal, so the planner can bound the drain probe by
