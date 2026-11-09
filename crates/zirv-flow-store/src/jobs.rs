@@ -5138,6 +5138,43 @@ mod tests {
         );
     }
 
+    /// The capped claim keeps one place of a workspace's cap for its reevaluate: with the cap at
+    /// two and one job running, the reevaluate takes the last place and the workspace's other
+    /// jobs wait; at the cap nothing of the workspace is claimed, the reevaluate included.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_capped_claim_keeps_a_place_of_the_cap_for_the_reevaluate(pool: PgPool) {
+        let ws = workspace(&pool, "w").await;
+        for _ in 0..3 {
+            let mut other = job("a.kind");
+            other.workspace_id = Some(ws);
+            enqueue(&pool, &other).await.unwrap();
+        }
+        crate::enqueue_reevaluate(&pool, ws, &TraceContext::root(Cause::api("req")))
+            .await
+            .unwrap();
+        let kinds = [crate::REEVALUATE_JOB_KIND, "a.kind"];
+
+        let first = claim_jobs(&pool, "w", &["a.kind"], LEASE, Some(2), 1)
+            .await
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        let second = claim_jobs(&pool, "w", &kinds, LEASE, Some(2), 32)
+            .await
+            .unwrap();
+        assert_eq!(
+            second
+                .iter()
+                .map(|job| job.kind.as_str())
+                .collect::<Vec<_>>(),
+            [crate::REEVALUATE_JOB_KIND]
+        );
+        let third = claim_jobs(&pool, "w", &kinds, LEASE, Some(2), 32)
+            .await
+            .unwrap();
+        assert!(third.is_empty());
+    }
+
     /// The claims name the drain kind as a literal, so the planner can bound the drain probe by
     /// it: the literal must stay the kind the ingest feature enqueues.
     #[test]
