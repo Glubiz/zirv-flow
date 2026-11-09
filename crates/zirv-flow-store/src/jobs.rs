@@ -1293,7 +1293,9 @@ pub enum Heard {
 
 impl JobListener {
     /// Waits for a notification and says what it carried, so a worker wakes only the slots
-    /// that claim the kind. Errors as [`JobListener::wait`] does.
+    /// that claim the kind. [`Heard::Reconnected`] means the connection was lost; it reconnects
+    /// on the next call, and notifications sent meanwhile are lost, so callers fall back to
+    /// polling.
     pub async fn hear(&mut self) -> Result<Heard, StoreError> {
         self.inner
             .try_recv()
@@ -1303,17 +1305,6 @@ impl JobListener {
                     Heard::Kind(notification.payload().to_owned())
                 })
             })
-            .map_err(StoreError::query)
-    }
-
-    /// Waits for a notification. `Ok(false)` means the connection was lost; it reconnects
-    /// on the next call, and notifications sent meanwhile are lost, so callers fall back
-    /// to polling.
-    pub async fn wait(&mut self) -> Result<bool, StoreError> {
-        self.inner
-            .try_recv()
-            .await
-            .map(|notification| notification.is_some())
             .map_err(StoreError::query)
     }
 }
@@ -2448,7 +2439,7 @@ mod tests {
 
         enqueue(&pool, &job("a.kind")).await.unwrap();
 
-        assert!(listener.wait().await.unwrap());
+        assert!(matches!(listener.hear().await.unwrap(), Heard::Kind(_)));
     }
 
     #[sqlx::test]
@@ -2860,7 +2851,10 @@ mod tests {
         assert_eq!(retried.dead_at, None);
         assert_eq!(retried.trace_id, trace.trace_id);
         assert_eq!(retried.cause, trace.cause);
-        assert!(listener.wait().await.unwrap(), "workers are woken");
+        assert!(
+            matches!(listener.hear().await.unwrap(), Heard::Kind(_)),
+            "workers are woken"
+        );
         let claimed = claim(&pool, &["retry.kind"]).await.unwrap();
         assert_eq!(claimed.id, id);
         assert_eq!(claimed.attempts, 1);
@@ -4617,7 +4611,7 @@ mod tests {
         let other = find_job(&pool, lost.id).await.unwrap().unwrap();
         assert_eq!(other.state, "running");
         assert_ne!(other.lease_token, Some(lost.lease_token));
-        tokio::time::timeout(Duration::from_secs(5), listener.wait())
+        tokio::time::timeout(Duration::from_secs(5), listener.hear())
             .await
             .expect("a release wakes the workers")
             .unwrap();
