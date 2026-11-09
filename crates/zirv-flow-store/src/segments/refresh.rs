@@ -681,7 +681,7 @@ mod tests {
     fn plan_query(plan: &str) -> SqlQuery {
         SqlQuery {
             sql: "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL \
-                  AND (p.traits ->> 'plan') = $2::text                   ORDER BY p.id DESC"
+                  AND (p.traits ->> 'plan') = $2::text"
                 .into(),
             params: vec![SqlParam::Text(plan.into())],
         }
@@ -1388,92 +1388,96 @@ mod tests {
         pool: PgPool,
     ) {
         crate::decision_testing::checked(pool, |pool| async move {
-        use std::time::Duration;
+            use std::time::Duration;
 
-        let ws = workspace(&pool, "one").await;
-        let seg = segment(&pool, ws, "Pros", 60).await;
-        // The inserts reach the people in the order of the members query, highest id first
-        // (hash joins keep the probe side's order; a merge join would sort ascending, which
-        // hides the deadlock). Without the lock CTE the foreign-key checks then take the
-        // higher people before the lowest.
-        let mut people = Vec::new();
-        for n in 0..20 {
-            people.push(person(&pool, ws, &format!("p{n}@example.com"), "pro").await);
-        }
-        people.sort();
-        let low = people[0];
-        let members = SqlQuery {
-            sql: "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL                   AND (p.traits ->> 'plan') = $2::text"
-                .into(),
-            params: vec![SqlParam::Text("pro".into())],
-        };
-
-        // The writer locks in id order: the lower person now, the higher one later.
-        let mut writer = begin(&pool).await.unwrap();
-        sqlx::query("SELECT 1 FROM people WHERE id = $1 FOR UPDATE")
-            .bind(low)
-            .execute(&mut *writer)
-            .await
-            .unwrap();
-
-        let (pid_sender, pid_receiver) = tokio::sync::oneshot::channel();
-        let refresh_pool = pool.clone();
-        let refresh = tokio::spawn(async move {
-            let job = job_trace();
-            let trace = membership_trace(MembershipCause::Initial, &job, seg.id, Uuid::new_v4());
-            let mut tx = begin(&refresh_pool).await.unwrap();
-            lock_segment_refresh(&mut tx, seg.id).await.unwrap();
-            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-                .fetch_one(&mut *tx)
-                .await
-                .unwrap();
-            sqlx::query("SET LOCAL enable_mergejoin = off")
-                .execute(&mut *tx)
-                .await
-                .unwrap();
-            pid_sender.send(pid).unwrap();
-            let outcome = apply_refresh(
-                &mut tx,
-                &RefreshApply {
-                    workspace: ws,
-                    segment: seg.id,
-                    version: 1,
-                    members: &members,
-                    now: NOW,
-                    cause: MembershipCause::Initial,
-                    trace: &trace,
-                    job: (Uuid::new_v4(), 1),
-                    job_trace: &job,
-                },
-            )
-            .await?;
-            commit(tx).await?;
-            Ok::<_, StoreError>(outcome)
-        });
-
-        // Wait until the refresh is blocked on a person the writer holds.
-        let pid = pid_receiver.await.unwrap();
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                let waiting: bool = sqlx::query_scalar(
-                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1                      AND wait_event_type = 'Lock' AND query LIKE '%segment_members%')",
-                )
-                .bind(pid)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-                if waiting {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
+            let ws = workspace(&pool, "one").await;
+            let seg = segment(&pool, ws, "Pros", 60).await;
+            // The inserts reach the people in the order of the members query, highest id first
+            // (hash joins keep the probe side's order; a merge join would sort ascending, which
+            // hides the deadlock). Without the lock CTE the foreign-key checks then take the
+            // higher people before the lowest.
+            let mut people = Vec::new();
+            for n in 0..20 {
+                people.push(person(&pool, ws, &format!("p{n}@example.com"), "pro").await);
             }
-        })
-        .await
-        .expect("the refresh never waited for the writer");
+            people.sort();
+            let low = people[0];
+            let members = SqlQuery {
+                sql:
+                    "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL \
+                    AND (p.traits ->> 'plan') = $2::text"
+                        .into(),
+                params: vec![SqlParam::Text("pro".into())],
+            };
 
-        // The writer now wants all the higher people, in id order. Before the fix the refresh
-        // holds some of them and waits for the lowest: a deadlock, one of the two aborted (40P01).
-        tokio::time::timeout(
+            // The writer locks in id order: the lower person now, the higher one later.
+            let mut writer = begin(&pool).await.unwrap();
+            sqlx::query("SELECT 1 FROM people WHERE id = $1 FOR UPDATE")
+                .bind(low)
+                .execute(&mut *writer)
+                .await
+                .unwrap();
+
+            let (pid_sender, pid_receiver) = tokio::sync::oneshot::channel();
+            let refresh_pool = pool.clone();
+            let refresh = tokio::spawn(async move {
+                let job = job_trace();
+                let trace =
+                    membership_trace(MembershipCause::Initial, &job, seg.id, Uuid::new_v4());
+                let mut tx = begin(&refresh_pool).await.unwrap();
+                lock_segment_refresh(&mut tx, seg.id).await.unwrap();
+                let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                    .fetch_one(&mut *tx)
+                    .await
+                    .unwrap();
+                sqlx::query("SET LOCAL enable_mergejoin = off")
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
+                pid_sender.send(pid).unwrap();
+                let outcome = apply_refresh(
+                    &mut tx,
+                    &RefreshApply {
+                        workspace: ws,
+                        segment: seg.id,
+                        version: 1,
+                        members: &members,
+                        now: NOW,
+                        cause: MembershipCause::Initial,
+                        trace: &trace,
+                        job: (Uuid::new_v4(), 1),
+                        job_trace: &job,
+                    },
+                )
+                .await?;
+                commit(tx).await?;
+                Ok::<_, StoreError>(outcome)
+            });
+
+            // Wait until the refresh is blocked on a person the writer holds.
+            let pid = pid_receiver.await.unwrap();
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let waiting: bool = sqlx::query_scalar(
+                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1 \
+                     AND wait_event_type = 'Lock' AND query LIKE '%segment_members%')",
+                    )
+                    .bind(pid)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                    if waiting {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("the refresh never waited for the writer");
+
+            // The writer now wants all the higher people, in id order. Before the fix the refresh
+            // holds some of them and waits for the lowest: a deadlock, one of the two aborted (40P01).
+            tokio::time::timeout(
             Duration::from_secs(20),
             sqlx::query(
                 "SELECT 1 FROM people WHERE id > $1 AND workspace_id = $2 ORDER BY id FOR UPDATE",
@@ -1485,15 +1489,15 @@ mod tests {
         .await
         .expect("the writer must not wait forever")
         .expect("the writer was the deadlock victim");
-        commit(writer).await.unwrap();
+            commit(writer).await.unwrap();
 
-        let outcome = tokio::time::timeout(Duration::from_secs(20), refresh)
-            .await
-            .expect("the refresh must finish")
-            .unwrap()
-            .expect("the refresh was the deadlock victim");
-        assert_eq!(outcome.entered, 20);
-        assert_eq!(open_people(&pool, seg.id).await.len(), 20);
+            let outcome = tokio::time::timeout(Duration::from_secs(20), refresh)
+                .await
+                .expect("the refresh must finish")
+                .unwrap()
+                .expect("the refresh was the deadlock victim");
+            assert_eq!(outcome.entered, 20);
+            assert_eq!(open_people(&pool, seg.id).await.len(), 20);
         })
         .await;
     }
