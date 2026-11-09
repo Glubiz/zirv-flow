@@ -1387,6 +1387,7 @@ mod tests {
     async fn a_full_refresh_takes_its_peoples_locks_in_id_order_and_does_not_deadlock_a_writer(
         pool: PgPool,
     ) {
+        crate::decision_testing::checked(pool, |pool| async move {
         use std::time::Duration;
 
         let ws = workspace(&pool, "one").await;
@@ -1493,5 +1494,7 @@ mod tests {
             .expect("the refresh was the deadlock victim");
         assert_eq!(outcome.entered, 20);
         assert_eq!(open_people(&pool, seg.id).await.len(), 20);
+        })
+        .await;
     }
 }
