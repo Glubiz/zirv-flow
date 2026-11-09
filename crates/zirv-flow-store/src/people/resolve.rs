@@ -155,7 +155,8 @@ pub(crate) async fn resolve_person(
             Some((survivor, _)) => (*survivor, false),
             None => match choose(identifiers, &owners, existing).or(existing) {
                 Some(person_id) => (person_id, false),
-                None => (create_person(connection, workspace, batch).await?, true),
+                // A new person's row is inserted once its identities are claimed.
+                None => (Uuid::now_v7(), true),
             },
         };
         let mut missing: Vec<&Identifier> = identifiers
@@ -178,7 +179,7 @@ pub(crate) async fn resolve_person(
                     // The record is not this person: it starts its own, and what it shares
                     // stays with its owners.
                     split_from = Some(person_id);
-                    person_id = create_person(connection, workspace, batch).await?;
+                    person_id = Uuid::now_v7();
                     created = true;
                     blocked = Some(BlockReason::UniqueKind.as_str());
                 }
@@ -187,17 +188,29 @@ pub(crate) async fn resolve_person(
         let conflicts = blocked.map_or_else(Vec::new, |reason| {
             conflicts(identifiers, &owners, person_id, reason)
         });
+        // A new person's identities are claimed before its row exists, their foreign key checked
+        // once the row is in (or they are gone): a pass that loses one never made a person to
+        // delete, a delete that checks every table referencing `people`.
+        let claiming = created && !missing.is_empty();
+        if claiming {
+            defer_identity_owners(connection, true).await?;
+        }
         let inserted = insert_identities(connection, workspace, person_id, &missing).await?;
-        if inserted < missing.len() {
+        let claimed = inserted == missing.len();
+        if created && claimed {
+            create_person(connection, workspace, person_id, batch).await?;
+        } else if created && inserted > 0 {
+            release_identities(connection, workspace, person_id).await?;
+        }
+        if claiming {
+            defer_identity_owners(connection, false).await?;
+        }
+        if !claimed {
+            // Another transaction claimed an identifier first: look again, the winner's identity
+            // now resolves.
             attempt += 1;
             if attempt >= MAX_ATTEMPTS {
                 return Err(StoreError::retryable_race());
-            }
-            // Another transaction claimed an identifier first. Undo a person made only for
-            // this pass, then look again: the winner's identity now resolves.
-            if created {
-                delete_new_person(connection, workspace, person_id).await?;
-                batch.released(person_id);
             }
             continue;
         }
@@ -455,13 +468,14 @@ fn conflicts(
     found
 }
 
-/// Inserts a person, which this transaction then holds: no other can see it before the commit.
+/// Inserts the new person `id`, whose identities this transaction has claimed, and holds it: no
+/// other transaction can see it before the commit.
 async fn create_person(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
+    id: Uuid,
     batch: &mut ProfileBatch,
-) -> Result<Uuid, StoreError> {
-    let id = Uuid::now_v7();
+) -> Result<(), StoreError> {
     let created_at: OffsetDateTime = sqlx::query_scalar(
         "INSERT INTO people (id, workspace_id) VALUES ($1, $2) RETURNING created_at",
     )
@@ -477,10 +491,11 @@ async fn create_person(
             created_at,
         },
     );
-    Ok(id)
+    Ok(())
 }
 
-async fn delete_new_person(
+/// Deletes the identities a pass claimed for a person it did not get to create.
+async fn release_identities(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     person: Uuid,
@@ -488,12 +503,26 @@ async fn delete_new_person(
     sqlx::query("DELETE FROM identities WHERE workspace_id = $1 AND person_id = $2")
         .bind(workspace.as_uuid())
         .bind(person)
-        .execute(&mut *connection)
+        .execute(connection)
         .await
         .map_err(StoreError::query)?;
-    sqlx::query("DELETE FROM people WHERE workspace_id = $1 AND id = $2")
-        .bind(workspace.as_uuid())
-        .bind(person)
+    Ok(())
+}
+
+/// Defers this transaction's check of the identities' foreign key to their person (deferrable
+/// since migration 0092), or, with `deferred` false, checks at each statement again and checks
+/// now what was deferred. Every other writer keeps the immediate check, whose key-share lock on
+/// the person an erasure waits for.
+async fn defer_identity_owners(
+    connection: &mut PgConnection,
+    deferred: bool,
+) -> Result<(), StoreError> {
+    let statement = if deferred {
+        "SET CONSTRAINTS identities_person_id_fkey DEFERRED"
+    } else {
+        "SET CONSTRAINTS identities_person_id_fkey IMMEDIATE"
+    };
+    sqlx::query(statement)
         .execute(connection)
         .await
         .map_err(StoreError::query)?;
@@ -750,6 +779,103 @@ mod tests {
             .await
             .unwrap();
         assert_eq!((identities, people), (1, 1));
+    }
+
+    /// The second record shares the email the first is claiming and brings a phone: it claims
+    /// the phone for a person of its own, loses the email, gives the phone back and resolves to
+    /// the first person, without ever inserting or deleting a `people` row.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_record_that_loses_an_identity_race_makes_no_person_to_delete(pool: PgPool) {
+        use std::time::Duration;
+
+        let name = WorkspaceName::parse("one").unwrap();
+        let slug = Slug::parse("one").unwrap();
+        let ws = create_workspace(&pool, &name, &slug).await.unwrap().id;
+        let email = identifier("email", "race@example.com");
+        let phone = identifier("phone", "+4520000000");
+
+        let mut first = pool.begin().await.unwrap();
+        let winner = resolve_person(
+            &mut first,
+            ws,
+            std::slice::from_ref(&email),
+            None,
+            &trace(),
+            &mut ProfileBatch::default(),
+        )
+        .await
+        .unwrap();
+        let second = {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                let mut tx = pool.begin().await.unwrap();
+                let resolution = resolve_person(
+                    &mut tx,
+                    ws,
+                    &[email, phone],
+                    None,
+                    &trace(),
+                    &mut ProfileBatch::default(),
+                )
+                .await
+                .unwrap();
+                // What this transaction wrote, by table: inserted and deleted rows.
+                let written: Vec<(String, i64, i64)> = sqlx::query_as(
+                    "SELECT relname::text, n_tup_ins, n_tup_del FROM pg_stat_xact_user_tables \
+                     WHERE relname IN ('people', 'identities') ORDER BY relname",
+                )
+                .fetch_all(&mut *tx)
+                .await
+                .unwrap();
+                tx.commit().await.unwrap();
+                (resolution, written)
+            })
+        };
+        let mut blocked = false;
+        for _ in 0..400 {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity \
+                 WHERE datname = current_database() AND wait_event_type = 'Lock'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting > 0 {
+                blocked = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(blocked, "the second record never waited for the email");
+        first.commit().await.unwrap();
+        let (resolution, written) = second.await.unwrap();
+
+        assert!(winner.created);
+        assert!(!resolution.created);
+        assert_eq!(resolution.person_id, winner.person_id);
+        // The phone twice (claimed, given back, attached to the winner), and no person at all.
+        assert_eq!(
+            written,
+            [("identities".to_owned(), 2, 1), ("people".to_owned(), 0, 0)]
+        );
+        let owners: Vec<(String, Uuid)> =
+            sqlx::query_as("SELECT kind, person_id FROM identities ORDER BY kind")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            owners,
+            [
+                ("email".to_owned(), winner.person_id),
+                ("phone".to_owned(), winner.person_id)
+            ]
+        );
+        let people: i64 = sqlx::query_scalar("SELECT count(*) FROM people")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(people, 1);
     }
 
     #[sqlx::test]

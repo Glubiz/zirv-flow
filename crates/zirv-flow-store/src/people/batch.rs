@@ -8,7 +8,8 @@
 //! - the people the transaction holds `FOR UPDATE`, so a record whose people are all held already
 //!   neither locks them again nor looks their identities up a second time: nobody else can move
 //!   or delete an identity of a person this transaction holds, and this transaction's own merges
-//!   and deletions update what the batch remembers;
+//!   update what the batch remembers (it deletes no person: a new one's row is inserted only
+//!   once its identities are claimed);
 //! - the trait recomputes its records owe. [`ProfileBatch::finish`] runs them for the whole batch
 //!   at once: one statement locks and reads the people, one reads their ledger contributions for
 //!   the keys that changed, one reads the definitions the batch has not read, and one writes every
@@ -130,11 +131,6 @@ impl ProfileBatch {
                 held.merged_into = Some(survivor);
             }
         }
-    }
-
-    /// This transaction deleted `person`.
-    pub(super) fn released(&mut self, person: Uuid) {
-        self.held.remove(&person);
     }
 
     pub(super) fn owe(&mut self, owed: Owed) {
