@@ -167,7 +167,8 @@ pub(crate) async fn resolve_person(
             .collect();
         let mut skipped = 0;
         let mut split_from = None;
-        if merge.is_none() && !created {
+        // With nothing to add, `fit` keeps nothing and judges nothing, so the read is skipped.
+        if merge.is_none() && !created && !missing.is_empty() {
             // What the record would add must fit the person it attaches to.
             let held = load_identities(connection, workspace, &[person_id]).await?;
             match fit(&held, &missing) {
