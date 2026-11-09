@@ -20,9 +20,9 @@ use zirv_flow_core::egress::EgressPolicy;
 use zirv_flow_core::schedule::backoff;
 use zirv_flow_render::RenderPool;
 use zirv_flow_store::{
-    ClaimedJob, Clock, DRAIN_JOB_KIND, DecisionRetention, EventRetention, FailOutcome, HmacKey,
-    Keyring, MessageRetention, PgConnection, PgPool, RetentionSettings, STEP_JOB_KIND, begin,
-    cache_change_readers, claim_jobs, complete_job, complete_jobs, confirm_lease,
+    ClaimedJob, Clock, DRAIN_JOB_KIND, DecisionRetention, EventRetention, FailOutcome, Heard,
+    HmacKey, Keyring, MessageRetention, PgConnection, PgPool, RetentionSettings, STEP_JOB_KIND,
+    begin, cache_change_readers, claim_jobs, complete_job, complete_jobs, confirm_lease,
     enqueue_drain_if_pending, fail_job, heartbeat_job, listen_for_jobs, lock_lease, observe_pool,
     payload_shard, release_jobs, sized_like,
 };
@@ -187,8 +187,14 @@ struct Shared {
     kinds: Vec<&'static str>,
     /// How many slots claim only `ingest.drain`; none when the registry has no such kind.
     drain_slots: usize,
-    /// Woken when a job is enqueued; polling covers a missed wake-up.
-    wake: Notify,
+    /// Woken when a job of a kind the general slots claim is enqueued: one idle slot per
+    /// notification. Polling covers a missed wake-up.
+    wake_general: Notify,
+    /// The same for the drain slots.
+    wake_drain: Notify,
+    /// Claim statements run, for tests that count them.
+    #[cfg(test)]
+    claims: std::sync::atomic::AtomicU64,
     /// Woken once for each job of a workspace that leaves running under a per-workspace cap,
     /// so that one slot whose claim found the workspaces at their caps claims again (#397).
     /// Only this worker's own jobs wake it; polling covers the room another worker frees.
@@ -216,7 +222,10 @@ impl Shared {
             listener_pool,
             registry,
             config,
-            wake: Notify::new(),
+            wake_general: Notify::new(),
+            wake_drain: Notify::new(),
+            #[cfg(test)]
+            claims: std::sync::atomic::AtomicU64::new(0),
             room: Notify::new(),
         }
     }
@@ -225,6 +234,30 @@ impl Shared {
     /// room that a slot may be waiting for.
     fn capped(&self) -> bool {
         self.config.max_running_per_workspace.is_some()
+    }
+
+    /// Wakes one idle slot of each lane that claims `kind`, for one notification. A notification
+    /// can stand for many jobs, so a slot whose claim comes back full wakes the next (see
+    /// [`work`]). A kind no lane of this worker claims wakes nobody.
+    fn wake_for(&self, kind: &str) {
+        for lane in [Lane::General, Lane::Drain] {
+            if lane.kinds(self).iter().any(|claimed| *claimed == kind) && self.slots_in(lane) > 0 {
+                lane.wake(self).notify_one();
+            }
+        }
+    }
+
+    /// Wakes every idle slot: the listener's connection was lost, so anything may be waiting.
+    fn wake_all(&self) {
+        self.wake_general.notify_waiters();
+        self.wake_drain.notify_waiters();
+    }
+
+    fn slots_in(&self, lane: Lane) -> usize {
+        match lane {
+            Lane::General => self.config.concurrency,
+            Lane::Drain => self.drain_slots,
+        }
     }
 
     /// Wakes one slot waiting for room when `job`, which held its workspace's room under a cap,
@@ -306,6 +339,14 @@ impl Lane {
         }
     }
 
+    /// What wakes an idle slot of this lane.
+    fn wake(self, shared: &Shared) -> &Notify {
+        match self {
+            Self::General => &shared.wake_general,
+            Self::Drain => &shared.wake_drain,
+        }
+    }
+
     /// How many jobs a claim takes: a drain slot runs one drain at a time, so the rest stay
     /// ready for the other drain slots instead of being held behind a long run.
     fn batch(self) -> u32 {
@@ -361,14 +402,16 @@ async fn listen(shared: Arc<Shared>, mut stop: watch::Receiver<bool>) {
             continue;
         };
         tokio::select! {
-            result = connected.wait() => match result {
-                // `Ok(false)` is a dropped and restored connection: notifications may have
-                // been missed, so everyone polls.
-                Ok(_) => shared.wake.notify_waiters(),
+            result = connected.hear() => match result {
+                // One idle slot per notification; a full claim wakes the next.
+                Ok(Heard::Kind(kind)) => shared.wake_for(&kind),
+                // A dropped and restored connection: notifications may have been missed, so
+                // everyone polls.
+                Ok(Heard::Reconnected) => shared.wake_all(),
                 Err(error) => {
                     warn!("the job listener failed: {error}");
                     listener = None;
-                    shared.wake.notify_waiters();
+                    shared.wake_all();
                     pause(Duration::from_secs(1), &mut stop).await;
                 }
             },
@@ -390,7 +433,7 @@ async fn work(shared: Arc<Shared>, slot: usize, lane: Lane, mut stop: watch::Rec
             // Arm the wake-ups before looking, so one sent in between is not missed. They end
             // with this block, before the batch runs: a wake-up for room that reaches a slot
             // which then claimed something goes on to the next waiting slot.
-            let woken = shared.wake.notified();
+            let woken = lane.wake(&shared).notified();
             tokio::pin!(woken);
             woken.as_mut().enable();
             let room = shared.room.notified();
@@ -399,6 +442,10 @@ async fn work(shared: Arc<Shared>, slot: usize, lane: Lane, mut stop: watch::Rec
                 room.as_mut().enable();
             }
 
+            #[cfg(test)]
+            shared
+                .claims
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             match claim_jobs(
                 &shared.pool,
                 &name,
@@ -429,6 +476,12 @@ async fn work(shared: Arc<Shared>, slot: usize, lane: Lane, mut stop: watch::Rec
                 }
             }
         };
+        // A full claim may mean more is ready, since one notification stands for the jobs a
+        // transaction enqueued of a kind: pass the wake on before running, until a claim comes
+        // back short. The wake-ups above ended with the block, so it cannot reach this slot.
+        if batch.len() >= lane.batch() as usize {
+            lane.wake(&shared).notify_one();
+        }
         run_batch(&shared, batch, &mut stop).await;
     }
 }
@@ -2765,6 +2818,106 @@ mod tests {
 
         wait_for(&pool, |counts| counts == QueueCounts::default()).await;
         stop_and_join(stop, handle).await;
+    }
+
+    /// Starts the listener and `slots` general slots on a shared state the test can read.
+    fn start_slots(
+        pool: &PgPool,
+        config: WorkerConfig,
+        slots: usize,
+    ) -> (Arc<Shared>, watch::Sender<bool>, JoinSet<()>) {
+        let shared = Arc::new(Shared::new(
+            pool.clone(),
+            pool.clone(),
+            pool.clone(),
+            registry(),
+            config,
+        ));
+        let (stop, stopped) = watch::channel(false);
+        let mut tasks = JoinSet::new();
+        tasks.spawn(listen(Arc::clone(&shared), stopped.clone()));
+        for slot in 0..slots {
+            tasks.spawn(work(
+                Arc::clone(&shared),
+                slot,
+                Lane::General,
+                stopped.clone(),
+            ));
+        }
+        (shared, stop, tasks)
+    }
+
+    /// One notification wakes one idle slot, not all of them: with eight idle slots, one
+    /// enqueued job costs one claim that finds it and one more by the slot that ran it, where
+    /// waking every slot cost eight claims that found nothing.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn one_notification_wakes_one_idle_slot(pool: PgPool) {
+        migrated(&pool).await;
+        let mut config = test_config(8);
+        // Only the notification can wake a slot in time.
+        config.poll_interval = Duration::from_secs(3600);
+        let (shared, stop, mut tasks) = start_slots(&pool, config, 8);
+        wait_until(&pool, "the listener to subscribe", LISTENING).await;
+        eventually("every slot to have claimed once", || async {
+            shared.claims.load(std::sync::atomic::Ordering::Relaxed) >= 8
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let before = shared.claims.load(std::sync::atomic::Ordering::Relaxed);
+
+        let mut job = new_job("test.effect");
+        job.payload = json!({"index": 1});
+        enqueue(&pool, &job).await.unwrap();
+        wait_for(&pool, |counts| counts == QueueCounts::default()).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let claims = shared.claims.load(std::sync::atomic::Ordering::Relaxed) - before;
+        assert!(claims <= 3, "{claims} claims for one notification");
+        stop.send(true).unwrap();
+        while tasks.join_next().await.is_some() {}
+    }
+
+    /// A burst that arrives under one notification is still shared: a slot whose claim came back
+    /// full wakes another before it runs.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_burst_under_one_notification_reaches_more_than_one_slot(pool: PgPool) {
+        migrated(&pool).await;
+        sqlx::query("CREATE TABLE gate (open boolean)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut config = test_config(4);
+        config.poll_interval = Duration::from_secs(3600);
+        let (_shared, stop, mut tasks) = start_slots(&pool, config, 4);
+        wait_until(&pool, "the listener to subscribe", LISTENING).await;
+
+        // More than one claim's batch, in one statement: one notification for the kind.
+        let jobs: Vec<NewJob> = (0..i64::from(CLAIM_BATCH) + 8)
+            .map(|index| {
+                let mut job = new_job("test.gated");
+                job.payload = json!({ "index": index });
+                job
+            })
+            .collect();
+        zirv_flow_store::enqueue_many(&pool, &jobs).await.unwrap();
+
+        eventually("a second slot to claim", || async {
+            let slots: i64 = sqlx::query_scalar("SELECT count(DISTINCT locked_by) FROM jobs")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            slots >= 2
+        })
+        .await;
+        sqlx::query("INSERT INTO gate VALUES (true)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        wait_for(&pool, |counts| counts == QueueCounts::default()).await;
+        stop.send(true).unwrap();
+        while tasks.join_next().await.is_some() {}
     }
 
     /// A config whose `ingest.drain` runs to completion on an empty inbox.

@@ -209,7 +209,7 @@ pub use ingest::{
     shard_pending,
 };
 pub use jobs::{
-    ClaimedJob, DEFAULT_MAX_ATTEMPTS, DeadCursor, FailOutcome, Job, JobListener, JobSummary,
+    ClaimedJob, DEFAULT_MAX_ATTEMPTS, DeadCursor, FailOutcome, Heard, Job, JobListener, JobSummary,
     KindDepth, Leadership, NOTIFY_CHANNEL, NewJob, NewSchedule, QueueCounts, QueueDepth, Reaped,
     Schedule, advance_schedule, claim_job, claim_jobs, complete_job, complete_jobs, confirm_lease,
     create_schedule, database_now, disable_schedule, due_schedules, enqueue, enqueue_many,

@@ -1282,7 +1282,30 @@ pub async fn listen_for_jobs(pool: &PgPool) -> Result<JobListener, StoreError> {
     Ok(JobListener { inner })
 }
 
+/// What a [`JobListener`] heard.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Heard {
+    /// A notification; its payload is the kind of the job that was enqueued or released.
+    Kind(String),
+    /// The connection was lost and restored: notifications may have been missed.
+    Reconnected,
+}
+
 impl JobListener {
+    /// Waits for a notification and says what it carried, so a worker wakes only the slots
+    /// that claim the kind. Errors as [`JobListener::wait`] does.
+    pub async fn hear(&mut self) -> Result<Heard, StoreError> {
+        self.inner
+            .try_recv()
+            .await
+            .map(|notification| {
+                notification.map_or(Heard::Reconnected, |notification| {
+                    Heard::Kind(notification.payload().to_owned())
+                })
+            })
+            .map_err(StoreError::query)
+    }
+
     /// Waits for a notification. `Ok(false)` means the connection was lost; it reconnects
     /// on the next call, and notifications sent meanwhile are lost, so callers fall back
     /// to polling.
