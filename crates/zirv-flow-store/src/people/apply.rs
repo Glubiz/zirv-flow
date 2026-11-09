@@ -21,7 +21,7 @@ use zirv_flow_core::segment::ChangeClasses;
 use zirv_flow_core::token::sha256;
 use zirv_flow_core::{OrphanPolicy, TraceContext, WorkspaceId};
 
-use super::batch::{Owed, ProfileBatch, recompute_people};
+use super::batch::{HeldPeople, Owed, ProfileBatch, recompute_people};
 use super::lock::{LedgerKey, LockedRow, lock_batch};
 use super::registry::{Definitions, insert_inferred_definition};
 use super::resolve::{Resolution, resolve_person};
@@ -99,6 +99,20 @@ pub(crate) async fn apply_profile_records(
     records: &[ProfileRecord],
     retracted: &[LedgerKey<'_>],
 ) -> Result<Vec<ProfileOutcome>, StoreError> {
+    apply_profile_records_held(connection, workspace, records, retracted)
+        .await
+        .map(|(outcomes, _)| outcomes)
+}
+
+/// [`apply_profile_records`], also handing back the people the records' batch holds, which the
+/// transaction keeps locked until it ends: the events of the same transaction resolve on them
+/// without locking or reading their identities again.
+pub(crate) async fn apply_profile_records_held(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    records: &[ProfileRecord],
+    retracted: &[LedgerKey<'_>],
+) -> Result<(Vec<ProfileOutcome>, HeldPeople), StoreError> {
     crate::changes::cache_change_readers(connection, workspace).await?;
     // Before any row lock; see `slots` for the order.
     lock_slots_shared(connection, workspace).await?;
@@ -123,7 +137,7 @@ pub(crate) async fn apply_profile_records(
     let changed = batch.finish(connection, workspace, &mut decisions).await?;
     settle(outcomes.iter_mut(), &changed);
     decisions.flush(connection).await?;
-    Ok(outcomes)
+    Ok((outcomes, batch.into_held()))
 }
 
 /// Sets `changed` on the applied ones of `outcomes`, in order, from [`ProfileBatch::finish`].

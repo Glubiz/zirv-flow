@@ -27,10 +27,13 @@ pub use apply::{
 };
 pub(crate) use apply::{
     NativeWrite, apply_native_record, apply_profile_record, apply_profile_record_into,
-    apply_profile_records, apply_profile_records_singly, remove_contribution_in,
+    apply_profile_records, apply_profile_records_held, apply_profile_records_singly,
+    remove_contribution_in,
 };
 pub(crate) use apply::{normalize_identifiers, record_resolution};
-pub(crate) use batch::ProfileBatch;
+#[cfg(test)]
+pub(crate) use batch::tests::statements_of;
+pub(crate) use batch::{HeldPeople, ProfileBatch};
 pub use conflicts::{
     ConflictResolution, ResolveError, find_conflict, list_conflicts, resolve_conflict,
 };

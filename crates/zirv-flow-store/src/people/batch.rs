@@ -52,6 +52,10 @@ pub(super) struct Held {
     pub(super) created_at: OffsetDateTime,
 }
 
+/// The people a batch holds `FOR UPDATE`, handed from one [`ProfileBatch`] to the next batch of
+/// the same transaction ([`ProfileBatch::adopt`]).
+pub(crate) struct HeldPeople(HashMap<Uuid, Held>);
+
 /// A recompute a record owes: `keys` of `person`.
 pub(super) struct Owed {
     pub(super) person: Uuid,
@@ -100,6 +104,18 @@ impl ProfileBatch {
         lock_slots_shared(connection, workspace).await?;
         self.guarded = true;
         Ok(())
+    }
+
+    /// What the batch holds, to hand on when it is done.
+    pub(crate) fn into_held(self) -> HeldPeople {
+        HeldPeople(self.held)
+    }
+
+    /// Takes over people an earlier batch of this transaction held. They stay locked until the
+    /// transaction ends, and nothing else can move or delete an identity of theirs, so the
+    /// batch resolves them on the held path.
+    pub(crate) fn adopt(&mut self, held: HeldPeople) {
+        self.held.extend(held.0);
     }
 
     pub(super) fn held(&self, person: Uuid) -> Option<Held> {
@@ -917,6 +933,27 @@ pub(crate) mod tests {
             count(
                 &statements,
                 "FROM people WHERE workspace_id = $1 AND id = ANY($2) ORDER BY id FOR UPDATE"
+            ),
+            0,
+            "{statements:#?}"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_known_person_with_nothing_new_reads_no_identities(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let records = known_people(&pool, ws, 6).await;
+
+        let (outcomes, statements) = statements_of(apply_profile_batch(&pool, ws, &records)).await;
+
+        outcomes.unwrap();
+        // Every record names an identifier its person holds already, so there is nothing to
+        // fit and no reason to read the person's identities.
+        assert_eq!(
+            count(
+                &statements,
+                "SELECT kind, value FROM identities WHERE workspace_id = $1 AND person_id = ANY($2)"
             ),
             0,
             "{statements:#?}"
