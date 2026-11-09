@@ -335,13 +335,14 @@ fn select_list(columns: &[Column]) -> String {
 
 /// The page query and, for each `?`, which key value to bind there. `keys` are the key columns
 /// in comparison order (the cursor first, when `cursor` is set); the checkpoint values are bound
-/// as text parameters, cast on the server for numbers.
+/// as text parameters, cast on the server for numbers. A page is `rows` rows.
 fn page_sql(
     from: &str,
     columns: &[Column],
     keys: &[(String, KeyType)],
     cursor: bool,
     after: bool,
+    rows: usize,
 ) -> (String, Vec<usize>) {
     let mut bindings = Vec::new();
     let sql = keyset::page_sql(
@@ -356,7 +357,7 @@ fn page_sql(
             format!("{column} {operator} {}", keys[index].1.placeholder())
         },
     );
-    (sql, bindings)
+    (keyset::limited(&sql, rows), bindings)
 }
 
 /// What a stream reads from: a table of the configured database or a configured query.
@@ -452,8 +453,9 @@ async fn open_paged(
     .await?;
     let keys = key_types(&columns, &spec)?;
     let cursor = spec.cursor.is_some();
-    let (first, _) = page_sql(&from, &columns, &keys, cursor, false);
-    let (next, positions) = page_sql(&from, &columns, &keys, cursor, true);
+    let rows = keyset::page_rows(ctx);
+    let (first, _) = page_sql(&from, &columns, &keys, cursor, false, rows);
+    let (next, positions) = page_sql(&from, &columns, &keys, cursor, true, rows);
     let bindings = positions
         .into_iter()
         .map(|index| (index, keys[index].1))
@@ -466,7 +468,7 @@ async fn open_paged(
         bindings,
     };
     let names = columns.into_iter().map(|column| column.name).collect();
-    Paged::new(pager, names, &spec, after)
+    Paged::new(pager, names, &spec, after, rows)
 }
 
 /// The key columns with the type each is paged on.
@@ -624,6 +626,7 @@ mod tests {
             &keys_of(&[("updated_at", KeyType::Temporal), ("id", KeyType::Signed)]),
             true,
             false,
+            keyset::BATCH_ROWS,
         );
 
         assert_eq!(
@@ -643,6 +646,7 @@ mod tests {
             &keys_of(&[("updated_at", KeyType::Temporal), ("id", KeyType::Signed)]),
             true,
             true,
+            keyset::BATCH_ROWS,
         );
 
         assert_eq!(
@@ -663,6 +667,7 @@ mod tests {
             &keys_of(&[("id", KeyType::Signed)]),
             false,
             false,
+            keyset::BATCH_ROWS,
         );
         let (composite, bindings) = page_sql(
             "t",
@@ -674,6 +679,7 @@ mod tests {
             ]),
             false,
             true,
+            keyset::BATCH_ROWS,
         );
 
         assert_eq!(
@@ -722,6 +728,7 @@ mod tests {
             &keys_of(&[("i`d", KeyType::Signed)]),
             false,
             false,
+            keyset::BATCH_ROWS,
         );
         assert!(
             sql.contains("CAST(s.`i``d` AS CHAR) AS `i``d` FROM `t``; DROP TABLE x; --` AS s"),

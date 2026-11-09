@@ -891,8 +891,10 @@ async fn run_pass(
         config,
         ..
     } = prepared.as_ref();
-    // A unit commits once it holds this many records or the stream ends. A single source batch over
-    // the size is committed alone: checkpoints are batch-granular.
+    // A unit commits once it holds this many records or the stream ends, and before a batch that
+    // would take it over the size. Checkpoints are batch-granular, so a source that pages itself
+    // is told the size and reads no larger pages (the database sources); a single batch over the
+    // size, as an API page can be, is committed alone.
     let unit_records = ctx.unit_sizes().sync_records.max(1);
     let planner = prepared.planner();
     // The time the run was started, so a resumed run observes what the first attempt did.
@@ -941,7 +943,7 @@ async fn run_pass(
         ids.workspace,
         source,
         &mut credential,
-        source_context.clone(),
+        source_context.clone().with_unit_records(unit_records),
     )
     .await
     .map_err(|reason| Failure::job(JobError::new(reason)))?;
@@ -955,6 +957,15 @@ async fn run_pass(
         };
         match next {
             Some(Ok(batch)) => {
+                if !gathered.is_empty() && gathered.len() + batch.records.len() > unit_records {
+                    let checkpoint = pending.take().unwrap_or(Checkpoint(Value::Null));
+                    if let Unit::Stop = pass
+                        .commit(gather(std::mem::take(&mut gathered)), &checkpoint)
+                        .await?
+                    {
+                        return Ok(());
+                    }
+                }
                 gathered.extend(batch.records);
                 pending = Some(batch.checkpoint);
                 if gathered.len() >= unit_records {
@@ -3278,6 +3289,61 @@ mod tests {
                     )
                     .await,
                     1500
+                );
+                db.drop_role().await;
+            })
+            .await;
+        }
+
+        // The source reads pages no larger than the unit, so a table of 250 rows commits in units
+        // of 100, 100 and 50, not in one page of 250.
+        #[sqlx::test]
+        #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+        async fn a_table_of_250_rows_commits_in_three_units_of_at_most_100(pool: PgPool) {
+            zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+                let db = setup_rows(&pool, "incremental", 250).await;
+                let (run, job) = db.env.queue().await;
+                let before: Arc<std::sync::Mutex<Vec<i64>>> = Arc::default();
+                let probe = hook({
+                    let (pool, before) = (pool.clone(), Arc::clone(&before));
+                    move |_| {
+                        let (pool, before) = (pool.clone(), Arc::clone(&before));
+                        Box::pin(async move {
+                            let committed: i64 =
+                                sqlx::query_scalar("SELECT count(*) FROM source_records")
+                                    .fetch_one(&pool)
+                                    .await
+                                    .unwrap();
+                            before.lock().unwrap().push(committed);
+                        })
+                    }
+                });
+
+                attempt_sized(
+                    &db.env,
+                    &job,
+                    &probe,
+                    Some(Arc::clone(&db.keys)),
+                    loopback(),
+                    false,
+                    UnitSizes {
+                        kafka_messages: 100,
+                        sync_records: 100,
+                    },
+                )
+                .await
+                .unwrap();
+
+                // Before each unit commits, the records the units before it committed.
+                assert_eq!(*before.lock().unwrap(), [0, 100, 200]);
+                let done = db.env.run(run.id).await;
+                assert_eq!(
+                    (done.state.as_str(), done.records_read, done.records_applied),
+                    ("succeeded", 250, 250)
+                );
+                assert_eq!(
+                    db.env.count("SELECT count(*) FROM source_records").await,
+                    250
                 );
                 db.drop_role().await;
             })

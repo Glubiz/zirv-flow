@@ -44,6 +44,8 @@ pub struct SourceContext {
     flight: Arc<tokio::sync::Mutex<()>>,
     /// Serializes authorization-code refreshes across processes, when the caller provides it.
     token_store: Option<Arc<dyn TokenStore>>,
+    /// The most records the caller commits in one unit, when it said.
+    unit_records: Option<usize>,
 }
 
 impl SourceContext {
@@ -86,7 +88,20 @@ impl SourceContext {
             token: Arc::default(),
             flight: Arc::default(),
             token_store: None,
+            unit_records: None,
         }
+    }
+
+    /// The most records the caller commits in one unit (`ingest.sync_unit_records`). A source
+    /// that chooses its own page size reads pages no larger, so a page never takes a unit over
+    /// it; the database sources do.
+    pub fn with_unit_records(mut self, records: usize) -> Self {
+        self.unit_records = Some(records.max(1));
+        self
+    }
+
+    pub(crate) fn unit_records(&self) -> Option<usize> {
+        self.unit_records
     }
 
     /// Limits the source's requests per process; `None` is unlimited. The spec of the source
