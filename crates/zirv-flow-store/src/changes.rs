@@ -227,7 +227,9 @@ pub async fn dirty_classes(
     limit: i64,
 ) -> Result<Option<ChangeClasses>, StoreError> {
     let bits: Option<i16> = sqlx::query_scalar(
-        "SELECT bit_or(classes) FROM (              SELECT classes FROM person_changes WHERE workspace_id = $1              ORDER BY changed_at, person_id LIMIT $2) oldest",
+        "SELECT bit_or(classes) FROM ( \
+             SELECT classes FROM person_changes WHERE workspace_id = $1 \
+             ORDER BY changed_at, person_id LIMIT $2) oldest",
     )
     .bind(workspace.as_uuid())
     .bind(limit)
