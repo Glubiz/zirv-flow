@@ -86,7 +86,7 @@ pub use audit::{
 };
 pub use changes::{
     DirtyHead, DirtyPerson, REEVALUATE_JOB_KIND, cache_change_readers, claim_dirty, dirty_backlog,
-    dirty_heads, enqueue_reevaluate,
+    dirty_classes, dirty_heads, enqueue_reevaluate,
 };
 pub use clock::{Clock, ManualClock};
 pub use consent::{

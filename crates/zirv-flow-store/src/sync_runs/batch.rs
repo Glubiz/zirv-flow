@@ -25,8 +25,8 @@ use crate::lists::{
     ListCounts, ListSource, ListWrite, MAX_PEOPLE_PER_CALL, MembershipError, add_members_into,
 };
 use crate::people::{
-    LedgerKey, ProfileOutcome, ProfileRecord, apply_profile_records, apply_profile_records_singly,
-    remove_contribution_in,
+    HeldPeople, LedgerKey, ProfileOutcome, ProfileRecord, apply_profile_records_held,
+    apply_profile_records_singly, remove_contribution_in,
 };
 use crate::stream_offsets::PartitionOffset;
 use crate::{
@@ -218,7 +218,7 @@ pub async fn commit_sync_batch(
     }
     write_offsets(&mut tx, batch.workspace, batch.stream_id, batch.offsets).await?;
 
-    let results = apply_upserts(&mut tx, batch).await?;
+    let (results, held) = apply_upserts(&mut tx, batch).await?;
     // Every record the run read that still exists in the source is marked as seen: the applied
     // and unchanged ones, and the ones the mapping or the store refused, whose earlier
     // contribution a sweep must not take away (a broken mapping cannot cascade into deletions).
@@ -236,7 +236,7 @@ pub async fn commit_sync_batch(
         .chain(batch.seen.iter().map(String::as_str))
         .collect();
     let seen = mark_seen(&mut tx, batch, &seen_keys).await?;
-    let events = apply_events(&mut tx, batch, &results, &seen).await?;
+    let events = apply_events(&mut tx, batch, &results, &seen, held).await?;
     link_event_rejects(&mut tx, batch, &events).await?;
     let mut lists = ListCounts::default();
     if !join_lists(&mut tx, batch, &results, &mut lists).await? {
@@ -515,7 +515,7 @@ pub(crate) async fn write_offsets(
 async fn apply_upserts(
     tx: &mut crate::Tx,
     batch: &SyncBatch<'_>,
-) -> Result<Vec<Option<ProfileOutcome>>, StoreError> {
+) -> Result<(Vec<Option<ProfileOutcome>>, Option<HeldPeople>), StoreError> {
     let records: Vec<ProfileRecord> = batch
         .upserts
         .iter()
@@ -531,10 +531,13 @@ async fn apply_upserts(
         })
         .collect();
     if batch.singly {
-        return apply_profile_records_singly(tx, batch.workspace, &records, &deleted).await;
+        let outcomes =
+            apply_profile_records_singly(tx, batch.workspace, &records, &deleted).await?;
+        return Ok((outcomes, None));
     }
-    let outcomes = apply_profile_records(tx, batch.workspace, &records, &deleted).await?;
-    Ok(outcomes.into_iter().map(Some).collect())
+    let (outcomes, held) =
+        apply_profile_records_held(tx, batch.workspace, &records, &deleted).await?;
+    Ok((outcomes.into_iter().map(Some).collect(), Some(held)))
 }
 
 /// What became of one record's event.
@@ -593,6 +596,7 @@ async fn apply_events(
     batch: &SyncBatch<'_>,
     results: &[Option<ProfileOutcome>],
     seen: &HashMap<String, Uuid>,
+    held: Option<HeldPeople>,
 ) -> Result<EventsApplied, StoreError> {
     let mut applied = EventsApplied::default();
     if batch.upserts.iter().all(|upsert| upsert.event.is_none()) {
@@ -611,6 +615,14 @@ async fn apply_events(
     };
     let mut events = new_events();
     events.readers_cached(batch.workspace);
+    // The people the records locked stay locked to the end of the transaction, and nothing else
+    // can move or delete their identities, so each event resolves them on the held path: no
+    // lock, no owner comparison and no identity read. The records' merges are already in what
+    // the batch handed on. Only the all-together path has such a batch; with `singly`, every
+    // event has a batch and a savepoint of its own.
+    if let Some(held) = held {
+        events.profiles.adopt(held);
+    }
     // Built up front, so one statement can look up every `messageId` of the batch.
     let mut records: Vec<Option<(EventRecord, String)>> = Vec::with_capacity(results.len());
     for (upsert, result) in batch.upserts.iter().zip(results) {
@@ -2969,6 +2981,52 @@ mod tests {
                 0,
                 "every ledger row of the merged person moved to the survivor"
             );
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_sync_batchs_events_resolve_on_the_people_its_records_locked(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let fx = fixture(&pool, "one", "full_refresh").await;
+            let source = fx.source_id.to_string();
+            let key = key();
+            let first: Vec<SyncUpsert> = (0..10)
+                .map(|i| upsert(&fx, &format!("k{i}"), &format!("a{i}@example.com")))
+                .collect();
+            let cp = json!({"offset": 10});
+            commit_sync_batch(&pool, &keyed(&fx, &source, &first, &cp, &key))
+                .await
+                .unwrap();
+            // The same people again, each with an event.
+            let second: Vec<SyncUpsert> = (0..10)
+                .map(|i| {
+                    with_event(
+                        &fx,
+                        &format!("k{i}"),
+                        &format!("a{i}@example.com"),
+                        json!(i),
+                        &[],
+                    )
+                })
+                .collect();
+
+            let (outcome, statements) = crate::people::statements_of(commit_sync_batch(
+                &pool,
+                &keyed(&fx, &source, &second, &cp, &key),
+            ))
+            .await;
+
+            let BatchOutcome::Committed(progress) = outcome.unwrap() else {
+                panic!("not committed");
+            };
+            assert_eq!(progress.events.accepted, 10);
+            let relocks = statements
+                .iter()
+                .filter(|sql| sql.contains("FROM people WHERE workspace_id = $1 AND id = ANY($2) ORDER BY id FOR UPDATE"))
+                .count();
+            assert_eq!(relocks, 0, "{statements:#?}");
         })
         .await;
     }
