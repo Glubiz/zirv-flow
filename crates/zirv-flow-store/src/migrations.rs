@@ -366,6 +366,34 @@ mod tests {
         );
     }
 
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_queue_tables_vacuum_on_a_fixed_count_without_a_cost_delay(pool: PgPool) {
+        for table in ["jobs", "ingest_inbox", "person_changes"] {
+            let options: Vec<String> =
+                sqlx::query_scalar("SELECT unnest(reloptions) FROM pg_class WHERE relname = $1")
+                    .bind(table)
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            for wanted in [
+                "autovacuum_vacuum_scale_factor=0",
+                "autovacuum_vacuum_cost_delay=0",
+            ] {
+                assert!(
+                    options.iter().any(|option| option == wanted),
+                    "{table} lacks {wanted}: {options:?}"
+                );
+            }
+            assert!(
+                options
+                    .iter()
+                    .any(|option| option.starts_with("autovacuum_vacuum_threshold=")),
+                "{table}: {options:?}"
+            );
+        }
+    }
+
     #[sqlx::test(migrations = false)]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_view_pii_migration_gives_every_existing_membership_no_grant(pool: PgPool) {
