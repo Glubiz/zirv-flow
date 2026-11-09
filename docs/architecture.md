@@ -2788,9 +2788,10 @@ future backlog (`docs/benchmarks/m5-flows.md` section 8).
 
 `segment.reevaluate` is the one kind enqueued below the default: at priority -1 (`REEVALUATE_PRIORITY`), so a
 run is claimed ahead of the priority-0 backlog instead of waiting behind every older ready job (one run at a
-time per workspace, 20 s budget). It cannot starve the other bands: a workspace has at most one such job
-ready or running, so while busy workspaces are fewer than the general slots the remaining slots run the
-other bands.
+time per workspace, 20 s budget). It cannot starve the other bands: a batch claim takes at most one
+`segment.reevaluate`, as it takes at most one `ingest.drain` (ruling 86c4df91), uncapped and capped alike
+(a capped claim picks the oldest due one on its own and keeps one place of its workspace's cap for it), so
+however many workspaces are busy the rest of the batch is the other bands' jobs.
 As built (#397): a worker slot claims up to 32 jobs with that one statement and one commit, by
 priority band, then age, each with a lease token of its own, and runs them one after another, each
 in its own transaction exactly as a job claimed alone: its own lease check, heartbeat and fenced

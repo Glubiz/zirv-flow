@@ -18,10 +18,9 @@ pub const REEVALUATE_JOB_KIND: &str = "segment.reevaluate";
 /// The priority a `segment.reevaluate` job is enqueued at; lower is claimed first, and every
 /// other job is at 0. A workspace has one reevaluate job at a time (its unique key) and a run
 /// never re-enqueues itself, so each new run would otherwise wait behind every older ready job.
-/// This cannot starve the priority-0 jobs: at most one reevaluate job per workspace is ready or
-/// running, so while the workspaces are fewer than the general slots, the slots left over run
-/// the other bands. (With more busy workspaces than slots, reevaluation could occupy every slot
-/// while backlog remains.)
+/// This cannot starve the priority-0 jobs: a batch claim takes at most one `segment.reevaluate`
+/// (supervisor ruling 86c4df91; `jobs.rs`, `CLAIM` and `CLAIM_CAPPED`), however many workspaces
+/// are busy, so the rest of every batch is the other bands' jobs.
 pub const REEVALUATE_PRIORITY: i16 = -1;
 
 /// One claimed mark.
