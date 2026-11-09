@@ -21,8 +21,8 @@ use zirv_flow_core::{TraceContext, WorkspaceId};
 use zirv_flow_segments::{compile, parse_and_validate};
 use zirv_flow_store::{
     Clock, DirtyBatch, NewDecision, PgPool, REEVALUATE_JOB_KIND, ReevaluateApply, append_decision,
-    apply_reevaluation, begin, claim_dirty, commit, find_segment, find_segment_version,
-    lock_reevaluation, segment_catalog,
+    apply_reevaluation, begin, claim_dirty, commit, dirty_classes, find_segment,
+    find_segment_version, lock_reevaluation, reevaluation_order, segment_catalog,
 };
 
 use super::segment_refresh::{catalog_of, sql_query};
@@ -91,15 +91,29 @@ impl Run {
         let mut tx = begin(pool).await?;
         // The slot lock comes before every other lock of the pass: see the store's `slots`.
         zirv_flow_store::hold_trait_slots(&mut tx, self.workspace).await?;
-        let claimed = claim_dirty(&mut tx, self.workspace, BATCH).await?;
+        // Peek at the classes of the oldest marks without a lock, then lock the segments they
+        // reach, and only then claim. A pass that waits on a refresh lock must hold no mark and
+        // no person (#518, D3b).
+        let Some(mask) = dirty_classes(&mut tx, self.workspace, BATCH).await? else {
+            return Ok(0);
+        };
+        // Lock every segment the batch reaches before reading anything about it, in an order
+        // that is the same for every pass, so two passes and a full refresh cannot deadlock.
+        let mut order = lock_reevaluation(&mut tx, self.workspace, mask).await?;
+        // Only marks the mask covers: one whose classes grew since the peek waits for the next
+        // pass, which locks the segments the new class reaches.
+        let claimed = claim_dirty(&mut tx, self.workspace, BATCH, mask).await?;
         if claimed.is_empty() {
             return Ok(0);
         }
         let batch = DirtyBatch::new(&claimed, &self.trace);
+        if batch.classes() != mask {
+            // The claim is narrower than the peek: keep, in the locked order, the segments its
+            // own classes reach.
+            let reached = reevaluation_order(&mut tx, self.workspace, batch.classes()).await?;
+            order.retain(|segment| reached.contains(segment));
+        }
 
-        // Lock every segment the batch reaches before reading anything about it, in an order
-        // that is the same for every pass, so two passes and a full refresh cannot deadlock.
-        let order = lock_reevaluation(&mut tx, self.workspace, batch.classes()).await?;
         if !order.is_empty() {
             // Read once the locks are held, so the time is no earlier than the refresh that
             // held them committed.
@@ -1676,6 +1690,69 @@ mod tests {
             tokio::time::timeout(std::time::Duration::from_secs(20), job)
                 .await
                 .expect("the pass finishes once the slot lock is free")
+                .unwrap();
+            assert_eq!(dirty(&pool).await, 0);
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_pass_waiting_for_a_refresh_lock_holds_no_person_or_mark(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            zirv_flow_store::migrate(&pool).await.unwrap();
+            let ws = workspace(&pool).await;
+            define_trait(&pool, ws, "plan").await;
+            let clock = clock();
+            let seg = create(&pool, ws, "Pro", plan_is("pro")).await;
+            full_refresh(&pool, ws, seg.id, &clock).await;
+            reevaluate(&pool, ws, &clock).await;
+            identify(
+                &pool,
+                ws,
+                PERSONAL_DATA.email,
+                "pro",
+                &TraceContext::root(Cause::api("enter")),
+            )
+            .await;
+            assert_eq!(dirty(&pool).await, 1);
+
+            // A running full refresh holds the segment's refresh lock.
+            let mut refresh = zirv_flow_store::begin(&pool).await.unwrap();
+            zirv_flow_store::lock_reevaluation(&mut refresh, ws, ChangeClasses::TRAITS)
+                .await
+                .unwrap();
+            let job = {
+                let pool = pool.clone();
+                let clock = clock.clone();
+                tokio::spawn(async move { reevaluate(&pool, ws, &clock).await })
+            };
+            tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+
+            // The pass waits on the refresh lock and holds neither the person nor the mark.
+            let person: Uuid = sqlx::query_scalar("SELECT person_id FROM person_changes")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            let mut probe = zirv_flow_store::begin(&pool).await.unwrap();
+            sqlx::query("SELECT id FROM people WHERE id = $1 FOR UPDATE NOWAIT")
+                .bind(person)
+                .fetch_one(&mut *probe)
+                .await
+                .expect("the waiting pass holds the person");
+            sqlx::query(
+                "SELECT person_id FROM person_changes WHERE person_id = $1 FOR UPDATE NOWAIT",
+            )
+            .bind(person)
+            .fetch_one(&mut *probe)
+            .await
+            .expect("the waiting pass holds the mark");
+            drop(probe);
+
+            zirv_flow_store::commit(refresh).await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(20), job)
+                .await
+                .expect("the pass finishes once the refresh lock is free")
                 .unwrap();
             assert_eq!(dirty(&pool).await, 0);
         })

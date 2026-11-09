@@ -1090,14 +1090,18 @@ segment-entry and segment-exit triggers ignore `definition_change` changes (OQ-6
 A flow with a segment-entry trigger chooses "enroll current members" at publish (M5) when
 current members should enroll rather than only new entries.
 
-**Claim and pass.** `segment.reevaluate` claims a batch with
+**Claim and pass.** `segment.reevaluate` takes the shared slot lock, reads (without a lock) the
+classes of the oldest marks, locks the refresh lock of every segment those classes reach, and only
+then claims, so a pass that waits on a running full refresh holds no mark and no person. The claim
+takes only marks whose classes the read covers; a mark that grew since is left for a later pass. It
+claims a batch with
 `DELETE ... WHERE (workspace_id, person_id) IN (SELECT ... FOR UPDATE SKIP LOCKED LIMIT n) RETURNING`,
 so concurrent jobs take disjoint people. A mark made later re-inserts a row, and a failed pass
 rolls the claim back. The claim also locks each person `FOR KEY SHARE SKIP LOCKED`, the lock the
 pass's membership rows and events take through their foreign keys, so the mark of a person a
 writer holds `FOR UPDATE` is left for a later pass: the pass never waits on a writer that waits
 on the pass for the mark (#518). In that one transaction it evaluates every segment whose dependency
-classes intersect the batch's combined classes, plus their transitive segment dependents, in
+classes intersect the claimed batch's combined classes, plus their transitive segment dependents, in
 topological order, with `person_id = ANY(batch)`. Name-level filtering (event names, trait
 keys) is an optimization, made only if the M4 benchmark misses.
 **Safety net and pending segments.** The scheduler leader enqueues `segment.reevaluate` for any workspace whose oldest mark is more than 2 s old, so correctness never depends on a writer's enqueue, and it publishes the dirty backlog and age. A pass skips a segment whose `computed_version` is null or differs from `current_version`: its pending full refresh covers everyone.

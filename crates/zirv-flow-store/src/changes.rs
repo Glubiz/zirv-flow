@@ -217,10 +217,31 @@ type ClaimedRow = (
     Option<OffsetDateTime>,
 );
 
-/// Claims up to `limit` of the workspace's oldest marks and returns them in person order.
-/// Rows another claim holds are skipped, so concurrent claims take disjoint people. The marks
-/// stay deleted only if the caller's transaction commits; a mark made after the claim inserts
-/// its row afresh.
+/// The classes the workspace's oldest `limit` marks carry, OR-ed, read without a lock. A pass
+/// takes the refresh locks of the segments these classes reach, and only then claims with
+/// [`claim_dirty`], so it never waits on a refresh while it holds a claim. `None` when there is
+/// no mark.
+pub async fn dirty_classes(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    limit: i64,
+) -> Result<Option<ChangeClasses>, StoreError> {
+    let bits: Option<i16> = sqlx::query_scalar(
+        "SELECT bit_or(classes) FROM (              SELECT classes FROM person_changes WHERE workspace_id = $1              ORDER BY changed_at, person_id LIMIT $2) oldest",
+    )
+    .bind(workspace.as_uuid())
+    .bind(limit)
+    .fetch_one(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(bits.map(|bits| ChangeClasses::from_bits(u8::try_from(bits).unwrap_or(u8::MAX))))
+}
+
+/// Claims up to `limit` of the workspace's oldest marks whose classes `mask` covers and returns
+/// them in person order. A mark with a class outside `mask` (it grew after the caller read
+/// [`dirty_classes`]) stays for a later pass. Rows another claim holds are skipped, so
+/// concurrent claims take disjoint people. The marks stay deleted only if the caller's
+/// transaction commits; a mark made after the claim inserts its row afresh.
 ///
 /// Each claimed person is also locked `FOR KEY SHARE`, the lock the pass's membership rows and
 /// events take through their foreign keys, and a person a writer holds `FOR UPDATE` is skipped
@@ -231,18 +252,20 @@ pub async fn claim_dirty(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     limit: i64,
+    mask: ChangeClasses,
 ) -> Result<Vec<DirtyPerson>, StoreError> {
     let rows: Vec<ClaimedRow> = sqlx::query_as(
         "DELETE FROM person_changes WHERE (workspace_id, person_id) IN ( \
              SELECT c.workspace_id, c.person_id FROM person_changes c \
              JOIN people p ON p.id = c.person_id \
-             WHERE c.workspace_id = $1 \
+             WHERE c.workspace_id = $1 AND (c.classes & ~$3::int2) = 0 \
              ORDER BY c.changed_at, c.person_id \
              FOR UPDATE OF c SKIP LOCKED FOR KEY SHARE OF p SKIP LOCKED LIMIT $2) \
          RETURNING person_id, classes, trace_id, cause_kind, cause_id, late_from",
     )
     .bind(workspace.as_uuid())
     .bind(limit)
+    .bind(i16::from(mask.bits()))
     .fetch_all(connection)
     .await
     .map_err(StoreError::query)?;
@@ -316,6 +339,8 @@ mod tests {
     use super::*;
     use crate::{begin, commit, create_workspace};
 
+    const ALL: ChangeClasses = ChangeClasses::from_bits(u8::MAX);
+
     fn trace(cause: Cause) -> TraceContext {
         TraceContext::root(cause)
     }
@@ -355,7 +380,7 @@ mod tests {
 
     async fn claim(pool: &PgPool, ws: WorkspaceId, limit: i64) -> Vec<DirtyPerson> {
         let mut tx = begin(pool).await.unwrap();
-        let claimed = claim_dirty(&mut tx, ws, limit).await.unwrap();
+        let claimed = claim_dirty(&mut tx, ws, limit, ALL).await.unwrap();
         commit(tx).await.unwrap();
         claimed
     }
@@ -887,19 +912,57 @@ mod tests {
 
         // A failed pass restores its batch.
         let mut tx = begin(&pool).await.unwrap();
-        assert_eq!(claim_dirty(&mut tx, ws, 10).await.unwrap().len(), 2);
+        assert_eq!(claim_dirty(&mut tx, ws, 10, ALL).await.unwrap().len(), 2);
         tx.rollback().await.unwrap();
         assert_eq!(dirty_backlog(&pool).await.unwrap(), 2);
 
         // A mark made after the claim re-inserts its row, and the claim does not remove it.
         let mut tx = begin(&pool).await.unwrap();
-        assert_eq!(claim_dirty(&mut tx, ws, 10).await.unwrap().len(), 2);
+        assert_eq!(claim_dirty(&mut tx, ws, 10, ALL).await.unwrap().len(), 2);
         commit(tx).await.unwrap();
         mark(&pool, ws, &[one], ChangeClasses::LISTS, &a, None).await;
         let left = claim(&pool, ws, 10).await;
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].person_id, one);
         assert_eq!(left[0].classes, ChangeClasses::LISTS);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_claim_leaves_marks_whose_classes_the_mask_does_not_cover(pool: PgPool) {
+        let ws = workspace(&pool, "ours").await;
+        crate::segments::tests_support::segment_reading(&pool, ws, ALL).await;
+        let (plain, grown) = (person(&pool, ws).await, person(&pool, ws).await);
+        let a = trace(Cause::api("a"));
+        mark(&pool, ws, &[plain, grown], ChangeClasses::TRAITS, &a, None).await;
+
+        let mut tx = begin(&pool).await.unwrap();
+        assert_eq!(
+            dirty_classes(&mut tx, ws, 10).await.unwrap(),
+            Some(ChangeClasses::TRAITS)
+        );
+        tx.rollback().await.unwrap();
+        // One mark grows after the read.
+        mark(&pool, ws, &[grown], ChangeClasses::EVENTS, &a, None).await;
+
+        let mut tx = begin(&pool).await.unwrap();
+        let claimed = claim_dirty(&mut tx, ws, 10, ChangeClasses::TRAITS)
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].person_id, plain);
+        commit(tx).await.unwrap();
+
+        // The grown mark is left whole for a later pass.
+        let left = claim(&pool, ws, 10).await;
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].person_id, grown);
+        assert_eq!(
+            left[0].classes,
+            ChangeClasses::TRAITS | ChangeClasses::EVENTS
+        );
+        let mut tx = begin(&pool).await.unwrap();
+        assert_eq!(dirty_classes(&mut tx, ws, 10).await.unwrap(), None);
     }
 
     #[sqlx::test]
@@ -928,8 +991,8 @@ mod tests {
         let mut first = begin(&pool).await.unwrap();
         let mut second = begin(&pool).await.unwrap();
 
-        let one = claim_dirty(&mut first, ws, 4).await.unwrap();
-        let two = claim_dirty(&mut second, ws, 4).await.unwrap();
+        let one = claim_dirty(&mut first, ws, 4, ALL).await.unwrap();
+        let two = claim_dirty(&mut second, ws, 4, ALL).await.unwrap();
 
         assert_eq!((one.len(), two.len()), (4, 2));
         let mut all: Vec<Uuid> = one.iter().chain(&two).map(|p| p.person_id).collect();
@@ -973,7 +1036,7 @@ mod tests {
             let pool = pool.clone();
             tokio::spawn(async move {
                 let mut tx = begin(&pool).await?;
-                let claimed = claim_dirty(&mut tx, ws, 10).await?;
+                let claimed = claim_dirty(&mut tx, ws, 10, ALL).await?;
                 for person in &claimed {
                     sqlx::query(
                         "INSERT INTO segment_members (workspace_id, segment_id, person_id, \
