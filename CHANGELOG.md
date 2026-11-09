@@ -15,3 +15,19 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.271.0 (2026-11-09)
+
+### Fixes
+
+- allow the slice scan clippy suggests contains for
+
+### Performance
+
+- use contains for the lane kind check, drop JobListener::wait
+- per-table autovacuum for the queue tables (0093), bump 0.271.0
+- wake one idle slot per notification, chained by full claims
+
+### Documentation
+
+- point the architecture upgrade link at the 0093 lock review
+
