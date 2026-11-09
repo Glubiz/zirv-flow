@@ -15,6 +15,15 @@ use crate::{NewJob, StoreError, enqueue};
 /// The kind of the job that re-evaluates the segments for a workspace's dirty people.
 pub const REEVALUATE_JOB_KIND: &str = "segment.reevaluate";
 
+/// The priority a `segment.reevaluate` job is enqueued at; lower is claimed first, and every
+/// other job is at 0. A workspace has one reevaluate job at a time (its unique key) and a run
+/// never re-enqueues itself, so each new run would otherwise wait behind every older ready job.
+/// This cannot starve the priority-0 jobs: at most one reevaluate job per workspace is ready or
+/// running, so while the workspaces are fewer than the general slots, the slots left over run
+/// the other bands. (With more busy workspaces than slots, reevaluation could occupy every slot
+/// while backlog remains.)
+pub const REEVALUATE_PRIORITY: i16 = -1;
+
 /// One claimed mark.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DirtyPerson {
@@ -153,6 +162,7 @@ pub async fn enqueue_reevaluate<'e>(
     trace: &TraceContext,
 ) -> Result<bool, StoreError> {
     let mut job = NewJob::new(REEVALUATE_JOB_KIND, trace.clone());
+    job.priority = REEVALUATE_PRIORITY;
     job.workspace_id = Some(workspace);
     job.payload = json!({ "workspace_id": workspace.as_uuid() });
     job.unique_key = Some(unique_key(workspace));
@@ -1159,5 +1169,35 @@ mod tests {
         assert!(!enqueue_reevaluate(&pool, ws, &a).await.unwrap());
 
         assert_eq!(jobs(pool.clone()).await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_reevaluate_job_is_claimed_ahead_of_older_default_priority_jobs(pool: PgPool) {
+        let ws = workspace(&pool, "ours").await;
+        for n in 0..3 {
+            let mut job = crate::NewJob::new("delivery.send", trace(Cause::api("t")));
+            job.workspace_id = Some(ws);
+            job.unique_key = Some(format!("older:{n}"));
+            assert!(crate::enqueue(&pool, &job).await.unwrap());
+        }
+        assert!(
+            enqueue_reevaluate(&pool, ws, &trace(Cause::api("t")))
+                .await
+                .unwrap()
+        );
+
+        let claimed = crate::claim_jobs(
+            &pool,
+            "w",
+            &["delivery.send", REEVALUATE_JOB_KIND],
+            std::time::Duration::from_secs(30),
+            None,
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].kind, REEVALUATE_JOB_KIND);
     }
 }
