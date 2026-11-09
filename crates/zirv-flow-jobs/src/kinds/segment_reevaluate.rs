@@ -65,7 +65,9 @@ impl JobKind for SegmentReevaluate {
         loop {
             let claimed = run.pass(&pool).await?;
             tracing::info!(claimed, "segments re-evaluated");
-            if i64::try_from(claimed).is_ok_and(|claimed| claimed < BATCH) {
+            // A short claim no longer means the marks ran out: a mark whose classes grew since
+            // the peek, or whose neighbours another pass held, waits for the next pass.
+            if claimed == 0 {
                 return Ok(());
             }
             if started.elapsed() >= TIME_BUDGET {
@@ -1755,6 +1757,66 @@ mod tests {
                 .expect("the pass finishes once the refresh lock is free")
                 .unwrap();
             assert_eq!(dirty(&pool).await, 0);
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_run_goes_on_after_a_claim_that_left_a_mark_its_locks_did_not_cover(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            zirv_flow_store::migrate(&pool).await.unwrap();
+            let ws = workspace(&pool).await;
+            define_trait(&pool, ws, "plan").await;
+            let clock = clock();
+            let seg = create(&pool, ws, "Pro", plan_is("pro")).await;
+            full_refresh(&pool, ws, seg.id, &clock).await;
+            reevaluate(&pool, ws, &clock).await;
+            let records: Vec<ProfileRecord> = (0..=BATCH)
+                .map(|i| ProfileRecord {
+                    source: "crm".into(),
+                    stream: "contacts".into(),
+                    record_key: format!("p{i}"),
+                    identifiers: vec![("email".into(), format!("p{i}@example.com"))],
+                    traits: json!({"plan": "pro"}).as_object().cloned().unwrap(),
+                    observed_at: OffsetDateTime::now_utc(),
+                    trace: TraceContext::root(Cause::api("enter")),
+                })
+                .collect();
+            zirv_flow_store::apply_profile_batch(&pool, ws, &records)
+                .await
+                .unwrap();
+            let marked: Vec<Uuid> = sqlx::query_scalar(
+                "SELECT person_id FROM person_changes ORDER BY changed_at, person_id",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(marked.len(), usize::try_from(BATCH).unwrap() + 1);
+            // The newest mark carries a class the oldest batch does not, and a writer holds the
+            // oldest person: the first claim is short and leaves the newest mark.
+            sqlx::query("UPDATE person_changes SET classes = classes | $2 WHERE person_id = $1")
+                .bind(marked[marked.len() - 1])
+                .bind(i16::from(ChangeClasses::EVENTS.bits()))
+                .execute(&pool)
+                .await
+                .unwrap();
+            let mut writer = zirv_flow_store::begin(&pool).await.unwrap();
+            sqlx::query("SELECT id FROM people WHERE id = $1 FOR UPDATE")
+                .bind(marked[0])
+                .fetch_one(&mut *writer)
+                .await
+                .unwrap();
+
+            reevaluate(&pool, ws, &clock).await;
+
+            // Only the held person's mark is left.
+            let left: Vec<Uuid> = sqlx::query_scalar("SELECT person_id FROM person_changes")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+            assert_eq!(left, [marked[0]]);
+            zirv_flow_store::commit(writer).await.unwrap();
         })
         .await;
     }
