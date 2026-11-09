@@ -347,15 +347,27 @@ pub(crate) async fn remove_contribution_in(
     Ok(Some(RemovedRecord { record_id }))
 }
 
+/// The dedupe rows of deleted events, `$2` their message ids and `$3` their ids, found through
+/// the primary key `(workspace_id, message_id)`: no index leads with `event_id`, so a delete by
+/// it alone read the whole table. Only a row that names one of the events goes; an event and its
+/// dedupe row always carry the same message id.
+const DELETE_EVENT_DEDUPE: &str = "DELETE FROM event_dedupe d \
+     USING unnest($2::text[], $3::uuid[]) AS e(message_id, event_id) \
+     WHERE d.workspace_id = $1 AND d.message_id = e.message_id AND d.event_id = e.event_id";
+
+/// How many dedupe rows one statement of [`remove_record_events`] deletes at most.
+const DEDUPE_CHUNK: usize = 1000;
+
 /// Deletes the events of one ledger record, and the dedupe and debugger rows that name them, in
-/// the removal's transaction.
+/// the removal's transaction. The dedupe rows go [`DEDUPE_CHUNK`] at a time, by their key.
 async fn remove_record_events(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     record_id: Uuid,
 ) -> Result<(), StoreError> {
-    let events: Vec<Uuid> = sqlx::query_scalar(
-        "DELETE FROM events WHERE workspace_id = $1 AND source_record_id = $2 RETURNING id",
+    let events: Vec<(Uuid, Option<String>)> = sqlx::query_as(
+        "DELETE FROM events WHERE workspace_id = $1 AND source_record_id = $2 \
+         RETURNING id, message_id",
     )
     .bind(workspace.as_uuid())
     .bind(record_id)
@@ -365,13 +377,27 @@ async fn remove_record_events(
     if events.is_empty() {
         return Ok(());
     }
-    for statement in [
-        "DELETE FROM debugger_feed WHERE workspace_id = $1 AND event_id = ANY($2)",
-        "DELETE FROM event_dedupe WHERE workspace_id = $1 AND event_id = ANY($2)",
-    ] {
-        sqlx::query(statement)
+    let ids: Vec<Uuid> = events.iter().map(|(id, _)| *id).collect();
+    sqlx::query("DELETE FROM debugger_feed WHERE workspace_id = $1 AND event_id = ANY($2)")
+        .bind(workspace.as_uuid())
+        .bind(&ids)
+        .execute(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
+    // An event without a message id has no dedupe row.
+    let named: Vec<(Uuid, String)> = events
+        .into_iter()
+        .filter_map(|(id, message)| message.map(|message| (id, message)))
+        .collect();
+    for chunk in named.chunks(DEDUPE_CHUNK) {
+        let (ids, messages): (Vec<Uuid>, Vec<&str>) = chunk
+            .iter()
+            .map(|(id, message)| (*id, message.as_str()))
+            .unzip();
+        sqlx::query(DELETE_EVENT_DEDUPE)
             .bind(workspace.as_uuid())
-            .bind(&events)
+            .bind(&messages)
+            .bind(&ids)
             .execute(&mut *connection)
             .await
             .map_err(StoreError::query)?;
@@ -1406,6 +1432,82 @@ mod tests {
             .unwrap();
         assert_eq!(dedupe_left, 4);
         assert!(find_person(&pool, ws, person).await.unwrap().is_some());
+    }
+
+    /// The scan nodes of an `EXPLAIN (FORMAT JSON)` plan that read `relation`.
+    fn scans_of<'a>(plan: &'a Value, relation: &str, out: &mut Vec<&'a Map<String, Value>>) {
+        if let Some(object) = plan.as_object() {
+            let scan = object
+                .get("Node Type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind.ends_with("Scan"));
+            if scan && object.get("Relation Name").and_then(Value::as_str) == Some(relation) {
+                out.push(object);
+            }
+            object
+                .values()
+                .for_each(|child| scans_of(child, relation, out));
+        } else if let Some(array) = plan.as_array() {
+            array
+                .iter()
+                .for_each(|child| scans_of(child, relation, out));
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_dedupe_rows_of_a_removed_records_events_are_found_by_their_key_not_a_scan(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "plan").await;
+        let person = person_of(
+            &apply_profile_batch(
+                &pool,
+                ws,
+                &[record("crm", "1", "a@example.com", json!({}), T0)],
+            )
+            .await
+            .unwrap()[0],
+        );
+        // Enough rows that a scan would be tempting, and never analysed.
+        sqlx::query(
+            "INSERT INTO event_dedupe (workspace_id, message_id, event_id, event_occurred_at, \
+                person_id) \
+             SELECT $1, 'm-' || n, gen_random_uuid(), now(), $2 FROM generate_series(1, 5000) n",
+        )
+        .bind(ws.as_uuid())
+        .bind(person)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let plan: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN (FORMAT JSON) {DELETE_EVENT_DEDUPE}"
+        )))
+        .bind(ws.as_uuid())
+        .bind(["m-1", "m-2"])
+        .bind([Uuid::now_v7(), Uuid::now_v7()])
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        // Every read of `event_dedupe` seeks its key, workspace and message id, not only the
+        // workspace's part of it.
+        let mut scans = Vec::new();
+        scans_of(&plan, "event_dedupe", &mut scans);
+        assert!(!scans.is_empty(), "{plan}");
+        for scan in scans {
+            assert_eq!(
+                scan.get("Index Name"),
+                Some(&json!("event_dedupe_pkey")),
+                "{plan}"
+            );
+            let condition = scan
+                .get("Index Cond")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            assert!(condition.contains("message_id"), "{plan}");
+        }
     }
 
     #[sqlx::test]
