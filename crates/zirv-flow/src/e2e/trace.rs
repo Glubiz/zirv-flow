@@ -7,7 +7,7 @@ use hashbrown::{HashMap, HashSet};
 use serde_json::{Value, json};
 
 /// The decisions the trace of the send path must hold once: action, outcome and, when it
-/// matters, the reason. What each message must hold is [`GATES`].
+/// matters, the reason. What each message must hold is `messages_complete`.
 pub(super) const REQUIRED: &[(&str, &str, Option<&str>)] = &[
     // What the track call caused; the event row records the acceptance, no decision does.
     ("segment.entered", "entered", None),
@@ -23,21 +23,6 @@ pub(super) const REQUIRED: &[(&str, &str, Option<&str>)] = &[
     ("message.feedback", "recorded", Some("delivered")),
 ];
 
-/// The send gates a message that went out passed, in the order the pipeline runs them.
-pub(super) const GATES: &[&str] = &[
-    "enrollment",
-    "template",
-    "sender",
-    "address",
-    "consent",
-    "suppression",
-    "quiet_hours",
-    "frequency_cap",
-    "render",
-    "rate_limit",
-    "delivery",
-];
-
 /// A transient send retries twice, fails on its last attempt, and a signed hard-bounce
 /// webhook suppresses the address on the same trace.
 const FAILING: &[(&str, &str, Option<&str>)] = &[
@@ -48,12 +33,6 @@ const FAILING: &[(&str, &str, Option<&str>)] = &[
     ("flow.wait", "waiting", Some("duration")),
     ("job.attempt", "failed", Some("job_error")),
     ("job.attempt", "failed", Some("job_error")),
-    ("send.gate", "passed", Some("enrollment")),
-    ("send.gate", "passed", Some("template")),
-    ("send.gate", "passed", Some("sender")),
-    ("send.gate", "passed", Some("address")),
-    ("send.gate", "passed", Some("render")),
-    ("send.gate", "passed", Some("rate_limit")),
     ("send.gate", "blocked", Some("delivery")),
     ("message.send", "failed", Some("http_5xx")),
     ("message.feedback", "recorded", Some("bounced_hard")),
@@ -178,8 +157,9 @@ fn message_of(record: &Value) -> Option<&str> {
 }
 
 /// Checks the gates message by message, so a gate missing from one message is not covered by the
-/// same gate of another: a message that went out passed every gate of [`GATES`], and one that
-/// did not was blocked at the consent gate.
+/// same gate of another: a message that went out has no `send.gate` row (it implies every gate
+/// passed; a `passed` row has not been written since 0.269.0), and one that did not was blocked
+/// at the consent gate.
 fn messages_complete(records: &[Value]) -> Result<(), String> {
     let (mut sent, mut skipped) = (0, 0);
     for send in records
@@ -191,7 +171,16 @@ fn messages_complete(records: &[Value]) -> Result<(), String> {
         let wanted: Vec<(&str, Option<&str>)> = match outcome {
             "sent" => {
                 sent += 1;
-                GATES.iter().map(|gate| ("passed", Some(*gate))).collect()
+                if records.iter().any(|record| {
+                    message_of(record) == Some(message)
+                        && text(record, "action") == Some("send.gate")
+                        && text(record, "outcome") == Some("passed")
+                }) {
+                    return Err(format!(
+                        "message {message} has a `send.gate` passed decision"
+                    ));
+                }
+                Vec::new()
             }
             "skipped" => {
                 skipped += 1;
@@ -364,7 +353,7 @@ mod tests {
             );
         }
         let mut broken = records;
-        broken[16]["cause"]["id"] = json!("unreachable");
+        broken[10]["cause"]["id"] = json!("unreachable");
         assert!(
             failing_complete(&broken)
                 .unwrap_err()
@@ -406,7 +395,7 @@ mod tests {
         for send in sends {
             let message = message_of(send).expect("a message");
             let skipped = text(send, "outcome") == Some("skipped");
-            // A message that went out needs every gate passed; a skipped one, its blocking gate.
+            // A message that went out has no gate row; a skipped one needs its blocking gate.
             let required: Vec<usize> = records
                 .iter()
                 .enumerate()
@@ -415,7 +404,7 @@ mod tests {
                 .filter(|(_, r)| (text(r, "outcome") == Some("blocked")) == skipped)
                 .map(|(index, _)| index)
                 .collect();
-            assert!(!required.is_empty());
+            assert_eq!(required.is_empty(), !skipped);
             for index in required {
                 let mut without = records.clone();
                 let removed = without.remove(index);

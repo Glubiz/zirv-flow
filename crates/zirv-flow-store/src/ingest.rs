@@ -1034,9 +1034,26 @@ pub async fn drain_batch(
         ..DrainOutcome::default()
     };
     let mut events = EventBatch::default();
+    events.readers_cached(workspace);
     let mut lists = ListCounts::default();
-    for row in &rows {
-        match map_with(row, &hooks).ok_or_else(StoreError::poison)? {
+    let mapped: Vec<Mapped> = rows
+        .iter()
+        .map(|row| map_with(row, &hooks).ok_or_else(StoreError::poison))
+        .collect::<Result<_, _>>()?;
+    // One statement looks up every `messageId` of the batch, instead of one probe per event.
+    events
+        .prefetch_duplicates(
+            &mut tx,
+            workspace,
+            mapped.iter().filter_map(|mapped| match mapped {
+                Mapped::Event(record) => Some(record),
+                Mapped::Hook(HookMapped::Record(record)) => record.event.as_ref(),
+                _ => None,
+            }),
+        )
+        .await?;
+    for (row, mapped) in rows.iter().zip(mapped) {
+        match mapped {
             Mapped::Profile(record) => {
                 let result =
                     apply_profile_record_into(&mut tx, workspace, &record, &mut events.decisions)

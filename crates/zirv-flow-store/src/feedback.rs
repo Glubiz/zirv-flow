@@ -211,31 +211,25 @@ pub async fn record_provider_feedback(
     // The dedupe key is claimed first, whatever the person's state, so a retry of an event for a
     // person who is gone writes nothing again.
     let event_id = Uuid::now_v7();
-    let first = sqlx::query(
+    // One statement claims the key or counts the repeat; `xmax = 0` is true only for the row
+    // this statement inserted.
+    let first: bool = sqlx::query_scalar(
         "INSERT INTO event_dedupe \
-                (workspace_id, message_id, event_id, event_occurred_at, person_id) \
-             VALUES ($1, $2, $3, $4, $5) ON CONFLICT (workspace_id, message_id) DO NOTHING",
+            (workspace_id, message_id, event_id, event_occurred_at, person_id) \
+            VALUES ($1, $2, $3, $4, $5) \
+            ON CONFLICT (workspace_id, message_id) \
+            DO UPDATE SET duplicates = event_dedupe.duplicates + 1 \
+            RETURNING (xmax = 0)",
     )
     .bind(row.workspace_id)
     .bind(&key)
     .bind(event_id)
     .bind(feedback.now)
     .bind(person_live.then_some(row.person_id))
-    .execute(&mut *tx)
+    .fetch_one(&mut *tx)
     .await
-    .map_err(StoreError::query)?
-    .rows_affected()
-        == 1;
+    .map_err(StoreError::query)?;
     if !first {
-        sqlx::query(
-            "UPDATE event_dedupe SET duplicates = duplicates + 1 \
-                 WHERE workspace_id = $1 AND message_id = $2",
-        )
-        .bind(row.workspace_id)
-        .bind(&key)
-        .execute(&mut *tx)
-        .await
-        .map_err(StoreError::query)?;
         commit(tx).await?;
         return Ok(FeedbackOutcome::Duplicate);
     }

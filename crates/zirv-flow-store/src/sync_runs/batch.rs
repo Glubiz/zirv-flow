@@ -275,9 +275,16 @@ pub async fn commit_sync_batch(
         // A record counts once, as its worst outcome: rejected, then applied, then unchanged.
         let event = events.per_upsert.get(index).copied().flatten();
         let reason: &'static str = match result {
-            Some(ProfileOutcome::Applied { person_id, .. }) => {
+            Some(ProfileOutcome::Applied {
+                person_id, changed, ..
+            }) => {
                 if event != Some(EventResult::Rejected) {
                     counts.applied += 1;
+                }
+                // A record that changed traits has its `trait.change` decision, which names the
+                // person and the record: no `sync.record` / `applied` row beside it.
+                if changed {
+                    continue;
                 }
                 let mut subjects = vec![("person", person_id)];
                 subjects.extend(
@@ -603,13 +610,16 @@ async fn apply_events(
         }
     };
     let mut events = new_events();
+    events.readers_cached(batch.workspace);
+    // Built up front, so one statement can look up every `messageId` of the batch.
+    let mut records: Vec<Option<(EventRecord, String)>> = Vec::with_capacity(results.len());
     for (upsert, result) in batch.upserts.iter().zip(results) {
         let current = matches!(
             result,
             Some(ProfileOutcome::Applied { .. } | ProfileOutcome::Unchanged { .. })
         );
         let Some(event) = upsert.event.as_ref().filter(|_| current) else {
-            applied.per_upsert.push(None);
+            records.push(None);
             continue;
         };
         let message_id = event_message_id(batch, upsert, &event.name);
@@ -624,6 +634,22 @@ async fn apply_events(
             trace: batch.trace.clone(),
             // The event goes with the record: removing the record removes it.
             source_record_id: seen.get(upsert.record.record_key.as_str()).copied(),
+        };
+        records.push(Some((record, message_id)));
+    }
+    if !batch.singly {
+        events
+            .prefetch_duplicates(
+                tx,
+                batch.workspace,
+                records.iter().flatten().map(|(record, _)| record),
+            )
+            .await?;
+    }
+    for entry in records {
+        let Some((record, message_id)) = entry else {
+            applied.per_upsert.push(None);
+            continue;
         };
         let outcome = if batch.singly {
             let outcome =
@@ -989,13 +1015,9 @@ mod tests {
                     .filter(|d| d.3 == action && d.4 == outcome)
                     .collect::<Vec<_>>()
             };
-            let applied = of("sync.record", "applied");
-            assert_eq!(applied.len(), 4);
-            for decision in &applied {
-                assert!(
-                    decision.6["person"].is_string() && decision.6["source_record"].is_string()
-                );
-            }
+            // Every applied record here changed traits, so `trait.change` stands for it.
+            assert!(of("sync.record", "applied").is_empty());
+            assert!(!of("trait.change", "changed").is_empty());
             let rejects = of("sync.record", "rejected");
             assert_eq!(rejects.len(), 2);
             let reject_ids: Vec<String> = sqlx::query_scalar("SELECT id::text FROM ingest_rejects")
@@ -1048,6 +1070,62 @@ mod tests {
                     .await
                     .unwrap();
             assert_eq!(stream_checkpoint, None);
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_record_that_changed_traits_has_trait_change_and_an_identifier_only_one_keeps_applied(
+        pool: PgPool,
+    ) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let fx = fixture(&pool, "one", "full_refresh").await;
+            let source = fx.source_id.to_string();
+            let mut with_traits = upsert(&fx, "traits", "a@example.com");
+            with_traits
+                .record
+                .traits
+                .insert("plan".into(), json!("pro"));
+            let identifier_only = upsert(&fx, "bare", "b@example.com");
+            let upserts = [with_traits, identifier_only];
+            let checkpoint = json!({"offset": 2});
+            let outcome = commit_sync_batch(&pool, &batch(&fx, &source, &upserts, &checkpoint))
+                .await
+                .unwrap();
+            assert!(matches!(outcome, BatchOutcome::Committed(_)));
+
+            let rows: Vec<(String, String, Value)> = sqlx::query_as(
+                "SELECT action, outcome, subject_ids FROM decision_records \
+                    WHERE action IN ('sync.record', 'trait.change') ORDER BY action, outcome",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            let kinds: Vec<_> = rows
+                .iter()
+                .map(|(action, outcome, _)| (action.as_str(), outcome.as_str()))
+                .collect();
+            assert_eq!(
+                kinds,
+                [("sync.record", "applied"), ("trait.change", "changed")]
+            );
+            let plan_record: Uuid =
+                sqlx::query_scalar("SELECT id FROM source_records WHERE record_key = 'traits'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            let bare_record: Uuid =
+                sqlx::query_scalar("SELECT id FROM source_records WHERE record_key = 'bare'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                rows[0].2["source_record"],
+                json!(bare_record),
+                "the applied row is the identifier-only record's"
+            );
+            assert_eq!(rows[1].2["source_record"], json!(plan_record));
         })
         .await;
     }

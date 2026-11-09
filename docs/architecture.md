@@ -2140,6 +2140,13 @@ builds the batch of the event path with the flag on).
   records, including merges, consent and trait changes, segment changes,
   enrollments, steps, sends and skips. Each system record links to its trace
   tree; values remain subject to the caller's PII access.
+- **Fewer decision rows:** since 0.269.0 a send writes no `send.gate` / `passed` row, and a sync
+  record that changed traits writes no `sync.record` / `applied` row. `message.send` / `sent`
+  implies that every gate passed, so a `blocked` gate keeps its row and a passed one has none; a
+  `trait.change` row already names the person and the source record, so the `applied` row beside
+  it added nothing. A sync record that changed no trait (identifier-only or event-only) keeps
+  `sync.record` / `applied`, and `rejected` and `deleted` are unchanged. Rows written by earlier
+  versions still read and render.
 - **Trace of an accepted event:** since 0.231.0 an accepted event writes no `event.accepted`
   decision, on the ingest drain, in a sync run or through `apply_event_batch` (#397): the event
   row already records the acceptance with its id, person, trace and state, and the decision

@@ -163,18 +163,17 @@ pub async fn record_send_outcome(
     let graph = message
         .flow_version
         .map(|version| GraphPoint::at(version, message.node));
+    // A passed gate writes nothing: `message.send` / `sent` implies every gate passed. A
+    // blocked gate keeps its row.
     let mut decisions: Vec<NewDecision> = message
         .gates
         .iter()
+        .filter(|gate| !gate.passed)
         .map(|gate| NewDecision {
             graph: graph.clone(),
             workspace_id: message.workspace,
             trace: outcome.trace.clone(),
-            spec: if gate.passed {
-                &decision_actions::SEND_GATE_PASSED
-            } else {
-                &decision_actions::SEND_GATE_BLOCKED
-            },
+            spec: &decision_actions::SEND_GATE_BLOCKED,
             detail: Some(gate.gate),
             subject_ids: subject_ids(gate.detail),
             job: outcome.job,
@@ -543,7 +542,9 @@ mod tests {
         .fetch_all(&pool)
         .await
         .unwrap();
-        assert_eq!(decisions.len(), 4, "{decisions:?}");
+        // The two gates that passed write nothing; only the blocked one and the send do.
+        assert_eq!(decisions.len(), 2, "{decisions:?}");
+        assert!(decisions.iter().all(|(_, outcome, _)| outcome != "passed"));
         assert!(decisions.contains(&(
             "send.gate".into(),
             "blocked".into(),

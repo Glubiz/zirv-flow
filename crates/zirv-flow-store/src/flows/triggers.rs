@@ -589,7 +589,7 @@ pub async fn lock_audience_page(
     flow: Uuid,
     page: &[Uuid],
 ) -> Result<Vec<Uuid>, StoreError> {
-    super::enroll::lock_enrolls(connection, flow).await?;
+    super::enroll::lock_enrolls_shared(connection, flow).await?;
     for _ in 0..super::enroll::LOCK_ROUNDS {
         let survivors = super::enroll::resolve_survivors(connection, workspace, page).await?;
         let mut people: Vec<Uuid> = page.iter().chain(survivors.values()).copied().collect();

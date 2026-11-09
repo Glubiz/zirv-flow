@@ -1566,7 +1566,8 @@ mod tests {
                 .filter(|d| d.3 == action && d.4 == outcome)
                 .count()
         };
-        assert_eq!(count("sync.record", "applied"), 5);
+        // Every applied record changed traits: `trait.change` stands for it, with no `applied` row.
+        assert_eq!(count("sync.record", "applied"), 0);
         assert_eq!(count("sync.record", "rejected"), 1);
         assert_eq!(count("contribution.removed", "removed"), 2);
         assert_eq!(count("sync.record", "deleted"), 2);
@@ -1586,10 +1587,10 @@ mod tests {
         assert_eq!(others, 0);
         let shown = format!("{decisions:?}");
         assert!(!shown.contains("example.com") && !shown.contains("not-an-email"));
-        // Applied decisions name the person and the source record, a reject its own id.
+        // Trait changes name the person and the source record, a reject its own id.
         let applied = decisions
             .iter()
-            .find(|d| d.3 == "sync.record" && d.4 == "applied")
+            .find(|d| d.3 == "trait.change" && d.4 == "changed")
             .unwrap();
         assert!(applied.5["person"].is_string() && applied.5["source_record"].is_string());
         let reject_id: String = sqlx::query_scalar("SELECT id::text FROM ingest_rejects")
