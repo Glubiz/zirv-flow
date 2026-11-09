@@ -154,7 +154,14 @@ pub(crate) async fn apply_profile_records_singly(
     for record in records {
         let mut savepoint = connection.begin().await.map_err(StoreError::query)?;
         // A batch of its own: a rollback must not leave the next record with its locks or writes.
-        let applied = apply_one(&mut savepoint, workspace, record, ProfileBatch::guarded()).await;
+        let applied = apply_one(
+            &mut savepoint,
+            workspace,
+            record,
+            None,
+            ProfileBatch::guarded(),
+        )
+        .await;
         match applied {
             Ok(outcome) => {
                 savepoint.commit().await.map_err(StoreError::query)?;
@@ -485,7 +492,7 @@ pub(crate) async fn apply_profile_record(
     workspace: WorkspaceId,
     record: &ProfileRecord,
 ) -> Result<ProfileOutcome, StoreError> {
-    apply_one(connection, workspace, record, ProfileBatch::default()).await
+    apply_one(connection, workspace, record, None, ProfileBatch::default()).await
 }
 
 /// [`apply_profile_record`] in `batch`, which may come with the guards already held.
@@ -493,6 +500,7 @@ async fn apply_one(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     record: &ProfileRecord,
+    native: Option<NativeWrite<'_>>,
     mut batch: ProfileBatch,
 ) -> Result<ProfileOutcome, StoreError> {
     let mut decisions = DecisionBuffer::default();
@@ -501,7 +509,7 @@ async fn apply_one(
         workspace,
         record,
         &mut decisions,
-        None,
+        native,
         &mut batch,
     )
     .await?;
@@ -542,21 +550,14 @@ pub(crate) async fn apply_native_record(
     record: &ProfileRecord,
     native: NativeWrite<'_>,
 ) -> Result<ProfileOutcome, StoreError> {
-    let mut decisions = DecisionBuffer::default();
-    let mut batch = ProfileBatch::default();
-    let mut outcome = apply_record(
+    apply_one(
         connection,
         workspace,
         record,
-        &mut decisions,
         Some(native),
-        &mut batch,
+        ProfileBatch::default(),
     )
-    .await?;
-    let changed = batch.finish(connection, workspace, &mut decisions).await?;
-    settle([&mut outcome], &changed);
-    decisions.flush(connection).await?;
-    Ok(outcome)
+    .await
 }
 
 /// Applies one record as part of `batch`: everything but the trait recompute, which the record
