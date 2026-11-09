@@ -325,6 +325,21 @@ pub(super) enum Scope {
     Batch,
 }
 
+/// The CTE that takes KEY SHARE on every person a full refresh inserts a member or an event row
+/// for, in ascending id order; the final SELECT forces it by counting it. The foreign-key
+/// checks of those inserts are AFTER ROW triggers: they fire at the end of the statement, after
+/// this CTE has been read to the end, and find the rows already held by the transaction. Without
+/// it they take KEY SHARE in whatever order the rows come, against writers that lock people
+/// FOR UPDATE in id order, and the refresh deadlocks with a writer (class D3a). With `ORDER BY`
+/// and a locking clause PostgreSQL locks the rows in the sorted order. A merged person's row
+/// closes without an event, so it is left out. `entering` and `leaving` are read by two CTEs
+/// each, so they are materialized and the target is not computed again.
+const LOCK_PEOPLE_IN_ORDER: &str = "locked AS MATERIALIZED ( \
+         SELECT p.id FROM people p \
+         WHERE p.id IN (SELECT person_id FROM entering \
+                        UNION ALL SELECT person_id FROM leaving WHERE NOT merged) \
+         ORDER BY p.id FOR KEY SHARE OF p), ";
+
 /// The diff statement for the compiled `members` query. The extra values bind after the compiled
 /// ones: `$1` is the workspace and the compiled values take `$2` to `$k + 1`. For
 /// [`Scope::Segment`] these follow in order: the segment, the version, the time, the trace id,
@@ -335,6 +350,11 @@ pub(super) enum Scope {
 /// cause, the people's trace ids, cause kinds and cause ids as three arrays parallel to the
 /// people, the job id and the attempt. Each change is recorded under its person's trace and
 /// decision cause.
+///
+/// A [`Scope::Segment`] statement first locks, in ascending id order, the people it inserts a
+/// member or an event row for (`LOCK_PEOPLE_IN_ORDER`), so its foreign-key checks cannot take
+/// those locks in another order than writers do. A [`Scope::Batch`] statement needs none: the
+/// claim already holds its people's KEY SHARE (`claim_dirty`).
 pub(super) fn refresh_statement(members: &SqlQuery, scope: Scope, capture: bool) -> String {
     let mut at = members.params.len() + 1;
     let mut next = || {
@@ -470,7 +490,7 @@ pub(super) fn refresh_statement(members: &SqlQuery, scope: Scope, capture: bool)
              WHERE m.workspace_id = $1 AND m.segment_id = {segment} AND m.exited_at IS NULL \
                {leaving_scope} \
                AND NOT EXISTS (SELECT 1 FROM target t WHERE t.id = m.person_id)), \
-         inserted AS ( \
+         {locked}inserted AS ( \
              INSERT INTO segment_members (workspace_id, segment_id, person_id, version, \
                  entered_at, entered_trace_id, entered_cause) \
              SELECT $1, {segment}, e.person_id, {version}, {now}, {trace}, {cause} \
@@ -488,8 +508,16 @@ pub(super) fn refresh_statement(members: &SqlQuery, scope: Scope, capture: bool)
              (SELECT count(*) FROM inserted), (SELECT count(*) FROM closed), \
              (SELECT count(*) FROM entered_events) + (SELECT count(*) FROM exited_events), \
              (SELECT count(*) FROM entered_decisions) + (SELECT count(*) FROM exited_decisions) \
-         ]::bigint[] AS counts{columns}",
+         ]::bigint[] AS counts{forced}{columns}",
         members_sql = members.sql,
+        locked = match scope {
+            Scope::Segment => LOCK_PEOPLE_IN_ORDER,
+            Scope::Batch => "",
+        },
+        forced = match scope {
+            Scope::Segment => ", (SELECT count(*) FROM locked) AS locked",
+            Scope::Batch => "",
+        },
         trailing = if capture {
             format!(", {}", captured.trim_end_matches(", "))
         } else {
@@ -1350,6 +1378,126 @@ mod tests {
             )
             .await;
             assert_eq!(outbox_rows(&pool, ws).await, 2);
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_full_refresh_takes_its_peoples_locks_in_id_order_and_does_not_deadlock_a_writer(
+        pool: PgPool,
+    ) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            use std::time::Duration;
+
+            let ws = workspace(&pool, "one").await;
+            let seg = segment(&pool, ws, "Pros", 60).await;
+            // The inserts reach the people in the order of the members query, highest id first
+            // (hash joins keep the probe side's order; a merge join would sort ascending, which
+            // hides the deadlock). Without the lock CTE the foreign-key checks then take the
+            // higher people before the lowest.
+            let mut people = Vec::new();
+            for n in 0..20 {
+                people.push(person(&pool, ws, &format!("p{n}@example.com"), "pro").await);
+            }
+            people.sort();
+            let low = people[0];
+            let members = SqlQuery {
+                sql:
+                    "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL \
+                    AND (p.traits ->> 'plan') = $2::text"
+                        .into(),
+                params: vec![SqlParam::Text("pro".into())],
+            };
+
+            // The writer locks in id order: the lower person now, the higher one later.
+            let mut writer = begin(&pool).await.unwrap();
+            sqlx::query("SELECT 1 FROM people WHERE id = $1 FOR UPDATE")
+                .bind(low)
+                .execute(&mut *writer)
+                .await
+                .unwrap();
+
+            let (pid_sender, pid_receiver) = tokio::sync::oneshot::channel();
+            let refresh_pool = pool.clone();
+            let refresh = tokio::spawn(async move {
+                let job = job_trace();
+                let trace =
+                    membership_trace(MembershipCause::Initial, &job, seg.id, Uuid::new_v4());
+                let mut tx = begin(&refresh_pool).await.unwrap();
+                lock_segment_refresh(&mut tx, seg.id).await.unwrap();
+                let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                    .fetch_one(&mut *tx)
+                    .await
+                    .unwrap();
+                sqlx::query("SET LOCAL enable_mergejoin = off")
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
+                pid_sender.send(pid).unwrap();
+                let outcome = apply_refresh(
+                    &mut tx,
+                    &RefreshApply {
+                        workspace: ws,
+                        segment: seg.id,
+                        version: 1,
+                        members: &members,
+                        now: NOW,
+                        cause: MembershipCause::Initial,
+                        trace: &trace,
+                        job: (Uuid::new_v4(), 1),
+                        job_trace: &job,
+                    },
+                )
+                .await?;
+                commit(tx).await?;
+                Ok::<_, StoreError>(outcome)
+            });
+
+            // Wait until the refresh is blocked on a person the writer holds.
+            let pid = pid_receiver.await.unwrap();
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let waiting: bool = sqlx::query_scalar(
+                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1 \
+                     AND wait_event_type = 'Lock' AND query LIKE '%segment_members%')",
+                    )
+                    .bind(pid)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                    if waiting {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("the refresh never waited for the writer");
+
+            // The writer now wants all the higher people, in id order. Before the fix the refresh
+            // holds some of them and waits for the lowest: a deadlock, one of the two aborted (40P01).
+            tokio::time::timeout(
+            Duration::from_secs(20),
+            sqlx::query(
+                "SELECT 1 FROM people WHERE id > $1 AND workspace_id = $2 ORDER BY id FOR UPDATE",
+            )
+            .bind(low)
+            .bind(ws.as_uuid())
+            .execute(&mut *writer),
+        )
+        .await
+        .expect("the writer must not wait forever")
+        .expect("the writer was the deadlock victim");
+            commit(writer).await.unwrap();
+
+            let outcome = tokio::time::timeout(Duration::from_secs(20), refresh)
+                .await
+                .expect("the refresh must finish")
+                .unwrap()
+                .expect("the refresh was the deadlock victim");
+            assert_eq!(outcome.entered, 20);
+            assert_eq!(open_people(&pool, seg.id).await.len(), 20);
         })
         .await;
     }

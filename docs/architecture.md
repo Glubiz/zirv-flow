@@ -1073,6 +1073,7 @@ targets (OQ-2).
 - **Planning:** the compiled preview, refresh and re-evaluation statements run unnamed (`persistent(false)`), so each execution is planned with its bound values and never switches to a generic plan. A trait slot that reaches `ready` is followed by an `ANALYZE` of its column, in a job that runs after the `ready` commit; a failure only logs.
 - **Explain:** evaluates each AST node for one person and returns a pass/fail tree with observed values ("2 orders in window, needs 2 or more"); it answers "why is this person in or out" on the profile. The store loads one bounded **snapshot** of the person in one read-only, consistent transaction: traits; events, limited to the referenced names and the widest window and capped; lists, consent and identifier kinds; and current memberships. The reference evaluator (8.2) runs over the snapshot at the same evaluation time the SQL would use. Leaves are two-valued, so a node is unknown only when it hit a cap: it reports "unable to explain", never a false pass or fail, and unknown propagates unless the known children decide the outcome.
 - **Membership refresh:** compute the new set, diff against current members, insert entries, close exits, write `segment.entered`/`segment.exited` events (properties: segment id, version, cause `data_change`, `time`, `definition_change`, `manual` or `initial`), and enqueue batched flow triggers, all in one transaction. The full refresh derives the cause and trace from state: a segment never computed is `initial` and one computed from an older version is `definition_change` (both on the trace of the request that saved the version); otherwise the trigger decides (`schedule` and `save` give `time`, `manual` gives `manual`, a referenced segment's change gives `data_change`), on the refresh job's own trace. The open row of a person merged away is closed with cause `data_change` and no event or decision, by a full refresh or a pass alike: the person it stood for is still there as the survivor, whom the same diff judges on its own row.
+The full refresh's statement first takes `FOR KEY SHARE` on every person it inserts a member or an event row for, in ascending id order (a materialized CTE the final select counts), so the foreign-key checks that fire at the end of the statement find those rows already held; before, they took the locks in plan order and deadlocked with writers that lock people `FOR UPDATE` in id order (D3a). A pass needs none of this: its claim holds its people's KEY SHARE.
 
 ### 8.4 Recompute and versioning
 
@@ -2785,6 +2786,12 @@ As built (#207): a claim walks the distinct priorities of the ready jobs upwards
 of each band with a due job in turn, so its cost depends neither on the statistics nor on the due or
 future backlog (`docs/benchmarks/m5-flows.md` section 8).
 
+`segment.reevaluate` is the one kind enqueued below the default: at priority -1 (`REEVALUATE_PRIORITY`), so a
+run is claimed ahead of the priority-0 backlog instead of waiting behind every older ready job (one run at a
+time per workspace, 20 s budget). It cannot starve the other bands: a batch claim takes at most one
+`segment.reevaluate`, as it takes at most one `ingest.drain` (ruling 86c4df91), uncapped and capped alike
+(a capped claim picks the oldest due one on its own and ranks it with its workspace's other jobs by band and age, within the cap), so
+however many workspaces are busy the rest of the batch is the other bands' jobs.
 As built (#397): a worker slot claims up to 32 jobs with that one statement and one commit, by
 priority band, then age, each with a lease token of its own, and runs them one after another, each
 in its own transaction exactly as a job claimed alone: its own lease check, heartbeat and fenced
