@@ -1,7 +1,7 @@
 //! Keyset paging shared by both database sources: which columns order a stream, the checkpoint
 //! that resumes it, the record key, and the loop that turns pages into batches.
 //!
-//! A stream is read in pages of [`BATCH_ROWS`] rows ordered by `(cursor, primary key)`
+//! A stream is read in pages of [`page_rows`] rows ordered by `(cursor, primary key)`
 //! (incremental) or by `(primary key)` (full refresh). The checkpoint is the key of the last row
 //! read, in the text form the database printed. Because the key is unique and totally ordered,
 //! rows that share a cursor value across a page boundary are neither skipped nor read twice.
@@ -14,10 +14,21 @@ use serde_json::{Map, Value, json};
 
 use super::error::NULL_KEY;
 use super::settings::config_error;
-use crate::sources::{Batch, Checkpoint, Record, SourceError, StreamConfig, SyncMode};
+use crate::sources::{
+    Batch, Checkpoint, Record, SourceContext, SourceError, StreamConfig, SyncMode,
+};
 
 /// The most rows one batch, and one short read-only transaction, holds.
 pub(crate) const BATCH_ROWS: usize = 500;
+
+/// The rows of a page: the caller's unit ([`SourceContext::with_unit_records`]), at most
+/// [`BATCH_ROWS`]. A page is one batch with one checkpoint, so a unit that commits at a page
+/// boundary never holds more than its size.
+pub(crate) fn page_rows(context: &SourceContext) -> usize {
+    context
+        .unit_records()
+        .map_or(BATCH_ROWS, |unit| unit.clamp(1, BATCH_ROWS))
+}
 
 /// One row, every column as the database printed it; `None` is SQL `NULL`.
 pub(crate) type Row = Vec<Option<String>>;
@@ -116,8 +127,9 @@ pub(crate) fn key_types<K>(
         .collect()
 }
 
-/// The page query over a select list and a `from` clause aliased `s`. `keys` are the key columns
-/// in comparison order (the cursor first, when `cursor` is set) and `quote` quotes an identifier.
+/// The page query over a select list and a `from` clause aliased `s`, without its `LIMIT` (see
+/// [`limited`]). `keys` are the key columns in comparison order (the cursor first, when `cursor`
+/// is set) and `quote` quotes an identifier.
 /// With `after`, the key is compared expanded, not as a row constructor: `term(index, column,
 /// operator)` renders one comparison of key `index` (`column` is the qualified, quoted name).
 pub(crate) fn page_sql<K>(
@@ -154,7 +166,12 @@ pub(crate) fn page_sql<K>(
         format!(" WHERE {}", conditions.join(" AND "))
     };
     let order = (0..keys.len()).map(column).collect::<Vec<_>>().join(", ");
-    format!("SELECT {select} FROM {from} AS s{filter} ORDER BY {order} LIMIT {BATCH_ROWS}")
+    format!("SELECT {select} FROM {from} AS s{filter} ORDER BY {order}")
+}
+
+/// `sql` limited to a page of `rows` rows.
+pub(crate) fn limited(sql: &str, rows: usize) -> String {
+    format!("{sql} LIMIT {rows}")
 }
 
 /// The record key: a single primary-key value as is, several as a JSON array text.
@@ -167,8 +184,8 @@ pub(crate) fn record_key(values: &[String]) -> String {
 
 /// Fetches pages of a stream, ordered as [`KeySpec`] says.
 pub(crate) trait Pager: Send {
-    /// Up to [`BATCH_ROWS`] rows after the key `after` (from the start when `None`), every
-    /// column in the order the stream's columns were given to [`Paged::new`].
+    /// Up to the page's rows (given to [`Paged::new`]) after the key `after` (from the start
+    /// when `None`), every column in the order the stream's columns were given to it.
     fn page(
         &mut self,
         after: Option<&[String]>,
@@ -184,16 +201,20 @@ pub(crate) struct Paged<P> {
     /// How many of the key columns are the primary key (the last ones).
     primary_key_len: usize,
     after: Option<Vec<String>>,
+    /// The rows a page asks for: a shorter page is the last.
+    rows: usize,
     done: bool,
 }
 
 impl<P: Pager> Paged<P> {
     /// `columns` are the columns a page row carries, in order. Every key column must be one.
+    /// `rows` is the `LIMIT` of the pager's query ([`page_rows`]).
     pub(crate) fn new(
         pager: P,
         columns: Vec<String>,
         spec: &KeySpec,
         after: Option<Vec<String>>,
+        rows: usize,
     ) -> Result<Self, SourceError> {
         let position = |name: &str, setting: &str| {
             columns
@@ -214,19 +235,20 @@ impl<P: Pager> Paged<P> {
             key_positions,
             primary_key_len: spec.primary_key.len(),
             after,
+            rows,
             done: false,
         })
     }
 
-    /// The next batch, or `None` when the stream is exhausted. A page shorter than
-    /// [`BATCH_ROWS`] is the last, so a stream whose size is a multiple of a page costs one empty
+    /// The next batch, or `None` when the stream is exhausted. A page shorter than its rows is
+    /// the last, so a stream whose size is a multiple of a page costs one empty
     /// query more.
     pub(crate) async fn next_batch(&mut self) -> Result<Option<Batch>, SourceError> {
         if self.done {
             return Ok(None);
         }
         let rows = self.pager.page(self.after.as_deref()).await?;
-        if rows.len() < BATCH_ROWS {
+        if rows.len() < self.rows {
             self.done = true;
         }
         let Some(last) = rows.last() else {
@@ -410,6 +432,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_page_is_the_callers_unit_and_never_more_than_a_batch() {
+        let context = || crate::runtime::testing::context("postgres", "t");
+
+        assert_eq!(page_rows(&context()), BATCH_ROWS);
+        assert_eq!(page_rows(&context().with_unit_records(100)), 100);
+        assert_eq!(page_rows(&context().with_unit_records(1000)), BATCH_ROWS);
+        assert_eq!(page_rows(&context().with_unit_records(0)), 1);
+    }
+
     /// A table of `(updated_at, id)` rows held in memory, paged the way the SQL does it:
     /// ordered by the key, strictly after it, `BATCH_ROWS` at a time.
     struct Table {
@@ -475,7 +507,7 @@ mod tests {
     #[tokio::test]
     async fn an_incremental_read_returns_every_row_once_across_a_shared_cursor_value() {
         let spec = spec(Some("updated_at"), &["id"]);
-        let paged = Paged::new(table(true), columns(), &spec, None).unwrap();
+        let paged = Paged::new(table(true), columns(), &spec, None, BATCH_ROWS).unwrap();
 
         let batches = drain(paged).await;
 
@@ -499,7 +531,7 @@ mod tests {
     #[tokio::test]
     async fn resuming_from_the_checkpoint_of_any_batch_returns_exactly_the_rest() {
         let spec = spec(Some("updated_at"), &["id"]);
-        let all = drain(Paged::new(table(true), columns(), &spec, None).unwrap()).await;
+        let all = drain(Paged::new(table(true), columns(), &spec, None, BATCH_ROWS).unwrap()).await;
         let all_keys: Vec<String> = all
             .iter()
             .flat_map(|b| &b.records)
@@ -510,7 +542,8 @@ mod tests {
         for batch in &all {
             seen += batch.records.len();
             let after = parse_checkpoint(Some(&batch.checkpoint), &spec).unwrap();
-            let rest = drain(Paged::new(table(true), columns(), &spec, after).unwrap()).await;
+            let rest =
+                drain(Paged::new(table(true), columns(), &spec, after, BATCH_ROWS).unwrap()).await;
             let rest_keys: Vec<String> = rest
                 .iter()
                 .flat_map(|b| &b.records)
@@ -523,10 +556,11 @@ mod tests {
     #[tokio::test]
     async fn a_full_refresh_pages_by_primary_key_and_an_empty_stream_yields_no_batch() {
         let spec = spec(None, &["id"]);
-        let batches = drain(Paged::new(table(false), columns(), &spec, None).unwrap()).await;
+        let batches =
+            drain(Paged::new(table(false), columns(), &spec, None, BATCH_ROWS).unwrap()).await;
         let mut empty = table(false);
         empty.rows.clear();
-        let none = drain(Paged::new(empty, columns(), &spec, None).unwrap()).await;
+        let none = drain(Paged::new(empty, columns(), &spec, None, BATCH_ROWS).unwrap()).await;
 
         assert_eq!(batches.len(), 3);
         assert_eq!(batches[2].checkpoint.0, json!({"v": 1, "key": ["1200"]}));
@@ -538,7 +572,7 @@ mod tests {
         let spec = spec(None, &["id"]);
         let mut thousand = table(false);
         thousand.rows.truncate(1000);
-        let mut paged = Paged::new(thousand, columns(), &spec, None).unwrap();
+        let mut paged = Paged::new(thousand, columns(), &spec, None, BATCH_ROWS).unwrap();
 
         let mut batches = 0;
         while paged.next_batch().await.unwrap().is_some() {
@@ -558,7 +592,7 @@ mod tests {
             }
         }
         let spec = spec(None, &["id"]);
-        let mut paged = Paged::new(NullKey, columns(), &spec, None).unwrap();
+        let mut paged = Paged::new(NullKey, columns(), &spec, None, BATCH_ROWS).unwrap();
 
         let error = paged.next_batch().await.unwrap_err();
 
@@ -568,8 +602,20 @@ mod tests {
 
     #[test]
     fn a_key_column_the_stream_lacks_is_a_config_error_naming_the_setting() {
-        let missing_pk = Paged::new(table(true), columns(), &spec(None, &["nope"]), None);
-        let missing_cursor = Paged::new(table(true), columns(), &spec(Some("nope"), &["id"]), None);
+        let missing_pk = Paged::new(
+            table(true),
+            columns(),
+            &spec(None, &["nope"]),
+            None,
+            BATCH_ROWS,
+        );
+        let missing_cursor = Paged::new(
+            table(true),
+            columns(),
+            &spec(Some("nope"), &["id"]),
+            None,
+            BATCH_ROWS,
+        );
 
         assert_eq!(
             missing_pk.err(),
@@ -596,7 +642,7 @@ mod tests {
             }
         }
         let spec = spec(None, &["id"]);
-        let mut paged = Paged::new(One, columns(), &spec, None).unwrap();
+        let mut paged = Paged::new(One, columns(), &spec, None, BATCH_ROWS).unwrap();
 
         let batch = paged.next_batch().await.unwrap().unwrap();
 

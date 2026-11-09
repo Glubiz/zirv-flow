@@ -67,13 +67,13 @@ With all roles stopped, a lock wait is not application traffic. Check other admi
 sessions, open transactions, backups and another migrator in `pg_stat_activity` and `pg_locks`.
 End the conflicting operation deliberately before retrying. Do not kill sessions blindly.
 
-## Lock review through 0091
+## Lock review through 0092
 
-This review covers every migration added in M8, from `0060` through `0091`; there are no `0076`,
+This review covers every migration added in M8, from `0060` through `0092`; there are no `0076`,
 `0080` or `0086` files. Paths are relative to `crates/zirv-flow-store/migrations/`. Every merged
 version is published as a release. As of 2026-11-01 the latest is `v0.214.0`, which includes
 every migration through `0088`; an upgrade from an older release replays the files after its last
-one (from `v0.187.0`, `0084` through `0088`, and `0089` through `0091` from the next releases). The drill selects the latest published older
+one (from `v0.187.0`, `0084` through `0088`, and `0089` through `0092` from the next releases). The drill selects the latest published older
 stable release from GitHub at runtime, independently of local git tags. Its replay range can
 change as releases are published.
 
@@ -115,6 +115,7 @@ referenced tables, even when the new child table is empty.
 | `0089_people_merged_into_index.sql` | One partial index on the merged `people` for the merge-group lookup (#397). SHARE blocks every write to `people` through the build, which scans the whole table. Keep and budget the build, or pre-build it before the stop under the same name (the migration uses `IF NOT EXISTS`; drop an invalid index a failed build leaves, then retry): `CREATE INDEX CONCURRENTLY people_merged_into_idx ON people (workspace_id, merged_into) WHERE merged_into IS NOT NULL;` |
 | `0090_step_executions_hot_settle.sql` | Rebuilds the started index of `step_executions` without `outcome` as `step_executions_started_idx` and drops `step_executions_workspace_node_started_idx` and the unread `step_executions_workspace_idx`, so the settle of a wait is a HOT update when its page has room (#397; 59% of settles in a bench-shaped run, with the default fillfactor). It also replaces `enrollments_person_idx` (`workspace_id, person_id`) with `enrollments_person_id_idx` (`person_id`), so a person's delete finds its enrollments by index instead of reading the whole table or index for each person (#510). Each build takes SHARE on its table, blocking every flow step (and, on `enrollments`, every enrollment) through a scan of the whole table; each drop takes ACCESS EXCLUSIVE, blocking reads too, briefly once granted but queued behind any open reader. Keep and budget the builds, or do all five before the stop, outside a transaction and in this order, so the goal count of the rollup and the person reads always have an index (the migration uses `IF NOT EXISTS` and `IF EXISTS`; drop an invalid index a failed build leaves, then retry): `CREATE INDEX CONCURRENTLY step_executions_started_idx ON step_executions (workspace_id, node_id, started_at) INCLUDE (enrollment_id);` `DROP INDEX CONCURRENTLY IF EXISTS step_executions_workspace_node_started_idx;` `DROP INDEX CONCURRENTLY IF EXISTS step_executions_workspace_idx;` `CREATE INDEX CONCURRENTLY enrollments_person_id_idx ON enrollments (person_id);` `DROP INDEX CONCURRENTLY IF EXISTS enrollments_person_idx;`. A concurrent build and drop take SHARE UPDATE EXCLUSIVE, which lets flow steps and enrollments run, and each waits for the transactions already open on the table. |
 | `0091_event_dedupe_person_index.sql` | One index on `event_dedupe (person_id)` for the merge rewrite, a person's delete and the foreign-key check of a `people` delete (investigation K). SHARE blocks every write to `event_dedupe`, so every event ingest, through the build, which scans the whole table. Keep and budget the build, or pre-build it before the stop under the same name (the migration uses `IF NOT EXISTS`; drop an invalid index a failed build leaves, then retry): `CREATE INDEX CONCURRENTLY event_dedupe_person_id_idx ON event_dedupe (person_id);` A concurrent build takes SHARE UPDATE EXCLUSIVE, which lets ingest run. |
+| `0092_identities_person_fk_deferrable.sql` | Makes the foreign key of `identities` to `people` deferrable, still checked at each statement unless deferred (`DEFERRABLE INITIALLY IMMEDIATE`), so the resolution can claim a new person's identities before inserting it and a lost identity race no longer deletes a `people` row (perf P). Catalog only, no scan; it takes ACCESS EXCLUSIVE on `identities`, brief once granted but queued behind any open reader. Keep. |
 
 **Older installs: `0033_trait_slots.sql`.** This is already present in `v0.187.0`, so that upgrade
 does not replay it. Keep its released SQL. It adds 30 nullable columns to `people`, builds 30

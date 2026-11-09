@@ -264,8 +264,14 @@ pub(crate) async fn apply_hook_record(
 ) -> Result<HookResult, StoreError> {
     let mut current = record.profile.clone();
     drop_superseded_traits(connection, workspace, &mut current).await?;
-    let profile =
-        apply_profile_record_into(connection, workspace, &current, &mut events.decisions).await?;
+    let profile = apply_profile_record_into(
+        connection,
+        workspace,
+        &current,
+        &mut events.profiles,
+        &mut events.decisions,
+    )
+    .await?;
     let person = match &profile {
         ProfileOutcome::Applied { person_id, .. } | ProfileOutcome::Unchanged { person_id, .. } => {
             *person_id

@@ -1,0 +1,17 @@
+-- A record whose identifiers nobody owns makes a person (`people/resolve.rs`). The person used to
+-- be inserted first and its identities after; when another transaction claimed one of them first,
+-- the person was deleted again, and that delete checks every table that references `people(id)`.
+-- Most of those tables are indexed by `(workspace_id, person_id)`, which the check (by person
+-- alone) cannot use, so it scanned `identities`, `source_records` and every `events` partition:
+-- 868 ms and 44k blocks a call on the sim.
+--
+-- Now the identities are claimed first, under the id the person will have, and the person is
+-- inserted once all of them were claimed; a pass that loses one deletes only the identities it
+-- claimed, by `identities_person_idx`. For that, the resolution defers the identities' foreign
+-- key (`SET CONSTRAINTS ... DEFERRED`) while it claims them and checks it again right after. The
+-- constraint stays checked at each statement for everyone else, so an identity insert still
+-- takes a key-share lock on its person, which an erasure waits for.
+--
+-- The change is to the catalog only and scans nothing, but it takes ACCESS EXCLUSIVE on
+-- `identities`: brief once granted, queued behind any open reader of the table.
+ALTER TABLE identities ALTER CONSTRAINT identities_person_id_fkey DEFERRABLE INITIALLY IMMEDIATE;

@@ -34,3 +34,4 @@ test-support = []
 [dev-dependencies]
 zirv-flow-core = { workspace = true, features = ["test-support"] }
 metrics-exporter-prometheus.workspace = true
+tracing.workspace = true

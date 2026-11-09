@@ -1830,7 +1830,15 @@ mod tests {
                 async move {
                     let mut tx = begin(&pool).await.unwrap();
                     let identifiers = [Identifier::parse("email", EMAIL).unwrap()];
-                    crate::people::resolve_person(&mut tx, ws, &identifiers, None, &trace()).await
+                    crate::people::resolve_person(
+                        &mut tx,
+                        ws,
+                        &identifiers,
+                        None,
+                        &trace(),
+                        &mut crate::people::ProfileBatch::default(),
+                    )
+                    .await
                 }
             });
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;

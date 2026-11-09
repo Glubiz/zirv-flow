@@ -1,23 +1,27 @@
 //! Bringing materialized traits back in line with the registry after a definition changes
 //! its precedence, source order or archived flag.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use sqlx::PgConnection;
 use uuid::Uuid;
 use zirv_flow_core::decision_actions;
 use zirv_flow_core::segment::ChangeClasses;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
-use super::apply::{mark_dirty, recompute};
-use crate::changes::request_reevaluation;
+use super::batch::recompute_people;
+use super::registry::Definitions;
+use crate::changes::{mark_people, request_reevaluation};
 use crate::{NewDecision, StoreError, append_decisions};
 
 /// How many people one recompute batch covers.
 pub const RECOMPUTE_BATCH: i64 = 500;
 
 /// Recomputes `key` for up to [`RECOMPUTE_BATCH`] people who hold a live contribution for it,
-/// in person-id order after `after`, on `connection` (the caller's transaction). A person
-/// whose materialized value changed is marked dirty and gets a `trait.change` decision
-/// (ids only). Returns the cursor for the next batch, or `None` when this was the last.
+/// in person-id order after `after`, on `connection` (the caller's transaction), all in one
+/// set-based recompute that locks them in id order. A person whose materialized value changed
+/// is marked dirty and gets a `trait.change` decision (ids only). Returns the cursor for the
+/// next batch, or `None` when this was the last.
 pub async fn recompute_trait_batch(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -42,22 +46,38 @@ pub async fn recompute_trait_batch(
     .fetch_all(&mut *connection)
     .await
     .map_err(StoreError::query)?;
-    let keys = [key.to_owned()];
-    let mut decisions = Vec::new();
-    for &person in &people {
-        if recompute(connection, workspace, person, &keys).await? {
-            mark_dirty(connection, workspace, person, ChangeClasses::TRAITS, trace).await?;
-            decisions.push(NewDecision {
-                graph: None,
-                workspace_id: workspace,
-                trace: trace.clone(),
-                spec: &decision_actions::TRAIT_CHANGED_DEFINITION,
-                detail: None,
-                subject_ids: vec![("person", person)],
-                job,
-            });
-        }
-    }
+    let wanted: BTreeMap<Uuid, BTreeSet<String>> = people
+        .iter()
+        .map(|person| (*person, BTreeSet::from([key.to_owned()])))
+        .collect();
+    let changed =
+        recompute_people(connection, workspace, &wanted, &mut Definitions::default()).await?;
+    let changed: Vec<Uuid> = people
+        .iter()
+        .copied()
+        .filter(|person| changed.contains_key(person))
+        .collect();
+    mark_people(
+        connection,
+        workspace,
+        &changed,
+        ChangeClasses::TRAITS,
+        trace,
+        None,
+    )
+    .await?;
+    let decisions: Vec<NewDecision> = changed
+        .iter()
+        .map(|person| NewDecision {
+            graph: None,
+            workspace_id: workspace,
+            trace: trace.clone(),
+            spec: &decision_actions::TRAIT_CHANGED_DEFINITION,
+            detail: None,
+            subject_ids: vec![("person", *person)],
+            job,
+        })
+        .collect();
     append_decisions(connection, &decisions).await?;
     if !people.is_empty() {
         request_reevaluation(connection, workspace).await?;

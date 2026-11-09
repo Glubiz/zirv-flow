@@ -5,7 +5,7 @@
 //! Decision records carry static strings and ids only, never trait keys or values and never
 //! identifiers.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value};
 use sqlx::{Connection, PgConnection};
@@ -15,16 +15,17 @@ use uuid::Uuid;
 use zirv_flow_core::contacts;
 use zirv_flow_core::decision_actions::{self, DecisionSpec};
 use zirv_flow_core::people::{
-    Contribution, DropReason, Identifier, TraitValue, coerce, infer_type, resolve, validate_key,
+    DropReason, Identifier, TraitValue, coerce, infer_type, validate_key,
 };
 use zirv_flow_core::segment::ChangeClasses;
 use zirv_flow_core::token::sha256;
 use zirv_flow_core::{OrphanPolicy, TraceContext, WorkspaceId};
 
-use super::lock::{LedgerKey, lock_batch};
-use super::registry::{TraitDefinition, find_trait_definition, insert_inferred_definition};
+use super::batch::{Owed, ProfileBatch, recompute_people};
+use super::lock::{LedgerKey, LockedRow, lock_batch};
+use super::registry::{Definitions, insert_inferred_definition};
 use super::resolve::{Resolution, resolve_person};
-use super::slots::{lock_and_read_writer_slots, lock_slots_shared, slot_assignments_sql};
+use super::slots::lock_slots_shared;
 use crate::changes::mark_person;
 use crate::decisions::DecisionBuffer;
 use crate::{DeleteReason, NewDecision, PgPool, StoreError, append_decision, begin, commit};
@@ -89,7 +90,9 @@ pub async fn apply_profile_batch(
 
 /// [`apply_profile_batch`] inside the caller's transaction, which the caller commits.
 /// `retracted` names the ledger rows the caller removes in the same transaction after these
-/// records: they are locked with the records' own, before the first record is applied.
+/// records: they are locked with the records' own, before the first record is applied. The
+/// records share one [`ProfileBatch`]: their traits are recomputed together after the last one,
+/// and their decisions are appended in one statement.
 pub(crate) async fn apply_profile_records(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -99,12 +102,39 @@ pub(crate) async fn apply_profile_records(
     crate::changes::cache_change_readers(connection, workspace).await?;
     // Before any row lock; see `slots` for the order.
     lock_slots_shared(connection, workspace).await?;
-    lock_records(connection, workspace, records, retracted).await?;
+    let held = lock_records(connection, workspace, records, retracted).await?;
+    let mut batch = ProfileBatch::guarded();
+    batch.hold_rows(held);
+    let mut decisions = DecisionBuffer::default();
     let mut outcomes = Vec::with_capacity(records.len());
     for record in records {
-        outcomes.push(apply_profile_record(connection, workspace, record).await?);
+        outcomes.push(
+            apply_record(
+                connection,
+                workspace,
+                record,
+                &mut decisions,
+                None,
+                &mut batch,
+            )
+            .await?,
+        );
     }
+    let changed = batch.finish(connection, workspace, &mut decisions).await?;
+    settle(outcomes.iter_mut(), &changed);
+    decisions.flush(connection).await?;
     Ok(outcomes)
+}
+
+/// Sets `changed` on the applied ones of `outcomes`, in order, from [`ProfileBatch::finish`].
+fn settle<'a>(outcomes: impl IntoIterator<Item = &'a mut ProfileOutcome>, changed: &[bool]) {
+    let applied = outcomes.into_iter().filter_map(|outcome| match outcome {
+        ProfileOutcome::Applied { changed, .. } => Some(changed),
+        _ => None,
+    });
+    for (flag, value) in applied.zip(changed) {
+        *flag = *value;
+    }
 }
 
 /// [`apply_profile_records`] with each record in a savepoint of its own: a record the store
@@ -123,7 +153,16 @@ pub(crate) async fn apply_profile_records_singly(
     let mut outcomes = Vec::with_capacity(records.len());
     for record in records {
         let mut savepoint = connection.begin().await.map_err(StoreError::query)?;
-        match apply_profile_record(&mut savepoint, workspace, record).await {
+        // A batch of its own: a rollback must not leave the next record with its locks or writes.
+        let applied = apply_one(
+            &mut savepoint,
+            workspace,
+            record,
+            None,
+            ProfileBatch::guarded(),
+        )
+        .await;
+        match applied {
             Ok(outcome) => {
                 savepoint.commit().await.map_err(StoreError::query)?;
                 outcomes.push(Some(outcome));
@@ -139,13 +178,13 @@ pub(crate) async fn apply_profile_records_singly(
 }
 
 /// [`lock_batch`] for the identities and ledger rows of `records` and the ledger rows
-/// `retracted`.
+/// `retracted`. Returns the people it locked.
 async fn lock_records(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     records: &[ProfileRecord],
     retracted: &[LedgerKey<'_>],
-) -> Result<(), StoreError> {
+) -> Result<Vec<LockedRow>, StoreError> {
     let mut identities: Vec<Vec<(String, String)>> = Vec::with_capacity(records.len());
     let mut ledger: Vec<LedgerKey<'_>> = Vec::with_capacity(records.len() + retracted.len());
     for record in records {
@@ -250,11 +289,19 @@ pub(crate) async fn remove_contribution_in(
     .fetch_one(&mut *connection)
     .await
     .map_err(StoreError::query)?;
-    let keys: Vec<String> = traits
+    let keys: BTreeSet<String> = traits
         .as_object()
         .map(|map| map.keys().cloned().collect())
         .unwrap_or_default();
-    if recompute(&mut *connection, workspace, person_id, &keys).await? {
+    let wanted = BTreeMap::from([(person_id, keys)]);
+    let changed = recompute_people(
+        &mut *connection,
+        workspace,
+        &wanted,
+        &mut Definitions::default(),
+    )
+    .await?;
+    if changed.contains_key(&person_id) {
         record_decision(
             &mut *connection,
             workspace,
@@ -307,15 +354,27 @@ pub(crate) async fn remove_contribution_in(
     Ok(Some(RemovedRecord { record_id }))
 }
 
+/// The dedupe rows of deleted events, `$2` their message ids and `$3` their ids, found through
+/// the primary key `(workspace_id, message_id)`: no index leads with `event_id`, so a delete by
+/// it alone read the whole table. Only a row that names one of the events goes; an event and its
+/// dedupe row always carry the same message id.
+const DELETE_EVENT_DEDUPE: &str = "DELETE FROM event_dedupe d \
+     USING unnest($2::text[], $3::uuid[]) AS e(message_id, event_id) \
+     WHERE d.workspace_id = $1 AND d.message_id = e.message_id AND d.event_id = e.event_id";
+
+/// How many dedupe rows one statement of [`remove_record_events`] deletes at most.
+const DEDUPE_CHUNK: usize = 1000;
+
 /// Deletes the events of one ledger record, and the dedupe and debugger rows that name them, in
-/// the removal's transaction.
+/// the removal's transaction. The dedupe rows go [`DEDUPE_CHUNK`] at a time, by their key.
 async fn remove_record_events(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     record_id: Uuid,
 ) -> Result<(), StoreError> {
-    let events: Vec<Uuid> = sqlx::query_scalar(
-        "DELETE FROM events WHERE workspace_id = $1 AND source_record_id = $2 RETURNING id",
+    let events: Vec<(Uuid, Option<String>)> = sqlx::query_as(
+        "DELETE FROM events WHERE workspace_id = $1 AND source_record_id = $2 \
+         RETURNING id, message_id",
     )
     .bind(workspace.as_uuid())
     .bind(record_id)
@@ -325,13 +384,27 @@ async fn remove_record_events(
     if events.is_empty() {
         return Ok(());
     }
-    for statement in [
-        "DELETE FROM debugger_feed WHERE workspace_id = $1 AND event_id = ANY($2)",
-        "DELETE FROM event_dedupe WHERE workspace_id = $1 AND event_id = ANY($2)",
-    ] {
-        sqlx::query(statement)
+    let ids: Vec<Uuid> = events.iter().map(|(id, _)| *id).collect();
+    sqlx::query("DELETE FROM debugger_feed WHERE workspace_id = $1 AND event_id = ANY($2)")
+        .bind(workspace.as_uuid())
+        .bind(&ids)
+        .execute(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
+    // An event without a message id has no dedupe row.
+    let named: Vec<(Uuid, String)> = events
+        .into_iter()
+        .filter_map(|(id, message)| message.map(|message| (id, message)))
+        .collect();
+    for chunk in named.chunks(DEDUPE_CHUNK) {
+        let (ids, messages): (Vec<Uuid>, Vec<&str>) = chunk
+            .iter()
+            .map(|(id, message)| (*id, message.as_str()))
+            .unzip();
+        sqlx::query(DELETE_EVENT_DEDUPE)
             .bind(workspace.as_uuid())
-            .bind(&events)
+            .bind(&messages)
+            .bind(&ids)
             .execute(&mut *connection)
             .await
             .map_err(StoreError::query)?;
@@ -412,26 +485,53 @@ async fn is_orphan(
     .map_err(StoreError::query)
 }
 
+/// Applies one record on its own: its traits are recomputed and its decisions appended before
+/// it returns.
 pub(crate) async fn apply_profile_record(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     record: &ProfileRecord,
 ) -> Result<ProfileOutcome, StoreError> {
+    apply_one(connection, workspace, record, None, ProfileBatch::default()).await
+}
+
+/// [`apply_profile_record`] in `batch`, which may come with the guards already held.
+async fn apply_one(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    record: &ProfileRecord,
+    native: Option<NativeWrite<'_>>,
+    mut batch: ProfileBatch,
+) -> Result<ProfileOutcome, StoreError> {
     let mut decisions = DecisionBuffer::default();
-    let outcome = apply_profile_record_into(connection, workspace, record, &mut decisions).await?;
+    let mut outcome = apply_record(
+        connection,
+        workspace,
+        record,
+        &mut decisions,
+        native,
+        &mut batch,
+    )
+    .await?;
+    let changed = batch.finish(connection, workspace, &mut decisions).await?;
+    settle([&mut outcome], &changed);
     decisions.flush(connection).await?;
     Ok(outcome)
 }
 
-/// [`apply_profile_record`] that leaves its decisions in `decisions` for the caller to flush in
-/// the same transaction, so a drain batch appends them in one statement.
+/// [`apply_profile_record`] as one record of `batch`, which leaves its recompute and its decisions
+/// for the caller: it calls [`ProfileBatch::finish`] once after the batch's last record and then
+/// flushes `decisions`, in the same transaction, so a drain batch recomputes its people and
+/// appends its decisions once. Until then an applied outcome reports `changed` as false;
+/// [`ProfileBatch::finish`] returns the real value.
 pub(crate) async fn apply_profile_record_into(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     record: &ProfileRecord,
+    batch: &mut ProfileBatch,
     decisions: &mut DecisionBuffer,
 ) -> Result<ProfileOutcome, StoreError> {
-    apply_record(connection, workspace, record, decisions, None).await
+    apply_record(connection, workspace, record, decisions, None, batch).await
 }
 
 /// How a native contact write differs from a source's record: its traits are the contact's
@@ -450,27 +550,39 @@ pub(crate) async fn apply_native_record(
     record: &ProfileRecord,
     native: NativeWrite<'_>,
 ) -> Result<ProfileOutcome, StoreError> {
-    let mut decisions = DecisionBuffer::default();
-    let outcome = apply_record(connection, workspace, record, &mut decisions, Some(native)).await?;
-    decisions.flush(connection).await?;
-    Ok(outcome)
+    apply_one(
+        connection,
+        workspace,
+        record,
+        Some(native),
+        ProfileBatch::default(),
+    )
+    .await
 }
 
+/// Applies one record as part of `batch`: everything but the trait recompute, which the record
+/// owes the batch ([`ProfileBatch::finish`]).
 async fn apply_record(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     record: &ProfileRecord,
     decisions: &mut DecisionBuffer,
     native: Option<NativeWrite<'_>>,
+    batch: &mut ProfileBatch,
 ) -> Result<ProfileOutcome, StoreError> {
-    crate::changes::cache_change_readers(connection, workspace).await?;
     // After the segment guard, before any row lock: see the lock order in `slots`.
-    lock_slots_shared(connection, workspace).await?;
+    batch.guard(connection, workspace).await?;
     let identifiers = match normalize_identifiers(&record.identifiers) {
         Ok(identifiers) => identifiers,
         Err(reason) => return Ok(ProfileOutcome::Rejected { reason }),
     };
-    let (updates, dropped) = prepare_traits(connection, workspace, &record.traits).await?;
+    let (updates, dropped) = prepare_traits(
+        connection,
+        workspace,
+        &record.traits,
+        &mut batch.definitions,
+    )
+    .await?;
     // A flow's write is a new contribution each time it is made: the time is part of its hash, so
     // writing the same value again after another source won still takes part in latest-wins.
     // Other sources keep deduplicating a replay, whatever its `observed_at`.
@@ -497,6 +609,7 @@ async fn apply_record(
         &identifiers,
         existing.as_ref().map(|row| row.person_id),
         &record.trace,
+        batch,
     )
     .await?;
     let person_id = resolution.person_id;
@@ -545,24 +658,16 @@ async fn apply_record(
     if let Some(row) = &existing
         && let Some(previous) = previous
         && previous != person_id
-        && recompute(connection, workspace, previous, &row.trait_keys()).await?
     {
-        mark_dirty(
-            connection,
-            workspace,
-            previous,
-            ChangeClasses::TRAITS,
-            &record.trace,
-        )
-        .await?;
-        buffer_decision(
-            decisions,
-            workspace,
-            &record.trace,
-            &decision_actions::TRAIT_CHANGED,
-            None,
-            vec![("person", previous), ("source_record", record_id)],
-        );
+        batch.owe(Owed {
+            person: previous,
+            keys: row.trait_keys(),
+            record_id,
+            trace: record.trace.clone(),
+            moved_from: true,
+            created: false,
+            decision: Uuid::now_v7(),
+        });
     }
 
     // Every key the row now holds, plus the keys it just retracted. A record that moved
@@ -571,31 +676,20 @@ async fn apply_record(
     keys.extend(updates.iter().map(|(key, _)| key.clone()));
     keys.sort();
     keys.dedup();
-    let changed = recompute(connection, workspace, person_id, &keys).await?;
-    if changed || resolution.created {
-        mark_dirty(
-            connection,
-            workspace,
-            person_id,
-            ChangeClasses::TRAITS,
-            &record.trace,
-        )
-        .await?;
-    }
-    if changed {
-        buffer_decision(
-            decisions,
-            workspace,
-            &record.trace,
-            &decision_actions::TRAIT_CHANGED,
-            None,
-            vec![("person", person_id), ("source_record", record_id)],
-        );
-    }
+    batch.owe(Owed {
+        person: person_id,
+        keys,
+        record_id,
+        trace: record.trace.clone(),
+        moved_from: false,
+        created: resolution.created,
+        decision: Uuid::now_v7(),
+    });
     Ok(ProfileOutcome::Applied {
         person_id,
         created: resolution.created,
-        changed,
+        // Known once the batch's recomputes ran: `settle` sets it from `ProfileBatch::finish`.
+        changed: false,
         dropped,
     })
 }
@@ -696,13 +790,26 @@ pub(crate) fn normalize_identifiers(
 /// The accepted changes (`None` removes the key) and the dropped traits of a record.
 type Prepared = (Vec<(String, Option<Value>)>, Vec<DroppedTrait>);
 
+/// Validates a record's traits against the registry, read through `definitions` in one query for
+/// the keys the batch has not read yet. An unregistered key is registered with an inferred type.
 async fn prepare_traits(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     traits: &Map<String, Value>,
+    definitions: &mut Definitions,
 ) -> Result<Prepared, StoreError> {
     let mut sorted: Vec<(&String, &Value)> = traits.iter().collect();
     sorted.sort_by_key(|(key, _)| *key);
+    definitions
+        .load(
+            &mut *connection,
+            workspace,
+            sorted
+                .iter()
+                .filter(|(key, _)| validate_key(key).is_ok())
+                .map(|(key, _)| key.as_str()),
+        )
+        .await?;
     let mut updates = Vec::new();
     let mut dropped = Vec::new();
     for (key, value) in sorted {
@@ -716,8 +823,13 @@ async fn prepare_traits(
             drop(DropReason::InvalidKey);
             continue;
         }
-        let mut definition = find_trait_definition(&mut *connection, workspace, key).await?;
-        if definition.as_ref().is_some_and(|d| d.archived) {
+        let known = |definitions: &Definitions| {
+            definitions
+                .get(key)
+                .map(|definition| (definition.archived, definition.trait_type))
+        };
+        let mut definition = known(definitions);
+        if definition.is_some_and(|(archived, _)| archived) {
             drop(DropReason::Archived);
             continue;
         }
@@ -734,17 +846,18 @@ async fn prepare_traits(
                 }
             };
             insert_inferred_definition(connection, workspace, key, inferred).await?;
-            definition = find_trait_definition(&mut *connection, workspace, key).await?;
+            definitions.reload(&mut *connection, workspace, key).await?;
+            definition = known(definitions);
         }
-        let Some(definition) = definition else {
+        let Some((archived, trait_type)) = definition else {
             drop(DropReason::NotInferable);
             continue;
         };
-        if definition.archived {
+        if archived {
             drop(DropReason::Archived);
             continue;
         }
-        match coerce(definition.trait_type, value) {
+        match coerce(trait_type, value) {
             Ok(accepted) => updates.push((key.clone(), Some(to_json(&accepted)))),
             Err(reason) => drop(reason),
         }
@@ -982,116 +1095,10 @@ async fn upsert_ledger_row(
     }
 }
 
-/// Recomputes `keys` of one person from the live ledger rows, and writes the person only if
-/// a value or its source changed. Returns whether a value changed.
-pub(super) async fn recompute(
-    connection: &mut PgConnection,
-    workspace: WorkspaceId,
-    person_id: Uuid,
-    keys: &[String],
-) -> Result<bool, StoreError> {
-    let person: Option<(Value, Value)> = sqlx::query_as(
-        "SELECT traits, trait_sources FROM people WHERE workspace_id = $1 AND id = $2 FOR UPDATE",
-    )
-    .bind(workspace.as_uuid())
-    .bind(person_id)
-    .fetch_optional(&mut *connection)
-    .await
-    .map_err(StoreError::query)?;
-    let Some((traits, sources)) = person else {
-        return Ok(false);
-    };
-    let (mut traits, mut sources) = (
-        traits.as_object().cloned().unwrap_or_default(),
-        sources.as_object().cloned().unwrap_or_default(),
-    );
-    let rows: Vec<(Uuid, String, Value)> = sqlx::query_as(
-        "SELECT id, source, traits FROM source_records \
-         WHERE workspace_id = $1 AND person_id = $2 AND deleted_at IS NULL",
-    )
-    .bind(workspace.as_uuid())
-    .bind(person_id)
-    .fetch_all(&mut *connection)
-    .await
-    .map_err(StoreError::query)?;
-
-    let (mut values_changed, mut sources_changed) = (false, false);
-    for key in keys {
-        let definition: Option<TraitDefinition> =
-            find_trait_definition(&mut *connection, workspace, key).await?;
-        let mut contributions = Vec::new();
-        // An archived key is not materialized; the ledger keeps its values for an unarchive.
-        let archived = definition.as_ref().is_some_and(|d| d.archived);
-        for (record_id, source, record_traits) in rows.iter().filter(|_| !archived) {
-            let Some(entry) = record_traits.get(key) else {
-                continue;
-            };
-            let (Some(value), Some(at)) = (entry.get("v"), entry.get("at").and_then(Value::as_str))
-            else {
-                return Err(decode_error("malformed ledger trait"));
-            };
-            contributions.push(Contribution {
-                source: source.clone(),
-                at: OffsetDateTime::parse(at, &Rfc3339)
-                    .map_err(|_| decode_error("malformed ledger time"))?,
-                record_id: *record_id,
-                value: value.clone(),
-            });
-        }
-        let (precedence, order) = definition.map_or_else(
-            || (zirv_flow_core::people::Precedence::Latest, Vec::new()),
-            |d| (d.precedence, d.source_order),
-        );
-        match resolve(precedence, &order, &contributions) {
-            Some(winner) => {
-                if !traits
-                    .get(key)
-                    .is_some_and(|current| same_value(current, &winner.value))
-                {
-                    traits.insert(key.clone(), winner.value.clone());
-                    values_changed = true;
-                }
-                let source = Value::String(winner.source.clone());
-                if sources.get(key) != Some(&source) {
-                    sources.insert(key.clone(), source);
-                    sources_changed = true;
-                }
-            }
-            None => {
-                values_changed |= traits.remove(key).is_some();
-                sources_changed |= sources.remove(key).is_some();
-            }
-        }
-    }
-    if values_changed || sources_changed {
-        // The writer lock comes in a statement of its own, before the read of the assignments,
-        // and the slots are written by the statement that writes `traits`.
-        let slots = lock_and_read_writer_slots(connection, workspace).await?;
-        let sql = format!(
-            "UPDATE people SET traits = $3, trait_sources = $4, updated_at = now(){} \
-             WHERE workspace_id = $1 AND id = $2",
-            slot_assignments_sql(&slots, "$3::jsonb", 5)
-        );
-        let mut update = sqlx::query(sqlx::AssertSqlSafe(sql))
-            .bind(workspace.as_uuid())
-            .bind(person_id)
-            .bind(Value::Object(traits))
-            .bind(Value::Object(sources));
-        for (key, _) in &slots {
-            update = update.bind(key.as_str());
-        }
-        update
-            .execute(connection)
-            .await
-            .map_err(StoreError::query)?;
-    }
-    Ok(values_changed)
-}
-
 /// Whether two stored values are the same for change detection: numbers compare by numeric
 /// value (5 and 5.0 are equal; two integers compare exactly as integers, and an integer
 /// equals a float only when the float is that exact integer), everything else exactly. Storage always keeps the number as sent.
-fn same_value(a: &Value, b: &Value) -> bool {
+pub(super) fn same_value(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Number(x), Value::Number(y)) => {
             if let (Some(i), Some(j)) = (exact_integer(x), exact_integer(y)) {
@@ -1426,6 +1433,82 @@ mod tests {
             .unwrap();
         assert_eq!(dedupe_left, 4);
         assert!(find_person(&pool, ws, person).await.unwrap().is_some());
+    }
+
+    /// The scan nodes of an `EXPLAIN (FORMAT JSON)` plan that read `relation`.
+    fn scans_of<'a>(plan: &'a Value, relation: &str, out: &mut Vec<&'a Map<String, Value>>) {
+        if let Some(object) = plan.as_object() {
+            let scan = object
+                .get("Node Type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind.ends_with("Scan"));
+            if scan && object.get("Relation Name").and_then(Value::as_str) == Some(relation) {
+                out.push(object);
+            }
+            object
+                .values()
+                .for_each(|child| scans_of(child, relation, out));
+        } else if let Some(array) = plan.as_array() {
+            array
+                .iter()
+                .for_each(|child| scans_of(child, relation, out));
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_dedupe_rows_of_a_removed_records_events_are_found_by_their_key_not_a_scan(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "plan").await;
+        let person = person_of(
+            &apply_profile_batch(
+                &pool,
+                ws,
+                &[record("crm", "1", "a@example.com", json!({}), T0)],
+            )
+            .await
+            .unwrap()[0],
+        );
+        // Enough rows that a scan would be tempting, and never analysed.
+        sqlx::query(
+            "INSERT INTO event_dedupe (workspace_id, message_id, event_id, event_occurred_at, \
+                person_id) \
+             SELECT $1, 'm-' || n, gen_random_uuid(), now(), $2 FROM generate_series(1, 5000) n",
+        )
+        .bind(ws.as_uuid())
+        .bind(person)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let plan: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN (FORMAT JSON) {DELETE_EVENT_DEDUPE}"
+        )))
+        .bind(ws.as_uuid())
+        .bind(["m-1", "m-2"])
+        .bind([Uuid::now_v7(), Uuid::now_v7()])
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        // Every read of `event_dedupe` seeks its key, workspace and message id, not only the
+        // workspace's part of it.
+        let mut scans = Vec::new();
+        scans_of(&plan, "event_dedupe", &mut scans);
+        assert!(!scans.is_empty(), "{plan}");
+        for scan in scans {
+            assert_eq!(
+                scan.get("Index Name"),
+                Some(&json!("event_dedupe_pkey")),
+                "{plan}"
+            );
+            let condition = scan
+                .get("Index Cond")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            assert!(condition.contains("message_id"), "{plan}");
+        }
     }
 
     #[sqlx::test]

@@ -2,6 +2,7 @@
 //! identities, the profile path of apply-batch, identity merges and conflict review.
 
 mod apply;
+mod batch;
 mod conflicts;
 mod lock;
 mod merge;
@@ -29,6 +30,7 @@ pub(crate) use apply::{
     apply_profile_records, apply_profile_records_singly, remove_contribution_in,
 };
 pub(crate) use apply::{normalize_identifiers, record_resolution};
+pub(crate) use batch::ProfileBatch;
 pub use conflicts::{
     ConflictResolution, ResolveError, find_conflict, list_conflicts, resolve_conflict,
 };

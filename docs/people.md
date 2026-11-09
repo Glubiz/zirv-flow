@@ -677,6 +677,8 @@ scheduler leader exports `zirv_flow_ingest_inbox_age_seconds`, the age of the ol
 `kafka.consume` and `sync.run` commit a unit of `ingest.kafka_unit_messages` messages (default 100) and
 `ingest.sync_unit_records` records (default 100) at a time, each between 1 and 1000. A unit takes the locks of
 its people before its first record and holds them to its commit, so a drain lane that touches one of
-them waits for the whole unit: a smaller unit shortens that wait. A source batch larger than
-`ingest.sync_unit_records` still commits alone.
+them waits for the whole unit: a smaller unit shortens that wait. A unit also commits before a
+source batch that would take it over the size. The database sources read pages of
+`ingest.sync_unit_records` rows (at most 500), so their units hold at most that many records; a
+single source batch larger than the size, as an API page can be, still commits alone.
 

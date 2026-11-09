@@ -453,6 +453,18 @@ the stream checkpoint. Customer-event schema validation, redaction, reject
 handling, lateness and trace propagation are defined once in section 12 and
 used by every ingestion path.
 
+The trait recompute runs once per batch, not per record (`people/batch.rs`). Each record upserts
+its ledger row and owes the keys it touched; when the batch ends, one statement locks and reads
+its people (`FOR UPDATE` in id order, rows the batch already holds), one reads their live ledger
+contributions for those keys only, and one writes every person whose value or source changed.
+So no person lock is held across a per-person recompute loop, and the lock order is unchanged:
+people in id order, list and segment locks after them, `ListCounts::apply` last. A record's
+`changed` and its `trait.change` decision are judged from the person as the batch found it to
+the person as the batch leaves it, and the decision keeps the record's place in its trace. One
+batch also takes the segment guard and the shared slot lock once, reads each trait definition
+once, and does not lock again, or look the identities up a second time, for a record whose
+people it already holds. A path that applies records in savepoints gives each its own batch.
+
 The dirty set is `person_changes`, one row per `(workspace_id, person_id)`. Each row carries a
 `smallint` change-class bitmask (traits, events, lists, consent, identifiers, merge), OR-ed
 on conflict, so repeated marks coalesce and keep every class that changed. A mark made after
@@ -720,7 +732,7 @@ Deterministic matching only, with rules per identifier kind:
 
 - **Blocked merge:** the record attaches to the person matched by the strongest identifier, and an **identity conflict** is recorded for review in the UI (shared family or role addresses are the common case). A review ends in one of two outcomes: keep the people separate, or move the identifier to one of them.
 - **Merge:** the older person survives. One transaction moves identities, contributions and consent, recomputes traits, sets `merged_into` and marks both people in the `merge` change class; it takes no segment or list lock. A `person.merge.rewrite` job then re-points identity conflicts in batches, moves the list memberships and closes any segment row the pass left open; the next re-evaluation pass closes the merged person's segment rows without an exit and evaluates the survivor (6); enrollments and messages stay on the old id on purpose, and message history follows `person_merges`; meanwhile reads follow `merged_into` (one hop, chains compressed). Duplicate active enrollments in one flow keep the older and exit the other with reason `merged`. Each merge records its provenance (the moved ids in a merge record, plus a decision record). There is no unmerge in v1 (OQ-3).
-- **Races:** concurrent creation of the same person is serialized by the unique identity index; the loser retries resolution.
+- **Races:** concurrent creation of the same person is serialized by the unique identity index; the loser retries resolution. A new person's identities are claimed first, under the id it will have, and its `people` row is inserted only once all of them were claimed (the resolution defers the identities' foreign key while it claims them, 0092; every other writer keeps the immediate check): a loser deletes only the identities it claimed, never a `people` row, whose delete would check every table that references it.
 - **Precedence:** each trait value is computed from all sources' contributions under the registry policy `latest` (by source observation time, default), `source_priority` (ordered sources) or `first`. Flow actions and the API write as sources (`flow:<id>`, `api`). The profile shows which source supplied each value.
 
 As built (people, identities and the field registry):
@@ -3796,7 +3808,7 @@ they were ruled as their capabilities were added to the plan.
   stays in `jsonb`. `string_list` traits stay in `jsonb`. The promotion is built in the
   segment milestone (M4); until the slots exist the `jsonb_path_ops` index stays, and it is reconsidered once promoted
   traits cover the equality searches. The slots are live (#125): states `backfilling`, `ready` and `retiring`; writers take the shared slot lock before they read the assignments and assignment changes take the exclusive one, so a backfill never leaves a stale value (`people/slots.rs`); the routes are `POST` and `DELETE /traits/{key}/index`.
-  Known limitation and upgrade decision: keep released migration 0033 and its checksum. Its initial `ALTER TABLE` holds ACCESS EXCLUSIVE on `people` through all 30 partial index builds, blocking reads and writes. Populated upgrades stop all roles and budget the full build when upgrading from before 0033; `v0.187.0` already contains it. No populated build timing is recorded. Rehearse at the installation's row counts before setting the downtime window; see the [lock review](operations/upgrade.md#lock-review-through-0091). This supports stopped upgrades only; online and mixed-version upgrades remain OQ-17.
+  Known limitation and upgrade decision: keep released migration 0033 and its checksum. Its initial `ALTER TABLE` holds ACCESS EXCLUSIVE on `people` through all 30 partial index builds, blocking reads and writes. Populated upgrades stop all roles and budget the full build when upgrading from before 0033; `v0.187.0` already contains it. No populated build timing is recorded. Rehearse at the installation's row counts before setting the downtime window; see the [lock review](operations/upgrade.md#lock-review-through-0092). This supports stopped upgrades only; online and mixed-version upgrades remain OQ-17.
   Details in [docs/benchmarks/m2-ingestion.md](benchmarks/m2-ingestion.md).
 
 - **OQ-8:** A per-workspace running cap in the claim query

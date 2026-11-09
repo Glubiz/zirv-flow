@@ -5,13 +5,17 @@
 //! merged people's segment rows are closed by the next re-evaluation pass and, for whatever it
 //! leaves, by the rewrite job, so a merge inside a drain batch takes no list or segment lock.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use sqlx::{PgConnection, PgExecutor};
 use uuid::Uuid;
 use zirv_flow_core::decision_actions;
 use zirv_flow_core::segment::ChangeClasses;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
-use super::apply::{recompute, record_decision};
+use super::apply::record_decision;
+use super::batch::recompute_people;
+use super::registry::Definitions;
 use super::slots::{lock_and_read_writer_slots, slot_nulls_sql};
 use crate::changes::mark_people;
 use crate::consent;
@@ -56,7 +60,8 @@ pub async fn current_person<'e>(
 /// Merges each of `losers` into `survivor`, all locked by the caller. For each loser, in the
 /// caller's transaction: its identities and ledger rows move, it points at the survivor, a
 /// provenance row and a `person.merge` decision are written and the rewrite job is enqueued.
-/// Afterwards the survivor's traits are recomputed from every contribution it now holds.
+/// Afterwards the survivor's traits are recomputed from every contribution it now holds, with the
+/// definitions the caller's batch has read (`definitions`).
 ///
 /// It writes no segment or list row and takes no segment or list lock: a drain batch applies
 /// many records in one transaction, and a lock taken per merge would be taken out of order
@@ -69,6 +74,7 @@ pub(super) async fn merge_people(
     survivor: Uuid,
     losers: &[Uuid],
     trace: &TraceContext,
+    definitions: &mut Definitions,
 ) -> Result<(), StoreError> {
     crate::changes::cache_change_readers(connection, workspace).await?;
     // A trait writer: the loser's traits are emptied below, so its slots are emptied with them.
@@ -240,7 +246,7 @@ pub(super) async fn merge_people(
     .await
     .map_err(StoreError::query)?;
 
-    let keys: Vec<String> = sqlx::query_scalar(
+    let keys: BTreeSet<String> = sqlx::query_scalar(
         "SELECT DISTINCT jsonb_object_keys(traits) FROM source_records \
          WHERE workspace_id = $1 AND person_id = $2 AND deleted_at IS NULL",
     )
@@ -248,8 +254,14 @@ pub(super) async fn merge_people(
     .bind(survivor)
     .fetch_all(&mut *connection)
     .await
-    .map_err(StoreError::query)?;
-    if recompute(connection, workspace, survivor, &keys).await? {
+    .map_err(StoreError::query)?
+    .into_iter()
+    .collect();
+    let wanted = BTreeMap::from([(survivor, keys)]);
+    if recompute_people(connection, workspace, &wanted, definitions)
+        .await?
+        .contains_key(&survivor)
+    {
         record_decision(
             connection,
             workspace,

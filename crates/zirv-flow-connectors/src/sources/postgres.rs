@@ -323,15 +323,17 @@ fn select_list(columns: &[Column]) -> String {
 
 /// The page query. `from` is a quoted table or a parenthesised query, `keys` the key columns in
 /// comparison order (the cursor first, when `cursor` is set) with their types, and `after`
-/// whether a checkpoint applies, bound as text parameters `$1..$n` and cast on the server.
+/// whether a checkpoint applies, bound as text parameters `$1..$n` and cast on the server. A page
+/// is `rows` rows.
 fn page_sql(
     from: &str,
     columns: &[Column],
     keys: &[(String, KeyType)],
     cursor: bool,
     after: bool,
+    rows: usize,
 ) -> String {
-    keyset::page_sql(
+    let sql = keyset::page_sql(
         &select_list(columns),
         from,
         keys,
@@ -345,7 +347,8 @@ fn page_sql(
                 keys[index].1.cast()
             )
         },
-    )
+    );
+    keyset::limited(&sql, rows)
 }
 
 /// What a stream reads from: a table of the configured schema or a configured query.
@@ -432,14 +435,16 @@ async fn open_paged(
     )
     .await?;
     let keys = key_types(&columns, &spec)?;
+    let rows = keyset::page_rows(ctx);
+    let cursor = spec.cursor.is_some();
     let pager = PostgresPager {
         conn,
         statement_timeout: settings.statement_timeout,
-        first: page_sql(&from, &columns, &keys, spec.cursor.is_some(), false),
-        next: page_sql(&from, &columns, &keys, spec.cursor.is_some(), true),
+        first: page_sql(&from, &columns, &keys, cursor, false, rows),
+        next: page_sql(&from, &columns, &keys, cursor, true, rows),
     };
     let names = columns.into_iter().map(|column| column.name).collect();
-    Paged::new(pager, names, &spec, after)
+    Paged::new(pager, names, &spec, after, rows)
 }
 
 /// The key columns with the type each is paged on.
@@ -588,6 +593,7 @@ mod tests {
             &key_list(&[("updated_at", KeyType::Timestamptz), ("id", KeyType::Int8)]),
             true,
             false,
+            keyset::BATCH_ROWS,
         );
 
         assert_eq!(
@@ -606,6 +612,7 @@ mod tests {
             &key_list(&[("updated_at", KeyType::Timestamptz), ("id", KeyType::Int8)]),
             true,
             true,
+            keyset::BATCH_ROWS,
         );
 
         assert_eq!(
@@ -624,6 +631,7 @@ mod tests {
             &key_list(&[("id", KeyType::Int8)]),
             false,
             false,
+            keyset::BATCH_ROWS,
         );
         let composite = page_sql(
             "t",
@@ -631,6 +639,7 @@ mod tests {
             &key_list(&[("a", KeyType::Int4), ("b", KeyType::Text)]),
             false,
             true,
+            keyset::BATCH_ROWS,
         );
 
         assert_eq!(
@@ -655,6 +664,7 @@ mod tests {
             ]),
             true,
             true,
+            keyset::BATCH_ROWS,
         );
 
         assert!(
@@ -674,6 +684,7 @@ mod tests {
             &key_list(&[(r#"i"d"#, KeyType::Int8)]),
             false,
             false,
+            keyset::BATCH_ROWS,
         );
         assert!(
             sql.contains(r#"s."i""d"::text AS "i""d" FROM "t""; DROP TABLE x; --" AS s"#),

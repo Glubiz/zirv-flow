@@ -24,7 +24,6 @@ use zirv_flow_core::people::Identifier;
 use zirv_flow_core::{Cause, HmacKey, TraceContext, TraceId, WorkspaceId};
 
 use crate::contacts::{lock_contacts, replace_stored_fields};
-use crate::decisions::DecisionBuffer;
 use crate::events::{
     DroppedTraits, EventBatch, EventOutcome, EventRecord, FailedItem, Refusal, apply_event_record,
     insert_dropped_traits_reject, insert_record_rejects, reject_apply_failed,
@@ -869,22 +868,29 @@ async fn apply_contact(
     workspace: WorkspaceId,
     record: &ProfileRecord,
 ) -> Result<ProfileOutcome, StoreError> {
-    let mut decisions = DecisionBuffer::default();
-    let outcome = apply_contact_into(connection, workspace, record, &mut decisions).await?;
-    decisions.flush(connection).await?;
-    Ok(outcome)
+    let mut record = record.clone();
+    replace_stored_fields(connection, workspace, &mut record).await?;
+    apply_profile_record(connection, workspace, &record).await
 }
 
-/// [`apply_contact`] that leaves its decisions in `decisions` for the caller to flush.
+/// [`apply_contact`] as one record of the drain's batch, which recomputes its traits and appends
+/// its decisions when it finishes ([`EventBatch::finish`]).
 async fn apply_contact_into(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     record: &ProfileRecord,
-    decisions: &mut DecisionBuffer,
+    events: &mut EventBatch,
 ) -> Result<ProfileOutcome, StoreError> {
     let mut record = record.clone();
     replace_stored_fields(connection, workspace, &mut record).await?;
-    apply_profile_record_into(connection, workspace, &record, decisions).await
+    apply_profile_record_into(
+        connection,
+        workspace,
+        &record,
+        &mut events.profiles,
+        &mut events.decisions,
+    )
+    .await
 }
 
 /// The traits a contact record could not store, as a key to reason-code map: a single write
@@ -1035,6 +1041,10 @@ pub async fn drain_batch(
     };
     let mut events = EventBatch::default();
     events.readers_cached(workspace);
+    // The shared slot lock once for the batch, after the contact locks and before any person's:
+    // the batch's records and events then share what they hold and read, and its profile records
+    // recompute their traits together when the batch finishes.
+    events.profiles.guard(&mut tx, workspace).await?;
     let mut lists = ListCounts::default();
     let mapped: Vec<Mapped> = rows
         .iter()
@@ -1055,15 +1065,19 @@ pub async fn drain_batch(
     for (row, mapped) in rows.iter().zip(mapped) {
         match mapped {
             Mapped::Profile(record) => {
-                let result =
-                    apply_profile_record_into(&mut tx, workspace, &record, &mut events.decisions)
-                        .await?;
+                let result = apply_profile_record_into(
+                    &mut tx,
+                    workspace,
+                    &record,
+                    &mut events.profiles,
+                    &mut events.decisions,
+                )
+                .await?;
                 record_dropped_traits(&mut tx, workspace, row, &result).await?;
                 tally_profile(&mut outcome, "identify", &result);
             }
             Mapped::Contact(record) => {
-                let result =
-                    apply_contact_into(&mut tx, workspace, &record, &mut events.decisions).await?;
+                let result = apply_contact_into(&mut tx, workspace, &record, &mut events).await?;
                 // Rolls the batch back, so that the row is isolated and rejected singly.
                 if !dropped_fields(&result).is_empty() {
                     return Err(StoreError::poison());
