@@ -241,7 +241,10 @@ impl Shared {
     /// [`work`]). A kind no lane of this worker claims wakes nobody.
     fn wake_for(&self, kind: &str) {
         for lane in [Lane::General, Lane::Drain] {
-            if lane.kinds(self).iter().any(|claimed| *claimed == kind) && self.slots_in(lane) > 0 {
+            // `contains` would need `kind` to be `'static`, which a payload is not.
+            #[allow(clippy::manual_contains)]
+            let claims = lane.kinds(self).iter().any(|claimed| *claimed == kind);
+            if claims && self.slots_in(lane) > 0 {
                 lane.wake(self).notify_one();
             }
         }
