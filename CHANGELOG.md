@@ -15,3 +15,20 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.270.0 (2026-11-09)
+
+### Performance
+
+- commit SQL sync units at ingest.sync_unit_records
+- claim a new person's identities before inserting it
+- delete a removed record's event dedupe rows by their key
+- recompute a batch's traits in one read and one write
+
+### Documentation
+
+- record why a scoped statement count can see nothing
+
+### Chores
+
+- apply a native contact write through apply_one
+
