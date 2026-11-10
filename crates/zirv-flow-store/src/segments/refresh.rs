@@ -156,8 +156,9 @@ pub async fn poll_segment_refresh(
     Ok(())
 }
 
-/// [`poll_segment_refresh`] that gives up once `deadline` has passed: false means the lock was
-/// still held by another transaction at the last try, at the deadline, and is not taken.
+/// [`poll_segment_refresh`] that gives up once `deadline` has passed: false means the lock is not
+/// taken. The deadline is checked before every try, so a poll that wakes at it does not take a
+/// lock released meanwhile.
 pub async fn poll_segment_refresh_until(
     connection: &mut PgConnection,
     segment: Uuid,
@@ -165,6 +166,9 @@ pub async fn poll_segment_refresh_until(
 ) -> Result<bool, StoreError> {
     let mut pause = FIRST_PAUSE;
     loop {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Ok(false);
+        }
         let taken: bool = sqlx::query_scalar(
             "SELECT pg_try_advisory_xact_lock(hashtextextended($1 || '/' || $2::text, 0))",
         )
@@ -915,6 +919,45 @@ mod tests {
         .unwrap()
         .into_iter()
         .collect()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_poll_whose_deadline_has_passed_takes_no_lock_even_a_free_one(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let segment = Uuid::now_v7();
+            let held = "SELECT count(*) FROM pg_locks \
+                        WHERE locktype = 'advisory' AND pid = pg_backend_pid()";
+
+            // A pass that wakes at its deadline rolls back, even when the lock is free by then.
+            let mut late = begin(&pool).await.unwrap();
+            let taken = poll_segment_refresh_until(&mut late, segment, Some(Instant::now()))
+                .await
+                .unwrap();
+            let locks: i64 = sqlx::query_scalar(held)
+                .fetch_one(&mut *late)
+                .await
+                .unwrap();
+            assert_eq!((taken, locks), (false, 0), "no try once the time is out");
+            late.rollback().await.unwrap();
+
+            let mut early = begin(&pool).await.unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let taken = poll_segment_refresh_until(&mut early, segment, Some(deadline))
+                .await
+                .unwrap();
+            let locks: i64 = sqlx::query_scalar(held)
+                .fetch_one(&mut *early)
+                .await
+                .unwrap();
+            assert_eq!(
+                (taken, locks),
+                (true, 1),
+                "with time left a free lock is taken"
+            );
+            early.rollback().await.unwrap();
+        })
+        .await;
     }
 
     #[sqlx::test]
