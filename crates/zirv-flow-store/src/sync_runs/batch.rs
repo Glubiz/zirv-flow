@@ -2461,6 +2461,130 @@ mod tests {
         .await;
     }
 
+    /// A unit that removes twenty records, each its person's last, deletes twenty orphans in one
+    /// transaction. Each of them is the cursor of four audience pages whose fallback page is
+    /// queued already, so every rewrite is refused and its page goes; the transaction still stays
+    /// within the 64 subtransaction ids a backend caches.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_unit_deleting_orphans_that_page_audiences_stays_within_the_subtransaction_cache(
+        pool: PgPool,
+    ) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            use crate::subtransactions::testing::{record_at_commit, recorded};
+            use crate::{
+                AudienceSource, EnrollJobPayload, EnrollWork, TriggerKind, enroll_page_key,
+            };
+            use zirv_flow_core::OrphanPolicy;
+
+            let fx = fixture(&pool, "one", "incremental").await;
+            let source = fx.source_id.to_string();
+            crate::set_orphan_policy(&pool, fx.ws, OrphanPolicy::Delete)
+                .await
+                .unwrap();
+            let first = many(&fx, 0, 20);
+            let cp1 = json!({"offset": 20});
+            commit_sync_batch(&pool, &batch(&fx, &source, &first, &cp1))
+                .await
+                .unwrap();
+            // A person below everyone the unit deletes, which it removes in their id order: the
+            // cursor of every page falls back to this one.
+            let older = Uuid::from_u128(1);
+            sqlx::query("INSERT INTO people (id, workspace_id, traits) VALUES ($1, $2, '{}')")
+                .bind(older)
+                .bind(fx.ws.as_uuid())
+                .execute(&pool)
+                .await
+                .unwrap();
+            let records: Vec<(Uuid, String)> = sqlx::query_as(
+                "SELECT person_id, record_key FROM source_records WHERE workspace_id = $1 \
+                 ORDER BY person_id",
+            )
+            .bind(fx.ws.as_uuid())
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(records.len(), 20);
+            let flow = Uuid::from_u128(77);
+            let page = |occurrence, after| {
+                EnrollJobPayload {
+                    workspace: fx.ws,
+                    flow,
+                    version: Some(1),
+                    trigger: TriggerKind::Api,
+                    work: EnrollWork::Audience {
+                        source: AudienceSource::Everyone,
+                        occurrence: Some(occurrence),
+                        after: Some(after),
+                        entered_by: None,
+                    },
+                }
+                .to_value()
+            };
+            let mut fallbacks = Vec::new();
+            for (n, (person, _)) in records.iter().enumerate() {
+                for m in 0..4 {
+                    let occurrence = Uuid::from_u128(1000 + 4 * n as u128 + m);
+                    for after in [*person, older] {
+                        sqlx::query(
+                            "INSERT INTO jobs (id, workspace_id, kind, payload, unique_key, \
+                                cause_kind, cause_id, trace_id) \
+                             VALUES (gen_random_uuid(), $1, 'flow.enroll', $2, $3, 'api', 't', \
+                                gen_random_uuid())",
+                        )
+                        .bind(fx.ws.as_uuid())
+                        .bind(page(occurrence, after))
+                        .bind(enroll_page_key(flow, occurrence, Some(after)))
+                        .execute(&pool)
+                        .await
+                        .unwrap();
+                    }
+                    fallbacks.push(enroll_page_key(flow, occurrence, Some(older)));
+                }
+            }
+            let deleted: Vec<(String, &'static str)> = records
+                .iter()
+                .map(|(_, key)| (key.clone(), DELETE_BY_SOURCE))
+                .collect();
+            let cp2 = json!({"offset": 40});
+            record_at_commit(&pool, "sync_runs").await;
+
+            let outcome = commit_sync_batch(
+                &pool,
+                &SyncBatch {
+                    deleted: &deleted,
+                    ..batch(&fx, &source, &[], &cp2)
+                },
+            )
+            .await
+            .unwrap();
+
+            let BatchOutcome::Committed(progress) = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert_eq!(progress.batch.deleted, 20);
+            assert_eq!(count(&pool, "SELECT count(*) FROM people").await, 1);
+            let left: Vec<String> = sqlx::query_scalar(
+                "SELECT unique_key FROM jobs WHERE kind = 'flow.enroll' ORDER BY unique_key",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            fallbacks.sort();
+            assert_eq!(
+                left, fallbacks,
+                "each refused page went, its fallback stays"
+            );
+            let (subxacts, overflowed, rows) = recorded(&pool).await;
+            assert!(rows > 0, "the commit was recorded");
+            assert!(
+                !overflowed && subxacts <= 64,
+                "subxacts {subxacts}, overflowed {overflowed}"
+            );
+        })
+        .await;
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_batch_with_events_and_no_redaction_key_writes_nothing(pool: PgPool) {

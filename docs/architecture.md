@@ -479,8 +479,9 @@ and the run is applied again with that item rejected, then released after it, so
 kept or refused exactly as with a savepoint of its own and the writes keep their order. A unit
 releases at most 60 runs (a sync unit 30 for its records and 30 for their events): a run ends at a
 refusal only once it covers its share of the items left over the runs left, and the last never
-ends early. A person's deletion rewrites the audience pages paging past them the same way, in at
-most 4 runs, a page refused when its fallback cursor's page is queued already. A wake transaction
+ends early. A person's deletion rewrites the cursor of the audience pages paging past them with no
+savepoint: a page whose fallback cursor's page is queued already is found before the write and
+goes, and one queued in between makes the deletion a retryable race. A wake transaction
 runs at most 21 wakes (three ids each, section 14), a `flow.settle` job settles at most 60
 enrollments (one lock round each) and hands any more, from a job queued before that cap, on to
 jobs of 60, and a lock round lost to a merge (`lock_enrollment`) is rolled back and released, so
