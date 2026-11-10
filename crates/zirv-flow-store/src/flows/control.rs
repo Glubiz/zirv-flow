@@ -731,6 +731,35 @@ impl SettlePayload {
     }
 }
 
+/// Keeps the first [`SETTLE_BATCH`] items of the `flow.settle` job `job`'s payload and hands the
+/// rest on, in the job's transaction, as jobs of at most [`SETTLE_BATCH`] each: a job queued
+/// before the cap can name up to [`LIFECYCLE_BATCH`] enrollments. They keep the payload's order
+/// and are keyed by `job` and their place, so a retried attempt queues the same jobs once and
+/// every item is settled exactly once. Returns how many jobs it queued.
+pub async fn hand_on_settle_rest(
+    connection: &mut PgConnection,
+    job: Uuid,
+    trace: &TraceContext,
+    payload: &mut SettlePayload,
+) -> Result<usize, StoreError> {
+    if payload.items.len() <= SETTLE_BATCH {
+        return Ok(0);
+    }
+    let rest = payload.items.split_off(SETTLE_BATCH);
+    let mut enqueued = 0;
+    for (place, chunk) in rest.chunks(SETTLE_BATCH).enumerate() {
+        let next = SettlePayload {
+            workspace: payload.workspace,
+            items: chunk.to_vec(),
+        };
+        let unique = format!("flow.settle:rest:{job}:{place}");
+        if enqueue(&mut *connection, &next.job(trace, unique)).await? {
+            enqueued += 1;
+        }
+    }
+    Ok(enqueued)
+}
+
 /// Enqueues the `flow.settle` jobs for the events of a batch: one query finds the in-flight
 /// enrollments of the people whose flow version names the event as its goal or as an event exit
 /// criterion, by name. Property filters are not applied here (the store cannot read the segment

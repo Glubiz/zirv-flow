@@ -481,9 +481,10 @@ releases at most 60 runs (a sync unit 30 for its records and 30 for their events
 refusal only once it covers its share of the items left over the runs left, and the last never
 ends early. A person's deletion rewrites the audience pages paging past them the same way, in at
 most 4 runs, a page refused when its fallback cursor's page is queued already. A wake transaction
-runs at most 21 wakes (three ids each, section 14), a `flow.settle` job names at most 60
-enrollments (one lock round each), and a lock round lost to a merge (`lock_enrollment`) is rolled
-back and released, so it costs none.
+runs at most 21 wakes (three ids each, section 14), a `flow.settle` job settles at most 60
+enrollments (one lock round each) and hands any more, from a job queued before that cap, on to
+jobs of 60, and a lock round lost to a merge (`lock_enrollment`) is rolled back and released, so
+it costs none.
 
 The dirty set is `person_changes`, one row per `(workspace_id, person_id)`. Each row carries a
 `smallint` change-class bitmask (traits, events, lists, consent, identifiers, merge), OR-ed

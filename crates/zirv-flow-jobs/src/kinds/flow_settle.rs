@@ -17,6 +17,11 @@
 //! does. An enrollment that moved on since the store looked is read again under its lock, and
 //! `settle` acts only on one that is active or waiting (a held one counts as the state it was
 //! held from).
+//!
+//! Each lock round is a released savepoint whose subtransaction id the job keeps until it commits,
+//! so the store names at most 60 enrollments a job. A job queued before that cap can name more:
+//! it settles the first 60 and hands the rest on, in its own transaction, to jobs of at most 60,
+//! keyed by the job and their place, so each enrollment is settled once.
 
 use hashbrown::HashMap;
 use serde_json::Value;
@@ -31,8 +36,8 @@ use zirv_flow_segments::{Catalog, TraitStorage};
 use zirv_flow_store::{
     Enrollment, EnrollmentStatus, EnrollmentUpdate, GraphPoint, NewDecision, NewStepExecution,
     SETTLE_JOB_KIND, SettleItem, SettlePayload, Signal, StepJobInput, StepOutcome,
-    append_decisions, clear_waits, find_event_of_person, find_flow_version, lock_enrollment,
-    record_steps, save_enrollment, segment_catalog,
+    append_decisions, clear_waits, find_event_of_person, find_flow_version, hand_on_settle_rest,
+    lock_enrollment, record_steps, save_enrollment, segment_catalog,
 };
 
 use super::flow_step::{exit_reason_text, filters_pass};
@@ -48,13 +53,17 @@ impl JobKind for FlowSettle {
     const KIND: &'static str = SETTLE_JOB_KIND;
 
     async fn run(&self, ctx: &mut JobContext<'_>, payload: Value) -> Result<(), JobError> {
-        let job = SettlePayload::parse(&payload)
+        let mut job = SettlePayload::parse(&payload)
             .ok_or_else(|| JobError::new("the payload is not a flow settle"))?;
         if ctx.workspace_id() != Some(job.workspace) {
             return Err(JobError::new(
                 "the payload names another workspace than the job",
             ));
         }
+        // A job queued before the cap can name more than one transaction may lock in rounds.
+        let trace = ctx.trace().clone();
+        let job_id = ctx.job_id();
+        hand_on_settle_rest(ctx.conn(), job_id, &trace, &mut job).await?;
         let clock = ctx.clock().clone();
         let at = (ctx.job_id(), ctx.attempts());
         let conn = ctx.conn();
@@ -371,17 +380,12 @@ mod tests {
         )
     }
 
-    /// One arrival batch that converts a hundred enrollments is settled in transactions that each
-    /// stay within the 64 subtransaction ids a backend caches: an item takes one, its lock round,
-    /// and a released one keeps it until the commit.
-    #[sqlx::test]
-    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn settling_a_hundred_enrollments_never_overflows_the_subtransaction_cache(pool: PgPool) {
+    /// `count` people parked in a flow whose goal is an `order`, and one arrival batch with an
+    /// order of each, which queues their settle jobs.
+    async fn ordered(env: &Env, count: usize) {
         use zirv_flow_core::{HmacPurpose, HmacRoot, MasterKey};
         use zirv_flow_store::EventRecord;
-        use zirv_flow_store::subtransaction_testing::{record_at_commit, recorded};
 
-        let env = Env::new(pool).await;
         env.define_event("order").await;
         let flow = env
             .flow_with(
@@ -390,7 +394,9 @@ mod tests {
                 settings(manual(), json!({"goal": goal_event(json!([]))})),
             )
             .await;
-        let emails: Vec<String> = (0..100).map(|n| format!("buyer{n}@example.com")).collect();
+        let emails: Vec<String> = (0..count)
+            .map(|n| format!("buyer{n}@example.com"))
+            .collect();
         let mut people = Vec::with_capacity(emails.len());
         for email in &emails {
             people.push(env.person(email, json!({})).await);
@@ -415,17 +421,76 @@ mod tests {
         zirv_flow_store::apply_event_batch(&env.pool, env.ws, &key, &orders)
             .await
             .unwrap();
-        record_at_commit(&env.pool, "jobs").await;
+    }
 
-        settle_jobs(&env).await;
-
-        let (subxacts, overflowed, rows) = recorded(&env.pool).await;
+    /// The most subtransaction ids a recorded transaction cached stays within the 64 a backend
+    /// caches.
+    async fn assert_within_the_cache(env: &Env) {
+        let (subxacts, overflowed, rows) =
+            zirv_flow_store::subtransaction_testing::recorded(&env.pool).await;
         assert!(rows > 0, "no transaction recorded");
         assert!(
             !overflowed && subxacts <= 64,
             "a transaction cached {subxacts} subtransaction ids, overflowed: {overflowed}"
         );
+    }
+
+    /// One arrival batch that converts a hundred enrollments is settled in transactions that each
+    /// stay within the 64 subtransaction ids a backend caches: an item takes one, its lock round,
+    /// and a released one keeps it until the commit.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn settling_a_hundred_enrollments_never_overflows_the_subtransaction_cache(pool: PgPool) {
+        let env = Env::new(pool).await;
+        ordered(&env, 100).await;
+        zirv_flow_store::subtransaction_testing::record_at_commit(&env.pool, "jobs").await;
+
+        settle_jobs(&env).await;
+
+        assert_within_the_cache(&env).await;
         assert_eq!(conversions(&env).await, (100, 100));
+    }
+
+    /// A settle job queued before the cap names up to 500 enrollments. It settles the first 60
+    /// and hands the rest on in jobs of 60, so every transaction stays within the cache, and each
+    /// enrollment converts once.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_settle_job_of_five_hundred_from_before_the_cap_hands_on_its_rest_and_settles_each_once(
+        pool: PgPool,
+    ) {
+        let env = Env::new(pool).await;
+        ordered(&env, 500).await;
+        // The capped jobs the batch queued, made into one as an older version queued it.
+        let payloads: Vec<Value> = sqlx::query_scalar(
+            "WITH gone AS (DELETE FROM jobs WHERE kind = 'flow.settle' RETURNING id, payload) \
+             SELECT payload FROM gone ORDER BY id",
+        )
+        .fetch_all(&env.pool)
+        .await
+        .unwrap();
+        let items: Vec<Value> = payloads
+            .iter()
+            .flat_map(|payload| payload["items"].as_array().cloned().unwrap_or_default())
+            .collect();
+        assert_eq!(items.len(), 500);
+        let mut legacy =
+            zirv_flow_store::NewJob::new(SETTLE_JOB_KIND, TraceContext::root(Cause::api("order")));
+        legacy.workspace_id = Some(env.ws);
+        legacy.payload = json!({"workspace_id": env.ws, "items": items});
+        legacy.unique_key = Some("flow.settle:before-the-cap".into());
+        assert!(zirv_flow_store::enqueue(&env.pool, &legacy).await.unwrap());
+        zirv_flow_store::subtransaction_testing::record_at_commit(&env.pool, "jobs").await;
+
+        let ran = settle_jobs(&env).await;
+
+        assert_within_the_cache(&env).await;
+        assert_eq!(conversions(&env).await, (500, 500));
+        assert_eq!(
+            ran,
+            1 + 440_usize.div_ceil(60),
+            "the job and the ones it handed on"
+        );
     }
 
     #[sqlx::test]
