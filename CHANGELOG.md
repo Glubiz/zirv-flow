@@ -15,3 +15,23 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.277.0 (2026-11-10)
+
+### Fixes
+
+- a take never moves a cursor another take set after it began
+
+### Performance
+
+- claim from per-band floors and wake only past a one-second window
+- read each inbox bucket after a take cursor
+
+### Documentation
+
+- the take cursors, the claim floors and the wake window
+
+### Chores
+
+- drop the unused WAKE_WINDOW constant
+- bump the version to 0.277.0
+
