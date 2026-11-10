@@ -558,7 +558,13 @@ pub async fn apply_refresh(
     // enough for the server to compile it with JIT, which takes minutes and has crashed the
     // server on a statement of this shape. Both settings are local to the caller's transaction
     // and restored right after the statement.
-    for setting in ["SET LOCAL jit = off", "SET LOCAL enable_nestloop = off"] {
+    // The event scans and the hash joins of a large segment spilled tens of MB to disk at the
+    // default. Only the segment scope: a batch diff is a few hundred people.
+    for setting in [
+        "SET LOCAL jit = off",
+        "SET LOCAL enable_nestloop = off",
+        "SET LOCAL work_mem = '64MB'",
+    ] {
         sqlx::query(setting)
             .execute(&mut *connection)
             .await
@@ -586,6 +592,7 @@ pub async fn apply_refresh(
     for setting in [
         "SET LOCAL jit = DEFAULT",
         "SET LOCAL enable_nestloop = DEFAULT",
+        "SET LOCAL work_mem = DEFAULT",
     ] {
         sqlx::query(setting)
             .execute(&mut *connection)
