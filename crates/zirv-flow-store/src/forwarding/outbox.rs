@@ -155,7 +155,7 @@ pub async fn ensure_forward_job(
          SELECT pg_notify($5, 'event.forward') \
          FROM (SELECT 1 FROM inserted UNION ALL SELECT 1 FROM pulled) woken \
          WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE kind = 'event.forward' AND state = 'ready' \
-                           AND run_at <= now()) \
+                           AND run_at <= now() AND run_at > now() - interval '1 second') \
          LIMIT 1",
     )
     .bind(workspace.as_uuid())

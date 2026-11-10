@@ -20,11 +20,11 @@ use zirv_flow_core::egress::EgressPolicy;
 use zirv_flow_core::schedule::backoff;
 use zirv_flow_render::RenderPool;
 use zirv_flow_store::{
-    ClaimedJob, Clock, DRAIN_JOB_KIND, DecisionRetention, EventRetention, FailOutcome, Heard,
-    HmacKey, Keyring, MessageRetention, PgConnection, PgPool, RetentionSettings, STEP_JOB_KIND,
-    begin, cache_change_readers, claim_jobs, complete_job, complete_jobs, confirm_lease,
-    enqueue_drain_if_pending, fail_job, heartbeat_job, listen_for_jobs, lock_lease, observe_pool,
-    payload_shard, release_jobs, sized_like,
+    ClaimFloors, ClaimedJob, Clock, DRAIN_JOB_KIND, DecisionRetention, EventRetention, FailOutcome,
+    Heard, HmacKey, Keyring, MessageRetention, PgConnection, PgPool, RetentionSettings,
+    STEP_JOB_KIND, begin, cache_change_readers, claim_jobs_from, complete_job, complete_jobs,
+    confirm_lease, enqueue_drain_if_pending, fail_job, heartbeat_job, listen_for_jobs, lock_lease,
+    observe_pool, payload_shard, release_jobs, sized_like,
 };
 
 use crate::JobError;
@@ -192,6 +192,10 @@ struct Shared {
     wake_general: Notify,
     /// The same for the drain slots.
     wake_drain: Notify,
+    /// Where the general slots' claims start in each band, past the jobs claimed before.
+    general_floors: ClaimFloors,
+    /// The same for the drain slots.
+    drain_floors: ClaimFloors,
     /// Claim statements run, for tests that count them.
     #[cfg(test)]
     claims: std::sync::atomic::AtomicU64,
@@ -224,6 +228,8 @@ impl Shared {
             config,
             wake_general: Notify::new(),
             wake_drain: Notify::new(),
+            general_floors: ClaimFloors::default(),
+            drain_floors: ClaimFloors::default(),
             #[cfg(test)]
             claims: std::sync::atomic::AtomicU64::new(0),
             room: Notify::new(),
@@ -347,6 +353,14 @@ impl Lane {
         }
     }
 
+    /// Where this lane's claims start.
+    fn floors(self, shared: &Shared) -> &ClaimFloors {
+        match self {
+            Self::General => &shared.general_floors,
+            Self::Drain => &shared.drain_floors,
+        }
+    }
+
     /// How many jobs a claim takes: a drain slot runs one drain at a time, so the rest stay
     /// ready for the other drain slots instead of being held behind a long run.
     fn batch(self) -> u32 {
@@ -446,13 +460,14 @@ async fn work(shared: Arc<Shared>, slot: usize, lane: Lane, mut stop: watch::Rec
             shared
                 .claims
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            match claim_jobs(
+            match claim_jobs_from(
                 &shared.pool,
                 &name,
                 lane.kinds(&shared),
                 shared.config.lease,
                 shared.config.max_running_per_workspace,
                 lane.batch(),
+                lane.floors(&shared),
             )
             .await
             {
@@ -639,14 +654,19 @@ fn held_jobs(held: &mut VecDeque<Unit>, queue: Option<&Queue>) -> Vec<ClaimedJob
 /// Gives claimed jobs a slot has not started back to the queue, on the heartbeat pool, as the
 /// slot's own connection may still be in its handler's transaction, and wakes a waiting slot for
 /// each, as their room is free again. A failure leaves them to lease expiry, the path of a slot
-/// that died.
+/// that died. A job given back keeps its `run_at`, which may sit below the floors the claims
+/// have moved past it, so the next claim of each lane walks every band from its start.
 async fn release(shared: &Shared, held: Vec<ClaimedJob>) {
     if held.is_empty() {
         return;
     }
     let jobs: Vec<_> = held.iter().map(|job| (job.id, job.lease_token)).collect();
     match release_jobs(&shared.heartbeat_pool, &jobs).await {
-        Ok(_) => held.iter().for_each(|job| shared.left_running(job)),
+        Ok(_) => {
+            shared.general_floors.expire();
+            shared.drain_floors.expire();
+            held.iter().for_each(|job| shared.left_running(job));
+        }
         Err(error) => warn!(
             "could not give back {} claimed jobs, which run again once their leases expire: {error}",
             jobs.len()
@@ -3262,5 +3282,60 @@ mod tests {
         );
         assert_eq!(Lane::Drain.batch(), 1);
         assert_eq!(Lane::General.batch(), CLAIM_BATCH);
+    }
+
+    /// A job a slot gives back keeps its `run_at`, below the floor the claim that took it moved
+    /// to, so giving it back expires the floors: the lane's next claim walks from the start and
+    /// takes it again, oldest first.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_job_given_back_below_the_floor_is_claimed_by_the_next_claim(pool: PgPool) {
+        migrated(&pool).await;
+        let shared = Shared::new(
+            pool.clone(),
+            pool.clone(),
+            pool.clone(),
+            Registry::built_in(),
+            test_config(1),
+        );
+        let mut ids = Vec::new();
+        for age in [10, 5] {
+            let mut new = new_job("given.back");
+            new.run_at = Some(time::OffsetDateTime::now_utc() - time::Duration::seconds(age));
+            enqueue(&pool, &new).await.unwrap();
+            ids.push(
+                sqlx::query_scalar::<_, Uuid>(
+                    "SELECT id FROM jobs ORDER BY created_at DESC, run_at DESC LIMIT 1",
+                )
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            );
+        }
+        let floors = Lane::General.floors(&shared);
+        let claim = |n| {
+            claim_jobs_from(
+                &pool,
+                "w",
+                &["given.back"],
+                Duration::from_secs(30),
+                None,
+                n,
+                floors,
+            )
+        };
+        let mut claimed = claim(1).await.unwrap();
+        assert_eq!(claimed[0].id, ids[0]);
+        claimed.extend(claim(1).await.unwrap());
+        assert_eq!(claimed[1].id, ids[1]);
+
+        release(&shared, vec![claimed.remove(0)]).await;
+
+        let again = claim(1).await.unwrap();
+        assert_eq!(
+            again.iter().map(|job| job.id).collect::<Vec<_>>(),
+            [ids[0]],
+            "the job given back is claimed again"
+        );
     }
 }
