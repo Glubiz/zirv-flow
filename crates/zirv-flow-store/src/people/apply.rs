@@ -995,6 +995,7 @@ async fn upsert_ledger_row(
     let mut traits = live
         .and_then(|row| row.traits.as_object().cloned())
         .unwrap_or_default();
+    let mut skipped = false;
     for (key, value) in *updates {
         // Within one source record an older observation never replaces a newer one, whatever
         // the order the updates were applied in. Instants are compared parsed, not as text.
@@ -1006,6 +1007,7 @@ async fn upsert_ledger_row(
             .and_then(|stored| OffsetDateTime::parse(stored, &Rfc3339).ok())
             .is_some_and(|stored| record.observed_at < stored);
         if stale {
+            skipped = true;
             continue;
         }
         match value {
@@ -1024,6 +1026,14 @@ async fn upsert_ledger_row(
             }
         }
     }
+    // The stored hash says "this exact content is already applied". After a skipped key the row
+    // holds something else, so store a hash no incoming record can match: the next record, a
+    // replay of this one included, runs the full apply.
+    let hash: &[u8] = &if skipped {
+        sha256(&format!("skipped:{}", Uuid::now_v7())).to_vec()
+    } else {
+        hash.to_vec()
+    };
     let previous: Vec<(String, String)> = live
         .and_then(|row| row.identifiers.as_array())
         .into_iter()
@@ -1852,6 +1862,12 @@ mod tests {
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_older_update_of_one_record_never_replaces_a_newer_value(pool: PgPool) {
         let ws = workspace(&pool, "one").await;
+        crate::segments::tests_support::segment_reading(
+            &pool,
+            ws,
+            zirv_flow_core::segment::ChangeClasses::from_bits(63),
+        )
+        .await;
         let newer = record(
             "crm",
             "1",
@@ -1869,6 +1885,10 @@ mod tests {
         let outcomes = apply_profile_batch(&pool, ws, &[newer]).await.unwrap();
         let person = person_of(&outcomes[0]);
         let decisions = plan_change_decisions(&pool).await;
+        sqlx::query("DELETE FROM person_changes")
+            .execute(&pool)
+            .await
+            .unwrap();
 
         let outcomes = apply_profile_batch(&pool, ws, &[older]).await.unwrap();
 
@@ -1881,6 +1901,176 @@ mod tests {
             Some(json!("pro"))
         );
         assert_eq!(plan_change_decisions(&pool).await, decisions);
+        let marks: i64 = sqlx::query_scalar("SELECT count(*) FROM person_changes")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(marks, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_skipped_older_update_does_not_make_a_later_equal_value_a_replay(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let at = |day: u8| datetime!(2026-01-01 00:00 UTC).replace_day(day).unwrap();
+        let set = |value: &str, day: u8| {
+            record("crm", "1", "a@example.com", json!({"plan": value}), at(day))
+        };
+        let outcomes = apply_profile_batch(&pool, ws, &[set("pro", 2)])
+            .await
+            .unwrap();
+        let person = person_of(&outcomes[0]);
+        apply_profile_batch(&pool, ws, &[set("free", 1)])
+            .await
+            .unwrap();
+
+        let outcomes = apply_profile_batch(&pool, ws, &[set("free", 4)])
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            outcomes[0],
+            ProfileOutcome::Applied { changed: true, .. }
+        ));
+        assert_eq!(
+            trait_of(&pool, ws, person, "plan").await,
+            Some(json!("free"))
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_record_with_one_stale_key_applies_its_other_key(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let first = record(
+            "crm",
+            "1",
+            "a@example.com",
+            json!({"plan": "pro"}),
+            datetime!(2026-02-01 00:00 UTC),
+        );
+        let person = person_of(&apply_profile_batch(&pool, ws, &[first]).await.unwrap()[0]);
+        // The older record names a new key and a stale one.
+        let mixed = record(
+            "crm",
+            "1",
+            "a@example.com",
+            json!({"plan": "free", "tier": "gold"}),
+            datetime!(2026-01-01 00:00 UTC),
+        );
+
+        apply_profile_batch(&pool, ws, &[mixed]).await.unwrap();
+
+        assert_eq!(
+            trait_of(&pool, ws, person, "plan").await,
+            Some(json!("pro"))
+        );
+        // `tier` had no stored entry, so the older observation is all there is.
+        assert_eq!(
+            trait_of(&pool, ws, person, "tier").await,
+            Some(json!("gold"))
+        );
+        // A newer record naming the stale key's older value still applies.
+        let newer = record(
+            "crm",
+            "1",
+            "a@example.com",
+            json!({"plan": "free", "tier": "gold"}),
+            datetime!(2026-03-01 00:00 UTC),
+        );
+        apply_profile_batch(&pool, ws, &[newer]).await.unwrap();
+        assert_eq!(
+            trait_of(&pool, ws, person, "plan").await,
+            Some(json!("free"))
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_removal_and_an_update_in_one_older_record_are_judged_per_key(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let first = record(
+            "crm",
+            "1",
+            "a@example.com",
+            json!({"plan": "pro", "tier": "gold"}),
+            datetime!(2026-02-01 00:00 UTC),
+        );
+        let person = person_of(&apply_profile_batch(&pool, ws, &[first]).await.unwrap()[0]);
+        let stale = record(
+            "crm",
+            "1",
+            "a@example.com",
+            json!({"plan": null, "tier": "silver"}),
+            datetime!(2026-01-01 00:00 UTC),
+        );
+
+        apply_profile_batch(&pool, ws, &[stale]).await.unwrap();
+
+        assert_eq!(
+            trait_of(&pool, ws, person, "plan").await,
+            Some(json!("pro"))
+        );
+        assert_eq!(
+            trait_of(&pool, ws, person, "tier").await,
+            Some(json!("gold"))
+        );
+        // The newer removal still applies afterwards.
+        let removal = record(
+            "crm",
+            "1",
+            "a@example.com",
+            json!({"plan": null, "tier": "gold"}),
+            datetime!(2026-03-01 00:00 UTC),
+        );
+        apply_profile_batch(&pool, ws, &[removal]).await.unwrap();
+        assert_eq!(trait_of(&pool, ws, person, "plan").await, None);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_stale_removal_then_a_newer_set_of_the_same_value_applies(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let set =
+            |at: OffsetDateTime| record("crm", "1", "a@example.com", json!({"plan": "pro"}), at);
+        let person = person_of(
+            &apply_profile_batch(&pool, ws, &[set(datetime!(2026-02-01 00:00 UTC))])
+                .await
+                .unwrap()[0],
+        );
+        let stale_removal = record(
+            "crm",
+            "1",
+            "a@example.com",
+            json!({"plan": null}),
+            datetime!(2026-01-01 00:00 UTC),
+        );
+        apply_profile_batch(&pool, ws, &[stale_removal])
+            .await
+            .unwrap();
+        assert_eq!(
+            trait_of(&pool, ws, person, "plan").await,
+            Some(json!("pro"))
+        );
+
+        // The same content as the first record, observed later: not a replay of the skipped
+        // removal, and the stamp moves forward.
+        apply_profile_batch(&pool, ws, &[set(datetime!(2026-03-01 00:00 UTC))])
+            .await
+            .unwrap();
+        let removal = record(
+            "crm",
+            "1",
+            "a@example.com",
+            json!({"plan": null}),
+            datetime!(2026-02-15 00:00 UTC),
+        );
+        apply_profile_batch(&pool, ws, &[removal]).await.unwrap();
+
+        assert_eq!(
+            trait_of(&pool, ws, person, "plan").await,
+            Some(json!("pro"))
+        );
     }
 
     #[sqlx::test]
