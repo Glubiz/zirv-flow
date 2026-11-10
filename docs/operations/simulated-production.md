@@ -80,8 +80,8 @@ service. The budget is fixed and never raises the Docker VM (32 CPUs, about 33.5
 | Group | CPUs | Memory | Services |
 |---|---|---|---|
 | Application | 8 | 10.5 GB (of 16) | `zf-serve-1/2` 1 CPU 1 GB each; `zf-worker-1` to `-4` 1.375 CPUs 2 GB each; `zf-scheduler` 0.5 CPUs 512 MB |
-| Database | 8 | 10 GB (of 16) | `zf-db` with `shared_buffers` 2560MB and `effective_cache_size` 6GB |
-| The rest | about 7.7 | about 10 GB | Kafka 1.5 CPUs 2 GB; `gen-ingest` 1.5 CPUs; `gen-kafka` 0.75 CPUs; `lb` 1 CPU; the other generators, `edge`, company databases, Prometheus and fixtures |
+| Database | 8 | 10 GB (of 16) | `zf-db` with `shared_buffers` 4GB, `effective_cache_size` 8GB, `max_connections` 350 and the Investigation Q settings below |
+| The rest | about 9.2 | about 10 GB | Kafka 1.5 CPUs 2 GB; `gen-ingest` 2 CPUs (2 processes); `gen-kafka` 0.75 CPUs; `gen-changes` 0.75 CPUs; `company-pg` 1 CPU; `lb` 1 CPU; the other generators, `edge`, company databases, Prometheus and fixtures |
 
 Retention is two days (`SIM_RETENTION_DAYS=2`) and the disk guard is `SIM_MAX_DB_GB=150`: at about 580
 bytes per event 5x is about 177 GB a day. Needs about 31 GB of Docker memory with every container at its
@@ -96,7 +96,13 @@ generator uses about 0.065 CPU per 1,000 events/s (0.27 CPU at 4,130/s with 8 se
 dropped chunks), and the Kafka generator's payload builder about 0.013 CPU per 1,000 events/s before the
 producer library's own work. The CPU caps leave room for the 3x burst; the worker count of
 `gen-ingest` matters more than its CPU, because the open-loop senders wait on the product's answers (24
-threads in x5).
+threads in x5). One Python process tops out near 7,700 events/s on a core and the 3x burst at the x5 rate
+is 13,260/s, so x5 runs `gen-ingest` as two processes (`SIM_GEN_INGEST_PROCS=2`): each paces half the rate
+with half the sender threads and writes its own stats file, and `sim.sh status` adds the parts up.
+
+The x5 profile runs 16 drain lanes (`SIM_DRAIN_SHARDS=16`, `ingest.drain_shards` on every serve, worker and
+the scheduler) with 4 workers x 4 drain slots (`SIM_DRAIN_SLOTS=4`); the small and full profiles keep 8
+lanes. Every service must agree on the shard count.
 
 ## Variables
 
@@ -104,7 +110,15 @@ Set in `scripts/sim/profiles/<profile>.env`; every default is today's value.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `SIM_GEN_INGEST_WORKERS` | 8 | Sender threads of `gen-ingest` |
+| `SIM_GEN_INGEST_WORKERS` | 8 | Sender threads of `gen-ingest`, shared over its processes |
+| `SIM_GEN_INGEST_PROCS` | 1 | Processes `gen-ingest` is split over (x5: 2) |
+| `SIM_DRAIN_SHARDS` | 8 | `ingest.drain_shards` on every serve, worker and scheduler (x5: 16) |
+| `SIM_DRAIN_SLOTS` | 4 | `worker.drain_slots` per worker; the workers' slots together must cover the shards |
+| `SIM_PG_MAX_CONNECTIONS` | 250 | `zf-db` `max_connections` (x5: 350) |
+| `SIM_PG_AUTOVACUUM_NAPTIME`, `SIM_PG_AUTOVACUUM_WORKERS` | 1min, 3 | `zf-db` autovacuum (x5: 5s, 5) |
+| `SIM_PG_BGWRITER_DELAY`, `SIM_PG_BGWRITER_MAXPAGES` | 200ms, 100 | `zf-db` background writer (x5: 20ms, 1000) |
+| `SIM_PG_RANDOM_PAGE_COST`, `SIM_PG_IO_CONCURRENCY` | 4, 1 | `zf-db` planner and prefetch (x5: 1.1, 200) |
+| `SIM_PG_WAL_IO_TIMING` | off | `zf-db` `track_wal_io_timing` (x5: on) |
 | `SIM_CPUS_GEN_INGEST`, `SIM_MEM_GEN_INGEST` | 0.25, 256m | `gen-ingest` limits |
 | `SIM_CPUS_GEN_KAFKA`, `SIM_MEM_GEN_KAFKA` | 0.25, 256m | `gen-kafka` limits |
 | `SIM_CPUS_GEN_CHANGES`, `SIM_MEM_GEN_CHANGES` | 0.25, 256m | `gen-changes` limits |

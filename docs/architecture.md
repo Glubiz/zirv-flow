@@ -1105,7 +1105,7 @@ on the pass for the mark (#518). In that one transaction it evaluates every segm
 classes intersect the claimed batch's combined classes, plus their transitive segment dependents, in
 topological order, with `person_id = ANY(batch)`. Name-level filtering (event names, trait
 keys) is an optimization, made only if the M4 benchmark misses.
-**Safety net and pending segments.** The scheduler leader enqueues `segment.reevaluate` for any workspace whose oldest mark is more than 2 s old, so correctness never depends on a writer's enqueue, and it publishes the dirty backlog and age. A pass skips a segment whose `computed_version` is null or differs from `current_version`: its pending full refresh covers everyone.
+**Safety net and pending segments.** The scheduler leader enqueues `segment.reevaluate` for any workspace whose oldest mark is more than 2 s old, so correctness never depends on a writer's enqueue, and it publishes the dirty age on every pass and the exact dirty backlog (a `count(*)` of `person_changes`) at most every 30 s. A pass skips a segment whose `computed_version` is null or differs from `current_version`: its pending full refresh covers everyone.
 Writers take the shared workspace segment advisory lock before any contact, slot, lease or row
 lock and hold it through commit while deciding which marks to skip;
 creates and saves hold it exclusively. The dependency read uses a fresh snapshot after the lock
