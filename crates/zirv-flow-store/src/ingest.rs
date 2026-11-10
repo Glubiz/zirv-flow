@@ -5,9 +5,13 @@
 //! Nothing here logs or labels anything with an identifier, a trait or property value or an
 //! event name.
 
+mod cursors;
+
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Instant;
 
 use hashbrown::{HashMap, HashSet};
 
@@ -36,9 +40,13 @@ use crate::people::{
 use crate::webhooks::HookResult;
 use crate::webhooks::{HookConfigs, HookMapped, apply_hook_record, map_hook_row};
 use crate::{NewJob, PgConnection, PgPool, StoreError, begin, commit, enqueue, enqueue_many};
+use cursors::{TakeCursors, TakeStart, Taken};
 
 /// The job kind that drains one shard of a workspace's inbox.
 pub const DRAIN_JOB_KIND: &str = "ingest.drain";
+
+/// The take cursors of this process ([`cursors`]), keyed by workspace.
+static TAKE_CURSORS: LazyLock<TakeCursors> = LazyLock::new(TakeCursors::default);
 
 /// The shard count the appenders and the safety net enqueue by (`ingest.drain_shards`), set once
 /// at start-up. A drain job carries the count it was enqueued with and drains that count's
@@ -255,6 +263,8 @@ fn item_bucket(item: &IngestItem, people: &KnownPeople) -> i16 {
 /// at once: the locking clause sits below the `LIMIT`, so a row another run bucketed and
 /// committed while this one waited fails the re-check and is replaced by the next unbucketed
 /// row, and the scan comes up short only when it has seen every row that lacked a bucket.
+/// A bucketed row keeps its old id, which may sit below a take cursor, so bucketing any row drops
+/// this process's cursors of the workspace; another process's next full walk finds the row.
 pub async fn backfill_affinity(
     pool: &PgPool,
     workspace: WorkspaceId,
@@ -292,6 +302,9 @@ pub async fn backfill_affinity(
     .await
     .map_err(StoreError::query)?;
     commit(tx).await?;
+    if !rows.is_empty() {
+        TAKE_CURSORS.forget(workspace);
+    }
     Ok(rows.len())
 }
 
@@ -421,8 +434,9 @@ pub async fn append_inbox(
              RETURNING kind), \
          notified AS ( \
              SELECT pg_notify($7, k.kind) FROM (SELECT DISTINCT kind FROM inserted) k \
-             WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE state = 'ready' AND kind = k.kind \
-                               AND run_at <= now())), \
+             WHERE (SELECT true FROM jobs WHERE state = 'ready' AND kind = k.kind \
+                    AND run_at <= now() AND run_at > now() - interval '1 second' \
+                    LIMIT 1) IS NULL), \
          appended AS ( \
              INSERT INTO ingest_inbox \
                 (workspace_id, api_key_id, kind, item, message_id, received_at, trace_id, \
@@ -767,37 +781,29 @@ pub(crate) fn strongest_identifier(identifiers: &[(String, String)]) -> Option<S
 /// batch, so nothing applies past a skipped row; their locks release at commit and they are
 /// picked again. Also returns whether the shard may hold more: step one filled `limit` and
 /// something was taken, so a batch that takes nothing ends the loop instead of spinning.
+///
+/// Step one reads each bucket after its cursor in `cursors` ([`cursors`]), past the entries of the
+/// rows earlier batches deleted; a pick that finds nothing above its cursors reads every bucket
+/// from its first row instead. The third value is what the take proved, for
+/// [`TakeCursors::advance`] once the batch has committed.
 async fn take_rows(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     shard: Shard,
     limit: i64,
-) -> Result<(Vec<InboxRow>, bool), StoreError> {
+    cursors: &TakeCursors,
+) -> Result<(Vec<InboxRow>, bool, Taken), StoreError> {
     let owned = shard.buckets();
-    if owned.is_empty() {
-        return Ok((Vec::new(), false));
+    let start = cursors.start(workspace, &owned);
+    let mut after = start.after.clone();
+    let mut picked = pick_rows(connection, workspace, &owned, &after, limit).await?;
+    if picked.is_empty() && after.iter().any(|after| *after > 0) {
+        // Nothing above the cursors, yet the drain ran for this shard: a straggler that
+        // committed below a cursor is the likely reason, so walk every bucket from its start.
+        after.fill(0);
+        picked = pick_rows(connection, workspace, &owned, &after, limit).await?;
     }
-    let limit = limit.max(1);
-    // The buckets are inlined, one branch each: with a bound array the planner estimates
-    // every bucket from the column's average frequency, and under a skewed backlog it walks
-    // the primary key past the hot bucket's rows to find an empty bucket's none.
-    let branches: Vec<String> = owned
-        .iter()
-        .map(|bucket| {
-            format!(
-                "(SELECT id, affinity FROM ingest_inbox WHERE workspace_id = $1 AND affinity = {bucket}                  ORDER BY id LIMIT $2)"
-            )
-        })
-        .collect();
-    let picked: Vec<(i64, i16)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT id, affinity FROM ({}) AS oldest ORDER BY id LIMIT $2",
-        branches.join(" UNION ALL ")
-    )))
-    .bind(workspace.as_uuid())
-    .bind(limit)
-    .fetch_all(&mut *connection)
-    .await
-    .map_err(StoreError::query)?;
+    let returned = Instant::now();
     let ids: Vec<i64> = picked.iter().map(|(id, _)| *id).collect();
     let fetched: Vec<InboxRow> = sqlx::query_as(
         "SELECT id, api_key_id, webhook_id, kind, item, message_id, received_at, trace_id          FROM ingest_inbox WHERE workspace_id = $1 AND id = ANY($2)          ORDER BY id FOR UPDATE SKIP LOCKED",
@@ -807,24 +813,103 @@ async fn take_rows(
     .fetch_all(connection)
     .await
     .map_err(StoreError::query)?;
-    let mut blocked = std::collections::BTreeSet::new();
+    // The first id of each bucket the batch could not lock.
+    let mut blocked: BTreeMap<i16, i64> = BTreeMap::new();
     let mut keep = std::collections::BTreeSet::new();
     for (id, bucket) in &picked {
-        if blocked.contains(bucket) {
+        if blocked.contains_key(bucket) {
             continue;
         }
         if fetched.iter().any(|row| row.id == *id) {
             keep.insert(*id);
         } else {
-            blocked.insert(*bucket);
+            blocked.insert(*bucket, *id);
         }
     }
     let rows: Vec<InboxRow> = fetched
         .into_iter()
         .filter(|row| keep.contains(&row.id))
         .collect();
-    let more = !rows.is_empty() && i64::try_from(picked.len()).is_ok_and(|n| n >= limit);
-    Ok((rows, more))
+    let full = i64::try_from(picked.len()).is_ok_and(|n| n >= limit.max(1));
+    let more = !rows.is_empty() && full;
+    Ok((
+        rows,
+        more,
+        proof(&start, &owned, &after, &picked, &blocked, full, returned),
+    ))
+}
+
+/// Step one of [`take_rows`]: the ids of up to `limit` of the oldest rows of `buckets` in id
+/// order, each bucket read after its entry in `after`, without locking.
+async fn pick_rows(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    buckets: &[i16],
+    after: &[i64],
+    limit: i64,
+) -> Result<Vec<(i64, i16)>, StoreError> {
+    if buckets.is_empty() {
+        return Ok(Vec::new());
+    }
+    // The buckets are inlined, one branch each: with a bound array the planner estimates
+    // every bucket from the column's average frequency, and under a skewed backlog it walks
+    // the primary key past the hot bucket's rows to find an empty bucket's none. Each branch's
+    // cursor is a parameter of its own, so a shard's statement text stays the same.
+    let branches: Vec<String> = buckets
+        .iter()
+        .enumerate()
+        .map(|(n, bucket)| {
+            format!(
+                "(SELECT id, affinity FROM ingest_inbox WHERE workspace_id = $1 AND affinity = {bucket} \
+                 AND id > ${} ORDER BY id LIMIT $2)",
+                n + 3
+            )
+        })
+        .collect();
+    let sql = format!(
+        "SELECT id, affinity FROM ({}) AS oldest ORDER BY id LIMIT $2",
+        branches.join(" UNION ALL ")
+    );
+    let mut query = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .bind(workspace.as_uuid())
+        .bind(limit.max(1));
+    for after in after {
+        query = query.bind(*after);
+    }
+    query.fetch_all(connection).await.map_err(StoreError::query)
+}
+
+/// What a take proved about each bucket it read: every row visible to its pick up to the first
+/// one it could not lock was taken, and, when the pick came back short of the limit, everything
+/// after that too; a full pick proves it up to its newest id only.
+fn proof(
+    start: &TakeStart,
+    buckets: &[i16],
+    after: &[i64],
+    picked: &[(i64, i16)],
+    blocked: &BTreeMap<i16, i64>,
+    full: bool,
+    returned: Instant,
+) -> Taken {
+    let newest = picked.last().map(|(id, _)| *id);
+    Taken {
+        cap: start.cap,
+        began: start.began,
+        returned,
+        newest,
+        buckets: buckets
+            .iter()
+            .zip(after)
+            .map(|(bucket, after)| {
+                let through = match blocked.get(bucket) {
+                    Some(first) => Some(first - 1),
+                    None if full => newest,
+                    None => None,
+                };
+                (*bucket, *after, through)
+            })
+            .collect(),
+    }
 }
 
 async fn delete_rows(
@@ -1029,9 +1114,21 @@ pub async fn drain_batch(
     key: &HmacKey,
     limit: i64,
 ) -> Result<DrainOutcome, StoreError> {
+    drain_batch_using(pool, workspace, shard, key, limit, &TAKE_CURSORS).await
+}
+
+/// [`drain_batch`] with the take cursors in `cursors`, which it moves on once the batch commits.
+pub(crate) async fn drain_batch_using(
+    pool: &PgPool,
+    workspace: WorkspaceId,
+    shard: Shard,
+    key: &HmacKey,
+    limit: i64,
+    cursors: &TakeCursors,
+) -> Result<DrainOutcome, StoreError> {
     let mut tx = begin(pool).await?;
     crate::changes::cache_change_readers(&mut tx, workspace).await?;
-    let (rows, more) = take_rows(&mut tx, workspace, shard, limit).await?;
+    let (rows, more, taken) = take_rows(&mut tx, workspace, shard, limit, cursors).await?;
     let hooks = HookConfigs::load(&mut tx, workspace, &rows).await?;
     lock_contact_rows(&mut tx, workspace, &rows).await?;
     let mut outcome = DrainOutcome {
@@ -1107,6 +1204,7 @@ pub async fn drain_batch(
     // Last, so the rows of the lists the batch added to are locked for the commit alone.
     lists.apply(&mut tx).await?;
     commit(tx).await?;
+    cursors.advance(workspace, &taken);
     Ok(outcome)
 }
 
@@ -1120,9 +1218,21 @@ pub async fn drain_batch_singly(
     key: &HmacKey,
     limit: i64,
 ) -> Result<DrainOutcome, StoreError> {
+    drain_batch_singly_using(pool, workspace, shard, key, limit, &TAKE_CURSORS).await
+}
+
+/// [`drain_batch_singly`] with the take cursors in `cursors`.
+pub(crate) async fn drain_batch_singly_using(
+    pool: &PgPool,
+    workspace: WorkspaceId,
+    shard: Shard,
+    key: &HmacKey,
+    limit: i64,
+    cursors: &TakeCursors,
+) -> Result<DrainOutcome, StoreError> {
     let mut tx = begin(pool).await?;
     crate::changes::cache_change_readers(&mut tx, workspace).await?;
-    let (rows, more) = take_rows(&mut tx, workspace, shard, limit).await?;
+    let (rows, more, taken) = take_rows(&mut tx, workspace, shard, limit, cursors).await?;
     let hooks = HookConfigs::load(&mut tx, workspace, &rows).await?;
     lock_contact_rows(&mut tx, workspace, &rows).await?;
     let mut outcome = DrainOutcome {
@@ -1239,6 +1349,7 @@ pub async fn drain_batch_singly(
     crate::changes::request_reevaluation(&mut tx, workspace).await?;
     lists.apply(&mut tx).await?;
     commit(tx).await?;
+    cursors.advance(workspace, &taken);
     Ok(outcome)
 }
 
@@ -1328,6 +1439,8 @@ async fn reject_row(
 mod tests {
     use crate::decision_testing::PERSONAL_DATA;
     use crate::webhooks::fixtures::{affinities, person_with};
+
+    use std::time::Duration;
 
     use serde_json::json;
     use sqlx::PgPool;
@@ -3273,7 +3386,9 @@ mod tests {
     /// What `shard` takes from the workspace's inbox, in id order, and whether it may hold more.
     async fn taken(pool: &PgPool, ws: WorkspaceId, shard: Shard, limit: i64) -> (Vec<i64>, bool) {
         let mut tx = begin(pool).await.unwrap();
-        let (rows, more) = take_rows(&mut tx, ws, shard, limit).await.unwrap();
+        let (rows, more, _) = take_rows(&mut tx, ws, shard, limit, &TakeCursors::default())
+            .await
+            .unwrap();
         // A dropped transaction rolls back only when its connection is next used, so the
         // next call could run on another connection while these rows are still locked.
         tx.rollback().await.unwrap();
@@ -3818,6 +3933,230 @@ mod tests {
             assert_eq!(
                 ids, all,
                 "once released the bucket's rows follow in id order"
+            );
+        })
+        .await;
+    }
+
+    /// The one shard of 64 that owns bucket 3 alone.
+    const BUCKET_3: Shard = Shard {
+        index: 3,
+        count: 64,
+    };
+
+    /// One batch of `BUCKET_3` with `cursors`: the ids it took.
+    async fn drained_with(pool: &PgPool, ws: WorkspaceId, cursors: &TakeCursors) -> Vec<i64> {
+        let before: Vec<i64> = sqlx::query_scalar("SELECT id FROM ingest_inbox ORDER BY id")
+            .fetch_all(pool)
+            .await
+            .unwrap();
+        let outcome = drain_batch_using(pool, ws, BUCKET_3, &key(), 500, cursors)
+            .await
+            .unwrap();
+        let after: Vec<i64> = sqlx::query_scalar("SELECT id FROM ingest_inbox ORDER BY id")
+            .fetch_all(pool)
+            .await
+            .unwrap();
+        let took: Vec<i64> = before
+            .into_iter()
+            .filter(|id| !after.contains(id))
+            .collect();
+        assert_eq!(took.len(), outcome.rows);
+        took
+    }
+
+    /// Appends a track row to bucket 3 on `connection` and returns its id; the caller commits.
+    async fn bucket_3_row(connection: &mut PgConnection, ws: WorkspaceId, tag: &str) -> i64 {
+        sqlx::query_scalar(
+            "INSERT INTO ingest_inbox \
+                (workspace_id, api_key_id, kind, item, message_id, trace_id, affinity) \
+             VALUES ($1, gen_random_uuid(), 'track', \
+                     jsonb_build_object('identifiers', \
+                        jsonb_build_array(jsonb_build_array('external:user_id', $2::text)), \
+                        'timestamp', null, 'event', 'seen', 'properties', jsonb_build_object()), \
+                     $2, gen_random_uuid(), 3) \
+             RETURNING id",
+        )
+        .bind(ws.as_uuid())
+        .bind(tag)
+        .fetch_one(connection)
+        .await
+        .unwrap()
+    }
+
+    /// Commits rows to bucket 3 until `cursors` reads it after an id above `straggler`, which a
+    /// transaction still holds uncommitted, and returns the ids taken meanwhile.
+    async fn move_the_cursor_past(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        cursors: &TakeCursors,
+        straggler: i64,
+    ) -> Vec<i64> {
+        let mut took = Vec::new();
+        for round in 0..3 {
+            let mut connection = pool.acquire().await.unwrap();
+            bucket_3_row(&mut connection, ws, &format!("newer-{round}")).await;
+            took.extend(drained_with(pool, ws, cursors).await);
+        }
+        assert!(
+            cursors.start(ws, &[3]).after[0] > straggler,
+            "the cursor passed the uncommitted row"
+        );
+        took
+    }
+
+    /// A row whose id is below a take cursor but that commits after the cursor passed it (ids come
+    /// from a sequence, commits do not follow it) is still taken: at once by the next take, when
+    /// nothing above the cursor is left, as the requeue's probe of the shard then still finds it.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_row_that_commits_below_a_take_cursor_is_taken_by_the_next_take(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            let cursors = TakeCursors::new(Duration::ZERO, Duration::from_secs(3600));
+            let mut late = begin(&pool).await.unwrap();
+            let straggler = bucket_3_row(&mut late, ws, "late").await;
+            let took = move_the_cursor_past(&pool, ws, &cursors, straggler).await;
+            assert_eq!(took.len(), 3);
+            commit(late).await.unwrap();
+
+            assert!(shard_pending(&pool, ws, BUCKET_3).await.unwrap());
+            assert_eq!(drained_with(&pool, ws, &cursors).await, [straggler]);
+            assert_eq!(inbox_count(&pool).await, 0);
+        })
+        .await;
+    }
+
+    /// While newer rows keep its bucket's takes busy above the cursor, a straggler below it is
+    /// taken by the bucket's next full walk, at most a period after it committed.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_row_below_a_take_cursor_is_taken_within_the_period_behind_newer_rows(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            let period = Duration::from_millis(1500);
+            let cursors = TakeCursors::new(Duration::ZERO, period);
+            let mut late = begin(&pool).await.unwrap();
+            let straggler = bucket_3_row(&mut late, ws, "late").await;
+            move_the_cursor_past(&pool, ws, &cursors, straggler).await;
+            commit(late).await.unwrap();
+            let committed = Instant::now();
+
+            let mut round = 0;
+            loop {
+                let mut connection = pool.acquire().await.unwrap();
+                bucket_3_row(&mut connection, ws, &format!("busy-{round}")).await;
+                drop(connection);
+                round += 1;
+                if drained_with(&pool, ws, &cursors).await.contains(&straggler) {
+                    break;
+                }
+                assert!(
+                    committed.elapsed() < period + Duration::from_secs(2),
+                    "the row below the cursor waited past the period"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            drained_with(&pool, ws, &cursors).await;
+            assert_eq!(inbox_count(&pool).await, 0, "no row is lost");
+        })
+        .await;
+    }
+
+    /// A take stopped by a locked row keeps its cursor below that row, so the row and the rows
+    /// after it are taken in id order once it is free.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_take_stopped_by_a_locked_row_keeps_its_cursor_below_it(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            let cursors = TakeCursors::new(Duration::ZERO, Duration::from_secs(3600));
+            move_the_cursor_past(&pool, ws, &cursors, 0).await;
+            let mut connection = pool.acquire().await.unwrap();
+            let held = bucket_3_row(&mut connection, ws, "held").await;
+            let after = bucket_3_row(&mut connection, ws, "after").await;
+            drop(connection);
+            let mut holder = begin(&pool).await.unwrap();
+            sqlx::query("SELECT id FROM ingest_inbox WHERE id = $1 FOR UPDATE")
+                .bind(held)
+                .fetch_all(&mut *holder)
+                .await
+                .unwrap();
+
+            // The second take begins after the first saw both rows, so only the stop keeps its
+            // cursor below the held one.
+            for _ in 0..2 {
+                assert!(drained_with(&pool, ws, &cursors).await.is_empty());
+            }
+            assert!(cursors.start(ws, &[3]).after[0] < held);
+            commit(holder).await.unwrap();
+
+            assert_eq!(drained_with(&pool, ws, &cursors).await, [held, after]);
+        })
+        .await;
+    }
+
+    /// Drains in small batches while the cursors trail the takes by nothing, with appends between
+    /// the batches: every row is taken, and each key ends on its last value. The people exist
+    /// before the rounds, so every row is keyed to its person's lane (7.1: order is not kept
+    /// across a key's first resolution, cursors or not).
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_drain_with_moving_cursors_takes_every_row_in_key_order(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            let cursors = TakeCursors::new(Duration::ZERO, Duration::from_secs(3600));
+            let trace = TraceContext::root(Cause::api("req"));
+            let shards: Vec<Shard> = (0..4).map(|index| Shard { index, count: 4 }).collect();
+            let people: Vec<IngestItem> = (0..40)
+                .map(|n| identify(&format!("u{n}"), &format!("seed-{n}"), json!({})))
+                .collect();
+            append(&pool, ws, &trace, &people).await;
+            while drain_batch(&pool, ws, Shard::ALL, &key(), 500)
+                .await
+                .unwrap()
+                .rows
+                > 0
+            {}
+            for round in ["free", "basic", "pro"] {
+                let items: Vec<IngestItem> = (0..40)
+                    .map(|n| {
+                        identify(
+                            &format!("u{n}"),
+                            &format!("{round}-{n}"),
+                            json!({ "plan": round }),
+                        )
+                    })
+                    .collect();
+                append(&pool, ws, &trace, &items).await;
+                for shard in &shards {
+                    drain_batch_using(&pool, ws, *shard, &key(), 7, &cursors)
+                        .await
+                        .unwrap();
+                }
+            }
+            for _ in 0..40 {
+                for shard in &shards {
+                    drain_batch_using(&pool, ws, *shard, &key(), 7, &cursors)
+                        .await
+                        .unwrap();
+                }
+            }
+
+            assert_eq!(inbox_count(&pool).await, 0);
+            for n in 0..40 {
+                assert_eq!(
+                    plan_of(&pool, &format!("u{n}")).await.as_deref(),
+                    Some("pro"),
+                    "u{n} ended on its last value"
+                );
+            }
+            assert!(
+                shards
+                    .iter()
+                    .flat_map(|shard| shard.buckets())
+                    .any(|bucket| cursors.start(ws, &[bucket]).after[0] > 0),
+                "the takes read from their cursors"
             );
         })
         .await;
