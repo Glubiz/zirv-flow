@@ -15,10 +15,12 @@
 --
 -- UPGRADE COST: this rebuilds both indexes on every events partition. CREATE INDEX
 -- CONCURRENTLY is not allowed on a partitioned table, and sqlx runs a migration file as one
--- statement batch, so each build takes a SHARE lock on its partition and blocks writes to it
--- (every event ingest into that month) until the migration commits, for as long as the build of
--- all partitions takes. It grows with the stored events; the indexes grow by about 29% (name)
--- and 34% (person). Plan the upgrade for a quiet window.
+-- statement batch, so the DROP INDEX statements take ACCESS EXCLUSIVE on `events` and on every
+-- partition, and the lock is held to the commit: all reads AND writes of events (ingest, the
+-- explorer, segment refreshes, flow arrivals) wait until both indexes are rebuilt on all
+-- partitions. The builds themselves take SHARE. The wait grows with the stored events; the
+-- indexes grow by about 29% (name) and 34% (person) on live-shaped data. Plan the upgrade for a
+-- quiet window.
 DROP INDEX events_name_idx;
 DROP INDEX events_person_idx;
 CREATE INDEX events_name_idx ON events (workspace_id, name, occurred_at DESC) INCLUDE (person_id);
