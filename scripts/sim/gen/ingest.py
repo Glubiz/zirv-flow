@@ -3,8 +3,11 @@
 
 import http.client
 import json
+import multiprocessing
+import multiprocessing.connection
 import os
 import random
+import sys
 import threading
 import time
 import uuid
@@ -97,4 +100,23 @@ def send(count):
 if __name__ == "__main__":
     while not KEY_FILE.exists():
         time.sleep(2)
-    pace.run("ingest", send, chunk_items=CHUNK, workers=int(os.environ.get("SIM_GEN_INGEST_WORKERS", "8")))
+    # One Python process tops out near 7,700 events/s on one core, so the x5 profile splits the
+    # generator over SIM_GEN_INGEST_PROCS processes; each paces 1/procs of the rate with its share
+    # of the sender threads, and writes its own stats part (see pace.Stats.write).
+    procs = max(1, int(os.environ.get("SIM_GEN_INGEST_PROCS", "1")))
+    threads = max(1, -(-int(os.environ.get("SIM_GEN_INGEST_WORKERS", "8")) // procs))
+
+    def run_part(part):
+        pace.run("ingest", send, chunk_items=CHUNK, workers=threads, part=part, parts=procs)
+
+    if procs == 1:
+        run_part(0)
+    else:
+        children = [multiprocessing.Process(target=run_part, args=(part,), daemon=True) for part in range(procs)]
+        for child in children:
+            child.start()
+        # A dead part would silently drop its share of the rate: exit so the container restarts
+        # and the failure shows.
+        multiprocessing.connection.wait([child.sentinel for child in children])
+        print("gen-ingest: a part exited; exiting", flush=True)
+        sys.exit(1)

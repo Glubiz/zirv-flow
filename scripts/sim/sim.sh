@@ -188,11 +188,10 @@ status_traffic() {
   if [[ -f "$STATE/control.json" ]]; then
     jq -r '"control: rate \(.rate) burst x\(.burst_factor) paused \(.paused)\(if .paused_reason then " (\(.paused_reason))" else "" end)"' "$STATE/control.json"
   fi
-  local file
-  for file in "$STATE"/stats/*.json; do
-    [[ -f "$file" ]] || continue
-    jq -r '"\(.name): achieved \(.achieved_per_s)/s of target \(.target_per_s)/s, sent \(.sent_total), late \(.late_total), dropped \(.dropped_total), errors \(.errors_total)"' "$file"
-  done
+  # A generator split over several processes writes one file per part; add the parts up.
+  if compgen -G "$STATE/stats/*.json" > /dev/null; then
+    jq -rs 'group_by(.name)[] | {name: .[0].name, a: (map(.achieved_per_s) | add), t: (map(.target_per_s) | add), s: (map(.sent_total) | add), l: (map(.late_total) | add), d: (map(.dropped_total) | add), e: (map(.errors_total) | add)} | "\(.name): achieved \(.a * 10 | round / 10)/s of target \(.t * 10 | round / 10)/s, sent \(.s), late \(.l), dropped \(.d), errors \(.e)"' "$STATE"/stats/*.json
+  fi
   zf_sql "SELECT 'people ' || count(*) FROM people WHERE merged_into IS NULL" || true
   zf_sql "SELECT 'inbox age ' || round(coalesce(extract(epoch FROM now() - min(received_at)), 0)::numeric, 1) || ' s, ' || count(*) || ' queued' FROM ingest_inbox" || true
   zf_sql "SELECT 'events (estimate) ' || coalesce(sum(n_live_tup), 0) FROM pg_stat_user_tables WHERE relname ~ '^events_(default|y[0-9]{4}m[0-9]{2})\$'" || true

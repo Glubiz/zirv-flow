@@ -105,7 +105,7 @@ does not exist.
 | `zirv_flow_kafka_offset_resets_total` | counter | none | Kafka offset resets |
 | `zirv_flow_segment_refresh_seconds` | histogram | none | Duration of one `segment.refresh` |
 | `zirv_flow_segment_refresh_people` | histogram | none | People who entered or left the segment in one refresh |
-| `zirv_flow_segment_dirty_backlog` | gauge | none | People marked dirty, over all workspaces |
+| `zirv_flow_segment_dirty_backlog` | gauge | none | People marked dirty, over all workspaces; an exact count republished by the scheduler leader at most every 30 s |
 | `zirv_flow_segment_dirty_age_seconds` | gauge | none | Age of the oldest dirty mark |
 | `zirv_flow_flow_enrollments_total` | counter | `trigger`, `outcome` | People a `flow.enroll` enrolled or found enrolled |
 | `zirv_flow_flow_enroll_skips_total` | counter | `trigger`, `reason` | Enrollments refused, by reason |
