@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value};
-use sqlx::{Connection, PgConnection};
+use sqlx::PgConnection;
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
 use uuid::Uuid;
@@ -28,6 +28,7 @@ use super::resolve::{Resolution, resolve_person};
 use super::slots::lock_slots_shared;
 use crate::changes::mark_person;
 use crate::decisions::DecisionBuffer;
+use crate::subtransactions::{Isolated, Tried, apply_isolated};
 use crate::{DeleteReason, NewDecision, PgPool, StoreError, append_decision, begin, commit};
 
 /// One record from a source, as the profile path receives it.
@@ -151,44 +152,74 @@ fn settle<'a>(outcomes: impl IntoIterator<Item = &'a mut ProfileOutcome>, change
     }
 }
 
-/// [`apply_profile_records`] with each record in a savepoint of its own: a record the store
-/// cannot apply is `None` (the caller rejects it as `apply_failed`) and the rest carry on. A
+/// [`apply_profile_records`] with each record kept or refused alone ([`apply_isolated`], which
+/// releases at most `runs` savepoints): a record the store cannot apply is `None` (the caller
+/// rejects it as `apply_failed`) and the rest carry on, as with a savepoint per record. A
 /// retryable error still fails the whole batch.
 pub(crate) async fn apply_profile_records_singly(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     records: &[ProfileRecord],
     retracted: &[LedgerKey<'_>],
+    runs: usize,
 ) -> Result<Vec<Option<ProfileOutcome>>, StoreError> {
     crate::changes::cache_change_readers(connection, workspace).await?;
     lock_slots_shared(connection, workspace).await?;
     // Outside the savepoints, so a record rolled back keeps the batch's locks.
     lock_records(connection, workspace, records, retracted).await?;
-    let mut outcomes = Vec::with_capacity(records.len());
-    for record in records {
-        let mut savepoint = connection.begin().await.map_err(StoreError::query)?;
-        // A batch of its own: a rollback must not leave the next record with its locks or writes.
-        let applied = apply_one(
-            &mut savepoint,
-            workspace,
-            record,
-            None,
-            ProfileBatch::guarded(),
-        )
-        .await;
-        match applied {
-            Ok(outcome) => {
-                savepoint.commit().await.map_err(StoreError::query)?;
-                outcomes.push(Some(outcome));
-            }
-            Err(error) if error.is_retryable() => return Err(error),
-            Err(_) => {
-                savepoint.rollback().await.map_err(StoreError::query)?;
-                outcomes.push(None);
-            }
-        }
+    let mut singly = Singly {
+        workspace,
+        records,
+        outcomes: Vec::with_capacity(records.len()),
+    };
+    apply_isolated(connection, &mut singly, records.len(), runs).await?;
+    Ok(singly.outcomes)
+}
+
+/// The records of [`apply_profile_records_singly`], and what became of each so far.
+struct Singly<'a> {
+    workspace: WorkspaceId,
+    records: &'a [ProfileRecord],
+    outcomes: Vec<Option<ProfileOutcome>>,
+}
+
+impl Isolated for Singly<'_> {
+    type Refusal = ();
+    type Mark = usize;
+
+    fn mark(&self) -> usize {
+        self.outcomes.len()
     }
-    Ok(outcomes)
+
+    fn restore(&mut self, mark: usize) {
+        self.outcomes.truncate(mark);
+    }
+
+    async fn apply(
+        &mut self,
+        connection: &mut PgConnection,
+        index: usize,
+    ) -> Result<Tried<()>, StoreError> {
+        // A batch of its own: a rollback must not leave the next record with its locks or writes.
+        let batch = ProfileBatch::guarded();
+        let outcome = apply_one(
+            connection,
+            self.workspace,
+            &self.records[index],
+            None,
+            batch,
+        )
+        .await?;
+        self.outcomes.push(Some(outcome));
+        Ok(Tried::Kept)
+    }
+
+    fn failed(&self, _: StoreError) {}
+
+    async fn reject(&mut self, _: &mut PgConnection, _: usize, (): &()) -> Result<(), StoreError> {
+        self.outcomes.push(None);
+        Ok(())
+    }
 }
 
 /// [`lock_batch`] for the identities and ledger rows of `records` and the ledger rows
@@ -1348,6 +1379,61 @@ mod tests {
             .fetch_all(pool)
             .await
             .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_full_unit_applied_singly_stays_within_the_subtransaction_cache(pool: PgPool) {
+        use crate::subtransactions::testing::{poison, subxacts};
+
+        let ws = workspace(&pool, "one").await;
+        let at = datetime!(2026-01-01 00:00 UTC);
+        // The largest unit a sync or Kafka run hands over (an import batch is 500), with every
+        // ninth record failing in the store after its person was written.
+        poison(&pool, "source_records", "NEW.record_key LIKE 'poison%'").await;
+        let poisoned = |n: usize| n % 9 == 4;
+        let records: Vec<ProfileRecord> = (0..1000)
+            .map(|n| {
+                let key = if poisoned(n) {
+                    format!("poison{n}")
+                } else {
+                    format!("k{n}")
+                };
+                record("crm", &key, &format!("p{n}@example.com"), json!({}), at)
+            })
+            .collect();
+
+        let mut tx = begin(&pool).await.unwrap();
+        let runs = crate::subtransactions::MAX_RUNS;
+        let outcomes = apply_profile_records_singly(&mut tx, ws, &records, &[], runs)
+            .await
+            .unwrap();
+        let cached = subxacts(&mut tx).await;
+        commit(tx).await.unwrap();
+
+        let failed: Vec<usize> = (0..outcomes.len())
+            .filter(|n| outcomes[*n].is_none())
+            .collect();
+        assert_eq!(
+            failed,
+            (0..1000).filter(|n| poisoned(*n)).collect::<Vec<_>>()
+        );
+        assert!(
+            outcomes
+                .iter()
+                .flatten()
+                .all(|outcome| matches!(outcome, ProfileOutcome::Applied { .. }))
+        );
+        let people: i64 = sqlx::query_scalar("SELECT count(*) FROM people WHERE workspace_id = $1")
+            .bind(ws.as_uuid())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(people, 1000 - i64::try_from(failed.len()).unwrap());
+        assert!(
+            !cached.1 && cached.0 <= 64,
+            "subxacts and overflow: {cached:?}"
+        );
     }
 
     #[sqlx::test]

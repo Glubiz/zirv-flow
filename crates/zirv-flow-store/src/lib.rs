@@ -39,6 +39,7 @@ mod snippets;
 mod sources;
 mod stream_freshness;
 mod stream_offsets;
+mod subtransactions;
 mod summary;
 mod suppressions;
 mod sync_runs;
@@ -339,6 +340,8 @@ pub use stream_offsets::{
     LagReport, OffsetsStored, PartitionLag, PartitionOffset, commit_stream_offsets, load_offsets,
     report_stream_lag, stream_lag,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use subtransactions::testing as subtransaction_testing;
 pub use summary::{
     COMMIT_MARGIN, FlowFigures, WorkspaceSummary, refresh_workspace_summary, summary_workspaces,
     workspace_summary,

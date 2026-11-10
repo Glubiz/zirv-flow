@@ -18,6 +18,7 @@ use crate::lists::{
 use crate::people::{
     ProfileOutcome, ProfileRecord, apply_profile_records, apply_profile_records_singly,
 };
+use crate::subtransactions::MAX_RUNS;
 use crate::{PgConnection, PgPool, StoreError, begin, commit};
 
 /// A failed run is judged on its reject rate only once this many rows are done.
@@ -113,8 +114,9 @@ impl Tally {
 
 /// Applies one batch of the run in a transaction of its own and advances the checkpoint.
 ///
-/// With `singly`, each record is applied in a savepoint of its own and a record the store
-/// cannot apply becomes an `apply_failed` reject, so one poison row never stops an import;
+/// With `singly`, each record is kept or refused alone (as in a savepoint of its own, within the
+/// subtransactions a backend caches) and a record the store cannot apply becomes an
+/// `apply_failed` reject, so one poison row never stops an import;
 /// callers use it after a batch failed with an error that retrying cannot cure. A retryable
 /// error rolls the whole batch back either way.
 pub async fn commit_import_batch(
@@ -130,7 +132,7 @@ pub async fn commit_import_batch(
 
     let mut tally = Tally::default();
     let outcomes = if singly {
-        apply_profile_records_singly(&mut tx, batch.workspace, batch.records, &[]).await?
+        apply_profile_records_singly(&mut tx, batch.workspace, batch.records, &[], MAX_RUNS).await?
     } else {
         apply_profile_records(&mut tx, batch.workspace, batch.records, &[])
             .await?
