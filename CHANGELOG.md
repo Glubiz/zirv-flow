@@ -15,3 +15,10 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.279.0 (2026-11-10)
+
+### Fixes
+
+- a skipped stale key no longer lets its record's hash dedup a newer value
+- an older update of a source record never replaces a newer trait value
+
