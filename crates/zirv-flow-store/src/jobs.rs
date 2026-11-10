@@ -3,6 +3,8 @@
 //! Every write a worker makes to a claimed job is fenced on its lease token, so a worker
 //! whose lease expired can change nothing.
 
+mod floors;
+
 use std::time::Duration;
 
 use serde_json::Value;
@@ -15,9 +17,31 @@ use zirv_flow_core::decision_actions;
 use zirv_flow_core::{Cause, CauseKind, TraceContext, TraceId, WorkspaceId};
 
 use crate::{PgPool, StoreError};
+pub use floors::ClaimFloors;
+use floors::{ClaimFrom, Took};
 
 /// The channel enqueue notifies; the payload is the job kind.
+///
+/// A transaction that notifies takes a database-wide lock at commit and holds it through the
+/// commit's flush, so notifying commits run one at a time: 2,392 to 2,545 single-job enqueues a
+/// second with a notify each, against 6,307 (8 clients) to 11,993 (16) with none (round 7d,
+/// PostgreSQL 16). An enqueue therefore notifies only when its kind looks idle: no ready job of
+/// that kind became due within the last second ([`WAKE_WINDOW`]). A worker woken for such a job
+/// claims it; one woken earlier is busy with the backlog and claims again as soon as it finishes,
+/// and a full claim wakes the next slot. Until round 7d the probe asked for any due ready job of
+/// the kind. Its walk started at the oldest `run_at` of `jobs_ready_kind_idx`, so it crossed the
+/// entries of every job claimed since the oldest open snapshot. The window bounds that walk to a
+/// second of the kind's churn. A due job older than the window no longer suppresses the
+/// notification, so every enqueue that notified before still does: an idle worker is woken as
+/// before. The worst case is one extra notification a second per kind. The probe is a scalar
+/// subquery, a subplan run once per kind with the kind as a bound of the index: as `NOT EXISTS`
+/// the planner may make it an anti join that scans the index on `run_at` alone, every kind's
+/// entries included.
 pub const NOTIFY_CHANNEL: &str = "zirv_flow_jobs";
+
+/// How recently a ready job of a kind must have become due for an enqueue of that kind to send
+/// no wake-up ([`NOTIFY_CHANNEL`]). It is spelled `interval '1 second'` in every probe.
+pub const WAKE_WINDOW: Duration = Duration::from_secs(1);
 /// Attempts a job gets unless it says otherwise.
 pub const DEFAULT_MAX_ATTEMPTS: i32 = 5;
 /// The longest `last_error` kept, in bytes.
@@ -115,6 +139,8 @@ struct ClaimedRow {
     cause_kind: String,
     cause_id: String,
     claim_lag_seconds: f64,
+    /// The claim's `now()`, which the floors trail ([`ClaimFloors`]).
+    claimed_now: OffsetDateTime,
 }
 
 impl ClaimedRow {
@@ -204,8 +230,9 @@ macro_rules! enqueue_ctes {
              RETURNING kind), \
          notified AS ( \
              SELECT pg_notify($12, kind) FROM inserted \
-             WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE state = 'ready' AND kind = inserted.kind \
-                               AND run_at <= now()))"
+             WHERE (SELECT true FROM jobs WHERE state = 'ready' AND kind = inserted.kind \
+                    AND run_at <= now() AND run_at > now() - interval '1 second' \
+                    LIMIT 1) IS NULL)"
     };
 }
 
@@ -253,7 +280,7 @@ pub async fn enqueue<'e>(executor: impl PgExecutor<'e>, job: &NewJob) -> Result<
 /// parameters from `$13` and must read `notified`, or the wake-up is never sent.
 macro_rules! enqueue_many_ctes {
     () => {
-        "inserted AS (              INSERT INTO jobs                 (id, workspace_id, kind, payload, priority, run_at, max_attempts, unique_key,                  trace_id, cause_kind, cause_id)              SELECT t.id, t.workspace_id, t.kind, t.payload, t.priority, COALESCE(t.run_at, now()),                     t.max_attempts, t.unique_key, t.trace_id, t.cause_kind, t.cause_id              FROM unnest($1::uuid[], $2::uuid[], $3::text[], $4::jsonb[], $5::int2[],                          $6::timestamptz[], $7::int4[], $8::text[], $9::uuid[], $10::text[],                          $11::text[])                   AS t(id, workspace_id, kind, payload, priority, run_at, max_attempts,                        unique_key, trace_id, cause_kind, cause_id)              ON CONFLICT DO NOTHING              RETURNING kind),          notified AS (              SELECT pg_notify($12, k.kind) FROM (SELECT DISTINCT kind FROM inserted) k              WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE state = 'ready' AND kind = k.kind                                AND run_at <= now()))"
+        "inserted AS (              INSERT INTO jobs                 (id, workspace_id, kind, payload, priority, run_at, max_attempts, unique_key,                  trace_id, cause_kind, cause_id)              SELECT t.id, t.workspace_id, t.kind, t.payload, t.priority, COALESCE(t.run_at, now()),                     t.max_attempts, t.unique_key, t.trace_id, t.cause_kind, t.cause_id              FROM unnest($1::uuid[], $2::uuid[], $3::text[], $4::jsonb[], $5::int2[],                          $6::timestamptz[], $7::int4[], $8::text[], $9::uuid[], $10::text[],                          $11::text[])                   AS t(id, workspace_id, kind, payload, priority, run_at, max_attempts,                        unique_key, trace_id, cause_kind, cause_id)              ON CONFLICT DO NOTHING              RETURNING kind),          notified AS (              SELECT pg_notify($12, k.kind) FROM (SELECT DISTINCT kind FROM inserted) k              WHERE (SELECT true FROM jobs WHERE state = 'ready' AND kind = k.kind                     AND run_at <= now() AND run_at > now() - interval '1 second'                     LIMIT 1) IS NULL)"
     };
 }
 
@@ -388,7 +415,7 @@ macro_rules! claim_returning {
         " RETURNING id, workspace_id, kind, payload, priority, run_at, attempts, max_attempts, \
             lease_token, unique_key, trace_id, cause_kind, cause_id, \
             EXTRACT(EPOCH FROM lease_expires_at - make_interval(secs => $2) - run_at)::float8 \
-                AS claim_lag_seconds"
+                AS claim_lag_seconds, now() AS claimed_now"
     };
 }
 
@@ -422,6 +449,50 @@ const CLAIM: &str = concat!(
     "WHERE id = ANY(",
     claim_first_due!(),
     ")",
+    claim_returning!()
+);
+
+/// [`CLAIM`] from a lane's floors ([`ClaimFloors`]): the bands of `$5` upwards instead of the
+/// bands found afresh, each read from its floor in `$6` (`run_at >= floor`, a bound of the
+/// `jobs_ready_idx` range, from its first entry when NULL), and the drain and the re-evaluation
+/// from `$7` and `$8`. Past the entries of the jobs claimed before, a claim reads only the due
+/// jobs it takes. Band order, age order, the one-drain and one-re-evaluation rules and the
+/// locking are [`CLAIM`]'s. `unnest` yields the bands in the order of the array, which is
+/// ascending.
+const CLAIM_FROM: &str = concat!(
+    claim_update!(),
+    "WHERE id = ANY(ARRAY(SELECT m.id FROM ( \
+        (SELECT c.id, b.priority, c.run_at \
+         FROM unnest($5::int2[], $6::timestamptz[]) AS b (priority, floor) \
+         CROSS JOIN LATERAL ( \
+            SELECT j.id, j.run_at FROM jobs j \
+            WHERE j.state = 'ready' AND j.priority = b.priority \
+            AND j.run_at >= COALESCE(b.floor, '-infinity') AND j.run_at <= now() \
+            AND j.kind = ANY($3) AND j.kind NOT IN ('ingest.drain', 'segment.reevaluate') \
+            ORDER BY j.run_at \
+            LIMIT $4 \
+            FOR UPDATE SKIP LOCKED) c \
+         LIMIT $4) \
+        UNION ALL \
+        SELECT d.id, d.priority, d.run_at FROM ( \
+            SELECT j.id, j.priority, j.run_at FROM jobs j \
+            WHERE 'ingest.drain' = ANY($3) \
+            AND j.state = 'ready' AND j.kind = 'ingest.drain' \
+            AND j.run_at >= COALESCE($7::timestamptz, '-infinity') AND j.run_at <= now() \
+            ORDER BY j.run_at \
+            LIMIT 1 \
+            FOR UPDATE SKIP LOCKED) d \
+        UNION ALL \
+        SELECT r.id, r.priority, r.run_at FROM ( \
+            SELECT j.id, j.priority, j.run_at FROM jobs j \
+            WHERE 'segment.reevaluate' = ANY($3) \
+            AND j.state = 'ready' AND j.kind = 'segment.reevaluate' \
+            AND j.run_at >= COALESCE($8::timestamptz, '-infinity') AND j.run_at <= now() \
+            ORDER BY j.run_at \
+            LIMIT 1 \
+            FOR UPDATE SKIP LOCKED) r) m \
+        ORDER BY m.priority, m.run_at \
+        LIMIT $4))",
     claim_returning!()
 );
 
@@ -625,6 +696,61 @@ pub async fn claim_jobs(
     claimed.into_iter().map(ClaimedRow::into_claimed).collect()
 }
 
+/// [`claim_jobs`] from the floors of the lane that claims, which it moves on. Without a cap the
+/// claim reads each band from its floor ([`CLAIM_FROM`]), and every [`floors::PERIOD`], or once
+/// [`ClaimFloors::expire`] was called, it is the full walk of [`claim_jobs`]. Under a cap it is
+/// [`claim_jobs`]'s capped claim, as before, and leaves the floors alone.
+pub async fn claim_jobs_from(
+    pool: &PgPool,
+    worker: &str,
+    kinds: &[&str],
+    lease: Duration,
+    max_running_per_workspace: Option<u32>,
+    n: u32,
+    floors: &ClaimFloors,
+) -> Result<Vec<ClaimedJob>, StoreError> {
+    if n == 0 || max_running_per_workspace.is_some() {
+        return claim_jobs(pool, worker, kinds, lease, max_running_per_workspace, n).await;
+    }
+    let bands = kinds
+        .iter()
+        .any(|kind| ![floors::DRAIN_KIND, floors::REEVALUATE_KIND].contains(kind));
+    let plan = floors.plan(bands);
+    let query = match &plan {
+        ClaimFrom::Start => sqlx::query_as(CLAIM),
+        ClaimFrom::Floors { .. } => sqlx::query_as(CLAIM_FROM),
+    }
+    .bind(worker)
+    .bind(lease.as_secs_f64())
+    .bind(kinds)
+    .bind(i64::from(n));
+    let query = match &plan {
+        ClaimFrom::Start => query,
+        ClaimFrom::Floors {
+            bands,
+            floors,
+            drain,
+            reevaluate,
+        } => query.bind(bands).bind(floors).bind(drain).bind(reevaluate),
+    };
+    let mut claimed: Vec<ClaimedRow> = query.fetch_all(pool).await.map_err(StoreError::query)?;
+    floors.record(
+        plan == ClaimFrom::Start,
+        &claimed
+            .iter()
+            .map(|row| Took {
+                priority: row.priority,
+                kind: &row.kind,
+                run_at: row.run_at,
+                now: row.claimed_now,
+            })
+            .collect::<Vec<_>>(),
+    );
+    // `RETURNING` follows the primary key, not the claim's order.
+    claimed.sort_by_key(|row| (row.priority, row.run_at));
+    claimed.into_iter().map(ClaimedRow::into_claimed).collect()
+}
+
 /// Claims the next runnable job of one of `kinds`, or none: [`claim_jobs`] of one.
 pub async fn claim_job(
     pool: &PgPool,
@@ -670,8 +796,9 @@ pub async fn release_jobs<'e>(
              RETURNING kind), \
          notified AS ( \
              SELECT pg_notify($3, k.kind) FROM (SELECT DISTINCT kind FROM released) k \
-             WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE state = 'ready' AND kind = k.kind \
-                               AND run_at <= now())) \
+             WHERE (SELECT true FROM jobs WHERE state = 'ready' AND kind = k.kind \
+                    AND run_at <= now() AND run_at > now() - interval '1 second' \
+                    LIMIT 1) IS NULL) \
          SELECT kind FROM released, (SELECT count(*) FROM notified) AS n",
     )
     .bind(&ids)
@@ -1174,7 +1301,8 @@ pub async fn retry_dead_job(
                        trace_id, cause_kind, cause_id, dead_at) \
          SELECT updated.*, \
                 CASE WHEN NOT EXISTS (SELECT 1 FROM jobs WHERE state = 'ready' \
-                                      AND kind = updated.kind AND run_at <= now()) \
+                                      AND kind = updated.kind AND run_at <= now() \
+                                      AND run_at > now() - interval '1 second') \
                      THEN pg_notify($2, kind) END AS notified \
          FROM updated",
     )
@@ -3338,7 +3466,8 @@ mod tests {
         let plan: serde_json::Value = sqlx::query_scalar(
             "EXPLAIN (FORMAT JSON) \
              SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE state = 'ready' \
-                                        AND kind = 'idle.kind' AND run_at <= now())",
+                                        AND kind = 'idle.kind' AND run_at <= now() \
+                                        AND run_at > now() - interval '1 second')",
         )
         .fetch_one(&pool)
         .await
@@ -5229,9 +5358,497 @@ mod tests {
     fn the_claims_bound_the_drain_kind_the_ingest_feature_enqueues() {
         for kind in [crate::DRAIN_JOB_KIND, crate::REEVALUATE_JOB_KIND] {
             let literal = format!("'{kind}'");
-            for (name, sql) in [("CLAIM", CLAIM), ("CLAIM_CAPPED", CLAIM_CAPPED)] {
+            for (name, sql) in [
+                ("CLAIM", CLAIM),
+                ("CLAIM_CAPPED", CLAIM_CAPPED),
+                ("CLAIM_FROM", CLAIM_FROM),
+            ] {
                 assert!(sql.contains(&literal), "{name} does not name {literal}");
             }
         }
+    }
+
+    /// `job("a.kind")` due `seconds` from now, negative for overdue.
+    fn due_in(kind: &str, seconds: i64) -> NewJob {
+        let mut new = job(kind);
+        new.run_at = Some(OffsetDateTime::now_utc() + time::Duration::seconds(seconds));
+        new
+    }
+
+    async fn enqueued(pool: &PgPool, new: &NewJob) -> Uuid {
+        enqueue(pool, new).await.unwrap();
+        sqlx::query_scalar("SELECT id FROM jobs ORDER BY created_at DESC, run_at DESC LIMIT 1")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn claimed_from(
+        pool: &PgPool,
+        kinds: &[&str],
+        n: u32,
+        floors: &ClaimFloors,
+    ) -> Vec<Uuid> {
+        claim_jobs_from(pool, "w", kinds, LEASE, None, n, floors)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|job| job.id)
+            .collect()
+    }
+
+    /// A floor claim starts past the jobs claimed before. A job due below the floor, here
+    /// backdated or skipped while another transaction held it, is not lost: the lane's next full
+    /// walk claims it, at once after an expiry.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_job_due_below_a_floor_is_claimed_by_the_next_full_walk(pool: PgPool) {
+        let floors = ClaimFloors::new(Duration::ZERO, Duration::from_secs(3600));
+        let first = enqueued(&pool, &job("a.kind")).await;
+        assert_eq!(claimed_from(&pool, &["a.kind"], 1, &floors).await, [first]);
+        let held = enqueued(&pool, &due_in("a.kind", -30)).await;
+        let mut holder = pool.begin().await.unwrap();
+        sqlx::query("SELECT id FROM jobs WHERE id = $1 FOR UPDATE")
+            .bind(held)
+            .fetch_one(&mut *holder)
+            .await
+            .unwrap();
+        let second = enqueued(&pool, &job("a.kind")).await;
+        assert_eq!(
+            claimed_from(&pool, &["a.kind"], 5, &floors).await,
+            [second],
+            "the held job is skipped"
+        );
+        holder.rollback().await.unwrap();
+        let backdated = enqueued(&pool, &due_in("a.kind", -3600)).await;
+        let third = enqueued(&pool, &job("a.kind")).await;
+
+        assert_eq!(
+            claimed_from(&pool, &["a.kind"], 5, &floors).await,
+            [third],
+            "a floor claim reads past the jobs below its floor"
+        );
+        floors.expire();
+        assert_eq!(
+            claimed_from(&pool, &["a.kind"], 5, &floors).await,
+            [backdated, held],
+            "the full walk claims them, oldest first"
+        );
+    }
+
+    /// The bound: a job due below the floor is claimed within the full-walk period.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_job_due_below_a_floor_is_claimed_within_the_period(pool: PgPool) {
+        let period = Duration::from_millis(1500);
+        let floors = ClaimFloors::new(Duration::ZERO, period);
+        enqueued(&pool, &job("a.kind")).await;
+        claimed_from(&pool, &["a.kind"], 1, &floors).await;
+        enqueued(&pool, &job("a.kind")).await;
+        claimed_from(&pool, &["a.kind"], 1, &floors).await;
+        let backdated = enqueued(&pool, &due_in("a.kind", -3600)).await;
+        let enqueued_at = std::time::Instant::now();
+
+        loop {
+            enqueued(&pool, &job("a.kind")).await;
+            if claimed_from(&pool, &["a.kind"], 5, &floors)
+                .await
+                .contains(&backdated)
+            {
+                break;
+            }
+            assert!(
+                enqueued_at.elapsed() < period + Duration::from_secs(2),
+                "the job below the floor waited past the period"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// A floor claim takes the bands upwards and each band by age, as the full walk does, and so
+    /// far into the batch as the full walk would.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_floor_claim_keeps_band_order_and_age_order(pool: PgPool) {
+        let floors = ClaimFloors::new(Duration::ZERO, Duration::from_secs(3600));
+        for priority in [-10, 0, 5] {
+            let mut new = due_in("a.kind", -60);
+            new.priority = priority;
+            enqueue(&pool, &new).await.unwrap();
+        }
+        assert_eq!(claimed_from(&pool, &["a.kind"], 3, &floors).await.len(), 3);
+        let mut expected = Vec::new();
+        for (priority, age) in [(5, -2), (5, -3), (0, -1), (0, -2), (-10, -1)] {
+            let mut new = due_in("a.kind", age);
+            new.priority = priority;
+            let id = enqueued(&pool, &new).await;
+            expected.push((priority, age, id));
+        }
+        expected.sort_unstable();
+        let expected: Vec<Uuid> = expected.into_iter().map(|(_, _, id)| id).collect();
+
+        let first = claim_jobs_from(&pool, "w", &["a.kind"], LEASE, None, 3, &floors)
+            .await
+            .unwrap();
+        let rest = claimed_from(&pool, &["a.kind"], 10, &floors).await;
+
+        assert_eq!(
+            first.iter().map(|job| job.id).collect::<Vec<_>>(),
+            expected[..3]
+        );
+        assert_eq!(rest, expected[3..]);
+    }
+
+    /// A floor claim takes at most one drain and one re-evaluation, as the full walk does.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_floor_claim_takes_at_most_one_drain_and_one_reevaluation(pool: PgPool) {
+        let floors = ClaimFloors::new(Duration::ZERO, Duration::from_secs(3600));
+        let kinds = [crate::DRAIN_JOB_KIND, crate::REEVALUATE_JOB_KIND, "a.kind"];
+        let count = |claimed: &[ClaimedJob], kind: &str| {
+            claimed.iter().filter(|job| job.kind == kind).count()
+        };
+        for round in 0..2 {
+            for kind in kinds {
+                for _ in 0..3 {
+                    let mut new = job(kind);
+                    if kind == crate::REEVALUATE_JOB_KIND {
+                        new.priority = -1;
+                    }
+                    enqueue(&pool, &new).await.unwrap();
+                }
+            }
+            let claimed = claim_jobs_from(&pool, "w", &kinds, LEASE, None, 32, &floors)
+                .await
+                .unwrap();
+
+            assert_eq!(count(&claimed, crate::DRAIN_JOB_KIND), 1, "round {round}");
+            assert_eq!(
+                count(&claimed, crate::REEVALUATE_JOB_KIND),
+                1,
+                "round {round}"
+            );
+            assert_eq!(count(&claimed, "a.kind"), 3, "round {round}");
+        }
+    }
+
+    /// A job the reaper requeues or a failure retries is due at `now()` or later, above every
+    /// floor, so a floor claim takes it without waiting for a full walk.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_requeued_or_retried_job_is_claimed_by_a_floor_claim(pool: PgPool) {
+        let floors = ClaimFloors::new(Duration::from_secs(1), Duration::from_secs(3600));
+        let reaped = enqueued(&pool, &due_in("a.kind", -5)).await;
+        let short = claim_jobs_from(
+            &pool,
+            "w",
+            &["a.kind"],
+            Duration::from_millis(50),
+            None,
+            1,
+            &floors,
+        )
+        .await
+        .unwrap();
+        assert_eq!(short[0].id, reaped);
+        wait_until_expired(&pool, reaped).await;
+        assert_eq!(reap_expired(&pool).await.unwrap().requeued, 1);
+        assert_eq!(claimed_from(&pool, &["a.kind"], 1, &floors).await, [reaped]);
+
+        let retried = enqueued(&pool, &due_in("a.kind", -5)).await;
+        floors.expire();
+        let claimed = claim_jobs_from(&pool, "w", &["a.kind"], LEASE, None, 1, &floors)
+            .await
+            .unwrap();
+        assert_eq!(claimed[0].id, retried);
+        fail_job(
+            &pool,
+            retried,
+            claimed[0].lease_token,
+            Duration::ZERO,
+            "boom",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            claimed_from(&pool, &["a.kind"], 1, &floors).await,
+            [retried]
+        );
+    }
+
+    /// Under a per-workspace cap the claim is the capped claim of [`claim_jobs`], which reads no
+    /// floor and moves none.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_capped_claim_neither_reads_nor_moves_the_floors(pool: PgPool) {
+        let floors = ClaimFloors::new(Duration::ZERO, Duration::from_secs(3600));
+        let ws = workspace(&pool, "ours").await;
+        let mut ids = Vec::new();
+        for age in [-30, -20] {
+            let mut new = due_in("a.kind", age);
+            new.workspace_id = Some(ws);
+            ids.push(enqueued(&pool, &new).await);
+        }
+
+        let claimed = claim_jobs_from(&pool, "w", &["a.kind"], LEASE, Some(1), 5, &floors)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            claimed.iter().map(|job| job.id).collect::<Vec<_>>(),
+            [ids[0]]
+        );
+        assert_eq!(
+            floors.plan(true),
+            ClaimFrom::Start,
+            "the floors were left alone"
+        );
+    }
+
+    /// The floor claim's plans stay bounded like the full walk's: a probe of each band's range
+    /// from its floor, and of the drain's and the re-evaluation's.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_floor_claim_plan_stays_bounded(pool: PgPool) {
+        freeze_statistics(&pool).await;
+        let ws = workspace(&pool, "ours").await;
+        seed_wakes(&pool, ws, "f", 20_000, 600.0, 2_400.0).await;
+        seed_wakes(&pool, ws, "b0", 5_000, -60.0, 0.0).await;
+        seed_other_work(&pool, OtherWork::Busy).await;
+        let floor = OffsetDateTime::now_utc() - time::Duration::seconds(30);
+        for analyze in [false, true] {
+            if analyze {
+                sqlx::query("ANALYZE jobs").execute(&pool).await.unwrap();
+            }
+            for n in [1_i64, 32] {
+                let plan: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                    "EXPLAIN (FORMAT JSON) {CLAIM_FROM}"
+                )))
+                .bind("w")
+                .bind(LEASE.as_secs_f64())
+                .bind(WORKER_KINDS)
+                .bind(n)
+                .bind(vec![-1_i16, 0])
+                .bind(vec![None, Some(floor)])
+                .bind(Some(floor))
+                .bind(None::<OffsetDateTime>)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                assert_eq!(
+                    unbounded_step(&plan),
+                    None,
+                    "n {n}, analyzed {analyze}\n{plan}"
+                );
+            }
+            let generic: Value = sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+                "EXPLAIN (FORMAT JSON, GENERIC_PLAN) {CLAIM_FROM}"
+            )))
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get(0);
+            assert_eq!(unbounded_step(&generic), None, "generic\n{generic}");
+        }
+    }
+
+    /// The pre-round-7d wake probe: any due ready job of the kind.
+    const WAKE_PROBE_BEFORE_7D: &str = "SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM jobs \
+         WHERE state = 'ready' AND kind = 'busy.kind' AND run_at <= now())";
+
+    /// The probe of [`enqueue_ctes`], for the same kind.
+    const WAKE_PROBE: &str = "SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM jobs \
+         WHERE state = 'ready' AND kind = 'busy.kind' AND run_at <= now() \
+         AND run_at > now() - interval '1 second')";
+
+    /// The buffers `sql` touched, by `EXPLAIN (ANALYZE, BUFFERS)`.
+    async fn buffers_of(pool: &PgPool, sql: &str) -> i64 {
+        let plan: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {sql}"
+        )))
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let top = &plan[0]["Plan"];
+        top["Shared Hit Blocks"].as_i64().unwrap() + top["Shared Read Blocks"].as_i64().unwrap()
+    }
+
+    /// With a snapshot held open, the entries of 5,000 claimed jobs stay at the head of the kind's
+    /// range. The old probe walked them all to find a due job; the windowed one reads only the
+    /// last second.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_wake_probe_reads_only_its_window_past_a_dead_head(pool: PgPool) {
+        let mut snapshot = pool.begin().await.unwrap();
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .execute(&mut *snapshot)
+            .await
+            .unwrap();
+        sqlx::query("SELECT 1")
+            .execute(&mut *snapshot)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO jobs (id, kind, payload, run_at, trace_id, cause_kind, cause_id) \
+             SELECT gen_random_uuid(), 'busy.kind', '{}', now() - interval '100 seconds' \
+                    + n * interval '10 milliseconds', gen_random_uuid(), 'api', 'x' \
+             FROM generate_series(1, 5000) AS n",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE jobs SET state = 'running' WHERE kind = 'busy.kind'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM jobs WHERE kind = 'busy.kind'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        enqueue(&pool, &due_in("busy.kind", -1)).await.unwrap();
+
+        let before = buffers_of(&pool, WAKE_PROBE_BEFORE_7D).await;
+        let now = buffers_of(&pool, WAKE_PROBE).await;
+
+        assert!(now <= 5, "the windowed probe touched {now} buffers");
+        assert!(
+            before >= 10 * now.max(1),
+            "the old probe touched {before} buffers"
+        );
+        snapshot.rollback().await.unwrap();
+    }
+
+    /// A due job older than the wake window no longer keeps an enqueue of its kind quiet, so the
+    /// enqueue wakes a worker; before round 7d it did not.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_due_job_older_than_the_wake_window_no_longer_keeps_an_enqueue_quiet(pool: PgPool) {
+        let mut listener = PgListener::connect_with(&pool).await.unwrap();
+        listener.listen(NOTIFY_CHANNEL).await.unwrap();
+        enqueue(&pool, &due_in("a.kind", -10)).await.unwrap();
+        wait_for_notification(&mut listener).await;
+
+        enqueue(&pool, &job("a.kind")).await.unwrap();
+
+        wait_for_notification(&mut listener).await;
+    }
+
+    /// Every scan of `jobs_ready_kind_idx` in `plan`: whether it runs inside a subplan, and its
+    /// `Index Cond`.
+    fn kind_index_scans(plan: &Value) -> Vec<(bool, String)> {
+        let mut scans = Vec::new();
+        let mut stack = vec![(plan, false)];
+        while let Some((node, inside)) = stack.pop() {
+            match node {
+                Value::Object(map) => {
+                    let inside = inside
+                        || map.get("Parent Relationship").and_then(Value::as_str)
+                            == Some("SubPlan");
+                    if map.get("Index Name").and_then(Value::as_str) == Some("jobs_ready_kind_idx")
+                    {
+                        let condition = map.get("Index Cond").and_then(Value::as_str);
+                        scans.push((inside, condition.unwrap_or_default().to_owned()));
+                    }
+                    stack.extend(map.values().map(|value| (value, inside)));
+                }
+                Value::Array(items) => stack.extend(items.iter().map(|value| (value, inside))),
+                _ => {}
+            }
+        }
+        scans
+    }
+
+    /// The wake probe of an enqueue is a subplan run once per kind, its scan of
+    /// `jobs_ready_kind_idx` bounded by the kind. Written as `NOT EXISTS` it was an anti join, and
+    /// once the window was added, round 7d saw the planner pick an anti join whose scan was bounded
+    /// by `run_at` alone and read the entries of every kind (190 buffers behind a dead head,
+    /// against 4 for the probe of the kind), on statistics taken while the queue churned. The
+    /// planner never pulls a scalar subquery up into a join, so the subplan holds on any statistics.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_wake_probe_scans_only_the_kind_it_wakes(pool: PgPool) {
+        let mut snapshot = pool.begin().await.unwrap();
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .execute(&mut *snapshot)
+            .await
+            .unwrap();
+        sqlx::query("SELECT 1")
+            .execute(&mut *snapshot)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO jobs (id, kind, payload, run_at, trace_id, cause_kind, cause_id) \
+             SELECT gen_random_uuid(), \
+                    (ARRAY['flow.step', 'delivery.send', 'person.merge.rewrite', \
+                           'flow.enroll', 'ingest.drain'])[1 + n % 5], \
+                    '{}', now() - interval '200 seconds' + n * interval '10 milliseconds', \
+                    gen_random_uuid(), 'api', 'x' \
+             FROM generate_series(1, 20000) AS n",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE jobs SET state = 'running'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM jobs")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO jobs (id, kind, payload, run_at, trace_id, cause_kind, cause_id) \
+             SELECT gen_random_uuid(), \
+                    (ARRAY['delivery.send', 'person.merge.rewrite', 'flow.enroll'])[1 + n % 3], \
+                    '{}', now() - interval '60 seconds' + n * interval '10 milliseconds', \
+                    gen_random_uuid(), 'api', 'x' \
+             FROM generate_series(1, 64) AS n",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("ANALYZE jobs").execute(&pool).await.unwrap();
+        let one = [job("flow.step")];
+
+        let single: Value = bind_job(
+            sqlx::query(concat!(
+                "EXPLAIN (FORMAT JSON) WITH ",
+                enqueue_ctes!(),
+                " SELECT kind FROM inserted, (SELECT count(*) FROM notified) AS n"
+            )),
+            &one[0],
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .get(0);
+        let many: Value = bind_jobs(
+            sqlx::query(concat!(
+                "EXPLAIN (FORMAT JSON) WITH ",
+                enqueue_many_ctes!(),
+                " SELECT kind FROM inserted, (SELECT count(*) FROM notified) AS n"
+            )),
+            &one,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .get(0);
+
+        for (name, plan) in [("enqueue", single), ("enqueue_many", many)] {
+            let scans = kind_index_scans(&plan);
+            assert!(
+                !scans.is_empty(),
+                "{name}: no probe of the kind index\n{plan}"
+            );
+            for (inside, condition) in scans {
+                assert!(inside, "{name}: the probe is not a subplan\n{plan}");
+                assert!(
+                    condition.contains("kind ="),
+                    "{name}: a probe not bounded by its kind: {condition}\n{plan}"
+                );
+            }
+        }
+        snapshot.rollback().await.unwrap();
     }
 }
