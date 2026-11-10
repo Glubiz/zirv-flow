@@ -24,23 +24,20 @@ pub async fn ensure_event_partitions(pool: &PgPool, today: Date) -> Result<(), S
             bound(start),
             bound(end),
         );
-        let created = sqlx::query(sqlx::AssertSqlSafe(statement))
-            .execute(pool)
-            .await
-            .map_err(StoreError::query);
         // Idempotent, so a partition that already exists gets the settings too.
-        let tuned = match created {
-            Ok(_) => sqlx::query(sqlx::AssertSqlSafe(format!(
-                "ALTER TABLE {} SET ({VACUUM_SETTINGS})",
-                partition_name(start)
-            )))
-            .execute(pool)
-            .await
-            .map_err(StoreError::query),
-            Err(error) => Err(error),
-        };
-        if let Err(error) = tuned {
-            first_error.get_or_insert(error);
+        let tune = format!(
+            "ALTER TABLE {} SET ({VACUUM_SETTINGS})",
+            partition_name(start)
+        );
+        let created = async {
+            sqlx::query(sqlx::AssertSqlSafe(statement))
+                .execute(pool)
+                .await?;
+            sqlx::query(sqlx::AssertSqlSafe(tune)).execute(pool).await
+        }
+        .await;
+        if let Err(error) = created {
+            first_error.get_or_insert(StoreError::query(error));
         }
     }
     first_error.map_or(Ok(()), Err)
@@ -124,7 +121,8 @@ mod tests {
             ]
         );
         let untuned: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid              WHERE i.inhparent = 'events'::regclass AND c.reloptions IS NULL",
+            "SELECT count(*) FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid \
+             WHERE i.inhparent = 'events'::regclass AND c.reloptions IS NULL",
         )
         .fetch_one(&pool)
         .await
