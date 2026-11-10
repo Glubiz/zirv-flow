@@ -4,8 +4,10 @@
 import http.client
 import json
 import multiprocessing
+import multiprocessing.connection
 import os
 import random
+import sys
 import threading
 import time
 import uuid
@@ -107,6 +109,14 @@ if __name__ == "__main__":
     def run_part(part):
         pace.run("ingest", send, chunk_items=CHUNK, workers=threads, part=part, parts=procs)
 
-    for part in range(1, procs):
-        multiprocessing.Process(target=run_part, args=(part,), daemon=True).start()
-    run_part(0)
+    if procs == 1:
+        run_part(0)
+    else:
+        children = [multiprocessing.Process(target=run_part, args=(part,), daemon=True) for part in range(procs)]
+        for child in children:
+            child.start()
+        # A dead part would silently drop its share of the rate: exit so the container restarts
+        # and the failure shows.
+        multiprocessing.connection.wait([child.sentinel for child in children])
+        print("gen-ingest: a part exited; exiting", flush=True)
+        sys.exit(1)
