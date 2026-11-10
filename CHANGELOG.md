@@ -15,3 +15,17 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.275.0 (2026-11-10)
+
+### Performance
+
+- index-only event scans for the full refresh and the re-evaluation diff
+
+### Documentation
+
+- state the real lock levels of the events index rebuild
+
+### Chores
+
+- fold the partition create and tune statements into one error path
+
