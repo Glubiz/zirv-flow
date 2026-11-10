@@ -25,8 +25,8 @@ pub use arrivals::{StoredEvent, find_event_of_person, find_trigger_event};
 pub use control::{
     ControlError, ExitBatch, LIFECYCLE_BATCH, LIFECYCLE_JOB_KIND, LifecycleAction, LifecycleBatch,
     LifecyclePayload, SETTLE_JOB_KIND, SettleItem, SettlePayload, Signal, enqueue_lifecycle,
-    exit_batch, flow_state_for_step, flow_states_for_steps, hold_enrollment, release_enrollment,
-    reopen_failed_step, resume_batch, resume_failed, segment_is_watched,
+    exit_batch, flow_state_for_step, flow_states_for_steps, hand_on_settle_rest, hold_enrollment,
+    release_enrollment, reopen_failed_step, resume_batch, resume_failed, segment_is_watched,
 };
 pub(crate) use control::{enqueue_segment_settles, exit_people};
 pub use crud::{

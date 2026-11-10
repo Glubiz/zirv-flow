@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use sqlx::{Connection, PgConnection};
+use sqlx::PgConnection;
 use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::decision_actions::{self, DecisionSpec};
@@ -29,6 +29,7 @@ use crate::people::{
     apply_profile_records_singly, remove_contribution_in,
 };
 use crate::stream_offsets::PartitionOffset;
+use crate::subtransactions::{Isolated, MAX_RUNS, Tried, apply_isolated};
 use crate::{
     NewDecision, PgPool, StoreError, StreamOutcome, append_decisions, begin, commit, database_now,
     lock_lease, record_stream_outcome,
@@ -116,8 +117,8 @@ pub struct SyncBatch<'a> {
     pub checkpoint: &'a Value,
     /// Also write the checkpoint to the stream, for the next run.
     pub incremental: bool,
-    /// Apply each record in a savepoint of its own, so one poison record is rejected as
-    /// `apply_failed` instead of stopping the run.
+    /// Keep or refuse each record and each event alone, as in a savepoint of its own, so one
+    /// poison record is rejected as `apply_failed` instead of stopping the run.
     pub singly: bool,
 }
 
@@ -508,10 +509,14 @@ pub(crate) async fn write_offsets(
     Ok(())
 }
 
-/// Applies the accepted records, all together or, with `singly`, each in a savepoint. A record
-/// the store cannot apply is `None`. The records' people and those of the deleted keys are
-/// locked first, in one order, so two batches over the same people never wait on each other in
-/// a cycle.
+/// The savepoints each of the two `singly` phases of a batch, the records and their events, may
+/// release ([`apply_isolated`]): together within the subtransactions a backend caches.
+const SINGLY_RUNS: usize = MAX_RUNS / 2;
+
+/// Applies the accepted records, all together or, with `singly`, each kept or refused alone (as
+/// in a savepoint of its own). A record the store cannot apply is `None`. The records' people
+/// and those of the deleted keys are locked first, in one order, so two batches over the same
+/// people never wait on each other in a cycle.
 async fn apply_upserts(
     tx: &mut crate::Tx,
     batch: &SyncBatch<'_>,
@@ -532,7 +537,8 @@ async fn apply_upserts(
         .collect();
     if batch.singly {
         let outcomes =
-            apply_profile_records_singly(tx, batch.workspace, &records, &deleted).await?;
+            apply_profile_records_singly(tx, batch.workspace, &records, &deleted, SINGLY_RUNS)
+                .await?;
         return Ok((outcomes, None));
     }
     let (outcomes, held) =
@@ -589,8 +595,8 @@ fn event_message_id(batch: &SyncBatch<'_>, upsert: &SyncUpsert, name: &str) -> S
 
 /// Applies the event of each record whose profile was written or already current, through the
 /// event path: validation against the published schema, redaction and reject handling. With
-/// `singly`, each event gets a savepoint of its own and one that cannot be stored is rejected as
-/// `apply_failed`.
+/// `singly`, each event is kept or refused alone (as in a savepoint of its own) and one that
+/// cannot be stored is rejected as `apply_failed`.
 async fn apply_events(
     tx: &mut crate::Tx,
     batch: &SyncBatch<'_>,
@@ -619,7 +625,7 @@ async fn apply_events(
     // can move or delete their identities, so each event resolves them on the held path: no
     // lock, no owner comparison and no identity read. The records' merges are already in what
     // the batch handed on. Only the all-together path has such a batch; with `singly`, every
-    // event has a batch and a savepoint of its own.
+    // event has a batch of its own.
     if let Some(held) = held {
         events.profiles.adopt(held);
     }
@@ -649,7 +655,19 @@ async fn apply_events(
         };
         records.push(Some((record, message_id)));
     }
-    if !batch.singly {
+    // With `singly`, the outcome of each event, in order: `None` when it was refused.
+    let mut singly = if batch.singly {
+        let pending: Vec<&(EventRecord, String)> = records.iter().flatten().collect();
+        let mut singly = EventsSingly {
+            batch,
+            key,
+            first_sync,
+            pending: &pending,
+            outcomes: Vec::with_capacity(pending.len()),
+        };
+        apply_isolated(tx, &mut singly, pending.len(), SINGLY_RUNS).await?;
+        Some(singly.outcomes.into_iter())
+    } else {
         events
             .prefetch_duplicates(
                 tx,
@@ -657,21 +675,22 @@ async fn apply_events(
                 records.iter().flatten().map(|(record, _)| record),
             )
             .await?;
-    }
+        None
+    };
     for entry in records {
         let Some((record, message_id)) = entry else {
             applied.per_upsert.push(None);
             continue;
         };
-        let outcome = if batch.singly {
-            let outcome =
-                apply_event_singly(tx, batch, key, &record, &message_id, new_events()).await?;
-            if outcome.is_none() {
-                applied.failed_messages.push(message_id);
+        let outcome = match &mut singly {
+            Some(outcomes) => {
+                let outcome = outcomes.next().flatten();
+                if outcome.is_none() {
+                    applied.failed_messages.push(message_id);
+                }
+                outcome
             }
-            outcome
-        } else {
-            Some(apply_event_record(tx, batch.workspace, key, &mut events, &record).await?)
+            None => Some(apply_event_record(tx, batch.workspace, key, &mut events, &record).await?),
         };
         let result = match outcome {
             Some(EventOutcome::Accepted { .. }) => {
@@ -713,51 +732,75 @@ async fn is_first_sync(tx: &mut crate::Tx, batch: &SyncBatch<'_>) -> Result<bool
     .map_err(StoreError::query)
 }
 
-/// One event in a savepoint of its own. `None` when it cannot be stored: it is rejected as
-/// `apply_failed` and the batch goes on.
-async fn apply_event_singly(
-    tx: &mut crate::Tx,
-    batch: &SyncBatch<'_>,
-    key: &HmacKey,
-    record: &EventRecord,
-    message_id: &str,
-    mut single: EventBatch,
-) -> Result<Option<EventOutcome>, StoreError> {
-    let mut savepoint = tx.begin().await.map_err(StoreError::query)?;
-    let done =
-        match apply_event_record(&mut savepoint, batch.workspace, key, &mut single, record).await {
-            Ok(outcome) => single
-                .finish(&mut savepoint, batch.workspace)
-                .await
-                .map(|()| outcome),
-            Err(error) => Err(error),
+/// The events of a `singly` batch, each with a batch of its own, and what became of each so far:
+/// `None` for one that cannot be stored, rejected as `apply_failed` while the batch goes on.
+struct EventsSingly<'a, 'b> {
+    batch: &'a SyncBatch<'b>,
+    key: &'a HmacKey,
+    first_sync: bool,
+    pending: &'a [&'a (EventRecord, String)],
+    outcomes: Vec<Option<EventOutcome>>,
+}
+
+impl Isolated for EventsSingly<'_, '_> {
+    type Refusal = ();
+    type Mark = usize;
+
+    fn mark(&self) -> usize {
+        self.outcomes.len()
+    }
+
+    fn restore(&mut self, mark: usize) {
+        self.outcomes.truncate(mark);
+    }
+
+    async fn apply(
+        &mut self,
+        connection: &mut PgConnection,
+        index: usize,
+    ) -> Result<Tried<()>, StoreError> {
+        let (record, _) = self.pending[index];
+        let workspace = self.batch.workspace;
+        let mut single = if self.first_sync {
+            EventBatch::without_triggers()
+        } else {
+            EventBatch::default()
         };
-    match done {
-        Ok(outcome) => {
-            savepoint.commit().await.map_err(StoreError::query)?;
-            Ok(Some(outcome))
-        }
-        Err(error) if error.is_retryable() => Err(error),
-        Err(_) => {
-            savepoint.rollback().await.map_err(StoreError::query)?;
-            reject_apply_failed(
-                tx,
-                batch.workspace,
-                key,
-                &FailedItem {
-                    kind: "event",
-                    source: batch.source,
-                    name: Some(&record.name),
-                    values: &record.properties,
-                    timestamp: record.timestamp,
-                    received_at: batch.received_at,
-                    message_id: Some(message_id),
-                    trace: batch.trace,
-                },
-            )
-            .await?;
-            Ok(None)
-        }
+        let outcome =
+            apply_event_record(connection, workspace, self.key, &mut single, record).await?;
+        single.finish(connection, workspace).await?;
+        self.outcomes.push(Some(outcome));
+        Ok(Tried::Kept)
+    }
+
+    fn failed(&self, _: StoreError) {}
+
+    async fn reject(
+        &mut self,
+        connection: &mut PgConnection,
+        index: usize,
+        (): &(),
+    ) -> Result<(), StoreError> {
+        let (record, message_id) = self.pending[index];
+        let batch = self.batch;
+        reject_apply_failed(
+            connection,
+            batch.workspace,
+            self.key,
+            &FailedItem {
+                kind: "event",
+                source: batch.source,
+                name: Some(&record.name),
+                values: &record.properties,
+                timestamp: record.timestamp,
+                received_at: batch.received_at,
+                message_id: Some(message_id),
+                trace: batch.trace,
+            },
+        )
+        .await?;
+        self.outcomes.push(None);
+        Ok(())
     }
 }
 
@@ -2355,6 +2398,189 @@ mod tests {
             assert_eq!((progress.batch.applied, progress.batch.rejected), (1, 1));
             assert_eq!((progress.events.accepted, progress.events.rejected), (1, 1));
             assert_eq!(count(&pool, "SELECT count(*) FROM list_members").await, 2);
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_full_unit_applied_record_by_record_stays_within_the_subtransaction_cache(
+        pool: PgPool,
+    ) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            use crate::subtransactions::testing::{poison, record_at_commit, recorded};
+
+            let fx = fixture(&pool, "one", "full_refresh").await;
+            let source = fx.source_id.to_string();
+            let key = key();
+            // A full unit (`ingest.sync_unit_records`): every tenth record fails in the store,
+            // and every tenth event fails after its record applied.
+            poison(&pool, "source_records", "NEW.record_key LIKE 'poison%'").await;
+            poison(&pool, "events", "NEW.properties ->> 'total' = '-1'").await;
+            let upserts: Vec<SyncUpsert> = (0..100)
+                .map(|n| {
+                    let record_key = if n % 10 == 3 {
+                        format!("poison{n}")
+                    } else {
+                        format!("k{n}")
+                    };
+                    let total = if n % 10 == 7 { json!(-1) } else { json!(n) };
+                    with_event(&fx, &record_key, &format!("a{n}@example.com"), total, &[])
+                })
+                .collect();
+            let cp = json!({"offset": 100});
+            record_at_commit(&pool, "sync_runs").await;
+
+            let outcome = commit_sync_batch(
+                &pool,
+                &SyncBatch {
+                    singly: true,
+                    ..keyed(&fx, &source, &upserts, &cp, &key)
+                },
+            )
+            .await
+            .unwrap();
+
+            let BatchOutcome::Committed(progress) = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert_eq!((progress.batch.applied, progress.batch.rejected), (80, 20));
+            assert_eq!(
+                (progress.events.accepted, progress.events.rejected),
+                (80, 10)
+            );
+            assert_eq!(count(&pool, "SELECT count(*) FROM events").await, 80);
+            assert_eq!(count(&pool, "SELECT count(*) FROM people").await, 90);
+            let (subxacts, overflowed, rows) = recorded(&pool).await;
+            assert!(rows > 0, "the commit was recorded");
+            assert!(
+                !overflowed && subxacts <= 64,
+                "subxacts {subxacts}, overflowed {overflowed}"
+            );
+        })
+        .await;
+    }
+
+    /// A unit that removes twenty records, each its person's last, deletes twenty orphans in one
+    /// transaction. Each of them is the cursor of four audience pages whose fallback page is
+    /// queued already, so every rewrite is refused and its page goes; the transaction still stays
+    /// within the 64 subtransaction ids a backend caches.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_unit_deleting_orphans_that_page_audiences_stays_within_the_subtransaction_cache(
+        pool: PgPool,
+    ) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            use crate::subtransactions::testing::{record_at_commit, recorded};
+            use crate::{
+                AudienceSource, EnrollJobPayload, EnrollWork, TriggerKind, enroll_page_key,
+            };
+            use zirv_flow_core::OrphanPolicy;
+
+            let fx = fixture(&pool, "one", "incremental").await;
+            let source = fx.source_id.to_string();
+            crate::set_orphan_policy(&pool, fx.ws, OrphanPolicy::Delete)
+                .await
+                .unwrap();
+            let first = many(&fx, 0, 20);
+            let cp1 = json!({"offset": 20});
+            commit_sync_batch(&pool, &batch(&fx, &source, &first, &cp1))
+                .await
+                .unwrap();
+            // A person below everyone the unit deletes, which it removes in their id order: the
+            // cursor of every page falls back to this one.
+            let older = Uuid::from_u128(1);
+            sqlx::query("INSERT INTO people (id, workspace_id, traits) VALUES ($1, $2, '{}')")
+                .bind(older)
+                .bind(fx.ws.as_uuid())
+                .execute(&pool)
+                .await
+                .unwrap();
+            let records: Vec<(Uuid, String)> = sqlx::query_as(
+                "SELECT person_id, record_key FROM source_records WHERE workspace_id = $1 \
+                 ORDER BY person_id",
+            )
+            .bind(fx.ws.as_uuid())
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(records.len(), 20);
+            let flow = Uuid::from_u128(77);
+            let page = |occurrence, after| {
+                EnrollJobPayload {
+                    workspace: fx.ws,
+                    flow,
+                    version: Some(1),
+                    trigger: TriggerKind::Api,
+                    work: EnrollWork::Audience {
+                        source: AudienceSource::Everyone,
+                        occurrence: Some(occurrence),
+                        after: Some(after),
+                        entered_by: None,
+                    },
+                }
+                .to_value()
+            };
+            let mut fallbacks = Vec::new();
+            for (n, (person, _)) in records.iter().enumerate() {
+                for m in 0..4 {
+                    let occurrence = Uuid::from_u128(1000 + 4 * n as u128 + m);
+                    for after in [*person, older] {
+                        sqlx::query(
+                            "INSERT INTO jobs (id, workspace_id, kind, payload, unique_key, \
+                                cause_kind, cause_id, trace_id) \
+                             VALUES (gen_random_uuid(), $1, 'flow.enroll', $2, $3, 'api', 't', \
+                                gen_random_uuid())",
+                        )
+                        .bind(fx.ws.as_uuid())
+                        .bind(page(occurrence, after))
+                        .bind(enroll_page_key(flow, occurrence, Some(after)))
+                        .execute(&pool)
+                        .await
+                        .unwrap();
+                    }
+                    fallbacks.push(enroll_page_key(flow, occurrence, Some(older)));
+                }
+            }
+            let deleted: Vec<(String, &'static str)> = records
+                .iter()
+                .map(|(_, key)| (key.clone(), DELETE_BY_SOURCE))
+                .collect();
+            let cp2 = json!({"offset": 40});
+            record_at_commit(&pool, "sync_runs").await;
+
+            let outcome = commit_sync_batch(
+                &pool,
+                &SyncBatch {
+                    deleted: &deleted,
+                    ..batch(&fx, &source, &[], &cp2)
+                },
+            )
+            .await
+            .unwrap();
+
+            let BatchOutcome::Committed(progress) = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert_eq!(progress.batch.deleted, 20);
+            assert_eq!(count(&pool, "SELECT count(*) FROM people").await, 1);
+            let left: Vec<String> = sqlx::query_scalar(
+                "SELECT unique_key FROM jobs WHERE kind = 'flow.enroll' ORDER BY unique_key",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            fallbacks.sort();
+            assert_eq!(
+                left, fallbacks,
+                "each refused page went, its fallback stays"
+            );
+            let (subxacts, overflowed, rows) = recorded(&pool).await;
+            assert!(rows > 0, "the commit was recorded");
+            assert!(
+                !overflowed && subxacts <= 64,
+                "subxacts {subxacts}, overflowed {overflowed}"
+            );
         })
         .await;
     }

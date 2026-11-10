@@ -3,6 +3,7 @@
 //! never sees the compiler: the job compiles each definition and passes in the SQL.
 
 use std::collections::BTreeSet;
+use std::time::Instant;
 
 use hashbrown::{HashMap, HashSet};
 use serde_json::Value;
@@ -14,7 +15,8 @@ use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use super::preview::{SqlQuery, bind_all_as};
 use super::refresh::{
-    Captured, MembershipCause, RefreshOutcome, Scope, lock_segment_refresh, refresh_statement,
+    Captured, MembershipCause, RefreshOutcome, Scope, lock_segment_refresh,
+    poll_segment_refresh_until, refresh_statement,
 };
 use crate::flows::{
     enqueue_segment_enrolls, enqueue_segment_settles, segment_is_watched, segment_trigger_flows,
@@ -95,6 +97,23 @@ impl DirtyBatch {
 /// ordered with the rest. The passes, erasures and merge rewrites lock through it, so no two of
 /// them can wait on each other. A merge takes no segment lock: the pass its mark schedules closes
 /// the merged person's rows, and its rewrite job closes any that remain.
+///
+/// A pass and a refresh job wait for a busy refresh lock between statements (ruling 4377357b),
+/// where the deadlock detector cannot see them, so a cycle through one of them would last until
+/// it gave up instead of ending in a 40P01. None can form except one bounded by a pass's budget:
+///
+/// - A polling pass holds the shared slot lock and the refresh locks before this one in its
+///   order, and nothing else: it has written nothing, so it holds no row and no mark. A polling
+///   refresh job holds the shared slot lock and its job row `FOR KEY SHARE`, and no refresh lock.
+/// - Only an exclusive slot request waits for the shared slot lock, and no holder of a refresh
+///   lock asks for the slot lock after it: a pass and a refresh take it before their segment
+///   locks, and an erasure, a merge's rewrite and a publish's fan-out never take it. No holder of
+///   a refresh lock deletes or locks `FOR UPDATE` a running refresh's job row.
+/// - Every taker of more than one refresh lock takes them in this one order; a refresh job and a
+///   publish's fan-out take one each. Two takers can still disagree when a save changed what a
+///   segment references between their reads of the order (a pass holds no segment guard): a pass
+///   against a pass, an erasure or a merge's rewrite. Each such cycle holds a polling pass, which
+///   gives up at the end of its time budget and rolls back.
 async fn lock_order(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -118,12 +137,28 @@ async fn lock_order(
         .collect())
 }
 
-/// Takes the refresh lock of each segment in `segments`, which are already in lock order.
+/// Takes the refresh lock of each segment in `segments`, which are already in lock order,
+/// waiting inside the lock statement for each.
 async fn acquire(connection: &mut PgConnection, segments: &[Uuid]) -> Result<(), StoreError> {
     for &segment in segments {
         lock_segment_refresh(connection, segment).await?;
     }
     Ok(())
+}
+
+/// [`acquire`] that waits between statements ([`poll_segment_refresh_until`]), holding the locks
+/// taken so far while it waits for the next. False when `deadline` passed before all were held.
+async fn poll_all(
+    connection: &mut PgConnection,
+    segments: &[Uuid],
+    deadline: Option<Instant>,
+) -> Result<bool, StoreError> {
+    for &segment in segments {
+        if !poll_segment_refresh_until(connection, segment, deadline).await? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// The live segments one batch reaches, in the order to evaluate them: every segment whose
@@ -141,15 +176,35 @@ pub async fn reevaluation_order(
 }
 
 /// [`reevaluation_order`], with each of its segments' refresh locks taken, in that order, for
-/// the rest of the transaction. Read nothing about the segments before this returns.
+/// the rest of the transaction. Read nothing about the segments before this returns. A lock
+/// another transaction holds is waited for between statements
+/// ([`poll_segment_refresh`](super::poll_segment_refresh)).
 pub async fn lock_reevaluation(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     classes: ChangeClasses,
 ) -> Result<Vec<Uuid>, StoreError> {
+    let order = lock_reevaluation_until(connection, workspace, classes, None).await?;
+    Ok(order.unwrap_or_default())
+}
+
+/// [`lock_reevaluation`] that gives up at `deadline`: `None` when a lock was still held by
+/// another transaction then. The locks taken before it stay held until the transaction ends, so
+/// the caller rolls back.
+///
+/// The pass calls this before it claims, in a READ COMMITTED transaction whose earlier
+/// statements (the slot lock, the peek at the classes, the order read) neither write nor leave a
+/// portal open, so while it waits it holds no snapshot and no transaction id.
+pub async fn lock_reevaluation_until(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    classes: ChangeClasses,
+    deadline: Option<Instant>,
+) -> Result<Option<Vec<Uuid>>, StoreError> {
     let order = reevaluation_order(connection, workspace, classes).await?;
-    acquire(connection, &order).await?;
-    Ok(order)
+    Ok(poll_all(connection, &order, deadline)
+        .await?
+        .then_some(order))
 }
 
 /// Takes, in the same order as a pass, the refresh lock of every segment in which one of

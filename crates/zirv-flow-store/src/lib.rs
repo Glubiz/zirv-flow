@@ -39,6 +39,7 @@ mod snippets;
 mod sources;
 mod stream_freshness;
 mod stream_offsets;
+mod subtransactions;
 mod summary;
 mod suppressions;
 mod sync_runs;
@@ -168,12 +169,12 @@ pub use flows::{
     end_orphaned_messages, enqueue_lifecycle, enroll, enroll_entries, enroll_page_key, exit_batch,
     find_enrollment, find_event_of_person, find_events, find_flow, find_flow_version,
     find_trigger_event, flow_entries_per_day, flow_source, flow_state_for_step,
-    flow_states_for_steps, has_webhook_signing_secret, hold_enrollment, list_flow_enrollments,
-    list_flow_versions, list_flows, live_signing_keys, load_enrollment_path, lock_audience_page,
-    lock_enrollment, lock_flow, lock_read_enrollment, lock_sync_person, lock_webhook_person,
-    occurrence_of, open_warmup, pause_flow, publish_flow, read_enrollment, read_enrollments,
-    read_webhook_subject, reconcile_flow_schedules, record_send_outcome, record_steps,
-    record_sync_evidence, record_webhook_outcome, register_wait, release_enrollment,
+    flow_states_for_steps, hand_on_settle_rest, has_webhook_signing_secret, hold_enrollment,
+    list_flow_enrollments, list_flow_versions, list_flows, live_signing_keys, load_enrollment_path,
+    lock_audience_page, lock_enrollment, lock_flow, lock_read_enrollment, lock_sync_person,
+    lock_webhook_person, occurrence_of, open_warmup, pause_flow, publish_flow, read_enrollment,
+    read_enrollments, read_webhook_subject, reconcile_flow_schedules, record_send_outcome,
+    record_steps, record_sync_evidence, record_webhook_outcome, register_wait, release_enrollment,
     reopen_failed_step, resolve_survivors, resume_batch, resume_failed, resume_flow,
     rotate_signing_key, sample_enrollments, save_enrollment, segment_is_watched,
     segment_trigger_flows, set_warmup, settle_wait_step, step_zones, unhealthy_inputs,
@@ -287,7 +288,8 @@ pub use segments::{
     archive_segment, begin_segment_snapshot, create_segment, decision_cause_kind, enqueue_refresh,
     evaluate_conditions, explain_clear_fields, find_segment, find_segment_version,
     list_segment_versions, list_segments, load_explain_person, lock_reevaluation,
-    lock_segment_refresh, lock_segments, membership_cause, membership_trace, read_segment_catalog,
+    lock_reevaluation_until, lock_segment_refresh, lock_segments, membership_cause,
+    membership_trace, poll_segment_refresh, poll_segment_refresh_until, read_segment_catalog,
     reconcile_segment_schedules, reevaluation_order, run_person_batch, run_segment_preview,
     segment_catalog, segment_catalog_details, segment_cron, segment_data_age, segment_history_page,
     segment_list_stats, segment_members_page, segment_size_per_day, segment_where_used,
@@ -338,6 +340,8 @@ pub use stream_offsets::{
     LagReport, OffsetsStored, PartitionLag, PartitionOffset, commit_stream_offsets, load_offsets,
     report_stream_lag, stream_lag,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use subtransactions::testing as subtransaction_testing;
 pub use summary::{
     COMMIT_MARGIN, FlowFigures, WorkspaceSummary, refresh_workspace_summary, summary_workspaces,
     workspace_summary,

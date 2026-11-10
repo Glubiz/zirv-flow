@@ -17,7 +17,6 @@ use hashbrown::{HashMap, HashSet};
 
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::Connection;
 use sqlx::Row;
 use sqlx::prelude::FromRow;
 use time::OffsetDateTime;
@@ -37,6 +36,7 @@ use crate::lists::ListCounts;
 use crate::people::{
     ProfileOutcome, ProfileRecord, apply_profile_record, apply_profile_record_into,
 };
+use crate::subtransactions::{Isolated, MAX_RUNS, Tried, apply_isolated};
 use crate::webhooks::HookResult;
 use crate::webhooks::{HookConfigs, HookMapped, apply_hook_record, map_hook_row};
 use crate::{NewJob, PgConnection, PgPool, StoreError, begin, commit, enqueue, enqueue_many};
@@ -1208,9 +1208,10 @@ pub(crate) async fn drain_batch_using(
     Ok(outcome)
 }
 
-/// [`drain_batch`] that applies each row in a savepoint of its own. A row that fails with a
-/// non-retryable error becomes an `apply_failed` ingest reject and is deleted, and the
-/// batch carries on. A retryable error still rolls the whole batch back.
+/// [`drain_batch`] that keeps or refuses each row alone, as in a savepoint of its own
+/// ([`apply_isolated`]). A row that fails with a non-retryable error becomes an `apply_failed`
+/// ingest reject and is deleted, and the batch carries on. A retryable error still rolls the
+/// whole batch back.
 pub async fn drain_batch_singly(
     pool: &PgPool,
     workspace: WorkspaceId,
@@ -1235,103 +1236,144 @@ pub(crate) async fn drain_batch_singly_using(
     let (rows, more, taken) = take_rows(&mut tx, workspace, shard, limit, cursors).await?;
     let hooks = HookConfigs::load(&mut tx, workspace, &rows).await?;
     lock_contact_rows(&mut tx, workspace, &rows).await?;
-    let mut outcome = DrainOutcome {
-        rows: rows.len(),
-        more,
-        ..DrainOutcome::default()
+    let mut singly = SinglyRows {
+        workspace,
+        key,
+        rows: &rows,
+        hooks: &hooks,
+        mapped: rows.iter().map(|row| map_with(row, &hooks)).collect(),
+        outcome: DrainOutcome {
+            rows: rows.len(),
+            more,
+            ..DrainOutcome::default()
+        },
+        lists: ListCounts::default(),
+        attempt: DrainOutcome::default(),
     };
-    let mut lists = ListCounts::default();
-    for row in &rows {
-        let mapped = map_with(row, &hooks);
-        let mark = lists.mark();
-        let mut savepoint = tx.begin().await.map_err(StoreError::query)?;
-        let mut unstorable = Map::new();
-        let applied = match &mapped {
+    apply_isolated(&mut tx, &mut singly, rows.len(), MAX_RUNS).await?;
+    let SinglyRows {
+        outcome, mut lists, ..
+    } = singly;
+    delete_rows(&mut tx, workspace, &rows).await?;
+    crate::changes::request_reevaluation(&mut tx, workspace).await?;
+    lists.apply(&mut tx).await?;
+    commit(tx).await?;
+    cursors.advance(workspace, &taken);
+    Ok(outcome)
+}
+
+/// The rows of [`drain_batch_singly`], and what they did so far.
+struct SinglyRows<'a> {
+    workspace: WorkspaceId,
+    key: &'a HmacKey,
+    rows: &'a [InboxRow],
+    hooks: &'a HookConfigs,
+    mapped: Vec<Option<Mapped>>,
+    outcome: DrainOutcome,
+    lists: ListCounts,
+    /// What the row being applied has tallied: a row that then fails keeps it, beside its
+    /// `apply_failed`, as it did with a savepoint of its own.
+    attempt: DrainOutcome,
+}
+
+/// Why [`drain_batch_singly`] refused a row.
+#[derive(Clone)]
+enum RowRefusal {
+    /// It failed, after tallying this.
+    Failed(DrainOutcome),
+    /// A contact with fields no write can store, what a single write answers `422` for: the row
+    /// is rejected whole, with the keys and codes of the fields as its sample.
+    Unstorable(Map<String, Value>),
+}
+
+impl Isolated for SinglyRows<'_> {
+    type Refusal = RowRefusal;
+    type Mark = (DrainOutcome, usize);
+
+    fn mark(&self) -> (DrainOutcome, usize) {
+        (self.outcome.clone(), self.lists.mark())
+    }
+
+    fn restore(&mut self, (outcome, lists): (DrainOutcome, usize)) {
+        self.outcome = outcome;
+        self.lists.discard_after(lists);
+    }
+
+    async fn apply(
+        &mut self,
+        connection: &mut PgConnection,
+        index: usize,
+    ) -> Result<Tried<RowRefusal>, StoreError> {
+        let (workspace, key) = (self.workspace, self.key);
+        let row = &self.rows[index];
+        self.attempt = DrainOutcome::default();
+        let attempt = &mut self.attempt;
+        match &self.mapped[index] {
             Some(Mapped::Profile(record)) => {
-                match apply_profile_record(&mut savepoint, workspace, record).await {
-                    Ok(result) => {
-                        tally_profile(&mut outcome, "identify", &result);
-                        record_dropped_traits(&mut savepoint, workspace, row, &result).await
-                    }
-                    Err(error) => Err(error),
-                }
+                let result = apply_profile_record(connection, workspace, record).await?;
+                tally_profile(attempt, "identify", &result);
+                record_dropped_traits(connection, workspace, row, &result).await?;
             }
-            Some(Mapped::Contact(record)) => apply_contact(&mut savepoint, workspace, record)
-                .await
-                .map(|result| {
-                    unstorable = dropped_fields(&result);
-                    if unstorable.is_empty() {
-                        tally_profile(&mut outcome, "contact", &result);
-                    }
-                }),
+            Some(Mapped::Contact(record)) => {
+                let result = apply_contact(connection, workspace, record).await?;
+                let unstorable = dropped_fields(&result);
+                if !unstorable.is_empty() {
+                    return Ok(Tried::Refused(RowRefusal::Unstorable(unstorable)));
+                }
+                tally_profile(attempt, "contact", &result);
+            }
             Some(Mapped::Event(record)) => {
                 let mut events = EventBatch::default();
-                match apply_event_record(&mut savepoint, workspace, key, &mut events, record).await
-                {
-                    Ok(result) => {
-                        tally_event(&mut outcome, &result);
-                        events.finish(&mut savepoint, workspace).await
-                    }
-                    Err(error) => Err(error),
-                }
+                let result =
+                    apply_event_record(connection, workspace, key, &mut events, record).await?;
+                tally_event(attempt, &result);
+                events.finish(connection, workspace).await?;
             }
             Some(Mapped::Hook(HookMapped::Record(record))) => {
                 let mut events = EventBatch::default();
-                match apply_hook_record(
-                    &mut savepoint,
-                    workspace,
-                    key,
-                    &mut events,
-                    &mut lists,
-                    record,
-                )
-                .await
-                {
-                    Ok(result) => {
-                        tally_hook(&mut outcome, &result);
-                        events.finish(&mut savepoint, workspace).await
-                    }
-                    Err(error) => Err(error),
-                }
+                let lists = &mut self.lists;
+                let result =
+                    apply_hook_record(connection, workspace, key, &mut events, lists, record)
+                        .await?;
+                tally_hook(attempt, &result);
+                events.finish(connection, workspace).await?;
             }
             Some(Mapped::Hook(HookMapped::Rejected(rejected))) => {
-                let done = reject_hook(&mut savepoint, workspace, row, rejected).await;
-                if done.is_ok() {
-                    outcome.count("webhook", "rejected");
-                }
-                done
+                reject_hook(connection, workspace, row, rejected).await?;
+                attempt.count("webhook", "rejected");
             }
-            None => Err(StoreError::poison()),
-        };
-        match applied {
-            Ok(()) if unstorable.is_empty() => {
-                savepoint.commit().await.map_err(StoreError::query)?;
-            }
-            Ok(()) => {
-                // What a single write answers `422` for: the row is rejected whole, with the
-                // keys and codes of the fields as its sample.
-                savepoint.rollback().await.map_err(StoreError::query)?;
-                lists.discard_after(mark);
-                if let Some(Mapped::Contact(record)) = &mapped {
+            None => return Err(StoreError::poison()),
+        }
+        self.outcome.absorb(std::mem::take(&mut self.attempt));
+        Ok(Tried::Kept)
+    }
+
+    fn failed(&self, _: StoreError) -> RowRefusal {
+        RowRefusal::Failed(self.attempt.clone())
+    }
+
+    async fn reject(
+        &mut self,
+        connection: &mut PgConnection,
+        index: usize,
+        refusal: &RowRefusal,
+    ) -> Result<(), StoreError> {
+        let (workspace, key, row) = (self.workspace, self.key, &self.rows[index]);
+        let mapped = self.mapped[index].as_ref();
+        match refusal {
+            RowRefusal::Unstorable(fields) => {
+                if let Some(Mapped::Contact(record)) = mapped {
                     let mut rejected = record.clone();
-                    rejected.traits = unstorable;
-                    reject_row(
-                        &mut tx,
-                        workspace,
-                        key,
-                        row,
-                        Some(&Mapped::Contact(rejected)),
-                        &hooks,
-                    )
-                    .await?;
+                    rejected.traits = fields.clone();
+                    let rejected = Mapped::Contact(rejected);
+                    reject_row(connection, workspace, key, row, Some(&rejected), self.hooks)
+                        .await?;
                 }
-                outcome.count("contact", "rejected");
+                self.outcome.count("contact", "rejected");
             }
-            Err(error) if error.is_retryable() => return Err(error),
-            Err(_) => {
-                savepoint.rollback().await.map_err(StoreError::query)?;
-                lists.discard_after(mark);
-                reject_row(&mut tx, workspace, key, row, mapped.as_ref(), &hooks).await?;
+            RowRefusal::Failed(tallied) => {
+                reject_row(connection, workspace, key, row, mapped, self.hooks).await?;
+                self.outcome.absorb(tallied.clone());
                 let kind = if row.kind == "webhook" {
                     "webhook"
                 } else if row.kind == "contact" {
@@ -1341,16 +1383,11 @@ pub(crate) async fn drain_batch_singly_using(
                 } else {
                     "track"
                 };
-                outcome.count(kind, "apply_failed");
+                self.outcome.count(kind, "apply_failed");
             }
         }
+        Ok(())
     }
-    delete_rows(&mut tx, workspace, &rows).await?;
-    crate::changes::request_reevaluation(&mut tx, workspace).await?;
-    lists.apply(&mut tx).await?;
-    commit(tx).await?;
-    cursors.advance(workspace, &taken);
-    Ok(outcome)
 }
 
 async fn reject_row(
@@ -2846,6 +2883,54 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(rejected, 1);
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_full_batch_drained_singly_stays_within_the_subtransaction_cache(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            use crate::subtransactions::testing::{record_at_commit, recorded};
+
+            let ws = workspace(&pool, "ours").await;
+            let trace = TraceContext::root(Cause::api("req"));
+            // The worker's default batch, with every tenth row poison.
+            let items: Vec<IngestItem> = (0..500)
+                .map(|n| track(&format!("u{n}"), &format!("m-{n}"), "seen", json!({})))
+                .collect();
+            append(&pool, ws, &trace, &items).await;
+            sqlx::query(
+                "UPDATE ingest_inbox SET item = '{\"identifiers\": 5}' \
+                 WHERE right(message_id, 1) = '3'",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            record_at_commit(&pool, "ingest_inbox").await;
+
+            let outcome = drain_batch_singly(&pool, ws, Shard::ALL, &key(), 500)
+                .await
+                .unwrap();
+
+            assert_eq!(outcome.rows, 500);
+            assert_eq!(outcome.applied[&("track", "apply_failed")], 50);
+            assert_eq!(outcome.applied[&("track", "unplanned")], 450);
+            assert_eq!(inbox_count(&pool).await, 0);
+            let counts: (i64, i64) = sqlx::query_as(
+                "SELECT (SELECT count(*) FROM ingest_rejects WHERE reason = 'apply_failed'), \
+                        (SELECT count(*) FROM events)",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(counts, (50, 450));
+            let (subxacts, overflowed, rows) = recorded(&pool).await;
+            assert!(rows > 0, "the commit was recorded");
+            assert!(
+                !overflowed && subxacts <= 64,
+                "subxacts {subxacts}, overflowed {overflowed}"
+            );
         })
         .await;
     }

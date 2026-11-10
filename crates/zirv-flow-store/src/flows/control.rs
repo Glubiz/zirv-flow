@@ -34,8 +34,12 @@ use crate::{GraphPoint, NewDecision, NewJob, StoreError, append_decisions, enque
 pub const SETTLE_JOB_KIND: &str = "flow.settle";
 /// The kind of the job that archives, resumes or bulk-exits the enrollments of a flow in batches.
 pub const LIFECYCLE_JOB_KIND: &str = "flow.lifecycle";
-/// How many enrollments one `flow.lifecycle` run changes, and one `flow.settle` job names.
+/// How many enrollments one `flow.lifecycle` run changes.
 pub const LIFECYCLE_BATCH: usize = 500;
+/// How many enrollments one `flow.settle` job names. The job locks each in a round of its own
+/// (a savepoint, released), whose subtransaction id it keeps until it commits, and a backend
+/// caches 64; past that every snapshot in the cluster reads `pg_subtrans`.
+pub(crate) const SETTLE_BATCH: usize = 60;
 
 /// Why a held enrollment whose stored input or cause does not parse is failed by a resume: it
 /// could not be run again, and a row left held would be read by every later batch.
@@ -727,6 +731,35 @@ impl SettlePayload {
     }
 }
 
+/// Keeps the first [`SETTLE_BATCH`] items of the `flow.settle` job `job`'s payload and hands the
+/// rest on, in the job's transaction, as jobs of at most [`SETTLE_BATCH`] each: a job queued
+/// before the cap can name up to [`LIFECYCLE_BATCH`] enrollments. They keep the payload's order
+/// and are keyed by `job` and their place, so a retried attempt queues the same jobs once and
+/// every item is settled exactly once. Returns how many jobs it queued.
+pub async fn hand_on_settle_rest(
+    connection: &mut PgConnection,
+    job: Uuid,
+    trace: &TraceContext,
+    payload: &mut SettlePayload,
+) -> Result<usize, StoreError> {
+    if payload.items.len() <= SETTLE_BATCH {
+        return Ok(0);
+    }
+    let rest = payload.items.split_off(SETTLE_BATCH);
+    let mut enqueued = 0;
+    for (place, chunk) in rest.chunks(SETTLE_BATCH).enumerate() {
+        let next = SettlePayload {
+            workspace: payload.workspace,
+            items: chunk.to_vec(),
+        };
+        let unique = format!("flow.settle:rest:{job}:{place}");
+        if enqueue(&mut *connection, &next.job(trace, unique)).await? {
+            enqueued += 1;
+        }
+    }
+    Ok(enqueued)
+}
+
 /// Enqueues the `flow.settle` jobs for the events of a batch: one query finds the in-flight
 /// enrollments of the people whose flow version names the event as its goal or as an event exit
 /// criterion, by name. Property filters are not applied here (the store cannot read the segment
@@ -782,7 +815,7 @@ pub(crate) async fn enqueue_event_settles(
         )
         .collect();
     let mut enqueued = 0;
-    for chunk in items.chunks(LIFECYCLE_BATCH) {
+    for chunk in items.chunks(SETTLE_BATCH) {
         let Some(first) = chunk.first() else {
             continue;
         };
@@ -901,7 +934,7 @@ pub(crate) async fn enqueue_segment_settles(
         return Ok(0);
     };
     let mut enqueued = 0;
-    for chunk in items.chunks(LIFECYCLE_BATCH) {
+    for chunk in items.chunks(SETTLE_BATCH) {
         let Some(first) = chunk.first() else {
             continue;
         };

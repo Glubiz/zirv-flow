@@ -465,6 +465,28 @@ batch also takes the segment guard and the shared slot lock once, reads each tra
 once, and does not lock again, or look the identities up a second time, for a record whose
 people it already holds. A path that applies records in savepoints gives each its own batch.
 
+**Subtransactions.** PostgreSQL 16 caches 64 subtransaction ids per backend; past that the backend
+is marked overflowed and every snapshot check in the cluster reads `pg_subtrans` until its
+transaction ends (Investigation Q measured 13 to 24 backends in `LWLock:SubtransSLRU`). A savepoint
+takes an id once it writes, a released one keeps it to the commit, and one rolled back gives it
+back only if it is released too: `ROLLBACK TO SAVEPOINT`, what a nested `sqlx` transaction's
+rollback runs, leaves the savepoint in place, and the next write inside it takes an id again. So
+no ingest or flow transaction takes a savepoint per item. The record-by-record paths (the drain's
+fallback, a sync or Kafka unit's and an import batch's `singly` commit, and the events of a
+`singly` sync unit) apply their items through `store::subtransactions::apply_isolated`: items run
+in one savepoint, a run, while each is kept; a refused one rolls the run back (and releases it),
+and the run is applied again with that item rejected, then released after it, so each item is
+kept or refused exactly as with a savepoint of its own and the writes keep their order. A unit
+releases at most 60 runs (a sync unit 30 for its records and 30 for their events): a run ends at a
+refusal only once it covers its share of the items left over the runs left, and the last never
+ends early. A person's deletion rewrites the cursor of the audience pages paging past them with no
+savepoint: a page whose fallback cursor's page is queued already is found before the write and
+goes, and one queued in between makes the deletion a retryable race. A wake transaction
+runs at most 21 wakes (three ids each, section 14), a `flow.settle` job settles at most 60
+enrollments (one lock round each) and hands any more, from a job queued before that cap, on to
+jobs of 60, and a lock round lost to a merge (`lock_enrollment`) is rolled back and released, so
+it costs none.
+
 The dirty set is `person_changes`, one row per `(workspace_id, person_id)`. Each row carries a
 `smallint` change-class bitmask (traits, events, lists, consent, identifiers, merge), OR-ed
 on conflict, so repeated marks coalesce and keep every class that changed. A mark made after
@@ -523,8 +545,9 @@ applies past a row it could not lock: the rest of that bucket's picked rows wait
 batch, and a batch that takes nothing ends the loop), applies them in id order through the
 transaction-taking profile and event paths of apply-batch, deletes them and commits, so a crash leaves them in place and concurrent
 drainers never apply a row twice. A retryable error retries the batch with jittered backoff;
-any other error applies the batch's rows one at a time, each in a savepoint, and a row that
-still fails becomes an `apply_failed` ingest reject. The job never re-enqueues itself, since it
+any other error applies the batch's rows one at a time, each kept or refused alone as with a
+savepoint per row (see "Subtransactions" below), and a row that still fails becomes an
+`apply_failed` ingest reject. The job never re-enqueues itself, since it
 holds its unique key; a worker with drain slots (`worker.drain_slots`, default `ingest.drain_shards`,
 each claiming one shard job at a time and only `ingest.drain`, which the general slots leave alone)
 enqueues the same shard's next drain as soon as a run completes with rows left in that shard's
@@ -1127,6 +1150,27 @@ on the pass for the mark (#518). In that one transaction it evaluates every segm
 classes intersect the claimed batch's combined classes, plus their transitive segment dependents, in
 topological order, with `person_id = ANY(batch)`. Name-level filtering (event names, trait
 keys) is an optimization, made only if the M4 benchmark misses.
+**Waiting for a refresh lock (ruling 4377357b).** The pass and the `segment.refresh` job never
+wait inside a lock statement: a statement that waits holds its snapshot, and one wait of 317 s
+pinned the xmin horizon, so every queue scan walked dead rows. Each takes a refresh lock with
+`pg_try_advisory_xact_lock` and, while it is held, sleeps on the client between tries, from 50 ms
+doubling to 200 ms (`store::poll_segment_refresh_until`); the transaction is READ COMMITTED and
+has written nothing, so between tries it holds no snapshot, and the pass no transaction id. The
+pass takes the same locks in the same order; one that has not got them all within its 20 s budget
+rolls back, its marks unclaimed, and ends as an out-of-budget pass, for the safety net or the next
+writer to enqueue again. The refresh polls with no cut; in a worker its lease lock (`FOR KEY
+SHARE` on its job row) has already given its transaction an id. An erasure, a merge rewrite and a
+publish's fan-out still wait in the statement (`lock_segment_refresh`). A
+polling waiter is invisible to the deadlock detector, so a cycle through one would be a livelock
+until its budget, not a `40P01`. None forms: a polling pass holds only the shared slot lock and
+the refresh locks before the one it polls for, in the one order (it has written nothing, so it
+holds no row and no mark); a polling refresh holds the shared slot lock and its job row
+`FOR KEY SHARE`; no holder of a refresh lock asks for the slot lock after it or locks a running
+refresh's job row `FOR UPDATE`; and every taker of several refresh locks takes them in the one
+order. The one inversion left, a save that changes a segment's references between two takers'
+reads of the order, always has a polling pass in the cycle, which its budget ends. A wait after
+a lock is held (a refresh's foreign-key lock on a person an erasure holds, say) is an ordinary
+statement wait, which the detector sees as before.
 **Safety net and pending segments.** The scheduler leader enqueues `segment.reevaluate` for any workspace whose oldest mark is more than 2 s old, so correctness never depends on a writer's enqueue, and it publishes the dirty age on every pass and the exact dirty backlog (a `count(*)` of `person_changes`) at most every 30 s. A pass skips a segment whose `computed_version` is null or differs from `current_version`: its pending full refresh covers everyone.
 Writers take the shared workspace segment advisory lock before any contact, slot, lease or row
 lock and hold it through commit while deciding which marks to skip;
@@ -2864,8 +2908,10 @@ cap of 4, sixteen slots and claims of about 220 ms, each claim waited about 3 s 
 against a hold of 1 s, and nothing completed for ten minutes (bench phase 4a).
 
 **Wake transactions (#397).** The `flow.step` jobs of one workspace that a slot claimed together
-run in one transaction, at the place of the first of them in the claim; jobs of other kinds, and a
-workspace's only step, run alone. The transaction takes the change-readers guard once, reads every
+run in one transaction, at the place of the first of them in the claim, 21 at most: a wake that
+walks keeps three subtransaction ids (its savepoint, its lock round and its walk) to the commit,
+and a backend caches 64 (section 7.1, "Subtransactions"), so a full claim of 32 is two
+transactions. Jobs of other kinds, and a workspace's only step, run alone. The transaction takes the change-readers guard once, reads every
 claimed enrollment in one statement, then locks the flows of all of them `FOR KEY SHARE` in id
 order and reads each flow's state once, before any person lock. A flow version is loaded once per
 batch: version rows are immutable and cannot be deleted while their flow is locked. A person's
@@ -2886,7 +2932,7 @@ running job whose lease ran out while the later wakes ran. A failure that cannot
 after the transaction, and a lost lease leaves the job to its new owner. The batch ends with one
 fenced delete of the jobs of every wake that completed, `DELETE ... WHERE (id, lease_token) IN
 (...) RETURNING id` with the rows taken `FOR UPDATE` in id order, one append of the decisions of
-the wakes it kept, and one commit, so 32 steps make one handler commit instead of 32; it reads
+the wakes it kept, and one commit, so 21 steps make one handler commit instead of 21; it reads
 the clock once, before it plans the wakes, and each wake steps at that time plus the time since
 the read on the worker's monotonic clock, taken once the wake holds its locks (ruling 512669c0),
 so a wake that waited behind the batch's earlier wakes schedules its waits and measures its

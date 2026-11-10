@@ -514,11 +514,18 @@ fn hold_limit(lease: Duration) -> Duration {
     (lease / 6).min(MAX_HOLD)
 }
 
+/// The most wakes one transaction runs. A wake that walks keeps three subtransaction ids to the
+/// commit (its savepoint, its lock round and its walk, each released), and a backend caches 64;
+/// past that every snapshot in the cluster reads `pg_subtrans` (Investigation Q, step 4).
+pub(crate) const WAKES_PER_TRANSACTION: usize = 21;
+const _: () = assert!(3 * WAKES_PER_TRANSACTION <= 64);
+
 /// What a slot runs in one transaction.
 enum Unit {
     /// A job in a transaction of its own.
     Alone(ClaimedJob),
-    /// The `flow.step` jobs of one workspace that one claim returned, in one transaction (#397).
+    /// The `flow.step` jobs of one workspace that one claim returned, up to
+    /// [`WAKES_PER_TRANSACTION`] of them, in one transaction (#397).
     Wakes(WorkspaceId, Vec<ClaimedJob>),
 }
 
@@ -532,8 +539,9 @@ impl Unit {
 }
 
 /// Splits a claimed batch into what runs in one transaction each, in claim order. The `flow.step`
-/// jobs of a workspace join the first of them, so a slot runs a workspace's wakes in one
-/// transaction (#397); every other job, and a workspace's only wake, runs alone as before.
+/// jobs of a workspace join the first of them until it holds [`WAKES_PER_TRANSACTION`], then the
+/// next one starts, so a slot runs a workspace's wakes in few transactions (#397); every other
+/// job, and a workspace's only wake, runs alone as before.
 fn units(batch: Vec<ClaimedJob>) -> VecDeque<Unit> {
     let mut units: Vec<Unit> = Vec::with_capacity(batch.len());
     let mut wakes: HashMap<Uuid, usize> = HashMap::new();
@@ -546,7 +554,7 @@ fn units(batch: Vec<ClaimedJob>) -> VecDeque<Unit> {
             .get(&workspace)
             .and_then(|index| units.get_mut(*index))
         {
-            Some(Unit::Wakes(_, jobs)) => jobs.push(job),
+            Some(Unit::Wakes(_, jobs)) if jobs.len() < WAKES_PER_TRANSACTION => jobs.push(job),
             _ => {
                 wakes.insert(workspace, units.len());
                 units.push(Unit::Wakes(WorkspaceId::from_uuid(workspace), vec![job]));
@@ -1362,6 +1370,21 @@ pub(crate) async fn run_wakes(
     process_wakes(&shared, wakes).await
 }
 
+/// Runs `jobs`, what one claim returned, as a slot does: split into the transactions it runs
+/// them in ([`units`]), each settled: the test seat of [`run_batch`].
+#[cfg(test)]
+pub(crate) async fn run_claimed(pool: &PgPool, config: WorkerConfig, jobs: Vec<ClaimedJob>) {
+    let shared = Arc::new(Shared::new(
+        pool.clone(),
+        pool.clone(),
+        pool.clone(),
+        Registry::built_in(),
+        config,
+    ));
+    let (_running, mut stop) = watch::channel(false);
+    run_batch(&shared, jobs, &mut stop).await;
+}
+
 /// Extends the lease every third of its length, and says so when the lease is gone.
 async fn heartbeat(shared: Arc<Shared>, job: ClaimedJob, lost: oneshot::Sender<()>) {
     let period = shared.config.lease / 3;
@@ -1795,6 +1818,26 @@ mod tests {
             "workspace 2 and 3 have one wake each, and a wake without a workspace runs alone"
         );
         assert!(units(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn a_workspace_s_wakes_share_transactions_that_stay_within_the_subtransaction_cache() {
+        let wakes = |count: u128| -> Vec<ClaimedJob> {
+            (1..=count)
+                .map(|index| claimed(STEP_JOB_KIND, Some(1), index))
+                .collect()
+        };
+        let full = u128::from(CLAIM_BATCH);
+        let first: Vec<u128> = (1..=21).collect();
+        assert_eq!(
+            shapes(units(wakes(full))),
+            [(Some(1), first.clone()), (Some(1), (22..=full).collect())]
+        );
+        assert_eq!(
+            shapes(units(wakes(22))),
+            [(Some(1), first), (None, vec![22])],
+            "a last wake on its own runs alone"
+        );
     }
 
     /// The handler p99.7 measured at 10 M waiting enrollments (#397).
