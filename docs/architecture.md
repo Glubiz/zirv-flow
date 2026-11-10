@@ -536,6 +536,27 @@ runs all shards at once with `drain_slots` = `drain_shards`; size slots across w
 sum is at least `drain_shards`, or shards wait for a free slot. Row ids come
 from a sequence, so two requests that commit out of order drain in id order, not commit order.
 
+As built (round 7d, take cursors): a take reads each bucket after a cursor instead of from its first
+row. The first entries of a bucket's range are those of rows earlier batches deleted, which vacuum
+cannot remove while an older snapshot is open, so every take walked them: behind a held snapshot
+with 20,000 rows taken, a take of 50 from four buckets read 1,307 buffers (0.51 ms); from cursors
+at the head it reads 48 (0.05 ms), and 325 (0.13 ms) from cursors a second behind at five times the
+bench's append rate. Each worker process keeps the cursors (`ingest/cursors.rs`), per workspace and
+bucket, and moves them only when a batch commits: to the row before the first one the take could
+not lock, else to the newest row picked when the pick filled its limit, else past every row the
+pick could see. A cursor never passes an id drawn less than a second (`MARGIN`) before the take
+began: a take records the newest id it saw, and only ids seen by takes that returned at least a
+second earlier count. A row whose append commits later than that (ids commit out of order) can
+still land below a cursor, and is taken anyway: a take that finds nothing above its cursors reads
+every bucket from its first row in the same transaction (the requeue probe reads without cursors,
+so the shard's next drain runs at once), and each bucket is read from its first row every 10
+seconds (`PERIOD`), which resets its cursor from what that walk proved. Bound: an append that
+commits within a second of drawing its ids waits no longer than before; a later one is taken by
+the bucket's next take that finds nothing above its cursors, or within one period plus the batch in
+progress while newer rows keep the takes busy. A restart or a crash starts with no cursors, so the
+first take of each bucket is a full walk; a change of `ingest.drain_shards` keeps them, as they are
+per bucket; a backfill that buckets any row (old ids) drops the workspace's cursors.
+
 As built (M3, webhooks): a hook is a source of kind `webhook` (capability `push`, no config, no
 credential, `read` yields nothing) with one stream `payload`, plus a `webhooks` row that holds
 the random v4 id of the URL, the signature scheme (`core::signature`: HMAC-SHA256 over
@@ -2786,6 +2807,27 @@ As built (#207): a claim walks the distinct priorities of the ready jobs upwards
 of each band with a due job in turn, so its cost depends neither on the statistics nor on the due or
 future backlog (`docs/benchmarks/m5-flows.md` section 8).
 
+As built (round 7d, claim floors): the walk still started at each band's oldest entry, so behind a
+held snapshot, after 20,000 jobs were claimed and completed, a general claim of 32 read 985
+buffers to pick its jobs (1,428 with the update, 2.4 ms) and a drain lane's claim of one read
+1,423, as it walked the bands too. Each lane of a worker process now keeps floors (`ClaimFloors`):
+per band the youngest `run_at` its claims took, at most a second (`MARGIN`) before the claim's
+`now()`, and one each for the drain and the re-evaluation. A floor claim (`CLAIM_FROM`) reads each
+band it has learned from its floor (`run_at >= floor` bounds the band's range) and the drain and
+the re-evaluation from theirs; a lane that claims only those two kinds reads no band. Band order,
+age order, the one-drain and one-re-evaluation rules, `SKIP LOCKED`, leases and fenced completion
+are the full walk's. It picks in 44 buffers (522 with the update, 0.54 ms) and the drain lane's in
+20 (0.09 ms); the generic plans read the same. A job can land below a floor when its `run_at` is
+backdated, when its enqueue commits more than a second after its `run_at`, when a claim skipped it
+while another transaction held it, when another process gives it back, or when it opens a new band.
+Such jobs are claimed by the lane's full walk (`CLAIM`, as before), which runs once a second
+(`PERIOD`; set when it is planned, so one slot walks while the lane's others claim from the floors)
+and resets the floors from what it took. Bound: the period plus the lane's next claim (the 1 s poll
+at most), about two seconds. A slot that gives jobs back expires its process's floors, so the next
+claim is a full walk. Jobs the reaper requeues (`run_at = now()`) and retries (`now()` plus the
+backoff) land above every floor. A capped claim is `CLAIM_CAPPED` as before and neither reads nor
+moves the floors. The floors live in the process, so a restart begins with a full walk.
+
 `segment.reevaluate` is the one kind enqueued below the default: at priority -1 (`REEVALUATE_PRIORITY`), so a
 run is claimed ahead of the priority-0 backlog instead of waiting behind every older ready job (one run at a
 time per workspace, 20 s budget). It cannot starve the other bands: a batch claim takes at most one
@@ -2968,6 +3010,17 @@ worker process frees is still found by the poll: waking across processes would t
 `pg_notify` on every finished job, and a transaction that notifies takes a
 database-wide lock at commit, the suspect of #298. `zirv_flow_job_idle_waits_total`
 counts the waits by what ended them.
+An enqueue (and a give-back, a dead job's retry, an append's drain wake-up and a forward job)
+notifies only when no ready job of its kind became due within the last second (`WAKE_WINDOW`,
+round 7d), a probe of `jobs_ready_kind_idx` run as a subplan once per kind. The probe used to ask
+for any due job of the kind, so it walked every entry the kind's finished jobs left behind an open
+snapshot: 449 buffers an insert after 20,000 jobs churned, now 20, and 85 with 2,000 of the kind's
+jobs churned within the last second, against 513 for the old probe. Every enqueue that notified
+before still notifies, so an idle worker wakes as before, and a busy kind sends about one extra
+notification a second at most. Notifying on every enqueue was measured and rejected: the commit
+lock serialises notifying commits, 2,392 and 2,545 single-job enqueues a second at 8 and 16
+clients against 6,307 and 11,993 without a notification; the windowed probe ran at 6,194 and
+10,687 against 5,891 to 6,251 and 10,391 without one in the same session.
 Weighted claiming is rejected for v1: it is more complex and nothing yet shows the
 cap is not enough. M8 validates the cap under load.
 
