@@ -15,3 +15,28 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.278.0 (2026-11-10)
+
+### Fixes
+
+- rewrite a deleted person's audience pages with no savepoint
+- hand on the rest of a settle job queued before the cap
+- rewrite a deleted person's audience pages in bounded runs
+- check the refresh poll's deadline before every try
+
+### Performance
+
+- keep wake and settle transactions within 64 subtransactions
+- apply record-by-record units within 64 subtransactions
+- wait for a busy refresh lock between statements
+
+### Documentation
+
+- refresh-lock polling and the subtransaction bound
+
+### Chores
+
+- start the waiting publish once the slow one holds the lock
+- wrap the subtransaction tests in the decision invariant check
+- bump 0.276.0
+
