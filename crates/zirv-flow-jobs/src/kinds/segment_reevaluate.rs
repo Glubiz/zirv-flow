@@ -10,6 +10,10 @@
 //! lease. The job never re-enqueues itself, since it still holds its unique key; the scheduler
 //! leader's safety net picks up what is left.
 //!
+//! A pass waits for a busy refresh lock between statements, holding no snapshot and no
+//! transaction id (ruling 4377357b). One that has not got all its locks when the time budget
+//! runs out rolls back, its marks unclaimed, and the run ends as one out of budget does.
+//!
 //! Nothing here logs an identifier or a value.
 
 use std::time::{Duration, Instant};
@@ -22,7 +26,7 @@ use zirv_flow_segments::{compile, parse_and_validate};
 use zirv_flow_store::{
     Clock, DirtyBatch, NewDecision, PgPool, REEVALUATE_JOB_KIND, ReevaluateApply, append_decision,
     apply_reevaluation, begin, claim_dirty, commit, dirty_classes, find_segment,
-    find_segment_version, lock_reevaluation, reevaluation_order, segment_catalog,
+    find_segment_version, lock_reevaluation_until, reevaluation_order, segment_catalog,
 };
 
 use super::segment_refresh::{catalog_of, sql_query};
@@ -60,20 +64,7 @@ impl JobKind for SegmentReevaluate {
             job: (ctx.job_id(), ctx.attempts()),
             trace: ctx.trace().clone(),
         };
-
-        let started = Instant::now();
-        loop {
-            let claimed = run.pass(&pool).await?;
-            tracing::info!(claimed, "segments re-evaluated");
-            // A short claim no longer means the marks ran out: a mark whose classes grew since
-            // the peek, or whose neighbours another pass held, waits for the next pass.
-            if claimed == 0 {
-                return Ok(());
-            }
-            if started.elapsed() >= TIME_BUDGET {
-                return Ok(());
-            }
-        }
+        run.work(&pool, TIME_BUDGET).await
     }
 }
 
@@ -88,8 +79,36 @@ struct Run {
 }
 
 impl Run {
-    /// One pass; returns how many people it claimed.
-    async fn pass(&self, pool: &PgPool) -> Result<usize, JobError> {
+    /// Passes until the dirty set is empty or `budget` has run out.
+    async fn work(&self, pool: &PgPool, budget: Duration) -> Result<(), JobError> {
+        let deadline = Instant::now() + budget;
+        loop {
+            let Some(claimed) = self.pass_until(pool, deadline).await? else {
+                // The budget ran out while the pass waited for a segment's refresh lock: it rolled
+                // back with nothing claimed, and the safety net or the next writer enqueues the
+                // job again.
+                tracing::info!("segment re-evaluation out of time waiting for a refresh lock");
+                return Ok(());
+            };
+            tracing::info!(claimed, "segments re-evaluated");
+            // A short claim no longer means the marks ran out: a mark whose classes grew since
+            // the peek, or whose neighbours another pass held, waits for the next pass.
+            if claimed == 0 {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Ok(());
+            }
+        }
+    }
+
+    /// One pass; returns how many people it claimed, or `None` when `deadline` passed before it
+    /// held the refresh locks of the segments its batch reaches.
+    async fn pass_until(
+        &self,
+        pool: &PgPool,
+        deadline: Instant,
+    ) -> Result<Option<usize>, JobError> {
         let mut tx = begin(pool).await?;
         // The slot lock comes before every other lock of the pass: see the store's `slots`.
         zirv_flow_store::hold_trait_slots(&mut tx, self.workspace).await?;
@@ -97,16 +116,23 @@ impl Run {
         // reach, and only then claim. A pass that waits on a refresh lock must hold no mark and
         // no person (#518, D3b).
         let Some(mask) = dirty_classes(&mut tx, self.workspace, BATCH).await? else {
-            return Ok(0);
+            return Ok(Some(0));
         };
         // Lock every segment the batch reaches before reading anything about it, in an order
-        // that is the same for every pass, so two passes and a full refresh cannot deadlock.
-        let mut order = lock_reevaluation(&mut tx, self.workspace, mask).await?;
+        // that is the same for every pass, so two passes and a full refresh cannot deadlock. A
+        // busy lock is waited for between statements: the transaction has written nothing, so it
+        // holds no snapshot and no transaction id meanwhile (ruling 4377357b).
+        let Some(mut order) =
+            lock_reevaluation_until(&mut tx, self.workspace, mask, Some(deadline)).await?
+        else {
+            tx.rollback().await?;
+            return Ok(None);
+        };
         // Only marks the mask covers: one whose classes grew since the peek waits for the next
         // pass, which locks the segments the new class reaches.
         let claimed = claim_dirty(&mut tx, self.workspace, BATCH, mask).await?;
         if claimed.is_empty() {
-            return Ok(0);
+            return Ok(Some(0));
         }
         let batch = DirtyBatch::new(&claimed, &self.trace);
         if batch.classes() != mask {
@@ -185,7 +211,7 @@ impl Run {
             }
         }
         commit(tx).await?;
-        Ok(claimed.len())
+        Ok(Some(claimed.len()))
     }
 }
 
@@ -212,6 +238,16 @@ mod tests {
     use super::*;
     use crate::context::IngestSettings;
     use crate::kinds::segment_refresh::SegmentRefresh;
+
+    impl Run {
+        /// One pass, with a whole run's budget to get its locks; out of budget reads as nothing
+        /// claimed.
+        async fn pass(&self, pool: &PgPool) -> Result<usize, JobError> {
+            self.pass_until(pool, Instant::now() + TIME_BUDGET)
+                .await
+                .map(Option::unwrap_or_default)
+        }
+    }
 
     #[test]
     fn the_kind_name_is_segment_reevaluate() {
@@ -1817,6 +1853,134 @@ mod tests {
                 .unwrap();
             assert_eq!(left, [marked[0]]);
             zirv_flow_store::commit(writer).await.unwrap();
+        })
+        .await;
+    }
+
+    /// A workspace with one computed segment and one person marked for it, and a transaction
+    /// holding the segment's refresh lock, as a running full refresh does, with its backend.
+    async fn marked_behind_a_held_refresh_lock(
+        pool: &PgPool,
+    ) -> (WorkspaceId, Segment, Uuid, Run, zirv_flow_store::Tx, i32) {
+        zirv_flow_store::migrate(pool).await.unwrap();
+        let ws = workspace(pool).await;
+        define_trait(pool, ws, "plan").await;
+        let clock = clock();
+        let seg = create(pool, ws, "Pro", plan_is("pro")).await;
+        full_refresh(pool, ws, seg.id, &clock).await;
+        reevaluate(pool, ws, &clock).await;
+        let trace = TraceContext::root(Cause::api("enter"));
+        let ada = identify(pool, ws, PERSONAL_DATA.email, "pro", &trace).await;
+        assert_eq!(dirty(pool).await, 1);
+        let mut holder = zirv_flow_store::begin(pool).await.unwrap();
+        zirv_flow_store::lock_segment_refresh(&mut holder, seg.id)
+            .await
+            .unwrap();
+        let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *holder)
+            .await
+            .unwrap();
+        let run = Run {
+            workspace: ws,
+            clock,
+            job: (Uuid::new_v4(), 1),
+            trace,
+        };
+        (ws, seg, ada, run, holder, holder_pid)
+    }
+
+    /// The backends of this database, other than the caller and `holder`, that are in a
+    /// transaction: their state, transaction id, xmin and last statement.
+    async fn in_transaction(
+        pool: &PgPool,
+        holder: i32,
+    ) -> Vec<(String, Option<String>, Option<String>, String)> {
+        sqlx::query_as(
+            "SELECT state, backend_xid::text, backend_xmin::text, query FROM pg_stat_activity \
+             WHERE datname = current_database() AND pid <> pg_backend_pid() AND pid <> $1 \
+               AND xact_start IS NOT NULL",
+        )
+        .bind(holder)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    /// Ruling 4377357b: a pass waits for a busy refresh lock between statements. Between two
+    /// tries its transaction is idle, with no transaction id and no snapshot, so it does not hold
+    /// the xmin horizon back; a wait inside `pg_advisory_xact_lock` held one for 317 s.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_pass_waiting_for_a_refresh_lock_holds_no_snapshot_and_no_transaction_id(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let (_, seg, ada, run, holder, holder_pid) =
+                marked_behind_a_held_refresh_lock(&pool).await;
+            let pass = {
+                let pool = pool.clone();
+                tokio::spawn(async move { run.pass(&pool).await })
+            };
+
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut between_tries = 0;
+            while between_tries < 5 {
+                let seen = in_transaction(&pool, holder_pid).await;
+                assert!(
+                    Instant::now() < deadline,
+                    "the pass was never idle between two tries of the lock: {seen:?}"
+                );
+                for (state, xid, xmin, query) in seen {
+                    if state == "idle in transaction"
+                        && query.starts_with("SELECT pg_try_advisory_xact_lock")
+                    {
+                        assert_eq!((xid, xmin), (None, None), "between two tries");
+                        between_tries += 1;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(40)).await;
+            }
+
+            zirv_flow_store::commit(holder).await.unwrap();
+            let claimed = tokio::time::timeout(Duration::from_secs(10), pass)
+                .await
+                .expect("the pass takes the lock once it is free")
+                .unwrap()
+                .unwrap();
+            assert_eq!(claimed, 1);
+            assert_eq!(dirty(&pool).await, 0);
+            assert_eq!(open(&pool, seg.id).await, [ada]);
+        })
+        .await;
+    }
+
+    /// A run whose budget runs out while its pass waits for a refresh lock ends as a run out of
+    /// budget does, and its pass leaves the marks it had not claimed for the next run.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_pass_out_of_budget_for_its_locks_rolls_back_and_leaves_its_marks(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let (_, seg, ada, run, holder, holder_pid) =
+                marked_behind_a_held_refresh_lock(&pool).await;
+
+            let started = Instant::now();
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                run.work(&pool, Duration::from_millis(500)),
+            )
+            .await
+            .expect("the run ends once its budget is out")
+            .unwrap();
+
+            assert!(started.elapsed() >= Duration::from_millis(500));
+            assert_eq!(dirty(&pool).await, 1, "the mark is left for the next run");
+            assert!(open(&pool, seg.id).await.is_empty());
+            let left = in_transaction(&pool, holder_pid).await;
+            assert!(left.is_empty(), "the pass rolled back: {left:?}");
+            zirv_flow_store::commit(holder).await.unwrap();
+            run.work(&pool, TIME_BUDGET).await.unwrap();
+            assert_eq!(dirty(&pool).await, 0);
+            assert_eq!(open(&pool, seg.id).await, [ada]);
         })
         .await;
     }

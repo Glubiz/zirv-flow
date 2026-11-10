@@ -3,6 +3,8 @@
 //! changes, and the set-based statement that diffs the new set against the open rows. This
 //! crate never sees the compiler: the job compiles the definition and passes in the SQL.
 
+use std::time::{Duration, Instant};
+
 use serde_json::json;
 use sqlx::PgConnection;
 use sqlx::prelude::FromRow;
@@ -113,6 +115,10 @@ pub async fn enqueue_refresh(
 
 /// Takes the segment's refresh lock for the rest of the transaction, waiting for a refresh that
 /// holds it. It serializes refreshes of one segment without blocking a save.
+///
+/// The wait is inside the statement, which holds its snapshot (and so the xmin horizon) for as
+/// long as it waits. A pass and a refresh job poll instead ([`poll_segment_refresh`]); an erasure,
+/// a merge's rewrite and a publish wait here, visible to the deadlock detector.
 pub async fn lock_segment_refresh(
     connection: &mut PgConnection,
     segment: Uuid,
@@ -124,6 +130,66 @@ pub async fn lock_segment_refresh(
         .await
         .map_err(StoreError::query)?;
     Ok(())
+}
+
+/// The pause after the first try of a busy refresh lock; each pause doubles, up to
+/// [`LONGEST_PAUSE`].
+const FIRST_PAUSE: Duration = Duration::from_millis(50);
+
+/// The longest pause between two tries of a busy refresh lock.
+const LONGEST_PAUSE: Duration = Duration::from_millis(200);
+
+/// Takes the segment's refresh lock for the rest of the transaction, waiting for a refresh that
+/// holds it between statements rather than inside one (ruling 4377357b): it tries the lock, and
+/// while another transaction holds it pauses 50 ms, then 100 ms, then 200 ms between tries.
+///
+/// No statement runs during a pause, so a READ COMMITTED transaction that has written nothing and
+/// holds no open portal keeps no snapshot and no transaction id while it waits, and does not hold
+/// the xmin horizon back (a wait of 317 s inside the statement did, Investigation Q). A waiter
+/// that polls is invisible to the deadlock detector: whatever it already holds must be something
+/// no holder of this lock waits for, which the lock order in [`super::reevaluate`] argues.
+pub async fn poll_segment_refresh(
+    connection: &mut PgConnection,
+    segment: Uuid,
+) -> Result<(), StoreError> {
+    poll_segment_refresh_until(connection, segment, None).await?;
+    Ok(())
+}
+
+/// [`poll_segment_refresh`] that gives up once `deadline` has passed: false means the lock is not
+/// taken. The deadline is checked before every try, so a poll that wakes at it does not take a
+/// lock released meanwhile.
+pub async fn poll_segment_refresh_until(
+    connection: &mut PgConnection,
+    segment: Uuid,
+    deadline: Option<Instant>,
+) -> Result<bool, StoreError> {
+    let mut pause = FIRST_PAUSE;
+    loop {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Ok(false);
+        }
+        let taken: bool = sqlx::query_scalar(
+            "SELECT pg_try_advisory_xact_lock(hashtextextended($1 || '/' || $2::text, 0))",
+        )
+        .bind(REFRESH_LOCK_CLASS)
+        .bind(segment)
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
+        if taken {
+            return Ok(true);
+        }
+        let wait = match deadline {
+            None => pause,
+            Some(deadline) => match deadline.checked_duration_since(Instant::now()) {
+                Some(left) if !left.is_zero() => pause.min(left),
+                _ => return Ok(false),
+            },
+        };
+        tokio::time::sleep(wait).await;
+        pause = (pause * 2).min(LONGEST_PAUSE);
+    }
 }
 
 /// Why a person entered or left a segment (architecture 8.3).
@@ -853,6 +919,45 @@ mod tests {
         .unwrap()
         .into_iter()
         .collect()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_poll_whose_deadline_has_passed_takes_no_lock_even_a_free_one(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let segment = Uuid::now_v7();
+            let held = "SELECT count(*) FROM pg_locks \
+                        WHERE locktype = 'advisory' AND pid = pg_backend_pid()";
+
+            // A pass that wakes at its deadline rolls back, even when the lock is free by then.
+            let mut late = begin(&pool).await.unwrap();
+            let taken = poll_segment_refresh_until(&mut late, segment, Some(Instant::now()))
+                .await
+                .unwrap();
+            let locks: i64 = sqlx::query_scalar(held)
+                .fetch_one(&mut *late)
+                .await
+                .unwrap();
+            assert_eq!((taken, locks), (false, 0), "no try once the time is out");
+            late.rollback().await.unwrap();
+
+            let mut early = begin(&pool).await.unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let taken = poll_segment_refresh_until(&mut early, segment, Some(deadline))
+                .await
+                .unwrap();
+            let locks: i64 = sqlx::query_scalar(held)
+                .fetch_one(&mut *early)
+                .await
+                .unwrap();
+            assert_eq!(
+                (taken, locks),
+                (true, 1),
+                "with time left a free lock is taken"
+            );
+            early.rollback().await.unwrap();
+        })
+        .await;
     }
 
     #[sqlx::test]

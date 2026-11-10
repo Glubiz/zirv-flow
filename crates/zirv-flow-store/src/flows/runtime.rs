@@ -8,12 +8,13 @@
 
 use serde_json::{Value, json};
 use sqlx::prelude::FromRow;
-use sqlx::{Connection, PgConnection, PgPool};
+use sqlx::{PgConnection, PgPool};
 use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::{Cause, CauseKind, TraceContext, TraceId, WorkspaceId};
 
 use crate::people::lock_people_with_zones;
+use crate::subtransactions::{begin_savepoint, release_savepoint, roll_back_savepoint};
 use crate::{NewJob, StoreError};
 
 /// The kind of the job that advances an enrollment.
@@ -332,15 +333,17 @@ pub async fn lock_read_enrollment(
 /// keeps every one of them on the same order.
 ///
 /// The person is found with an unlocked read and locked in a statement of its own (a join does
-/// not fix the order rows are locked in), inside a nested transaction (a savepoint). If a merge or a repoint committed
+/// not fix the order rows are locked in), inside a savepoint. If a merge or a repoint committed
 /// while the lock was waited for, the group or the enrollment's person is no longer the one
-/// read: the round is rolled back, which releases its locks, and the enrollment is
+/// read: the round is rolled back and its savepoint released, which releases its locks and gives
+/// back its subtransaction id (`roll_back_savepoint`), and the enrollment is
 /// read again and the new group locked from nothing, in id order, rather than the step dropped
 /// or the new group (a survivor can have a lower id) locked after the old one. An enrollment
 /// that is gone (erased) reads as missing.
 ///
 /// The enrollment is locked by primary key and its workspace and person are checked on the
-/// locked row; a row that fails the check is held only until its round rolls back.
+/// locked row; a row that fails the check is held only until its round rolls back. The locks are
+/// the caller's transaction's: `connection` must be in one.
 pub async fn lock_enrollment(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -369,41 +372,76 @@ async fn lock_enrollment_within(
         };
         let person = found.person_id;
         let survivor = found.merged_into.unwrap_or(person);
-        let group = [person, survivor];
-        // A (nested) transaction for the round: rolling it back releases the round's locks.
-        let mut round = connection.begin().await.map_err(StoreError::query)?;
-        let locked = lock_people_with_zones(&mut round, workspace, &group[..]).await?;
-        let Some((_, now_merged, zone)) = locked.into_iter().find(|(locked, ..)| *locked == person)
-        else {
-            // Erased: the enrollment went with the person.
-            round.commit().await.map_err(StoreError::query)?;
-            return Ok(None);
-        };
-        let row = if now_merged.unwrap_or(person) == survivor {
-            sqlx::query_as::<_, LockedRow>(sqlx::AssertSqlSafe(enrollment_lock()))
-                .bind(workspace.as_uuid())
-                .bind(id)
-                .bind(person)
-                .fetch_optional(&mut *round)
-                .await
-                .map_err(StoreError::query)?
-        } else {
-            // Merged (or merged again) while the lock was waited for.
-            None
-        };
-        if let Some(row) = row {
-            round.commit().await.map_err(StoreError::query)?;
-            return Ok(Some(StepEnrollment {
-                enrollment: row.enrollment.into_enrollment()?,
-                workspace_zone: row.workspace_zone,
-                person_zone: zone,
-            }));
+        // A savepoint for the round: rolling it back releases the round's locks, and gives back
+        // its subtransaction id, so a round lost to a merge costs the transaction none.
+        begin_savepoint(connection, ROUND).await?;
+        match lock_round(connection, workspace, id, person, survivor).await {
+            Ok(Round::Erased) => {
+                release_savepoint(connection, ROUND).await?;
+                return Ok(None);
+            }
+            Ok(Round::Locked(row, zone)) => {
+                release_savepoint(connection, ROUND).await?;
+                return Ok(Some(StepEnrollment {
+                    enrollment: row.enrollment.into_enrollment()?,
+                    workspace_zone: row.workspace_zone,
+                    person_zone: zone,
+                }));
+            }
+            // Let go of this round's locks and read which in the next.
+            Ok(Round::Moved) => roll_back_savepoint(connection, ROUND).await?,
+            Err(error) => {
+                // As a dropped nested transaction would, so the connection stays usable; the
+                // round's own error is the one that counts.
+                let _ = roll_back_savepoint(connection, ROUND).await;
+                return Err(error);
+            }
         }
-        // The group changed, or the enrollment moved to another person, or it is gone: let go of
-        // this round's locks and read which in the next.
-        round.rollback().await.map_err(StoreError::query)?;
     }
     Err(StoreError::retryable_race())
+}
+
+/// The savepoint of a round of [`lock_enrollment_within`].
+const ROUND: &str = "enrollment_round";
+
+/// What a round of [`lock_enrollment_within`] found under its locks.
+enum Round {
+    /// The enrollment, locked behind its person's group, and the person's `timezone` trait.
+    Locked(Box<LockedRow>, Option<String>),
+    /// The person is gone (erased), and the enrollment with it.
+    Erased,
+    /// The group changed while its locks were waited for, or the enrollment moved to another
+    /// person, or it is gone.
+    Moved,
+}
+
+/// Locks the group of `person` (and `survivor`, the person it was read merged into) in id order,
+/// then the enrollment, and checks under the locks what the read found.
+async fn lock_round(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    id: Uuid,
+    person: Uuid,
+    survivor: Uuid,
+) -> Result<Round, StoreError> {
+    let locked = lock_people_with_zones(&mut *connection, workspace, &[person, survivor]).await?;
+    let Some((_, now_merged, zone)) = locked.into_iter().find(|(locked, ..)| *locked == person)
+    else {
+        // Erased: the enrollment went with the person.
+        return Ok(Round::Erased);
+    };
+    if now_merged.unwrap_or(person) != survivor {
+        // Merged (or merged again) while the lock was waited for.
+        return Ok(Round::Moved);
+    }
+    let row = sqlx::query_as::<_, LockedRow>(sqlx::AssertSqlSafe(enrollment_lock()))
+        .bind(workspace.as_uuid())
+        .bind(id)
+        .bind(person)
+        .fetch_optional(connection)
+        .await
+        .map_err(StoreError::query)?;
+    Ok(row.map_or(Round::Moved, |row| Round::Locked(Box::new(row), zone)))
 }
 
 /// Reads an enrollment without locking it.
@@ -1422,7 +1460,8 @@ mod tests {
         let (one, two) = (person(&pool, ws).await, person(&pool, ws).await);
         let kept = enrollment_row(&pool, ws, flow.id, one).await;
         let ended = enrollment_row(&pool, ws, flow.id, two).await;
-        let mut connection = pool.acquire().await.unwrap();
+        // A transaction: the enrollment's lock is taken in one.
+        let mut connection = pool.begin().await.unwrap();
         save_enrollment(
             &mut connection,
             ws,
