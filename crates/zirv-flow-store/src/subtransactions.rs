@@ -80,13 +80,19 @@ pub(crate) trait Isolated {
     /// Goes back to `mark`: the run since it rolled back.
     fn restore(&mut self, mark: Self::Mark);
 
-    /// Applies item `index`. An error refuses the item unless it is retryable, which fails the
-    /// unit.
+    /// Applies item `index`. An error refuses the item unless it fails the unit
+    /// ([`Isolated::fails_unit`]).
     async fn apply(
         &mut self,
         connection: &mut PgConnection,
         index: usize,
     ) -> Result<Tried<Self::Refusal>, StoreError>;
+
+    /// Whether `error`, from applying an item, fails the unit instead of refusing the item: a
+    /// retryable one does.
+    fn fails_unit(&self, error: &StoreError) -> bool {
+        error.is_retryable()
+    }
 
     /// The refusal of an item whose apply failed with `error`.
     fn failed(&self, error: StoreError) -> Self::Refusal;
@@ -116,8 +122,8 @@ pub(crate) trait Isolated {
 /// over the runs it may release, and an item is applied again about once per refusal in its run.
 ///
 /// A run is a savepoint of its own name, not a nested `sqlx` transaction, so a rolled-back run
-/// gives its id back ([`roll_back_savepoint`]). An error it returns (a retryable one, or one
-/// recording a refusal) leaves the run open: the caller's transaction must roll back.
+/// gives its id back ([`roll_back_savepoint`]). An error it returns (one that fails the unit, or
+/// one recording a refusal) leaves the run open: the caller's transaction must roll back.
 pub(crate) async fn apply_isolated<I: Isolated>(
     connection: &mut PgConnection,
     items: &mut I,
@@ -145,7 +151,7 @@ pub(crate) async fn apply_isolated<I: Isolated>(
                     newly = Some((index, refusal));
                     break;
                 }
-                Err(error) if error.is_retryable() => return Err(error),
+                Err(error) if items.fails_unit(&error) => return Err(error),
                 Err(error) => {
                     newly = Some((index, items.failed(error)));
                     break;

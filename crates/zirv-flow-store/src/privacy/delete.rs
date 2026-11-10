@@ -7,6 +7,7 @@ use zirv_flow_core::decision_actions;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use crate::decisions::ID_SUBJECTS;
+use crate::subtransactions::{Isolated, Tried, apply_isolated};
 use crate::{NewDecision, StoreError, append_decision};
 
 /// Why a person is being deleted; recorded as the reason of the `person.deleted` decision.
@@ -283,7 +284,7 @@ async fn strip_enrolls(
     // The cursor of a page job is the erased id; the job's unique key names it too, so both are
     // rewritten together, with the same helper that built the key.
     // `FOR NO KEY UPDATE` does not wait for a running handler's `FOR KEY SHARE`.
-    let pages: Vec<(Uuid, serde_json::Value, Option<String>, bool)> = sqlx::query_as(
+    let found: Vec<(Uuid, serde_json::Value, Option<String>, bool)> = sqlx::query_as(
         "SELECT id, payload, unique_key, state = 'running' FROM jobs \
          WHERE workspace_id = $1 AND kind = 'flow.enroll' AND NOT purge_on_release \
            AND payload ->> 'after' = ANY($2) ORDER BY id FOR NO KEY UPDATE",
@@ -293,7 +294,8 @@ async fn strip_enrolls(
     .fetch_all(&mut *connection)
     .await
     .map_err(StoreError::query)?;
-    for (id, payload, key, running) in pages {
+    let mut pages = StripPages(Vec::with_capacity(found.len()));
+    for (id, payload, key, running) in found {
         let Some(mut job) = crate::EnrollJobPayload::parse(&payload) else {
             continue;
         };
@@ -323,52 +325,101 @@ async fn strip_enrolls(
             }
             _ => None,
         };
-        // The rewrite runs in a savepoint: if the page that starts at the fallback cursor is
-        // queued already, the unique key refuses the new key (23505) and only the savepoint is
-        // undone. Asking first would leave a gap between the check and the update.
-        sqlx::query("SAVEPOINT strip_page")
-            .execute(&mut *connection)
-            .await
-            .map_err(StoreError::query)?;
+        pages.0.push(StripPage {
+            id,
+            payload: job.to_value(),
+            key: new_key,
+            running,
+        });
+    }
+    // Each rewrite is kept or refused alone: if the page that starts at the fallback cursor is
+    // queued already, the unique key refuses the new key (23505) and only that rewrite is undone.
+    // Asking first would leave a gap between the check and the update. The rewrites share a few
+    // savepoints ([`apply_isolated`]) instead of one each, which past 64 pages overflowed the
+    // backend's subtransaction cache.
+    let count = pages.0.len();
+    apply_isolated(connection, &mut pages, count, STRIP_RUNS).await
+}
+
+/// The most savepoints one [`strip_enrolls`] releases. A person is the cursor of at most one page
+/// per flow occurrence, and a refused rewrite is rarer still, so a few runs keep the replays
+/// short; few, because an erasure deletes a group of people in one transaction, and an orphan is
+/// deleted inside an import's own runs.
+const STRIP_RUNS: usize = 4;
+
+/// The audience pages [`strip_enrolls`] rewrites to their fallback cursor, in id order.
+struct StripPages(Vec<StripPage>);
+
+struct StripPage {
+    id: Uuid,
+    /// The payload with the fallback cursor.
+    payload: serde_json::Value,
+    /// The key naming the fallback cursor, when the page's key named the erased one.
+    key: Option<String>,
+    running: bool,
+}
+
+impl Isolated for StripPages {
+    type Refusal = ();
+    type Mark = ();
+
+    fn mark(&self) {}
+
+    fn restore(&mut self, (): ()) {}
+
+    async fn apply(
+        &mut self,
+        connection: &mut PgConnection,
+        index: usize,
+    ) -> Result<Tried<()>, StoreError> {
+        let page = &self.0[index];
         let rewritten = sqlx::query(
             "UPDATE jobs SET payload = $2, unique_key = COALESCE($3, unique_key) WHERE id = $1",
         )
-        .bind(id)
-        .bind(job.to_value())
-        .bind(new_key)
+        .bind(page.id)
+        .bind(&page.payload)
+        .bind(page.key.as_deref())
         .execute(&mut *connection)
         .await;
         match rewritten {
-            Ok(_) => {
-                sqlx::query("RELEASE SAVEPOINT strip_page")
-                    .execute(&mut *connection)
-                    .await
-                    .map_err(StoreError::query)?;
-            }
+            Ok(_) => Ok(Tried::Kept),
             Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("23505") => {
-                sqlx::query("ROLLBACK TO SAVEPOINT strip_page")
-                    .execute(&mut *connection)
-                    .await
-                    .map_err(StoreError::query)?;
-                // The same page is queued already, and the unique key allows one. A pending
-                // page goes. A running one is not deleted (the delete would wait for its
-                // handler's lease while the handler waits for the people this erasure holds):
-                // it is marked, and its release deletes it.
-                let sql = if running {
-                    "UPDATE jobs SET purge_on_release = true WHERE id = $1"
-                } else {
-                    "DELETE FROM jobs WHERE id = $1"
-                };
-                sqlx::query(sql)
-                    .bind(id)
-                    .execute(&mut *connection)
-                    .await
-                    .map_err(StoreError::query)?;
+                Ok(Tried::Refused(()))
             }
-            Err(error) => return Err(StoreError::query(error)),
+            Err(error) => Err(StoreError::query(error)),
         }
     }
-    Ok(())
+
+    /// Only the unique key refuses a rewrite; any other error fails the erasure.
+    fn fails_unit(&self, _: &StoreError) -> bool {
+        true
+    }
+
+    fn failed(&self, _: StoreError) {}
+
+    async fn reject(
+        &mut self,
+        connection: &mut PgConnection,
+        index: usize,
+        (): &(),
+    ) -> Result<(), StoreError> {
+        // The same page is queued already, and the unique key allows one. A pending page goes. A
+        // running one is not deleted (the delete would wait for its handler's lease while the
+        // handler waits for the people this erasure holds): it is marked, and its release
+        // deletes it.
+        let page = &self.0[index];
+        let sql = if page.running {
+            "UPDATE jobs SET purge_on_release = true WHERE id = $1"
+        } else {
+            "DELETE FROM jobs WHERE id = $1"
+        };
+        sqlx::query(sql)
+            .bind(page.id)
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::query)?;
+        Ok(())
+    }
 }
 
 /// Removes the people from their lists and keeps each list's member count exact. The lists
@@ -1033,6 +1084,79 @@ mod tests {
                     .await
                     .unwrap();
             assert_eq!(keys, 2, "the rewritten page and the bystander's page");
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_erasure_that_rewrites_many_pages_stays_within_the_subtransaction_cache(
+        pool: PgPool,
+    ) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            use crate::subtransactions::testing::subxacts;
+            use crate::{AudienceSource, EnrollWork, enroll_page_key};
+            let Seeded { ws, person, .. } = seed_everything(&pool).await;
+            let older = Uuid::from_u128(1);
+            sqlx::query("INSERT INTO people (id, workspace_id, traits) VALUES ($1, $2, '{}')")
+                .bind(older)
+                .bind(ws.as_uuid())
+                .execute(&pool)
+                .await
+                .unwrap();
+            let flow = Uuid::from_u128(77);
+            let page = |occurrence, after| EnrollWork::Audience {
+                source: AudienceSource::Everyone,
+                occurrence: Some(occurrence),
+                after,
+                entered_by: None,
+            };
+            // Seventy audiences paging past the erased person, more than the 64 subtransaction ids
+            // a backend caches. The tenth's fallback page is queued already, so its rewrite
+            // collides with it and the page goes.
+            let occurrences: Vec<Uuid> = (0..70).map(|n| Uuid::from_u128(1000 + n)).collect();
+            for occurrence in &occurrences {
+                queue_enroll(
+                    &pool,
+                    ws,
+                    &enroll_page_key(flow, *occurrence, Some(person)),
+                    enroll_payload(ws, page(*occurrence, Some(person))),
+                )
+                .await;
+            }
+            let collided = occurrences[9];
+            queue_enroll(
+                &pool,
+                ws,
+                &enroll_page_key(flow, collided, Some(older)),
+                enroll_payload(ws, page(collided, Some(older))),
+            )
+            .await;
+
+            let mut tx = begin(&pool).await.unwrap();
+            delete_person(&mut tx, ws, person, DeleteReason::Erasure, &trace())
+                .await
+                .unwrap();
+            let (cached, overflowed) = subxacts(&mut tx).await;
+            commit(tx).await.unwrap();
+
+            for occurrence in &occurrences {
+                let key = enroll_page_key(flow, *occurrence, Some(older));
+                assert_eq!(
+                    queued_enroll(&pool, &key).await.map(|job| job.work),
+                    Some(page(*occurrence, Some(older)))
+                );
+            }
+            let pages: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = 'flow.enroll'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(pages, 70, "one page an audience: the collided one went");
+            assert!(
+                !overflowed && cached <= 64,
+                "subxacts {cached}, overflowed {overflowed}"
+            );
         })
         .await;
     }
