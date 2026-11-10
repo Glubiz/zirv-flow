@@ -346,12 +346,16 @@ mod tests {
         let ws = workspace(&pool, "one").await;
         let flow = create(&pool, ws, "Welcome").await;
         let id = flow.id;
+        // The quick publish starts only once the slow one holds the lock, however loaded the
+        // runner: a fixed head start let the quick one lock first.
+        let (locked_sender, locked_receiver) = tokio::sync::oneshot::channel();
 
         let slow = {
             let pool = pool.clone();
             async move {
                 let mut tx = begin(&pool).await.unwrap();
                 let locked = lock_flow(&mut tx, ws, id).await.unwrap();
+                locked_sender.send(()).unwrap();
                 // Hold the lock while the other publish arrives and waits.
                 tokio::time::sleep(Duration::from_millis(400)).await;
                 let (_, version) =
@@ -365,7 +369,7 @@ mod tests {
         let quick = {
             let pool = pool.clone();
             async move {
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                locked_receiver.await.unwrap();
                 publish(&pool, ws, id).await.unwrap().1.version
             }
         };
