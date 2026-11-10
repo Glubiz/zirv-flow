@@ -3011,8 +3011,8 @@ worker process frees is still found by the poll: waking across processes would t
 database-wide lock at commit, the suspect of #298. `zirv_flow_job_idle_waits_total`
 counts the waits by what ended them.
 An enqueue (and a give-back, a dead job's retry, an append's drain wake-up and a forward job)
-notifies only when no ready job of its kind became due within the last second (`WAKE_WINDOW`,
-round 7d), a probe of `jobs_ready_kind_idx` run as a subplan once per kind. The probe used to ask
+notifies only when no ready job of its kind became due within the last second
+(round 7d), a probe of `jobs_ready_kind_idx` run as a subplan once per kind. The probe used to ask
 for any due job of the kind, so it walked every entry the kind's finished jobs left behind an open
 snapshot: 449 buffers an insert after 20,000 jobs churned, now 20, and 85 with 2,000 of the kind's
 jobs churned within the last second, against 513 for the old probe. Every enqueue that notified

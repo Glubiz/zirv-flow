@@ -26,11 +26,12 @@ use floors::{ClaimFrom, Took};
 /// commit's flush, so notifying commits run one at a time: 2,392 to 2,545 single-job enqueues a
 /// second with a notify each, against 6,307 (8 clients) to 11,993 (16) with none (round 7d,
 /// PostgreSQL 16). An enqueue therefore notifies only when its kind looks idle: no ready job of
-/// that kind became due within the last second ([`WAKE_WINDOW`]). A worker woken for such a job
-/// claims it; one woken earlier is busy with the backlog and claims again as soon as it finishes,
-/// and a full claim wakes the next slot. Until round 7d the probe asked for any due ready job of
-/// the kind. Its walk started at the oldest `run_at` of `jobs_ready_kind_idx`, so it crossed the
-/// entries of every job claimed since the oldest open snapshot. The window bounds that walk to a
+/// that kind became due within the last second (`interval '1 second'` in every probe). A worker
+/// woken for such a job claims it; one woken earlier is busy with the backlog and claims again as
+/// soon as it finishes, and a full claim wakes the next slot. Until round 7d the probe asked for
+/// any due ready job of the kind. Its walk started at the oldest `run_at` of
+/// `jobs_ready_kind_idx`, so it crossed the entries of every job claimed since the oldest open
+/// snapshot. The window bounds that walk to a
 /// second of the kind's churn. A due job older than the window no longer suppresses the
 /// notification, so every enqueue that notified before still does: an idle worker is woken as
 /// before. The worst case is one extra notification a second per kind. The probe is a scalar
@@ -38,10 +39,6 @@ use floors::{ClaimFrom, Took};
 /// the planner may make it an anti join that scans the index on `run_at` alone, every kind's
 /// entries included.
 pub const NOTIFY_CHANNEL: &str = "zirv_flow_jobs";
-
-/// How recently a ready job of a kind must have become due for an enqueue of that kind to send
-/// no wake-up ([`NOTIFY_CHANNEL`]). It is spelled `interval '1 second'` in every probe.
-pub const WAKE_WINDOW: Duration = Duration::from_secs(1);
 /// Attempts a job gets unless it says otherwise.
 pub const DEFAULT_MAX_ATTEMPTS: i32 = 5;
 /// The longest `last_error` kept, in bytes.
