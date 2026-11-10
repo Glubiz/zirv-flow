@@ -2777,9 +2777,9 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_full_batch_drained_singly_stays_within_the_subtransaction_cache(pool: PgPool) {
-        use crate::subtransactions::testing::{record_at_commit, recorded};
-
         crate::decision_testing::checked(pool, |pool| async move {
+            use crate::subtransactions::testing::{record_at_commit, recorded};
+
             let ws = workspace(&pool, "ours").await;
             let trace = TraceContext::root(Cause::api("req"));
             // The worker's default batch, with every tenth row poison.

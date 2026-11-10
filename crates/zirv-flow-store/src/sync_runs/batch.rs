@@ -2407,9 +2407,9 @@ mod tests {
     async fn a_full_unit_applied_record_by_record_stays_within_the_subtransaction_cache(
         pool: PgPool,
     ) {
-        use crate::subtransactions::testing::{poison, record_at_commit, recorded};
-
         crate::decision_testing::checked(pool, |pool| async move {
+            use crate::subtransactions::testing::{poison, record_at_commit, recorded};
+
             let fx = fixture(&pool, "one", "full_refresh").await;
             let source = fx.source_id.to_string();
             let key = key();

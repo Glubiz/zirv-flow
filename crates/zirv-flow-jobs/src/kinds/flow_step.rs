@@ -3994,25 +3994,28 @@ pub(super) mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_full_claim_of_wakes_never_overflows_the_subtransaction_cache(pool: PgPool) {
-        use zirv_flow_store::subtransaction_testing::{record_at_commit, recorded};
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            use zirv_flow_store::subtransaction_testing::{record_at_commit, recorded};
 
-        let env = Env::new(pool).await;
-        let full = crate::worker::CLAIM_BATCH as usize;
-        let enrolled = due_visits(&env, full).await;
-        let jobs = claim_wakes(&env, full).await;
-        record_at_commit(&env.pool, "jobs").await;
+            let env = Env::new(pool).await;
+            let full = crate::worker::CLAIM_BATCH as usize;
+            let enrolled = due_visits(&env, full).await;
+            let jobs = claim_wakes(&env, full).await;
+            record_at_commit(&env.pool, "jobs").await;
 
-        crate::worker::run_claimed(&env.pool, batch_config(&env), jobs).await;
+            crate::worker::run_claimed(&env.pool, batch_config(&env), jobs).await;
 
-        let (subxacts, overflowed, rows) = recorded(&env.pool).await;
-        assert!(rows > 0, "no transaction recorded");
-        assert!(
-            !overflowed && subxacts <= 64,
-            "a transaction cached {subxacts} subtransaction ids, overflowed: {overflowed}"
-        );
-        for visited in &enrolled {
-            assert_eq!(visits(&env, visited.person).await, json!(1));
-        }
+            let (subxacts, overflowed, rows) = recorded(&env.pool).await;
+            assert!(rows > 0, "no transaction recorded");
+            assert!(
+                !overflowed && subxacts <= 64,
+                "a transaction cached {subxacts} subtransaction ids, overflowed: {overflowed}"
+            );
+            for visited in &enrolled {
+                assert_eq!(visits(&env, visited.person).await, json!(1));
+            }
+        })
+        .await;
     }
 
     async fn visits(env: &Env, person: Uuid) -> Value {
