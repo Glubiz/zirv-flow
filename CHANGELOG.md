@@ -15,3 +15,18 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.274.0 (2026-11-10)
+
+### Fixes
+
+- exit gen-ingest when one of its processes dies
+
+### Performance
+
+- x5 profile with 16 drain lanes, tuned PostgreSQL and a two-process ingest generator
+- publish the dirty-backlog gauge at most every 30 s
+
+### Chores
+
+- drop the 10M bench database fact; the database is removed
+
