@@ -34,8 +34,12 @@ use crate::{GraphPoint, NewDecision, NewJob, StoreError, append_decisions, enque
 pub const SETTLE_JOB_KIND: &str = "flow.settle";
 /// The kind of the job that archives, resumes or bulk-exits the enrollments of a flow in batches.
 pub const LIFECYCLE_JOB_KIND: &str = "flow.lifecycle";
-/// How many enrollments one `flow.lifecycle` run changes, and one `flow.settle` job names.
+/// How many enrollments one `flow.lifecycle` run changes.
 pub const LIFECYCLE_BATCH: usize = 500;
+/// How many enrollments one `flow.settle` job names. The job locks each in a round of its own
+/// (a savepoint, released), whose subtransaction id it keeps until it commits, and a backend
+/// caches 64; past that every snapshot in the cluster reads `pg_subtrans`.
+pub(crate) const SETTLE_BATCH: usize = 60;
 
 /// Why a held enrollment whose stored input or cause does not parse is failed by a resume: it
 /// could not be run again, and a row left held would be read by every later batch.
@@ -782,7 +786,7 @@ pub(crate) async fn enqueue_event_settles(
         )
         .collect();
     let mut enqueued = 0;
-    for chunk in items.chunks(LIFECYCLE_BATCH) {
+    for chunk in items.chunks(SETTLE_BATCH) {
         let Some(first) = chunk.first() else {
             continue;
         };
@@ -901,7 +905,7 @@ pub(crate) async fn enqueue_segment_settles(
         return Ok(0);
     };
     let mut enqueued = 0;
-    for chunk in items.chunks(LIFECYCLE_BATCH) {
+    for chunk in items.chunks(SETTLE_BATCH) {
         let Some(first) = chunk.first() else {
             continue;
         };

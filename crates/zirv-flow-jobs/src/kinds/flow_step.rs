@@ -3988,6 +3988,33 @@ pub(super) mod tests {
             .collect()
     }
 
+    /// A slot runs a full claim of one workspace's wakes in transactions that each stay within
+    /// the 64 subtransaction ids a backend caches: a wake that walks takes three (its savepoint,
+    /// its lock round and its walk), and a released one keeps its ids until the commit.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_full_claim_of_wakes_never_overflows_the_subtransaction_cache(pool: PgPool) {
+        use zirv_flow_store::subtransaction_testing::{record_at_commit, recorded};
+
+        let env = Env::new(pool).await;
+        let full = crate::worker::CLAIM_BATCH as usize;
+        let enrolled = due_visits(&env, full).await;
+        let jobs = claim_wakes(&env, full).await;
+        record_at_commit(&env.pool, "jobs").await;
+
+        crate::worker::run_claimed(&env.pool, batch_config(&env), jobs).await;
+
+        let (subxacts, overflowed, rows) = recorded(&env.pool).await;
+        assert!(rows > 0, "no transaction recorded");
+        assert!(
+            !overflowed && subxacts <= 64,
+            "a transaction cached {subxacts} subtransaction ids, overflowed: {overflowed}"
+        );
+        for visited in &enrolled {
+            assert_eq!(visits(&env, visited.person).await, json!(1));
+        }
+    }
+
     async fn visits(env: &Env, person: Uuid) -> Value {
         env.traits(person).await["visits"].clone()
     }
@@ -4177,7 +4204,7 @@ pub(super) mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_slot_runs_the_due_wakes_of_a_workspace_in_one_transaction_that_writes_what_a_lone_wake_writes(
+    async fn a_slot_runs_the_due_wakes_of_a_workspace_in_shared_transactions_that_write_what_a_lone_wake_writes(
         pool: PgPool,
     ) {
         zirv_flow_store::decision_testing::checked(pool, |pool| async move {
@@ -4217,11 +4244,13 @@ pub(super) mod tests {
                 .filter(|enrolled| enrolled.enrollment != lone)
                 .map(|enrolled| wake_of(enrolled.enrollment))
                 .collect();
-            assert_eq!(transactions_of(&env, &batched).await, 1);
+            // A full claim is two transactions: 21 wakes and 11, each within the subtransaction
+            // ids a backend caches.
+            assert_eq!(transactions_of(&env, &batched).await, 2);
             assert!(
                 handle
                     .render()
-                    .contains("zirv_flow_job_transactions_total{kind=\"flow.step\"} 1"),
+                    .contains("zirv_flow_job_transactions_total{kind=\"flow.step\"} 2"),
                 "{}",
                 handle.render()
             );
@@ -4918,7 +4947,10 @@ pub(super) mod tests {
             .unwrap();
             assert_eq!(steps.len(), 32);
             assert!(steps.iter().all(|count| *count == steps[0]), "{steps:?}");
-            // Every wake of the batch failed with it, and each ran again to its one completion.
+            // Every wake of the failed transaction, the claim's first, failed with it, and each ran
+            // again to its one completion; the claim's other wakes committed in a transaction of
+            // their own.
+            let mut failed_once = 0;
             for wake in &wakes {
                 let failed: Vec<(String, String, Option<String>, Value, i32)> =
                     shapes_of(&env, *wake)
@@ -4926,12 +4958,19 @@ pub(super) mod tests {
                         .into_iter()
                         .filter(|(action, ..)| action == "job.attempt")
                         .collect();
-                assert_eq!(failed.len(), 1, "wake {wake}: {failed:?}");
-                assert_eq!(
-                    (failed[0].1.as_str(), failed[0].2.as_deref(), failed[0].4),
-                    ("failed", Some("job_error"), 1)
-                );
+                match failed.as_slice() {
+                    [] => {}
+                    [attempt] => {
+                        assert_eq!(
+                            (attempt.1.as_str(), attempt.2.as_deref(), attempt.4),
+                            ("failed", Some("job_error"), 1)
+                        );
+                        failed_once += 1;
+                    }
+                    more => panic!("wake {wake}: {more:?}"),
+                }
             }
+            assert_eq!(failed_once, crate::worker::WAKES_PER_TRANSACTION);
         })
         .await;
     }

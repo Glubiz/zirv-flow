@@ -371,6 +371,63 @@ mod tests {
         )
     }
 
+    /// One arrival batch that converts a hundred enrollments is settled in transactions that each
+    /// stay within the 64 subtransaction ids a backend caches: an item takes one, its lock round,
+    /// and a released one keeps it until the commit.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn settling_a_hundred_enrollments_never_overflows_the_subtransaction_cache(pool: PgPool) {
+        use zirv_flow_core::{HmacPurpose, HmacRoot, MasterKey};
+        use zirv_flow_store::EventRecord;
+        use zirv_flow_store::subtransaction_testing::{record_at_commit, recorded};
+
+        let env = Env::new(pool).await;
+        env.define_event("order").await;
+        let flow = env
+            .flow_with(
+                "Goal",
+                parked(),
+                settings(manual(), json!({"goal": goal_event(json!([]))})),
+            )
+            .await;
+        let emails: Vec<String> = (0..100).map(|n| format!("buyer{n}@example.com")).collect();
+        let mut people = Vec::with_capacity(emails.len());
+        for email in &emails {
+            people.push(env.person(email, json!({})).await);
+        }
+        env.enroll(flow, 1, &people).await;
+        env.run_matching(Some("start"), None).await;
+        let key = HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction);
+        let orders: Vec<EventRecord> = emails
+            .iter()
+            .map(|email| EventRecord {
+                source_record_id: None,
+                source: "web".into(),
+                identifiers: vec![("email".into(), email.clone())],
+                name: "order".into(),
+                properties: serde_json::Map::new(),
+                timestamp: None,
+                received_at: env.clock.now(),
+                message_id: None,
+                trace: TraceContext::root(Cause::api("order")),
+            })
+            .collect();
+        zirv_flow_store::apply_event_batch(&env.pool, env.ws, &key, &orders)
+            .await
+            .unwrap();
+        record_at_commit(&env.pool, "jobs").await;
+
+        settle_jobs(&env).await;
+
+        let (subxacts, overflowed, rows) = recorded(&env.pool).await;
+        assert!(rows > 0, "no transaction recorded");
+        assert!(
+            !overflowed && subxacts <= 64,
+            "a transaction cached {subxacts} subtransaction ids, overflowed: {overflowed}"
+        );
+        assert_eq!(conversions(&env).await, (100, 100));
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_goal_converts_once_and_leaves_the_enrollment_running(pool: PgPool) {
