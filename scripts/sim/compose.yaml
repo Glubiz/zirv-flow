@@ -6,6 +6,8 @@ x-image: &zirv-image ghcr.io/glubiz/zirv-flow:${SIM_IMAGE_TAG:-0.235.0}
 x-tools-image: &tools-image zirv-flow-sim-tools:local
 
 x-zirv-env: &zirv-env
+  # Every serve, worker and scheduler must agree on the shard count.
+  ZIRV_FLOW_INGEST__DRAIN_SHARDS: "${SIM_DRAIN_SHARDS:-8}"
   ZIRV_FLOW_DATABASE__URL: postgres://zirv:${SIM_PG_PASSWORD:?run sim.sh init}@zf-db:5432/zirv_flow
   ZIRV_FLOW_DATABASE__MIGRATE_ON_START: "false"
   ZIRV_FLOW_SECRETS__MASTER_KEY_FILE: /var/lib/zirv-flow/secrets/master.key
@@ -91,7 +93,7 @@ services:
       - -c
       - jit=${SIM_PG_JIT:-on}
       - -c
-      - max_connections=250
+      - max_connections=${SIM_PG_MAX_CONNECTIONS:-250}
       - -c
       - shared_preload_libraries=pg_stat_statements
       - -c
@@ -100,6 +102,21 @@ services:
       - log_min_duration_statement=1000
       - -c
       - synchronous_commit=on
+      # Tuning for the x5 profile (Investigation Q). The defaults are PostgreSQL 16's own.
+      - -c
+      - autovacuum_naptime=${SIM_PG_AUTOVACUUM_NAPTIME:-1min}
+      - -c
+      - autovacuum_max_workers=${SIM_PG_AUTOVACUUM_WORKERS:-3}
+      - -c
+      - bgwriter_delay=${SIM_PG_BGWRITER_DELAY:-200ms}
+      - -c
+      - bgwriter_lru_maxpages=${SIM_PG_BGWRITER_MAXPAGES:-100}
+      - -c
+      - random_page_cost=${SIM_PG_RANDOM_PAGE_COST:-4}
+      - -c
+      - effective_io_concurrency=${SIM_PG_IO_CONCURRENCY:-1}
+      - -c
+      - track_wal_io_timing=${SIM_PG_WAL_IO_TIMING:-off}
     volumes:
       - zf-db-data:/var/lib/postgresql/data
     healthcheck:
@@ -160,7 +177,8 @@ services:
     environment:
       <<: *zirv-env
       ZIRV_FLOW_WORKER__CONCURRENCY: "8"
-      # One slot per shard job: the workers' slots together must cover ingest.drain_shards (8),
+      # One slot per shard job: the workers' slots together must cover ingest.drain_shards
+      # (SIM_DRAIN_SHARDS, default 8; the x5 profile runs 16 with 4 workers x 4 slots),
       # and each slot adds three connections (see the profile files for the arithmetic).
       ZIRV_FLOW_WORKER__DRAIN_SLOTS: "${SIM_DRAIN_SLOTS:-4}"
       ZIRV_FLOW_OPS__BIND: 0.0.0.0:9100
@@ -418,6 +436,8 @@ services:
     environment:
       <<: *gen-env
       SIM_GEN_INGEST_WORKERS: ${SIM_GEN_INGEST_WORKERS:-8}
+      # Processes the generator is split over (a Python process tops out near 7,700 events/s).
+      SIM_GEN_INGEST_PROCS: ${SIM_GEN_INGEST_PROCS:-1}
     mem_limit: ${SIM_MEM_GEN_INGEST:-256m}
     cpus: ${SIM_CPUS_GEN_INGEST:-0.25}
 

@@ -3,6 +3,7 @@
 
 import http.client
 import json
+import multiprocessing
 import os
 import random
 import threading
@@ -97,4 +98,15 @@ def send(count):
 if __name__ == "__main__":
     while not KEY_FILE.exists():
         time.sleep(2)
-    pace.run("ingest", send, chunk_items=CHUNK, workers=int(os.environ.get("SIM_GEN_INGEST_WORKERS", "8")))
+    # One Python process tops out near 7,700 events/s on one core, so the x5 profile splits the
+    # generator over SIM_GEN_INGEST_PROCS processes; each paces 1/procs of the rate with its share
+    # of the sender threads, and writes its own stats part (see pace.Stats.write).
+    procs = max(1, int(os.environ.get("SIM_GEN_INGEST_PROCS", "1")))
+    threads = max(1, -(-int(os.environ.get("SIM_GEN_INGEST_WORKERS", "8")) // procs))
+
+    def run_part(part):
+        pace.run("ingest", send, chunk_items=CHUNK, workers=threads, part=part, parts=procs)
+
+    for part in range(1, procs):
+        multiprocessing.Process(target=run_part, args=(part,), daemon=True).start()
+    run_part(0)

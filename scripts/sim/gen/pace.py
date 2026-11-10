@@ -94,8 +94,9 @@ def factor(control, now=None):
 class Stats:
     """Counters of one generator, written to /sim/stats/<name>.json every few seconds."""
 
-    def __init__(self, name):
+    def __init__(self, name, part=0):
         self.name = name
+        self.part = part
         self.lock = threading.Lock()
         self.sent = 0
         self.late = 0
@@ -130,18 +131,23 @@ class Stats:
                 "achieved_per_s": round(self.achieved(), 1), "sent_total": self.sent,
                 "late_total": self.late, "dropped_total": self.dropped, "errors_total": self.errors}
         body.update(extra or {})
-        tmp = STATS_DIR / f".{self.name}.tmp"
+        # Part 0 keeps the single-process file name; further parts of one generator write
+        # <name>.<part>.json with the same "name", and sim.sh status adds the parts up.
+        stem = self.name if self.part == 0 else f"{self.name}.{self.part}"
+        tmp = STATS_DIR / f".{stem}.tmp"
         tmp.write_text(json.dumps(body))
-        os.replace(tmp, STATS_DIR / f"{self.name}.json")
+        os.replace(tmp, STATS_DIR / f"{stem}.json")
 
 
-def run(name, send, chunk_items=1, workers=8, make_extra=None):
+def run(name, send, chunk_items=1, workers=8, make_extra=None, part=0, parts=1):
     """Open-loop pacing. `send(count)` is called from a worker for each chunk and returns the
     number of items it delivered (or raises). Work owed accumulates at the target rate whether or
     not the senders keep up; a chunk started more than LATE_AFTER seconds after its due time is
-    late, and owed work older than MAX_LAG is dropped and counted."""
+    late, and owed work older than MAX_LAG is dropped and counted. A generator split over
+    `parts` processes runs one `run` per process (`part` 0 to parts-1); each paces 1/parts of the
+    generator's rate, so together they send what one process would."""
     control = Control()
-    stats = Stats(name)
+    stats = Stats(name, part)
     pool = ThreadPoolExecutor(max_workers=workers)
     sem = threading.Semaphore(workers * 2)
     owed = 0.0
@@ -167,7 +173,7 @@ def run(name, send, chunk_items=1, workers=8, make_extra=None):
         ctl = control.get()
         rate = 0.0
         if not ctl.get("paused"):
-            rate = float(ctl.get("rate") or 0) * SHARE[name.removeprefix("gen-")] * factor(ctl, now)
+            rate = float(ctl.get("rate") or 0) * SHARE[name.removeprefix("gen-")] * factor(ctl, now) / parts
         stats.target = rate
         owed += rate * (now - last)
         last = now
