@@ -51,6 +51,11 @@ const ENROLLMENT_INTERVAL: Duration = Duration::from_secs(60);
 /// 10,000 and estimated above that, under a second's statement timeout, so the refresh reads a
 /// bounded part of the jobs table however long the queue (#397).
 const QUEUE_DEPTH_INTERVAL: Duration = Duration::from_secs(15);
+/// How often the dirty-backlog gauge is published. It is an exact `count(*)` over `person_changes`,
+/// which cost 30 to 133 ms and about 20,000 buffer hits a call on the 1x simulation and grows with
+/// the backlog, so it is read twice a minute, not every pass. The oldest-mark age, the dirty heads
+/// and the safety net still run every pass.
+const DIRTY_BACKLOG_INTERVAL: Duration = Duration::from_secs(30);
 /// How often the leader looks for sending domains that are due a DNS check.
 const SENDING_DOMAIN_SCAN_INTERVAL: Duration = Duration::from_secs(60);
 /// Domains queued per scan; more than this carry over to the next one.
@@ -149,6 +154,8 @@ pub struct Scheduler {
     depths_failing: bool,
     /// When the sending domains were last scanned for due checks; none until this instance leads.
     domains_scanned: Option<Instant>,
+    /// When the dirty-backlog gauge was last published; none until this instance leads.
+    dirty_backlog_checked: Option<Instant>,
 }
 
 impl Scheduler {
@@ -172,6 +179,7 @@ impl Scheduler {
             depth_counts: QueueCounts::default(),
             depths_failing: false,
             domains_scanned: None,
+            dirty_backlog_checked: None,
         }
     }
 
@@ -595,6 +603,7 @@ impl Scheduler {
             self.depth_counts = QueueCounts::default();
             self.depths_failing = false;
             self.domains_scanned = None;
+            self.dirty_backlog_checked = None;
             self.destinations.zero_all();
             set_enrollments(&EnrollmentSample::default());
             self.gauges
@@ -608,7 +617,10 @@ impl Scheduler {
 
     /// The leader's work: due schedules, expired leases and the safety nets. The queue counts are
     /// left at zero: [`tick`](Self::tick) fills them from the throttled gauge refresh.
-    pub(crate) async fn work_at(&self, now: OffsetDateTime) -> Result<LeaderReport, StoreError> {
+    pub(crate) async fn work_at(
+        &mut self,
+        now: OffsetDateTime,
+    ) -> Result<LeaderReport, StoreError> {
         let (fired, skipped) = self.enqueue_due(now).await?;
         let reaped = reap_expired(&self.pool).await?;
         if reaped.requeued + reaped.dead + reaped.purged > 0 {
@@ -663,16 +675,22 @@ impl Scheduler {
     /// mark is more than [`STALE_DIRTY`] older than the database clock. The unique key makes it a
     /// no-op while a re-evaluation is ready or running. It covers a mark that landed after the
     /// job's last claim, a request that rolled back and a run that ran out of its time budget.
-    /// Also publishes the dirty backlog and the age of the oldest mark anywhere. Returns the
-    /// re-evaluations enqueued.
-    async fn wake_stale_dirty(&self) -> Result<u64, StoreError> {
+    /// Also publishes the age of the oldest mark anywhere on every pass, and the exact dirty
+    /// backlog at most once per [`DIRTY_BACKLOG_INTERVAL`]. Returns the re-evaluations enqueued.
+    async fn wake_stale_dirty(&mut self) -> Result<u64, StoreError> {
         let heads = dirty_heads(&self.pool).await?;
         let oldest = heads
             .iter()
             .map(|head| head.age_seconds)
             .fold(0.0_f64, f64::max);
         set_dirty_age(oldest);
-        set_dirty_backlog(dirty_backlog(&self.pool).await?);
+        if self
+            .dirty_backlog_checked
+            .is_none_or(|checked| checked.elapsed() >= DIRTY_BACKLOG_INTERVAL)
+        {
+            set_dirty_backlog(dirty_backlog(&self.pool).await?);
+            self.dirty_backlog_checked = Some(Instant::now());
+        }
         let mut enqueued = 0;
         for head in heads
             .iter()
@@ -1660,8 +1678,8 @@ mod tests {
     async fn two_leaders_working_the_same_instant_fire_a_slot_once(pool: PgPool) {
         migrated(&pool).await;
         create_schedule(&pool, &hourly(BASE)).await.unwrap();
-        let one = scheduler(&pool);
-        let two = scheduler(&pool);
+        let mut one = scheduler(&pool);
+        let mut two = scheduler(&pool);
 
         // A failover overlap: both believe they lead and read the same due slot.
         let (a, b) = tokio::join!(one.work_at(BASE), two.work_at(BASE));
@@ -1710,7 +1728,7 @@ mod tests {
             // The dead instance comes back and replays the slot it last saw; the schedule
             // has moved on, so it fires nothing.
             if slot == 6 {
-                let stale = scheduler(&pool);
+                let mut stale = scheduler(&pool);
                 assert_eq!(stale.work_at(at(slot)).await.unwrap().fired, 0);
             }
         }
@@ -1946,6 +1964,39 @@ mod tests {
         };
         assert_eq!(gauge("zirv_flow_segment_dirty_backlog"), 2.0);
         assert!((39.0..120.0).contains(&gauge("zirv_flow_segment_dirty_age_seconds")));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_dirty_backlog_gauge_is_published_at_most_once_per_interval(pool: PgPool) {
+        use metrics_exporter_prometheus::PrometheusBuilder;
+
+        migrated(&pool).await;
+        let ws = inbox_workspace(&pool, "ours").await;
+        mark_dirty_aged(&pool, ws, 1).await;
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let mut scheduler = scheduler(&pool);
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let backlog = || -> f64 {
+            handle
+                .render()
+                .lines()
+                .find_map(|line| line.strip_prefix("zirv_flow_segment_dirty_backlog "))
+                .expect("the backlog gauge is published")
+                .parse()
+                .unwrap()
+        };
+
+        scheduler.tick_at(BASE).await.unwrap();
+        assert_eq!(backlog(), 1.0);
+        mark_dirty_aged(&pool, ws, 1).await;
+        scheduler.tick_at(BASE).await.unwrap();
+        assert_eq!(backlog(), 1.0, "counted again inside the interval");
+
+        scheduler.dirty_backlog_checked = Instant::now().checked_sub(DIRTY_BACKLOG_INTERVAL);
+        scheduler.tick_at(BASE).await.unwrap();
+        assert_eq!(backlog(), 2.0, "not counted after the interval");
     }
 
     /// A workspace with one source whose streams `fresh`, `stale`, `failing` and `off` are set
