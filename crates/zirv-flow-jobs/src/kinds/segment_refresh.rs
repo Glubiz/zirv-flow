@@ -13,8 +13,8 @@ use zirv_flow_core::decision_actions;
 use zirv_flow_segments::{Catalog, Param, TraitStorage, compile, parse_and_validate};
 use zirv_flow_store::{
     CatalogSnapshot, REFRESH_JOB_KIND, RefreshApply, RefreshTrigger, SqlParam, SqlQuery,
-    apply_refresh, find_segment, find_segment_version, lock_segment_refresh, membership_cause,
-    membership_trace, segment_catalog,
+    apply_refresh, find_segment, find_segment_version, membership_cause, membership_trace,
+    poll_segment_refresh, segment_catalog,
 };
 
 use super::workspace_and_id;
@@ -46,7 +46,9 @@ impl JobKind for SegmentRefresh {
 
         // The slot lock comes before the segment locks: see the lock order in the store's `slots`.
         zirv_flow_store::hold_trait_slots(ctx.conn(), workspace).await?;
-        lock_segment_refresh(ctx.conn(), segment_id).await?;
+        // A refresh or pass that holds the lock is waited for between statements, so no
+        // statement holds a snapshot meanwhile (ruling 4377357b); the wait has no time limit.
+        poll_segment_refresh(ctx.conn(), segment_id).await?;
         let segment = find_segment(&mut *ctx.conn(), workspace, segment_id).await?;
         let Some(segment) = segment.filter(|segment| segment.archived_at.is_none()) else {
             return ctx
@@ -978,6 +980,82 @@ mod tests {
                 .await
                 .expect("the refresh finishes once the slot lock is free")
                 .unwrap();
+        })
+        .await;
+    }
+
+    /// Ruling 4377357b: a refresh waits for a refresh lock another transaction holds between
+    /// statements, so no statement keeps a snapshot, and the xmin horizon, while it waits. (A
+    /// worker's job transaction has a transaction id by then: its lease lock on the job row.)
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_refresh_waiting_for_its_segment_lock_holds_no_snapshot(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            zirv_flow_store::migrate(&pool).await.unwrap();
+            let ws = workspace(&pool).await;
+            define_trait(&pool, ws, "plan").await;
+            let (clock, _) = manual(OffsetDateTime::now_utc());
+            let seg = create(
+                &pool,
+                ws,
+                "Plan",
+                json!({"op": "eq", "trait": "plan", "value": "pro", "v": 1}),
+                &TraceContext::root(Cause::api("save")),
+            )
+            .await;
+            let mut holder = zirv_flow_store::begin(&pool).await.unwrap();
+            zirv_flow_store::lock_segment_refresh(&mut holder, seg.id)
+                .await
+                .unwrap();
+            let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *holder)
+                .await
+                .unwrap();
+
+            let job = {
+                let pool = pool.clone();
+                let trace = TraceContext::root(Cause::api("manual"));
+                tokio::spawn(async move { run(&pool, ws, seg.id, "manual", trace, &clock).await })
+            };
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut between_tries = 0;
+            while between_tries < 5 {
+                let seen: Vec<(String, Option<String>, String)> = sqlx::query_as(
+                    "SELECT state, backend_xmin::text, query FROM pg_stat_activity \
+                     WHERE datname = current_database() AND pid <> pg_backend_pid() \
+                       AND pid <> $1 AND xact_start IS NOT NULL",
+                )
+                .bind(holder_pid)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+                assert!(
+                    Instant::now() < deadline,
+                    "the refresh was never idle between two tries of the lock: {seen:?}"
+                );
+                for (state, xmin, query) in seen {
+                    if state == "idle in transaction"
+                        && query.starts_with("SELECT pg_try_advisory_xact_lock")
+                    {
+                        assert_eq!(xmin, None, "between two tries");
+                        between_tries += 1;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(40)).await;
+            }
+
+            zirv_flow_store::commit(holder).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(20), job)
+                .await
+                .expect("the refresh finishes once the lock is free")
+                .unwrap();
+            let computed: Option<i32> =
+                sqlx::query_scalar("SELECT computed_version FROM segments WHERE id = $1")
+                    .bind(seg.id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(computed, Some(1));
         })
         .await;
     }

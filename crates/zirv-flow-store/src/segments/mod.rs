@@ -46,14 +46,15 @@ pub use preview::{
     snapshot_now,
 };
 pub use reevaluate::{
-    DirtyBatch, ReevaluateApply, apply_reevaluation, lock_reevaluation, reevaluation_order,
+    DirtyBatch, ReevaluateApply, apply_reevaluation, lock_reevaluation, lock_reevaluation_until,
+    reevaluation_order,
 };
 pub(crate) use reevaluate::{active_change_classes, lock_segments_of_people};
 pub use refresh::{
     MembershipCause, REFRESH_JOB_KIND, REFRESH_LOCK_CLASS, RefreshApply, RefreshOutcome,
     RefreshRequest, RefreshTrigger, SegmentMembershipChange, SegmentMembershipChanges,
     apply_refresh, decision_cause_kind, enqueue_refresh, lock_segment_refresh, membership_cause,
-    membership_trace,
+    membership_trace, poll_segment_refresh, poll_segment_refresh_until,
 };
 pub use schedule::{reconcile_segment_schedules, segment_cron};
 pub use uses::{
