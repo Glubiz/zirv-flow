@@ -544,7 +544,8 @@ at the head it reads 48 (0.05 ms), and 325 (0.13 ms) from cursors a second behin
 bench's append rate. Each worker process keeps the cursors (`ingest/cursors.rs`), per workspace and
 bucket, and moves them only when a batch commits: to the row before the first one the take could
 not lock, else to the newest row picked when the pick filled its limit, else past every row the
-pick could see. A cursor never passes an id drawn less than a second (`MARGIN`) before the take
+pick could see; a take leaves alone a cursor that another take set after it began (that take may
+have stopped below a held row this one passed). A cursor never passes an id drawn less than a second (`MARGIN`) before the take
 began: a take records the newest id it saw, and only ids seen by takes that returned at least a
 second earlier count. A row whose append commits later than that (ids commit out of order) can
 still land below a cursor, and is taken anyway: a take that finds nothing above its cursors reads

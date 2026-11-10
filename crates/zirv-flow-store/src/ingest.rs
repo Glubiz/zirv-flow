@@ -894,6 +894,7 @@ fn proof(
     let newest = picked.last().map(|(id, _)| *id);
     Taken {
         cap: start.cap,
+        began: start.began,
         returned,
         newest,
         buckets: buckets

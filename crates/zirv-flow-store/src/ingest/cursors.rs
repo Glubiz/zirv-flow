@@ -25,7 +25,9 @@
 //!   row is picked again, as today.
 //!
 //! Only a committed batch moves a cursor: a rollback leaves every row in place and the cursors
-//! where they were. The state lives in this process only: a worker restart or a crash starts
+//! where they were. A take never moves a cursor that another take set after it began: a full walk
+//! that stopped at a held row may have set it, and the older take's advance would pass that row.
+//! The state lives in this process only: a worker restart or a crash starts
 //! with no cursors, so its first take of each bucket is a full walk. Cursors are kept per bucket,
 //! not per shard, so a shard-count change keeps them valid. Each process keeps its own, so a
 //! bucket another process drained meanwhile costs this one only the entries it skips, never a
@@ -74,6 +76,11 @@ struct Workspace {
     /// Where the latest take's margin ended: samples that returned before it are settled.
     horizon: Option<Instant>,
     buckets: HashMap<i16, Bucket>,
+    /// Counts every cursor set and every [`TakeCursors::forget`], so a take can tell what was set
+    /// after it began.
+    sets: u64,
+    /// The count of the latest forget.
+    forgot_at: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -82,6 +89,8 @@ struct Bucket {
     after: i64,
     /// When the bucket's next take reads it from its first row again.
     full_walk_at: Instant,
+    /// The workspace's count when `after` was set.
+    set_at: u64,
 }
 
 /// Where a take starts, from [`TakeCursors::start`].
@@ -92,12 +101,16 @@ pub(crate) struct TakeStart {
     pub(crate) after: Vec<i64>,
     /// The highest id a cursor may move to after this take: drawn at least the margin before it.
     pub(crate) cap: i64,
+    /// The workspace's count of cursor sets when the take began.
+    pub(crate) began: u64,
 }
 
 /// What a committed take proved about each bucket it read, for [`TakeCursors::advance`].
 #[derive(Clone, Debug)]
 pub(crate) struct Taken {
     pub(crate) cap: i64,
+    /// [`TakeStart::began`].
+    pub(crate) began: u64,
     /// When the take's pick returned.
     pub(crate) returned: Instant,
     /// The newest id the pick saw, if any.
@@ -154,10 +167,14 @@ impl TakeCursors {
         TakeStart {
             after,
             cap: state.settled,
+            began: state.sets,
         }
     }
 
-    /// Moves `workspace`'s cursors on after a take's batch committed.
+    /// Moves `workspace`'s cursors on after a take's batch committed. A bucket whose cursor another
+    /// take set after this one began, or whose cursors a forget dropped since, is left as it is:
+    /// that take may have stopped below a row this one passed, a row another transaction held, and
+    /// moving the cursor back above it would leave the row to the next full walk.
     pub(crate) fn advance(&self, workspace: WorkspaceId, taken: &Taken) {
         let mut workspaces = self.lock();
         let state = workspaces.entry(workspace.as_uuid()).or_default();
@@ -172,25 +189,43 @@ impl TakeCursors {
             }
         }
         for &(bucket, after, through) in &taken.buckets {
+            let set_since = state.forgot_at > taken.began
+                || state
+                    .buckets
+                    .get(&bucket)
+                    .is_some_and(|cursor| cursor.set_at > taken.began);
+            if set_since {
+                continue;
+            }
             let proven = through.map_or(taken.cap, |through| through.min(taken.cap));
             if after == 0 {
+                state.sets += 1;
                 state.buckets.insert(
                     bucket,
                     Bucket {
                         after: proven.max(0),
                         full_walk_at: taken.returned + self.period,
+                        set_at: state.sets,
                     },
                 );
-            } else if let Some(cursor) = state.buckets.get_mut(&bucket) {
-                cursor.after = cursor.after.max(proven);
+            } else if let Some(cursor) = state.buckets.get_mut(&bucket)
+                && proven > cursor.after
+            {
+                state.sets += 1;
+                cursor.after = proven;
+                cursor.set_at = state.sets;
             }
         }
     }
 
-    /// Drops `workspace`'s cursors, so each bucket's next take reads it from its first row.
+    /// Drops `workspace`'s cursors, so each bucket's next take reads it from its first row. A take
+    /// already under way sets none from what it proved, as its pick missed the rows the backfill
+    /// bucketed meanwhile.
     pub(crate) fn forget(&self, workspace: WorkspaceId) {
         if let Some(state) = self.lock().get_mut(&workspace.as_uuid()) {
             state.buckets.clear();
+            state.sets += 1;
+            state.forgot_at = state.sets;
         }
     }
 }
@@ -206,6 +241,7 @@ mod tests {
     fn taken(start: &TakeStart, newest: i64, buckets: Vec<(i16, i64, Option<i64>)>) -> Taken {
         Taken {
             cap: start.cap,
+            began: start.began,
             returned: Instant::now(),
             newest: Some(newest),
             buckets,
@@ -301,5 +337,58 @@ mod tests {
 
         assert_eq!(cursors.start(ws(), &[3]).after, [0]);
         assert_eq!(cursors.start(other, &[3]).after, [100]);
+    }
+
+    /// Lets either take of a test move a cursor as far as 500: a take of another bucket saw it.
+    fn seen_up_to_500(cursors: &TakeCursors) {
+        let seed = cursors.start(ws(), &[9]);
+        cursors.advance(ws(), &taken(&seed, 500, vec![(9, 0, None)]));
+    }
+
+    /// A long take reads bucket 3 through 200. Meanwhile a full walk of the bucket stops at a row
+    /// another transaction holds and sets the cursor below it. The long take commits last and must
+    /// leave the cursor there, or the held row waits for the next full walk. Both the long take's
+    /// kinds are covered: a full walk of its own, and a take from the cursor.
+    #[test]
+    fn a_take_that_commits_after_a_newer_one_set_the_cursor_leaves_it_there() {
+        let cursors = TakeCursors::new(Duration::ZERO, Duration::from_secs(3600));
+        seen_up_to_500(&cursors);
+
+        let long = cursors.start(ws(), &[3]);
+        let walk = cursors.start(ws(), &[3]);
+        assert_eq!(
+            (long.after[0], walk.after[0]),
+            (0, 0),
+            "both walk from the first row"
+        );
+        cursors.advance(ws(), &taken(&walk, 500, vec![(3, 0, Some(59))]));
+        cursors.advance(ws(), &taken(&long, 500, vec![(3, 0, Some(200))]));
+        assert_eq!(cursors.start(ws(), &[3]).after, [59], "a long full walk");
+
+        let long = cursors.start(ws(), &[3]);
+        // The walk reads from the cursor too, finds nothing above it and walks from the first row.
+        let walk = cursors.start(ws(), &[3]);
+        assert_eq!((long.after[0], walk.after[0]), (59, 59));
+        cursors.advance(ws(), &taken(&walk, 500, vec![(3, 0, Some(40))]));
+        cursors.advance(ws(), &taken(&long, 500, vec![(3, 59, Some(200))]));
+        assert_eq!(
+            cursors.start(ws(), &[3]).after,
+            [40],
+            "a long take from the cursor"
+        );
+    }
+
+    /// A take that began before the workspace's cursors were dropped sets none from what it proved:
+    /// the rows the backfill bucketed meanwhile have old ids and were not in its pick.
+    #[test]
+    fn a_take_that_began_before_a_forget_sets_no_cursor() {
+        let cursors = TakeCursors::new(Duration::ZERO, Duration::from_secs(3600));
+        seen_up_to_500(&cursors);
+        let walk = cursors.start(ws(), &[3]);
+
+        cursors.forget(ws());
+        cursors.advance(ws(), &taken(&walk, 500, vec![(3, 0, Some(200))]));
+
+        assert_eq!(cursors.start(ws(), &[3]).after, [0]);
     }
 }
