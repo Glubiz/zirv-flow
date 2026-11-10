@@ -24,16 +24,31 @@ pub async fn ensure_event_partitions(pool: &PgPool, today: Date) -> Result<(), S
             bound(start),
             bound(end),
         );
-        let created = sqlx::query(sqlx::AssertSqlSafe(statement))
-            .execute(pool)
-            .await
-            .map_err(StoreError::query);
+        // Idempotent, so a partition that already exists gets the settings too.
+        let tune = format!(
+            "ALTER TABLE {} SET ({VACUUM_SETTINGS})",
+            partition_name(start)
+        );
+        let created = async {
+            sqlx::query(sqlx::AssertSqlSafe(statement))
+                .execute(pool)
+                .await?;
+            sqlx::query(sqlx::AssertSqlSafe(tune)).execute(pool).await
+        }
+        .await;
         if let Err(error) = created {
-            first_error.get_or_insert(error);
+            first_error.get_or_insert(StoreError::query(error));
         }
     }
     first_error.map_or(Ok(()), Err)
 }
+
+/// Events are insert-only, so autovacuum would reach a partition only after 20% growth and its
+/// visibility map would lag; a fixed insert threshold keeps index-only scans off the heap. A
+/// partitioned parent cannot hold these options, so every partition carries them (migration 0094
+/// sets them on the existing ones).
+const VACUUM_SETTINGS: &str =
+    "autovacuum_vacuum_insert_scale_factor = 0, autovacuum_vacuum_insert_threshold = 500000";
 
 pub(super) const PARTITION_PREFIX: &str = "events_y";
 
@@ -83,6 +98,36 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(next, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_new_partition_carries_the_autovacuum_insert_settings(pool: PgPool) {
+        ensure_event_partitions(&pool, date!(2043 - 05 - 10))
+            .await
+            .unwrap();
+
+        let options: Vec<String> = sqlx::query_scalar(
+            "SELECT unnest(reloptions) FROM pg_class WHERE relname = 'events_y2043m05' ORDER BY 1",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            options,
+            [
+                "autovacuum_vacuum_insert_scale_factor=0",
+                "autovacuum_vacuum_insert_threshold=500000"
+            ]
+        );
+        let untuned: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid \
+             WHERE i.inhparent = 'events'::regclass AND c.reloptions IS NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(untuned, 0, "the migration tunes the partitions it made");
     }
 
     #[sqlx::test]
