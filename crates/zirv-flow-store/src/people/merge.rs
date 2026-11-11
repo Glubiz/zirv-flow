@@ -17,7 +17,7 @@ use super::apply::record_decision;
 use super::batch::recompute_people;
 use super::registry::Definitions;
 use super::slots::{lock_and_read_writer_slots, slot_nulls_sql};
-use crate::changes::mark_people;
+use crate::changes::{mark_people, mark_person, request_reevaluation};
 use crate::consent;
 use crate::{NewDecision, NewJob, StoreError, append_decision, enqueue};
 
@@ -403,7 +403,12 @@ async fn lock_merged_and_survivor(
 /// ([`crate::lists::move_on_merge`]): the survivor ends up in the union of both people's lists
 /// and the counts are exact again. Until then the loser's rows stay, and the list writers and
 /// audiences follow `merged_into` from them. The person-change guard is taken first, because a
-/// moved membership marks the survivor.
+/// moved membership or event marks the survivor.
+///
+/// When an event moved, the survivor is marked in the events class after the lists move and a
+/// pass is requested: the pass the merge's mark schedules is claimed ahead of this job, so it
+/// has usually judged the survivor without these events, and the next one enters or exits it on
+/// them.
 ///
 /// Then every open segment row the merged person still holds closes, with no exit
 /// ([`crate::segments::close_on_merge`]): the pass the merge's mark schedules skips an archived
@@ -447,6 +452,7 @@ pub async fn rewrite_merged_person(
         return Ok(0);
     };
     let mut total = 0;
+    let mut events_moved = 0;
     for (table, column, key) in REWRITE_TARGETS {
         if *table == "identity_conflicts" {
             close_conflicts_the_move_would_duplicate(
@@ -476,12 +482,28 @@ pub async fn rewrite_merged_person(
             .map_err(StoreError::query)?
             .rows_affected();
             total += moved;
+            if *table == "events" {
+                events_moved += moved;
+            }
             if i64::try_from(moved).is_ok_and(|moved| moved < REWRITE_BATCH) {
                 break;
             }
         }
     }
     total += crate::lists::move_on_merge(connection, workspace, merged, survivor, trace).await?;
+    // No other moved row is read by a segment: the lists marked their own class above.
+    if events_moved > 0 {
+        mark_person(
+            connection,
+            workspace,
+            survivor,
+            ChangeClasses::EVENTS,
+            trace,
+            None,
+        )
+        .await?;
+        request_reevaluation(connection, workspace).await?;
+    }
     total += crate::segments::close_on_merge(connection, workspace, merged, trace).await?;
     // A conflict between two people that have both been merged into the survivor is now
     // between one person and itself.

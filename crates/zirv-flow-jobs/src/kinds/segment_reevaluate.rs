@@ -397,6 +397,12 @@ mod tests {
         job.workspace_id = Some(ws);
         job.payload = payload;
         zirv_flow_store::enqueue(pool, &job).await.unwrap();
+        run_queued(kind, pool, clock).await;
+    }
+
+    /// Claims the ready job of `kind`, on the trace it was enqueued with, and runs it in a
+    /// transaction as a worker would.
+    async fn run_queued<K: JobKind>(kind: &K, pool: &PgPool, clock: &Clock) {
         let claimed = zirv_flow_store::claim_job(
             pool,
             "w",
@@ -1002,6 +1008,142 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(exits, 0, "the merged person's row closes without an exit");
+        })
+        .await;
+    }
+
+    /// An anonymous visitor orders, then identifies as a known person. The pass is claimed ahead
+    /// of the rewrite job (#581), so it consumes the merge's marks while the orders still sit on
+    /// the visitor; the rewrite that moves them marks the survivor in the events class, and the
+    /// next pass enters it into the segment the visitor was in and takes it out of the one that
+    /// wants no order, on the merge's trace.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn after_a_merge_the_rewrite_has_the_survivor_re_evaluated_on_the_events_it_moved(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            zirv_flow_store::migrate(&pool).await.unwrap();
+            let ws = workspace(&pool).await;
+            define_order_event(&pool, ws).await;
+            let clock = Clock::Database;
+            let buyers = create(&pool, ws, "Buyers", json!({"event": "order", "v": 1})).await;
+            let never = json!({"not": {"event": "order"}, "v": 1});
+            let never = create(&pool, ws, "Never ordered", never).await;
+            let trace = TraceContext::root(Cause::api("t"));
+            let known = [PERSONAL_DATA.email];
+            let survivor = profile(&pool, ws, "1", &known, json!({}), &trace).await;
+            let key =
+                HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction);
+            let orders: Vec<EventRecord> = (0..3)
+                .map(|n| EventRecord {
+                    source_record_id: None,
+                    source: "web".into(),
+                    identifiers: vec![("anonymous_id".into(), "anon-1".into())],
+                    name: "order".into(),
+                    properties: json!({"total": 10}).as_object().cloned().unwrap(),
+                    timestamp: None,
+                    received_at: OffsetDateTime::now_utc(),
+                    message_id: Some(format!("order-{n}")),
+                    trace: trace.clone(),
+                })
+                .collect();
+            zirv_flow_store::apply_event_batch(&pool, ws, &key, &orders)
+                .await
+                .unwrap();
+            let visitor: Uuid =
+                sqlx::query_scalar("SELECT DISTINCT person_id FROM events WHERE name = 'order'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            for segment in [buyers.id, never.id] {
+                full_refresh(&pool, ws, segment, &clock).await;
+            }
+            reevaluate(&pool, ws, &clock).await;
+            assert_eq!(open(&pool, buyers.id).await, [visitor]);
+            assert_eq!(open(&pool, never.id).await, [survivor]);
+            assert_eq!(dirty(&pool).await, 0);
+            segment_flow(&pool, ws, buyers.id, "entered", &clock).await;
+
+            let merge = TraceContext::root(Cause::api("merge"));
+            let identified = ProfileRecord {
+                source: "web".into(),
+                stream: "identify".into(),
+                record_key: "anon-1".into(),
+                identifiers: vec![
+                    ("email".into(), PERSONAL_DATA.email.into()),
+                    ("anonymous_id".into(), "anon-1".into()),
+                ],
+                traits: serde_json::Map::new(),
+                observed_at: OffsetDateTime::now_utc(),
+                trace: merge.clone(),
+            };
+            let joined = match &zirv_flow_store::apply_profile_batch(&pool, ws, &[identified])
+                .await
+                .unwrap()[0]
+            {
+                ProfileOutcome::Applied { person_id, .. }
+                | ProfileOutcome::Unchanged { person_id, .. } => *person_id,
+                ProfileOutcome::Rejected { reason } => panic!("rejected: {reason}"),
+            };
+            assert_eq!(joined, survivor);
+            assert_eq!(
+                sqlx::query_scalar::<_, Option<Uuid>>(
+                    "SELECT merged_into FROM people WHERE id = $1"
+                )
+                .bind(visitor)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+                Some(survivor)
+            );
+            reevaluate(&pool, ws, &clock).await;
+            // The pass closed the visitor's row and judged the survivor without the orders.
+            assert!(open(&pool, buyers.id).await.is_empty());
+            assert_eq!(open(&pool, never.id).await, [survivor]);
+            run_queued(
+                &super::super::person_merge_rewrite::PersonMergeRewrite,
+                &pool,
+                &clock,
+            )
+            .await;
+            reevaluate(&pool, ws, &clock).await;
+
+            assert_eq!(open(&pool, buyers.id).await, [survivor]);
+            assert!(open(&pool, never.id).await.is_empty());
+            assert_eq!(
+                (
+                    count_of(&pool, buyers.id).await,
+                    count_of(&pool, never.id).await
+                ),
+                (1, 0)
+            );
+            let events: Vec<(String, Uuid, String)> = sqlx::query_as(
+                "SELECT name, person_id, properties ->> 'segment_id' FROM events \
+                 WHERE name LIKE 'segment.%' AND trace_id = $1 ORDER BY name",
+            )
+            .bind(merge.trace_id.as_uuid())
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                events,
+                [
+                    (
+                        "segment.entered".to_owned(),
+                        survivor,
+                        buyers.id.to_string()
+                    ),
+                    ("segment.exited".to_owned(), survivor, never.id.to_string()),
+                ]
+            );
+            let started: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = 'flow.enroll'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(started, 1, "the entry starts the flow of Buyers");
+            assert_eq!(dirty(&pool).await, 0);
         })
         .await;
     }
