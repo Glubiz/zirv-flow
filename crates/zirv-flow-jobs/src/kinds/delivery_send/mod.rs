@@ -178,8 +178,8 @@ impl Trail {
     }
 
     /// Ends the message here for a failure before the destination was called. A resumed message
-    /// (its row was `sending` when the attempt began) may have been accepted on an earlier call,
-    /// so it ends unconfirmed instead.
+    /// (its row carried an unconfirmed or in-flight mark) may have been accepted on an earlier
+    /// call, so it ends unconfirmed instead.
     fn fail_unsent(self, resuming: bool, gate: &'static str, reason: &'static str) -> Step {
         if resuming {
             self.unconfirmed(gate, Some(reason))
@@ -429,14 +429,9 @@ async fn decide(
     if !driver.spec().capabilities.channels.contains(&"email") {
         return Ok(trail.fail_unsent(resuming, "rate_limit", "destination_unsupported"));
     }
-    // An earlier call may have been accepted: it lost the server's reply after the whole message
-    // was sent (the unconfirmed mark), or it was cut off before its outcome was known (the
-    // in-flight mark, written before every call). Both are kept on the row (they survive a job
-    // retry), and read once, before this attempt writes its own in-flight mark (gate 9). A crash
-    // after a definitive reply but before the clear there also counts as carried: that is
-    // deliberately conservative.
-    // (`resuming` is true only when one of those marks was set when this run began.)
-    let carried = resuming;
+    // An earlier call may have been accepted (the unconfirmed or in-flight mark set when this run
+    // began, see `run`). A crash after a definitive reply but before the in-flight clear also
+    // counts as resumed: that is deliberately conservative.
     let current_hash = gates::address_hash(&key, &address);
     // An earlier call that may have been accepted went to the stored address. If the person's
     // address changed since, the resumed call must not go to the new one under the same
@@ -444,7 +439,7 @@ async fn decide(
     // the message (a bounce for it must not suppress the new one). A message with no stored hash
     // keeps the earlier behaviour. This ends the message before a rate token is taken: it makes
     // no call, so it must not spend one.
-    if carried
+    if resuming
         && let (Some(current), Some(Some(stored))) = (
             current_hash,
             message_address_hash(&pool, workspace, job.message).await?,
@@ -514,7 +509,7 @@ async fn decide(
     trail.attempts = number;
     // Once an earlier call may have been accepted, nothing that goes wrong after it shows that it
     // was not: every ending but a sent message and a verdict about the address is unconfirmed.
-    let unconfirmed = carried || possibly_accepted;
+    let unconfirmed = resuming || possibly_accepted;
     match done.verdict {
         Verdict::Succeeded { .. } => {
             trail.pass(GateRecord::passed("delivery"));
@@ -2967,8 +2962,8 @@ mod tests {
             let queued = env.queue(person, template, 5).await;
             env.attempt().await.unwrap_err();
             assert_eq!(env.message(queued.message).await.status, "sending");
-            // The fake answers 503 for a lost reply; a 503 alone proves nothing was accepted, so the
-            // lost reply is marked as the real one would be.
+            // The fake's `lose_first_answer` replies 503, which production treats as a refusal, so
+            // set the mark that a lost reply (a timeout or reset) leaves.
             zirv_flow_store::mark_message_unconfirmed(&env.pool, env.ws, queued.message)
                 .await
                 .unwrap();
@@ -3768,6 +3763,8 @@ mod tests {
             let queued = env.queue(person, template, 5).await;
             env.attempt().await.unwrap_err();
             assert_eq!(env.message(queued.message).await.status, "sending");
+            // The fake's `lose_first_answer` replies 503, which production treats as a refusal, so
+            // set the mark that a lost reply (a timeout or reset) leaves.
             zirv_flow_store::mark_message_unconfirmed(&env.pool, env.ws, queued.message)
                 .await
                 .unwrap();
