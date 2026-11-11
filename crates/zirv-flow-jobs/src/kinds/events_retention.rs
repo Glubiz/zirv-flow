@@ -110,6 +110,15 @@ mod tests {
             };
             apply_event_batch(&pool, ws, &key, &[record]).await.unwrap();
         }
+        // A longer override elsewhere keeps the month's partition, so the old row is deleted by
+        // the batch and counted (a wholly expired partition is dropped without counting rows).
+        sqlx::query(
+            "INSERT INTO event_schemas (workspace_id, name, retention_days) VALUES ($1, 'keeper', 2000)",
+        )
+        .bind(ws.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
         let mut new = NewJob::new(EventsRetention::KIND, TraceContext::root(Cause::api("req")));
         new.payload = json!({});
         zirv_flow_store::enqueue(&pool, &new).await.unwrap();
