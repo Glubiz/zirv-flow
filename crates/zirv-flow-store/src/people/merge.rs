@@ -491,10 +491,7 @@ pub async fn rewrite_merged_person(
         }
     }
     total += crate::lists::move_on_merge(connection, workspace, merged, survivor, trace).await?;
-    // The pass the merge's mark scheduled is claimed ahead of this job, so it has usually judged
-    // the survivor without the events that just moved: mark the survivor in the events class, in
-    // the lock order's place of the survivor's mark (after the lists), so the next pass judges it
-    // on them. No other moved row is read by a segment: the lists marked their own class above.
+    // No other moved row is read by a segment: the lists marked their own class above.
     if events_moved > 0 {
         mark_person(
             connection,
