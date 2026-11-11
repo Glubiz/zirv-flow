@@ -17,6 +17,14 @@ use crate::{NewDecision, StoreError, append_decisions};
 /// How many people one recompute batch covers.
 pub const RECOMPUTE_BATCH: i64 = 500;
 
+/// Up to `$4` people after `$3` with a live ledger row holding the key `$2`, in id order. A
+/// record without traits holds no key, so `traits <> '{}'` keeps the same people and walks
+/// `source_records_traits_idx` (0095), the live records that hold traits, in person order.
+pub(super) const PEOPLE_HOLDING_KEY: &str = "SELECT DISTINCT person_id FROM source_records \
+     WHERE workspace_id = $1 AND deleted_at IS NULL AND traits <> '{}' AND traits ? $2 \
+       AND ($3::uuid IS NULL OR person_id > $3) \
+     ORDER BY person_id LIMIT $4";
+
 /// Recomputes `key` for up to [`RECOMPUTE_BATCH`] people who hold a live contribution for it,
 /// in person-id order after `after`, on `connection` (the caller's transaction), all in one
 /// set-based recompute that locks them in id order. A person whose materialized value changed
@@ -33,19 +41,14 @@ pub async fn recompute_trait_batch(
     crate::changes::cache_change_readers(connection, workspace).await?;
     // After the segment guard, before any row lock: see the lock order in `slots`.
     super::slots::lock_slots_shared(connection, workspace).await?;
-    let people: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT DISTINCT person_id FROM source_records \
-         WHERE workspace_id = $1 AND deleted_at IS NULL AND traits ? $2 \
-           AND ($3::uuid IS NULL OR person_id > $3) \
-         ORDER BY person_id LIMIT $4",
-    )
-    .bind(workspace.as_uuid())
-    .bind(key)
-    .bind(after)
-    .bind(RECOMPUTE_BATCH)
-    .fetch_all(&mut *connection)
-    .await
-    .map_err(StoreError::query)?;
+    let people: Vec<Uuid> = sqlx::query_scalar(PEOPLE_HOLDING_KEY)
+        .bind(workspace.as_uuid())
+        .bind(key)
+        .bind(after)
+        .bind(RECOMPUTE_BATCH)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
     let wanted: BTreeMap<Uuid, BTreeSet<String>> = people
         .iter()
         .map(|person| (*person, BTreeSet::from([key.to_owned()])))

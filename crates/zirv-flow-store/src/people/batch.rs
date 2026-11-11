@@ -219,6 +219,17 @@ impl ProfileBatch {
 /// A person's contributions to the keys being recomputed, by key.
 type Contributions = HashMap<String, Vec<Contribution<Value>>>;
 
+/// The live ledger contributions of the people `$2` to the `(person, key)` pairs `$3`, `$4`. A
+/// record with no traits holds no key, so `traits <> '{}'` changes no row of the result; it lets
+/// the read walk `source_records_traits_idx` (0095), the live records that hold traits (22% of
+/// the ledger on the 5x sim), instead of fetching every record of the people.
+pub(super) const LEDGER_CONTRIBUTIONS: &str = "SELECT s.person_id, w.key, s.id, s.source, \
+         s.traits -> w.key \
+     FROM source_records s \
+     JOIN unnest($3::uuid[], $4::text[]) AS w(person_id, key) ON w.person_id = s.person_id \
+     WHERE s.workspace_id = $1 AND s.person_id = ANY($2) AND s.deleted_at IS NULL \
+       AND s.traits <> '{}' AND s.traits ? w.key";
+
 /// Recomputes, from the live ledger rows, the keys `wanted` names of each person, and writes every
 /// person a value or a source of whose keys changed in one statement. One statement locks and
 /// reads the people, in id order; one reads the contributions to those keys only; the definitions
@@ -255,20 +266,14 @@ pub(super) async fn recompute_people(
     definitions
         .load(&mut *connection, workspace, pair_keys.iter().copied())
         .await?;
-    let found: Vec<(Uuid, String, Uuid, String, Value)> = sqlx::query_as(
-        "SELECT s.person_id, w.key, s.id, s.source, s.traits -> w.key \
-         FROM source_records s \
-         JOIN unnest($3::uuid[], $4::text[]) AS w(person_id, key) ON w.person_id = s.person_id \
-         WHERE s.workspace_id = $1 AND s.person_id = ANY($2) AND s.deleted_at IS NULL \
-           AND s.traits ? w.key",
-    )
-    .bind(workspace.as_uuid())
-    .bind(&present)
-    .bind(&pair_people)
-    .bind(&pair_keys)
-    .fetch_all(&mut *connection)
-    .await
-    .map_err(StoreError::query)?;
+    let found: Vec<(Uuid, String, Uuid, String, Value)> = sqlx::query_as(LEDGER_CONTRIBUTIONS)
+        .bind(workspace.as_uuid())
+        .bind(&present)
+        .bind(&pair_people)
+        .bind(&pair_keys)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
     let mut contributions: HashMap<Uuid, Contributions> = HashMap::new();
     for (person, key, record_id, source, entry) in found {
         let (Some(value), Some(at)) = (entry.get("v"), entry.get("at").and_then(Value::as_str))
@@ -938,5 +943,368 @@ pub(crate) mod tests {
             0,
             "{statements:#?}"
         );
+    }
+
+    // The ledger reads that skip the records holding no traits (round 7e2, migration 0095).
+
+    /// Main's three reads before they gained `traits <> '{}'`: the reference the new ones must
+    /// agree with.
+    const MAIN_LEDGER_CONTRIBUTIONS: &str = "SELECT s.person_id, w.key, s.id, s.source, \
+             s.traits -> w.key \
+         FROM source_records s \
+         JOIN unnest($3::uuid[], $4::text[]) AS w(person_id, key) ON w.person_id = s.person_id \
+         WHERE s.workspace_id = $1 AND s.person_id = ANY($2) AND s.deleted_at IS NULL \
+           AND s.traits ? w.key";
+    const MAIN_PERSON_LEDGER_KEYS: &str = "SELECT DISTINCT jsonb_object_keys(traits) \
+         FROM source_records \
+         WHERE workspace_id = $1 AND person_id = $2 AND deleted_at IS NULL";
+    const MAIN_PEOPLE_HOLDING_KEY: &str = "SELECT DISTINCT person_id FROM source_records \
+         WHERE workspace_id = $1 AND deleted_at IS NULL AND traits ? $2 \
+           AND ($3::uuid IS NULL OR person_id > $3) \
+         ORDER BY person_id LIMIT $4";
+
+    /// Every person of `ws`, recomputed one at a time from all their live ledger rows, with or
+    /// without traits, on every key they or their records hold, has nothing left to change.
+    async fn nothing_left_to_recompute(pool: &PgPool, ws: WorkspaceId) {
+        let people: Vec<Uuid> =
+            sqlx::query_scalar("SELECT id FROM people WHERE workspace_id = $1 ORDER BY id")
+                .bind(ws.as_uuid())
+                .fetch_all(pool)
+                .await
+                .unwrap();
+        let mut tx = begin(pool).await.unwrap();
+        for person in people {
+            let keys: Vec<String> = sqlx::query_scalar(
+                "SELECT DISTINCT jsonb_object_keys(traits) FROM source_records \
+                 WHERE person_id = $1 AND deleted_at IS NULL \
+                 UNION SELECT jsonb_object_keys(traits) FROM people WHERE id = $1",
+            )
+            .bind(person)
+            .fetch_all(&mut *tx)
+            .await
+            .unwrap();
+            assert!(
+                !per_person_recompute(&mut tx, ws, person, &keys).await,
+                "{person}"
+            );
+        }
+        commit(tx).await.unwrap();
+    }
+
+    /// Two people with records that hold traits and records that hold none (as a Kafka
+    /// message's record does), then a record whose traits become empty, one whose traits stop
+    /// being empty, an older observation of a key (#584), a record that goes and comes back, and
+    /// a merge that moves both people's records to one. Returns the survivor.
+    async fn mixed_ledger(pool: &PgPool, ws: WorkspaceId) -> Uuid {
+        define(
+            pool,
+            ws,
+            "tier",
+            Precedence::SourcePriority,
+            &["crm", "shop"],
+        )
+        .await;
+        define(pool, ws, "plan", Precedence::First, &[]).await;
+        let (a, b) = (["a@x.example"], ["b@x.example"]);
+        let apply = |records: Vec<ProfileRecord>| async move {
+            apply_profile_batch(pool, ws, &records).await.unwrap();
+        };
+        apply(vec![
+            record("crm", "a", &a, json!({"tier": "gold", "plan": "basic"}), 1),
+            record("shop", "a", &a, json!({}), 1),
+            record("web", "a", &a, json!({"city": "Oslo"}), 2),
+            record("kafka", "a-1", &a, json!({}), 2),
+            record("shop", "b", &b, json!({"tier": "silver", "plan": "pro"}), 1),
+            record("kafka", "b-1", &b, json!({}), 2),
+        ])
+        .await;
+        let (_, traits, _) = person_of(pool, ws, "a@x.example").await;
+        assert_eq!(
+            traits,
+            json!({"tier": "gold", "plan": "basic", "city": "Oslo"})
+        );
+
+        // web/a's traits become empty; shop/a's stop being empty.
+        apply(vec![
+            record("web", "a", &a, json!({"city": null}), 3),
+            record(
+                "shop",
+                "a",
+                &a,
+                json!({"tier": "silver", "city": "Bergen"}),
+                3,
+            ),
+        ])
+        .await;
+        let web: Value = sqlx::query_scalar(
+            "SELECT traits FROM source_records WHERE source = 'web' AND record_key = 'a'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(web, json!({}));
+        let (_, traits, sources) = person_of(pool, ws, "a@x.example").await;
+        assert_eq!(
+            traits,
+            json!({"tier": "gold", "plan": "basic", "city": "Bergen"})
+        );
+        assert_eq!(sources["city"], json!("shop"));
+
+        // Within one record an older observation does not replace a newer one (#584).
+        apply(vec![record("shop", "a", &a, json!({"city": "Paris"}), 2)]).await;
+        let (_, traits, _) = person_of(pool, ws, "a@x.example").await;
+        assert_eq!(traits["city"], json!("Bergen"));
+
+        // crm/a goes: the tier falls to shop and no plan is left. It comes back holding only
+        // what it says now.
+        let trace = TraceContext::root(Cause::api("test"));
+        assert!(
+            crate::people::remove_contribution(pool, ws, "crm", "contacts", "a", &trace)
+                .await
+                .unwrap()
+        );
+        let (_, traits, _) = person_of(pool, ws, "a@x.example").await;
+        assert_eq!(traits, json!({"tier": "silver", "city": "Bergen"}));
+        apply(vec![record("crm", "a", &a, json!({"tier": "platinum"}), 5)]).await;
+        let (_, traits, _) = person_of(pool, ws, "a@x.example").await;
+        assert_eq!(traits, json!({"tier": "platinum", "city": "Bergen"}));
+
+        // A record naming both merges them, and every record of both moves to the survivor.
+        apply(vec![record(
+            "crm",
+            "ab",
+            &["a@x.example", "b@x.example"],
+            json!({"vip": "yes"}),
+            6,
+        )])
+        .await;
+        let (survivor, _, _) = person_of(pool, ws, "a@x.example").await;
+        assert_eq!(person_of(pool, ws, "b@x.example").await.0, survivor);
+        survivor
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn records_that_empty_fill_go_come_back_and_move_keep_precedence_and_observed_time(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "mixed").await;
+
+        let survivor = mixed_ledger(&pool, ws).await;
+
+        let (_, traits, sources) = person_of(&pool, ws, "a@x.example").await;
+        assert_eq!(
+            traits,
+            json!({"tier": "platinum", "plan": "pro", "city": "Bergen", "vip": "yes"})
+        );
+        assert_eq!(
+            sources,
+            json!({"tier": "crm", "plan": "shop", "city": "shop", "vip": "crm"})
+        );
+        let (live, empty): (i64, i64) = sqlx::query_as(
+            "SELECT count(*), count(*) FILTER (WHERE traits = '{}') FROM source_records \
+             WHERE person_id = $1 AND deleted_at IS NULL",
+        )
+        .bind(survivor)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            (live, empty),
+            (7, 3),
+            "the survivor holds both people's records"
+        );
+        nothing_left_to_recompute(&pool, ws).await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_ledger_reads_return_the_rows_they_returned_without_the_traits_predicate(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "mixed").await;
+        mixed_ledger(&pool, ws).await;
+        // Two more people, one holding only records without traits.
+        apply_profile_batch(
+            &pool,
+            ws,
+            &[
+                record("crm", "c", &["c@x.example"], json!({"plan": "basic"}), 1),
+                record("kafka", "c-1", &["c@x.example"], json!({}), 1),
+                record("kafka", "d-1", &["d@x.example"], json!({}), 1),
+                record("kafka", "d-2", &["d@x.example"], json!({}), 2),
+            ],
+        )
+        .await
+        .unwrap();
+        let people: Vec<Uuid> =
+            sqlx::query_scalar("SELECT id FROM people WHERE workspace_id = $1 ORDER BY id")
+                .bind(ws.as_uuid())
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let mut keys: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT jsonb_object_keys(traits) FROM source_records ORDER BY 1",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        keys.push("nobody".to_owned());
+        let (mut pair_people, mut pair_keys) = (Vec::new(), Vec::new());
+        for person in &people {
+            for key in &keys {
+                pair_people.push(*person);
+                pair_keys.push(key.as_str());
+            }
+        }
+        let tombstones: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM source_records WHERE deleted_at IS NOT NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(tombstones, 0, "crm/a came back");
+
+        type Contribution = (Uuid, String, Uuid, String, Value);
+        let (db, everyone) = (&pool, &people);
+        let (pair_people, pair_keys) = (&pair_people, &pair_keys);
+        let contributions = |sql: &'static str| async move {
+            let mut rows: Vec<Contribution> = sqlx::query_as(sql)
+                .bind(ws.as_uuid())
+                .bind(everyone)
+                .bind(pair_people)
+                .bind(pair_keys)
+                .fetch_all(db)
+                .await
+                .unwrap();
+            rows.sort_by(|x, y| (x.0, &x.1, x.2).cmp(&(y.0, &y.1, y.2)));
+            rows
+        };
+        let found = contributions(LEDGER_CONTRIBUTIONS).await;
+        assert_eq!(found, contributions(MAIN_LEDGER_CONTRIBUTIONS).await);
+        // crm/a tier, shop/a tier and city, shop/b tier and plan, crm/ab vip, crm/c plan.
+        assert_eq!(found.len(), 7, "{found:#?}");
+
+        for person in &people {
+            let keys_of = |sql: &'static str| async move {
+                let mut keys: Vec<String> = sqlx::query_scalar(sql)
+                    .bind(ws.as_uuid())
+                    .bind(person)
+                    .fetch_all(db)
+                    .await
+                    .unwrap();
+                keys.sort();
+                keys
+            };
+            assert_eq!(
+                keys_of(super::super::merge::PERSON_LEDGER_KEYS).await,
+                keys_of(MAIN_PERSON_LEDGER_KEYS).await,
+                "{person}"
+            );
+        }
+
+        for key in &keys {
+            let holding = |sql: &'static str| async move {
+                let people: Vec<Uuid> = sqlx::query_scalar(sql)
+                    .bind(ws.as_uuid())
+                    .bind(key)
+                    .bind(None::<Uuid>)
+                    .bind(500_i64)
+                    .fetch_all(db)
+                    .await
+                    .unwrap();
+                people
+            };
+            assert_eq!(
+                holding(super::super::recompute::PEOPLE_HOLDING_KEY).await,
+                holding(MAIN_PEOPLE_HOLDING_KEY).await,
+                "{key}"
+            );
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_ledger_reads_walk_the_traits_index_on_a_ledger_of_mostly_empty_records(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "five-x").await;
+        // 10,000 people with 12 records each, 22% of them holding traits: the shape of the 5x
+        // sim's ledger.
+        sqlx::query(
+            "INSERT INTO people (id, workspace_id) \
+             SELECT md5('p' || p)::uuid, $1 FROM generate_series(0, 9999) p",
+        )
+        .bind(ws.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO source_records \
+                (id, workspace_id, source, stream, record_key, person_id, traits, content_hash) \
+             SELECT gen_random_uuid(), $1, 'source-' || k, 'stream', 'r' || i, \
+                    md5('p' || p)::uuid, \
+                    CASE WHEN k < 2 OR (k = 2 AND p % 25 < 16) THEN jsonb_build_object( \
+                        'plan', jsonb_build_object('v', 'basic', 'at', '2026-11-01T00:00:00Z'), \
+                        'tier', jsonb_build_object('v', 'gold', 'at', '2026-11-01T00:00:00Z')) \
+                    ELSE '{}' END, '\\x00' \
+             FROM (SELECT i, i % 10000 AS p, i / 10000 AS k FROM generate_series(0, 119999) i) g",
+        )
+        .bind(ws.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("ANALYZE source_records")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let people: Vec<Uuid> =
+            sqlx::query_scalar("SELECT md5('p' || (p * 17))::uuid FROM generate_series(0, 99) p")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let (mut pair_people, mut pair_keys) = (Vec::new(), Vec::new());
+        for person in &people {
+            for key in ["plan", "tier", "city"] {
+                pair_people.push(*person);
+                pair_keys.push(key);
+            }
+        }
+        let explain = |sql: &str| format!("EXPLAIN (FORMAT JSON) {sql}");
+
+        let lookup: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(explain(LEDGER_CONTRIBUTIONS)))
+            .bind(ws.as_uuid())
+            .bind(&people)
+            .bind(&pair_people)
+            .bind(&pair_keys)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let keys: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(explain(
+            super::super::merge::PERSON_LEDGER_KEYS,
+        )))
+        .bind(ws.as_uuid())
+        .bind(people[0])
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let holding: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(explain(
+            super::super::recompute::PEOPLE_HOLDING_KEY,
+        )))
+        .bind(ws.as_uuid())
+        .bind("plan")
+        .bind(None::<Uuid>)
+        .bind(500_i64)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        for (read, plan) in [("lookup", lookup), ("keys", keys), ("holding", holding)] {
+            let plan = plan.to_string();
+            assert!(
+                plan.contains("source_records_traits_idx")
+                    && !plan.contains("source_records_person_idx"),
+                "{read}: {plan}"
+            );
+        }
     }
 }

@@ -1,0 +1,30 @@
+-- The ledger reads that need only the records holding traits (round 7e2): a batch's trait
+-- recompute (`people/batch.rs`, the key lookup), a merge's read of the survivor's keys
+-- (`people/merge.rs`) and `traits.recompute` (`people/recompute.rs`). Each walked
+-- `source_records_person_idx` and fetched every live record of its people from the heap, while on
+-- the 5x sim 78% of the records hold no traits (a Kafka message's record carries identifiers
+-- only): the key lookup fetched 3,736 rows to use 122. This index lists only the live records
+-- that hold traits; each read adds `traits <> '{}'`, which changes none of its rows (a record
+-- without traits holds no key), so the planner can prove the index's predicate.
+--
+-- `source_records_person_idx` stays: the merge's move of a person's records, the batch lock of
+-- a merging owner's records, the orphan check, the identity release, the profile and the
+-- privacy export and delete read every record of a person, with or without traits.
+--
+-- Write cost: an insert or a non-HOT update adds an entry here only when the new row is live and
+-- holds traits (none for a Kafka message's record). `traits` now takes part in the HOT check, so
+-- an update that changes a record's traits is never heap-only; an update that leaves `traits`
+-- alone (`last_seen_run`) still can be.
+--
+-- UPGRADE COST: the build takes SHARE on `source_records` until the migration commits, which
+-- blocks every write to the ledger (the drain's profile records, sync and Kafka units, imports,
+-- contacts) for the build; reads go on. On the 6M-row test ledger of round 7e2 (2.0 GB heap,
+-- 1.32M rows indexed into 35 MB) it took 1.0 to 1.2 s. The file does not build concurrently: it
+-- would run under the migration advisory lock, and a second migrator waiting for that lock
+-- deadlocks a concurrent build. A populated deployment can build it first, outside a
+-- transaction, under the same name; the migration then finds it and does nothing (drop an
+-- invalid index a failed build leaves, then retry):
+--     CREATE INDEX CONCURRENTLY source_records_traits_idx ON source_records (workspace_id, person_id)
+--         WHERE deleted_at IS NULL AND traits <> '{}'::jsonb;
+CREATE INDEX IF NOT EXISTS source_records_traits_idx ON source_records (workspace_id, person_id)
+    WHERE deleted_at IS NULL AND traits <> '{}'::jsonb;

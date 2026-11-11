@@ -27,6 +27,12 @@ pub const REWRITE_JOB_KIND: &str = "person.merge.rewrite";
 /// Rows re-pointed per statement by the rewrite.
 pub const REWRITE_BATCH: i64 = 1000;
 
+/// The trait keys the live ledger rows of the person `$2` hold. Only a record that holds traits
+/// has a key, so `traits <> '{}'` reads those alone, through `source_records_traits_idx` (0095).
+pub(super) const PERSON_LEDGER_KEYS: &str = "SELECT DISTINCT jsonb_object_keys(traits) \
+     FROM source_records \
+     WHERE workspace_id = $1 AND person_id = $2 AND deleted_at IS NULL AND traits <> '{}'";
+
 /// Person-scoped columns that name a merged person and are re-pointed in batches rather than
 /// in the merge transaction, with the columns that identify a row within its workspace. The
 /// event table is partitioned, so its rows are found by `(occurred_at, id)`.
@@ -246,17 +252,14 @@ pub(super) async fn merge_people(
     .await
     .map_err(StoreError::query)?;
 
-    let keys: BTreeSet<String> = sqlx::query_scalar(
-        "SELECT DISTINCT jsonb_object_keys(traits) FROM source_records \
-         WHERE workspace_id = $1 AND person_id = $2 AND deleted_at IS NULL",
-    )
-    .bind(workspace.as_uuid())
-    .bind(survivor)
-    .fetch_all(&mut *connection)
-    .await
-    .map_err(StoreError::query)?
-    .into_iter()
-    .collect();
+    let keys: BTreeSet<String> = sqlx::query_scalar(PERSON_LEDGER_KEYS)
+        .bind(workspace.as_uuid())
+        .bind(survivor)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(StoreError::query)?
+        .into_iter()
+        .collect();
     let wanted = BTreeMap::from([(survivor, keys)]);
     if recompute_people(connection, workspace, &wanted, definitions)
         .await?
