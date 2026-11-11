@@ -343,3 +343,89 @@ async fn held_identities(
     }
     Ok(held)
 }
+
+#[cfg(test)]
+mod tests {
+    use sqlx::PgPool;
+    use zirv_flow_core::{Cause, Slug, WorkspaceName};
+
+    use super::*;
+    use crate::people::{normalize_identifiers, resolve_person};
+    use crate::{begin, commit, create_workspace};
+
+    fn identifiers(pairs: &[(&str, &str)]) -> Vec<Identifier> {
+        let raw: Vec<(String, String)> = pairs
+            .iter()
+            .map(|(kind, value)| ((*kind).to_owned(), (*value).to_owned()))
+            .collect();
+        normalize_identifiers(&raw).unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_plan_resolves_a_run_as_its_records_one_after_another(pool: PgPool) {
+        let name = WorkspaceName::parse("plan").unwrap();
+        let slug = Slug::parse("plan").unwrap();
+        let ws = create_workspace(&pool, &name, &slug).await.unwrap().id;
+        let trace = TraceContext::root(Cause::api("test"));
+        let known = identifiers(&[("email", "ada@example.com")]);
+        let other = identifiers(&[("phone", "+4512345678")]);
+        let mut tx = begin(&pool).await.unwrap();
+        let mut batch = ProfileBatch::default();
+        let ada = resolve_person(&mut tx, ws, &known, None, &trace, &mut batch)
+            .await
+            .unwrap()
+            .person_id;
+        let bob = resolve_person(&mut tx, ws, &other, None, &trace, &mut batch)
+            .await
+            .unwrap()
+            .person_id;
+        commit(tx).await.unwrap();
+
+        let new = identifiers(&[("anonymous_id", "a1")]);
+        let grown = identifiers(&[("anonymous_id", "a1"), ("email", "new@example.com")]);
+        let both = identifiers(&[("email", "ada@example.com"), ("phone", "+4512345678")]);
+        let sets: Vec<&[Identifier]> = vec![&known, &new, &grown, &both];
+        let mut tx = begin(&pool).await.unwrap();
+        let mut batch = ProfileBatch::default();
+        let mut marks = MarkBuffer::default();
+        let mut plan = Planned::load(&mut tx, ws, &sets, &mut batch).await.unwrap();
+
+        let first = plan.resolve(&known, &batch, &trace, &mut marks).unwrap();
+        assert_eq!((first.person_id, first.created), (ada, false));
+        let made = plan.resolve(&new, &batch, &trace, &mut marks).unwrap();
+        assert!(made.created);
+        // The person the run made a record ago, gaining an identifier.
+        let again = plan.resolve(&grown, &batch, &trace, &mut marks).unwrap();
+        assert_eq!((again.person_id, again.created), (made.person_id, false));
+        // Two people's identifiers need a merge: left to `resolve_person`, and nothing changes.
+        assert!(plan.resolve(&both, &batch, &trace, &mut marks).is_none());
+        plan.write(&mut tx, ws, &mut batch).await.unwrap();
+        commit(tx).await.unwrap();
+
+        let held: Vec<(Uuid, String)> = sqlx::query_as(
+            "SELECT person_id, kind || ':' || value FROM identities \
+             WHERE workspace_id = $1 ORDER BY kind, value",
+        )
+        .bind(ws.as_uuid())
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let person = made.person_id;
+        assert_eq!(
+            held,
+            [
+                (person, "anonymous_id:a1".to_owned()),
+                (ada, "email:ada@example.com".to_owned()),
+                (person, "email:new@example.com".to_owned()),
+                (bob, "phone:+4512345678".to_owned()),
+            ]
+        );
+        let people: i64 = sqlx::query_scalar("SELECT count(*) FROM people WHERE workspace_id = $1")
+            .bind(ws.as_uuid())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(people, 3);
+    }
+}

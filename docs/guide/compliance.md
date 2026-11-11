@@ -226,6 +226,7 @@ shows stored values only when the viewer may see them and asks for `reveal=true`
 are the redacted ones: a dropped or hashed property stays dropped or hashed. A rejected event's
 sample is cut to the properties the published schema declares non-PII. A real-person template
 preview or a flow test that shows personal data needs the grant for an editor.
+A segment condition on a personal trait or event property is held to `eq`, `exists` and `not_exists` (a trait window start, a sum, min, max or average of a property and an ordered or prefix filter are refused with 403 `pii_trait_not_searchable` or `pii_property_not_explorable`) for a caller without the grant, in preview, create and update, since a count or member list would otherwise reveal the value one probe at a time. A segment saved earlier with such a condition by someone with the grant keeps evaluating and its members stay masked; an editor without the grant cannot save a new version that still holds it.
 *Limit:* masking is display only. Data sent to destinations, exports and event forwards is not masked.
 
 ### Audit

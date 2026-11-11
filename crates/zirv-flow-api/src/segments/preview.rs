@@ -1,6 +1,7 @@
 //! Segment preview (architecture 8.3 and 7.5): the count and a sample of the people an unsaved
 //! definition matches, and how old the data behind them is. It runs on the primary, in one
-//! read-only snapshot under a fixed 20 second statement timeout.
+//! read-only snapshot under a fixed 20 second statement timeout, on the explorer pool and with at
+//! most two previews running per caller.
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -13,7 +14,7 @@ use uuid::Uuid;
 use zirv_flow_segments::{Param, Query, compile, parse_and_validate};
 use zirv_flow_store::{DataAge, SqlParam, SqlQuery, StoreError};
 
-use super::{catalog_of, issues_error};
+use super::{catalog_of, issues_error, refuse_personal_probes};
 use crate::AppState;
 use crate::auth::{Need, Principal, authorize, may_view_pii, path_id};
 use crate::json::ApiJson;
@@ -146,6 +147,11 @@ pub(super) fn read_error(error: StoreError) -> ApiError {
 /// Previews a definition without saving it: how many people match, a sample of them and the age
 /// of the data. A definition that does not validate is 422 `segment_invalid` with its issues. A
 /// preview that runs past its time limit is 503 with the code `segment_preview_timeout`.
+/// It uses the explorer's connections, and a caller may run at most two at once: when none is free
+/// for a second, or the caller is at the limit, the answer is 503 `explorer_busy`.
+/// A caller who may not see personal values cannot preview a condition that orders or prefixes a
+/// personal trait or event property (403 `pii_trait_not_searchable` or `pii_property_not_explorable`);
+/// `eq`, `exists` and `not_exists` stay allowed.
 /// Identifier values in the sample are shown to the owner, workspace admins and `admin` keys and
 /// masked for everyone else.
 #[utoipa::path(
@@ -158,10 +164,10 @@ pub(super) fn read_error(error: StoreError) -> ApiError {
     responses(
         (status = 200, description = "The count, a sample and the data age", body = PreviewBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
-        (status = 403, description = "A key without the read scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "A key without the read scope, a missing CSRF token, or a condition that orders or prefixes a personal trait or event property for a caller who may not see personal values (`code` is `pii_trait_not_searchable` or `pii_property_not_explorable`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "A definition that does not validate (`code` is `segment_invalid`, with `issues`), or a sample size out of range", body = Problem, content_type = "application/problem+json"),
-        (status = 503, description = "The preview ran past its time limit (`code` is `segment_preview_timeout`)", body = Problem, content_type = "application/problem+json")
+        (status = 503, description = "The preview ran past its time limit (`code` is `segment_preview_timeout`), or every explorer connection stayed busy for a second, or the caller already has previews running (`code` is `explorer_busy`; see `Retry-After`)", body = Problem, content_type = "application/problem+json", headers(("Retry-After" = u64, description = "Whole seconds to wait before retrying `explorer_busy`")))
     ),
     security(("session" = []), ("api_key" = []))
 )]
@@ -175,10 +181,23 @@ pub(crate) async fn preview(
     let size = sample_size(body.sample_size)?;
     let reveal = may_view_pii(&state, &principal, workspace.id).await;
 
-    let mut tx =
-        zirv_flow_store::begin_segment_snapshot(&state.pool, state.segment_preview_timeout)
-            .await
-            .map_err(read_error)?;
+    let _slot = state
+        .try_preview_slot(principal.caller_id())
+        .ok_or_else(ApiError::explorer_busy)?;
+    // Previews run on the explorer's connections: they are the heaviest reads a viewer can start,
+    // and on the main pool a burst of them starved ingest, sign-in and readiness.
+    let mut tx = zirv_flow_store::begin_segment_snapshot(
+        state.explorer_pool(),
+        state.segment_preview_timeout,
+    )
+    .await
+    .map_err(|error| {
+        if error.is_pool_timeout() {
+            ApiError::explorer_busy()
+        } else {
+            read_error(error)
+        }
+    })?;
     let compiled_at = state.clock.now(&mut tx).await.map_err(read_error)?;
     let (catalog, storage) = catalog_of(
         zirv_flow_store::segment_catalog(&mut tx, workspace.id)
@@ -186,6 +205,7 @@ pub(crate) async fn preview(
             .map_err(read_error)?,
     );
     let definition = parse_and_validate(&body.definition, &catalog).map_err(issues_error)?;
+    refuse_personal_probes(&mut tx, workspace.id, &definition.root, reveal).await?;
     let compiled = compile(&definition, &catalog, &storage, compiled_at).map_err(issues_error)?;
     let (count, sample) = zirv_flow_store::run_segment_preview(
         &mut tx,

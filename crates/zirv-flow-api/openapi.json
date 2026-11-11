@@ -18252,7 +18252,7 @@
             }
           },
           "403": {
-            "description": "A key without the write scope, or a missing CSRF token",
+            "description": "A key without the write scope, a missing CSRF token, or a condition that orders or prefixes a personal trait or event property for a caller who may not see personal values (`code` is `pii_trait_not_searchable` or `pii_property_not_explorable`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -18317,7 +18317,7 @@
         "tags": [
           "segments"
         ],
-        "summary": "Previews a definition without saving it: how many people match, a sample of them and the age\nof the data. A definition that does not validate is 422 `segment_invalid` with its issues. A\npreview that runs past its time limit is 503 with the code `segment_preview_timeout`.\nIdentifier values in the sample are shown to the owner, workspace admins and `admin` keys and\nmasked for everyone else.",
+        "summary": "Previews a definition without saving it: how many people match, a sample of them and the age\nof the data. A definition that does not validate is 422 `segment_invalid` with its issues. A\npreview that runs past its time limit is 503 with the code `segment_preview_timeout`.\nIt uses the explorer's connections, and a caller may run at most two at once: when none is free\nfor a second, or the caller is at the limit, the answer is 503 `explorer_busy`.\nA caller who may not see personal values cannot preview a condition that orders or prefixes a\npersonal trait or event property (403 `pii_trait_not_searchable` or `pii_property_not_explorable`);\n`eq`, `exists` and `not_exists` stay allowed.\nIdentifier values in the sample are shown to the owner, workspace admins and `admin` keys and\nmasked for everyone else.",
         "operationId": "preview_segment",
         "parameters": [
           {
@@ -18373,7 +18373,7 @@
             }
           },
           "403": {
-            "description": "A key without the read scope, or a missing CSRF token",
+            "description": "A key without the read scope, a missing CSRF token, or a condition that orders or prefixes a personal trait or event property for a caller who may not see personal values (`code` is `pii_trait_not_searchable` or `pii_property_not_explorable`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -18413,7 +18413,17 @@
             }
           },
           "503": {
-            "description": "The preview ran past its time limit (`code` is `segment_preview_timeout`)",
+            "description": "The preview ran past its time limit (`code` is `segment_preview_timeout`), or every explorer connection stayed busy for a second, or the caller already has previews running (`code` is `explorer_busy`; see `Retry-After`)",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 0
+                },
+                "description": "Whole seconds to wait before retrying `explorer_busy`"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -18583,7 +18593,7 @@
             }
           },
           "403": {
-            "description": "A key without the write scope, or a missing CSRF token",
+            "description": "A key without the write scope, a missing CSRF token, or a condition that orders or prefixes a personal trait or event property for a caller who may not see personal values (`code` is `pii_trait_not_searchable` or `pii_property_not_explorable`)",
             "content": {
               "application/problem+json": {
                 "schema": {

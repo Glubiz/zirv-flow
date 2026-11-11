@@ -598,7 +598,7 @@ Requests wait for a connection, answer slowly or time out; `/readyz` can time ou
 ### Confirm
 
 1. Metrics: `zirv_flow_db_pool_connections{state="in_use"}` against
-   `zirv_flow_db_pool_max_connections` (the `pool="explorer"` series is the explorer pool, whose
+   `zirv_flow_db_pool_max_connections` (the `pool="explorer"` series is the explorer pool, which also serves segment previews, whose
    exhaustion answers `explorer_busy`, not slowness elsewhere), and the p99 of `zirv_flow_http_request_duration_seconds`.
 2. Probe:
    `psql "$DATABASE_URL" -c "SELECT state, wait_event_type, count(*) FROM pg_stat_activity GROUP BY 1, 2 ORDER BY 3 DESC"`.

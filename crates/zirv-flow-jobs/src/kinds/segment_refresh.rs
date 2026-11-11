@@ -1022,8 +1022,8 @@ mod tests {
             while between_tries < 5 {
                 let seen: Vec<(String, Option<String>, String)> = sqlx::query_as(
                     "SELECT state, backend_xmin::text, query FROM pg_stat_activity \
-                     WHERE datname = current_database() AND pid <> pg_backend_pid() \
-                       AND pid <> $1 AND xact_start IS NOT NULL",
+                     WHERE datname = current_database() AND backend_type = 'client backend' \
+                       AND pid <> pg_backend_pid() AND pid <> $1 AND xact_start IS NOT NULL",
                 )
                 .bind(holder_pid)
                 .fetch_all(&pool)

@@ -97,6 +97,14 @@ impl Principal {
         }
     }
 
+    /// The id of the user or key making the request, to count what one caller has running.
+    pub(crate) fn caller_id(&self) -> uuid::Uuid {
+        match self {
+            Self::Session(session) => session.user.id.as_uuid(),
+            Self::Key(key) => key.key.id.as_uuid(),
+        }
+    }
+
     pub(crate) fn context(&self) -> admin::Context {
         let context = match self {
             Self::Session(session) => {

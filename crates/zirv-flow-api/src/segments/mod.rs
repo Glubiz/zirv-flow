@@ -3,6 +3,7 @@
 
 pub(crate) mod crud;
 pub(crate) mod explain;
+mod guard;
 pub(crate) mod members;
 pub(crate) mod preview;
 mod schema;
@@ -15,6 +16,7 @@ use zirv_flow_store::{CatalogSnapshot, SegmentError, SegmentRef};
 
 use crate::problem::{ApiError, SegmentIssueProblem, SegmentRefProblem};
 
+pub(crate) use guard::refuse_personal_probes;
 pub(crate) use schema::{
     NODE as SEGMENT_NODE_SCHEMA, PROPERTY_FILTER as SEGMENT_FILTER_SCHEMA, SegmentSchemas,
 };
@@ -22,6 +24,10 @@ pub(crate) use schema::{
 /// How long a preview may run before PostgreSQL cancels it (architecture 8.3). It is fixed, with no
 /// setting, and sits above the 15 s target of an aggregate preview (architecture 19).
 pub(crate) const PREVIEW_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// How many previews one caller may have running at once. A preview is the heaviest read a viewer can
+/// start, and it runs on the explorer pool, so one caller cannot take every connection of it.
+pub(crate) const MAX_PREVIEWS_PER_CALLER: usize = 2;
 
 /// The compiler's catalog and trait storage from the store's snapshot. Only slots in state
 /// `ready` are in the storage, and they come from the same snapshot as the catalog.

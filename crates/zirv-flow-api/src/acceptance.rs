@@ -16059,4 +16059,313 @@ email,b@example.com,
         expected.sort();
         assert_eq!(codes, expected);
     }
+
+    // ---- Personal values must not leak through segment conditions ----
+
+    fn pii_probes() -> Vec<(&'static str, Value)> {
+        vec![
+            (
+                "trait prefix",
+                json!({"v": 1, "trait": "ssn", "op": "starts_with", "value": "12"}),
+            ),
+            (
+                "trait set",
+                json!({"v": 1, "trait": "ssn", "op": "in", "value": ["123-45-6789"]}),
+            ),
+            (
+                "property range",
+                json!({"v": 1, "event": "order",
+                       "where": [{"prop": "total", "op": "gt", "value": 1}]}),
+            ),
+            (
+                "aggregate",
+                json!({"v": 1, "event": "order",
+                       "agg": {"fn": "sum", "prop": "total", "op": "gt", "value": 1}}),
+            ),
+        ]
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_pii_condition_beyond_eq_and_exists_is_refused_without_access_to_values(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        define_trait(&pool, &ws, "ssn", true).await;
+        define_trait(&pool, &ws, "plan", false).await;
+        define_order(&pool, &ws).await;
+        let (viewer_id, viewer) = user(&pool, &router, "viewer@example.com").await;
+        add_member(&router, &owner, &ws, viewer_id, "viewer").await;
+        let (editor_id, editor) = user(&pool, &router, "editor@example.com").await;
+        add_member(&router, &owner, &ws, editor_id, "editor").await;
+        let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
+        let preview = format!("{}/preview", segments_uri(&ws));
+        let clean = make_segment(
+            &router,
+            Auth::Session(&editor),
+            &ws,
+            "Clean",
+            plan_is("pro"),
+        )
+        .await;
+        assert_eq!(clean.status, StatusCode::CREATED, "{:?}", clean.body);
+        let clean_id = clean.body["id"].as_str().unwrap().to_owned();
+
+        for (label, probe) in pii_probes() {
+            let body = json!({"definition": probe});
+            for who in [Auth::Session(&viewer), Auth::Key(&read_key)] {
+                let reply = call(&router, "POST", &preview, Some(body.clone()), who).await;
+                assert_eq!(
+                    reply.status,
+                    StatusCode::FORBIDDEN,
+                    "{label}: {:?}",
+                    reply.body
+                );
+            }
+            let created = make_segment(
+                &router,
+                Auth::Session(&editor),
+                &ws,
+                &format!("Probe {label}"),
+                probe.clone(),
+            )
+            .await;
+            assert_eq!(
+                created.status,
+                StatusCode::FORBIDDEN,
+                "{label}: {:?}",
+                created.body
+            );
+            let updated = call(
+                &router,
+                "PATCH",
+                &format!("{}/{clean_id}", segments_uri(&ws)),
+                Some(json!({"definition": probe})),
+                Auth::Session(&editor),
+            )
+            .await;
+            assert_eq!(
+                updated.status,
+                StatusCode::FORBIDDEN,
+                "{label}: {:?}",
+                updated.body
+            );
+        }
+        let probes = pii_probes();
+        let trait_probe = call(
+            &router,
+            "POST",
+            &preview,
+            Some(json!({"definition": probes[0].1})),
+            Auth::Session(&viewer),
+        )
+        .await;
+        assert_eq!(trait_probe.body["code"], "pii_trait_not_searchable");
+        let property_probe = call(
+            &router,
+            "POST",
+            &preview,
+            Some(json!({"definition": probes[2].1})),
+            Auth::Key(&read_key),
+        )
+        .await;
+        assert_eq!(property_probe.body["code"], "pii_property_not_explorable");
+
+        let allowed = [
+            json!({"v": 1, "trait": "ssn", "op": "eq", "value": "123-45-6789"}),
+            json!({"v": 1, "trait": "ssn", "op": "exists"}),
+            json!({"v": 1, "trait": "ssn", "op": "not_exists"}),
+            json!({"v": 1, "trait": "plan", "op": "starts_with", "value": "p"}),
+            json!({"v": 1, "event": "order",
+                   "where": [{"prop": "total", "op": "exists"}]}),
+            json!({"v": 1, "event": "order",
+                   "where": [{"prop": "sku", "op": "starts_with", "value": "a"}]}),
+            json!({"v": 1, "event": "order", "agg": {"fn": "count", "op": "gte", "value": 1}}),
+        ];
+        for definition in allowed {
+            let body = json!({"definition": definition});
+            for who in [Auth::Session(&viewer), Auth::Key(&read_key)] {
+                let reply = call(&router, "POST", &preview, Some(body.clone()), who).await;
+                assert_eq!(
+                    reply.status,
+                    StatusCode::OK,
+                    "{definition}: {:?}",
+                    reply.body
+                );
+            }
+        }
+        // Someone who may see personal values is not held to the rule.
+        for (label, probe) in pii_probes() {
+            let reply = call(
+                &router,
+                "POST",
+                &preview,
+                Some(json!({"definition": probe})),
+                Auth::Session(&owner),
+            )
+            .await;
+            assert_eq!(reply.status, StatusCode::OK, "{label}: {:?}", reply.body);
+            let saved = make_segment(
+                &router,
+                Auth::Session(&owner),
+                &ws,
+                &format!("Owner {label}"),
+                probe,
+            )
+            .await;
+            assert_eq!(
+                saved.status,
+                StatusCode::CREATED,
+                "{label}: {:?}",
+                saved.body
+            );
+        }
+    }
+
+    // ---- Segment previews share no connections with ingest (A5) ----
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_preview_waits_no_longer_than_the_acquire_timeout_and_answers_explorer_busy(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let explorer_pool =
+            zirv_flow_store::sized_like(&pool, 1, 0, std::time::Duration::from_millis(100));
+        let router = router(
+            AppState::new(pool.clone(), Arc::new(String::new))
+                .with_hmac_root(&zirv_flow_core::HmacRoot::bootstrap_from(
+                    &zirv_flow_core::MasterKey::generate(),
+                ))
+                .with_explorer_pool(explorer_pool.clone()),
+        );
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        define_plan(&pool, &ws).await;
+        let (_, key) = make_key(&router, &owner, &ws, &["read", "ingest"]).await;
+        let uri = format!("{}/preview", segments_uri(&ws));
+        let held = loop {
+            if let Ok(connection) = explorer_pool.acquire().await {
+                break connection;
+            }
+        };
+
+        let started = std::time::Instant::now();
+        let busy = call(
+            &router,
+            "POST",
+            &uri,
+            Some(json!({"definition": plan_is("pro")})),
+            Auth::Key(&key),
+        )
+        .await;
+        let waited = started.elapsed();
+        let ingested = call(
+            &router,
+            "POST",
+            "/api/v1/ingest/track",
+            Some(json!({"userId": "u-1", "event": "seen"})),
+            Auth::Key(&key),
+        )
+        .await;
+        drop(held);
+        let free = call(
+            &router,
+            "POST",
+            &uri,
+            Some(json!({"definition": plan_is("pro")})),
+            Auth::Key(&key),
+        )
+        .await;
+
+        assert_eq!(
+            busy.status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{:?}",
+            busy.body
+        );
+        assert_eq!(busy.body["code"], "explorer_busy");
+        assert!(busy.headers.contains_key(header::RETRY_AFTER));
+        assert!(
+            waited < std::time::Duration::from_secs(3),
+            "waited {waited:?}"
+        );
+        assert_eq!(ingested.status, StatusCode::ACCEPTED, "{:?}", ingested.body);
+        assert_eq!(free.status, StatusCode::OK, "{:?}", free.body);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_caller_at_the_preview_limit_is_refused_while_another_caller_is_served(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let router = router(
+            AppState::new(pool.clone(), Arc::new(String::new))
+                .with_hmac_root(&zirv_flow_core::HmacRoot::bootstrap_from(
+                    &zirv_flow_core::MasterKey::generate(),
+                ))
+                .with_max_previews_per_caller(1),
+        );
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        define_plan(&pool, &ws).await;
+        let (_, first_key) = make_key(&router, &owner, &ws, &["read"]).await;
+        let (_, second_key) = make_key(&router, &owner, &ws, &["read"]).await;
+        let uri = format!("{}/preview", segments_uri(&ws));
+        let body = json!({"definition": plan_is("pro")});
+        // A lock on the people table holds the first preview in its count query.
+        let mut blocker = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE people IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+
+        let running = call(
+            &router,
+            "POST",
+            &uri,
+            Some(body.clone()),
+            Auth::Key(&first_key),
+        );
+        let others = async {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let refused = call(
+                &router,
+                "POST",
+                &uri,
+                Some(body.clone()),
+                Auth::Key(&first_key),
+            )
+            .await;
+            let other_caller = tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                call(
+                    &router,
+                    "POST",
+                    &uri,
+                    Some(body.clone()),
+                    Auth::Key(&second_key),
+                ),
+            )
+            .await;
+            drop(blocker);
+            (refused, other_caller)
+        };
+        let (first, (refused, other_caller)) = tokio::join!(running, others);
+        let after = call(&router, "POST", &uri, Some(body), Auth::Key(&first_key)).await;
+
+        assert_eq!(first.status, StatusCode::OK, "{:?}", first.body);
+        assert_eq!(
+            refused.status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{:?}",
+            refused.body
+        );
+        assert_eq!(refused.body["code"], "explorer_busy");
+        assert!(refused.headers.contains_key(header::RETRY_AFTER));
+        // The other caller is not refused for the first one's slot: it waits on the same lock.
+        assert!(other_caller.is_err(), "the other caller was answered early");
+        assert_eq!(after.status, StatusCode::OK, "{:?}", after.body);
+    }
 }

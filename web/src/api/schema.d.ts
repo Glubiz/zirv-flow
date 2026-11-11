@@ -2850,6 +2850,11 @@ export interface paths {
          * Previews a definition without saving it: how many people match, a sample of them and the age
          *     of the data. A definition that does not validate is 422 `segment_invalid` with its issues. A
          *     preview that runs past its time limit is 503 with the code `segment_preview_timeout`.
+         *     It uses the explorer's connections, and a caller may run at most two at once: when none is free
+         *     for a second, or the caller is at the limit, the answer is 503 `explorer_busy`.
+         *     A caller who may not see personal values cannot preview a condition that orders or prefixes a
+         *     personal trait or event property (403 `pii_trait_not_searchable` or `pii_property_not_explorable`);
+         *     `eq`, `exists` and `not_exists` stay allowed.
          *     Identifier values in the sample are shown to the owner, workspace admins and `admin` keys and
          *     masked for everyone else.
          */
@@ -24183,7 +24188,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description A key without the write scope, or a missing CSRF token */
+            /** @description A key without the write scope, a missing CSRF token, or a condition that orders or prefixes a personal trait or event property for a caller who may not see personal values (`code` is `pii_trait_not_searchable` or `pii_property_not_explorable`) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -24273,7 +24278,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description A key without the read scope, or a missing CSRF token */
+            /** @description A key without the read scope, a missing CSRF token, or a condition that orders or prefixes a personal trait or event property for a caller who may not see personal values (`code` is `pii_trait_not_searchable` or `pii_property_not_explorable`) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -24309,9 +24314,11 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The preview ran past its time limit (`code` is `segment_preview_timeout`) */
+            /** @description The preview ran past its time limit (`code` is `segment_preview_timeout`), or every explorer connection stayed busy for a second, or the caller already has previews running (`code` is `explorer_busy`; see `Retry-After`) */
             503: {
                 headers: {
+                    /** @description Whole seconds to wait before retrying `explorer_busy` */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -24417,7 +24424,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description A key without the write scope, or a missing CSRF token */
+            /** @description A key without the write scope, a missing CSRF token, or a condition that orders or prefixes a personal trait or event property for a caller who may not see personal values (`code` is `pii_trait_not_searchable` or `pii_property_not_explorable`) */
             403: {
                 headers: {
                     [name: string]: unknown;
