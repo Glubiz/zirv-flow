@@ -117,6 +117,11 @@ pub struct SyncBatch<'a> {
     pub checkpoint: &'a Value,
     /// Also write the checkpoint to the stream, for the next run.
     pub incremental: bool,
+    /// The run sweeps once its read is complete (a full refresh or a reconciliation): the batch
+    /// marks the records it saw with the run (`last_seen_run`), which keeps them from the sweep.
+    /// Only that sweep reads the mark, so the batch of any other run looks its records up and
+    /// writes none of them.
+    pub sweeps: bool,
     /// Keep or refuse each record and each event alone, as in a savepoint of its own, so one
     /// poison record is rejected as `apply_failed` instead of stopping the run.
     pub singly: bool,
@@ -873,7 +878,11 @@ async fn join_lists(
     Ok(true)
 }
 
-/// Sets `last_seen_run` on the live ledger rows of `keys` and returns their ids by key.
+/// Returns the ids by key of the live ledger rows of `keys`, and sets their `last_seen_run` when
+/// the run sweeps ([`SyncBatch::sweeps`]). The sweep compares the mark with its own run, so the
+/// mark of a run that never sweeps (incremental, a Kafka stream) has no reader. Writing it anyway
+/// rewrote every record a unit had just inserted or updated: one more row version per record,
+/// with an entry in every index unless the update was heap-only.
 async fn mark_seen(
     tx: &mut crate::Tx,
     batch: &SyncBatch<'_>,
@@ -882,20 +891,28 @@ async fn mark_seen(
     if keys.is_empty() {
         return Ok(HashMap::new());
     }
-    let rows: Vec<(String, Uuid)> = sqlx::query_as(
+    let sql = if batch.sweeps {
         "UPDATE source_records SET last_seen_run = $5 \
          WHERE workspace_id = $1 AND source = $2 AND stream = $3 AND record_key = ANY($4) \
            AND deleted_at IS NULL \
-         RETURNING record_key, id",
-    )
-    .bind(batch.workspace.as_uuid())
-    .bind(batch.source)
-    .bind(batch.stream)
-    .bind(keys)
-    .bind(batch.run_id)
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(StoreError::query)?;
+         RETURNING record_key, id"
+    } else {
+        "SELECT record_key, id FROM source_records \
+         WHERE workspace_id = $1 AND source = $2 AND stream = $3 AND record_key = ANY($4) \
+           AND deleted_at IS NULL"
+    };
+    let mut query = sqlx::query_as(sql)
+        .bind(batch.workspace.as_uuid())
+        .bind(batch.source)
+        .bind(batch.stream)
+        .bind(keys);
+    if batch.sweeps {
+        query = query.bind(batch.run_id);
+    }
+    let rows: Vec<(String, Uuid)> = query
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(StoreError::query)?;
     Ok(rows.into_iter().collect())
 }
 
@@ -1913,6 +1930,7 @@ mod tests {
             offsets: &[],
             checkpoint: &checkpoint,
             incremental: false,
+            sweeps: false,
             singly: false,
         };
         let up = |key: &str, occurrence: Option<&str>| SyncUpsert {
@@ -2746,6 +2764,93 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(live, [("k0".to_owned(), Some(fx.run.id))]);
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_batch_of_a_run_that_does_not_sweep_marks_no_record_and_still_names_each(
+        pool: PgPool,
+    ) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let fx = fixture(&pool, "one", "incremental").await;
+            let source = fx.source_id.to_string();
+            // A batch of a run that sweeps marks k0 and k1 with its run.
+            let first = many(&fx, 0, 2);
+            let cp1 = json!({"offset": 2});
+            commit_sync_batch(&pool, &batch(&fx, &source, &first, &cp1))
+                .await
+                .unwrap();
+            // The next run does not sweep: k1 again, unchanged; k2, new; k0, refused.
+            let second = next_run(&pool, &fx).await;
+            let again = many(&second, 1, 3);
+            let refused = [SyncReject {
+                record_key: "k0".into(),
+                ..reject()
+            }];
+            let cp2 = json!({"offset": 4});
+
+            let outcome = commit_sync_batch(
+                &pool,
+                &SyncBatch {
+                    rejected: &refused,
+                    sweeps: false,
+                    ..batch(&second, &source, &again, &cp2)
+                },
+            )
+            .await
+            .unwrap();
+
+            let BatchOutcome::Committed(progress) = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert_eq!(
+                (
+                    progress.batch.applied,
+                    progress.batch.unchanged,
+                    progress.batch.rejected
+                ),
+                (1, 1, 1)
+            );
+            let marks: Vec<(String, Option<Uuid>)> = sqlx::query_as(
+                "SELECT record_key, last_seen_run FROM source_records ORDER BY record_key",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                marks,
+                [
+                    ("k0".to_owned(), Some(fx.run.id)),
+                    ("k1".to_owned(), Some(fx.run.id)),
+                    ("k2".to_owned(), None),
+                ]
+            );
+            // The batch still looked its records up: the reject of k0 and the applied k2 name
+            // their ledger rows.
+            let ids: HashMap<String, Uuid> =
+                sqlx::query_as::<_, (String, Uuid)>("SELECT record_key, id FROM source_records")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .collect();
+            let named: std::collections::BTreeSet<(String, String)> = sqlx::query_as(
+                "SELECT outcome, subject_ids ->> 'source_record' FROM decision_records \
+                 WHERE action = 'sync.record'",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .collect();
+            let expected = [("applied", "k0"), ("applied", "k1"), ("applied", "k2")]
+                .into_iter()
+                .chain([("rejected", "k0")])
+                .map(|(outcome, key)| (outcome.to_owned(), ids[key].to_string()))
+                .collect();
+            assert_eq!(named, expected);
         })
         .await;
     }

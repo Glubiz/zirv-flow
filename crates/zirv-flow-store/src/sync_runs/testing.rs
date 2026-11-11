@@ -219,6 +219,8 @@ pub(crate) fn batch<'a>(
         offsets: &[],
         checkpoint,
         incremental: false,
+        // As a full refresh: the batch marks what it saw.
+        sweeps: true,
         singly: false,
     }
 }
