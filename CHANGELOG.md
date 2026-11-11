@@ -15,3 +15,14 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.282.0 (2026-11-11)
+
+### Fixes
+
+- re-evaluate the merge survivor on the events its rewrite moved
+
+### Chores
+
+- drop the rewrite comment that repeats its doc comment
+- bump 0.282.0
+
