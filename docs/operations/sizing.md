@@ -99,6 +99,10 @@ limit, E be `explorer.max_connections` (default 4), C be `worker.concurrency` pl
   so a burst of them waits for its E connections and never takes one from ingest.
   A query that waits one second for a connection answers `503` with the code
   `explorer_busy` and `Retry-After`.
+  Segment previews run on the same pool, so they take from the E connections too and never
+  from ingest, sign-in or readiness. One caller (a user or an API key) may have two previews
+  running at once; a third, or one that finds no free connection within the second, answers
+  the same `503` `explorer_busy`. The limit is fixed and has no setting.
   `explorer.max_exports` (default 1) caps the CSV exports streaming at once per process; a
   further export answers the same `503`. Raise it only after measuring ingest with that many
   exports open, since concurrent exports have collapsed ingest throughput.

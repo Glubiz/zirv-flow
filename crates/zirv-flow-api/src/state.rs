@@ -60,6 +60,9 @@ pub struct AppState {
     explorer_pool: Option<PgPool>,
     /// One permit per CSV export that may stream at once in this process.
     export_permits: Arc<tokio::sync::Semaphore>,
+    /// The segment previews each caller has running, and how many one caller may run at once.
+    preview_callers: Arc<Mutex<hashbrown::HashMap<uuid::Uuid, usize>>>,
+    max_previews_per_caller: usize,
     /// How long a segment preview may run before PostgreSQL cancels it (architecture 8.3).
     pub(crate) segment_preview_timeout: Duration,
     /// The clock segment paths and the webhook signature window read; a test fixes it.
@@ -128,6 +131,8 @@ impl AppState {
             explorer: ExplorerLimits::default(),
             explorer_pool: None,
             export_permits: Arc::new(tokio::sync::Semaphore::new(1)),
+            preview_callers: Arc::default(),
+            max_previews_per_caller: crate::segments::MAX_PREVIEWS_PER_CALLER,
             segment_preview_timeout: crate::segments::PREVIEW_TIMEOUT,
             clock: Clock::default(),
             stop: None,
@@ -265,6 +270,30 @@ impl AppState {
         Arc::clone(&self.export_permits).try_acquire_owned().ok()
     }
 
+    /// How many segment previews one caller may run at once; a test changes it.
+    pub fn with_max_previews_per_caller(mut self, max: usize) -> Self {
+        self.max_previews_per_caller = max;
+        self
+    }
+
+    /// A slot for one preview of `caller`, or `None` while the caller already has the allowed
+    /// number running. The slot frees itself when dropped.
+    pub(crate) fn try_preview_slot(&self, caller: uuid::Uuid) -> Option<PreviewSlot> {
+        let mut running = self
+            .preview_callers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let count = running.entry(caller).or_insert(0);
+        if *count >= self.max_previews_per_caller {
+            return None;
+        }
+        *count += 1;
+        Some(PreviewSlot {
+            callers: Arc::clone(&self.preview_callers),
+            caller,
+        })
+    }
+
     /// The explorer's query timeouts and row limits.
     pub fn with_explorer_limits(mut self, limits: ExplorerLimits) -> Self {
         self.explorer = limits;
@@ -353,6 +382,26 @@ impl AppState {
     }
 }
 
+/// One running segment preview of a caller; dropping it frees the slot.
+pub(crate) struct PreviewSlot {
+    callers: Arc<Mutex<hashbrown::HashMap<uuid::Uuid, usize>>>,
+    caller: uuid::Uuid,
+}
+
+impl Drop for PreviewSlot {
+    fn drop(&mut self) {
+        let mut running = self
+            .callers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(count) = running.get_mut(&self.caller) {
+            *count -= 1;
+            if *count == 0 {
+                running.remove(&self.caller);
+            }
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -18,10 +18,10 @@ use zirv_flow_store::{
     SegmentPatch, SegmentVersion,
 };
 
-use super::{catalog_of, issues_error, name_taken, segment_error};
+use super::{catalog_of, issues_error, name_taken, refuse_personal_probes, segment_error};
 use crate::AppState;
 use crate::admin::{self, Context};
-use crate::auth::{Need, Principal, authorize, path_id};
+use crate::auth::{Need, Principal, authorize, may_view_pii, path_id};
 use crate::consent::bool_param;
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem, SegmentIssueProblem};
@@ -241,11 +241,13 @@ async fn prepare(
     connection: &mut zirv_flow_store::PgConnection,
     workspace: WorkspaceId,
     definition: Value,
+    reveal: bool,
 ) -> Result<NewSegmentVersion, ApiError> {
     let (catalog, storage) =
         catalog_of(zirv_flow_store::segment_catalog(connection, workspace).await?);
     let now = zirv_flow_store::database_now(&mut *connection).await?;
     let parsed = parse_and_validate(&definition, &catalog).map_err(issues_error)?;
+    refuse_personal_probes(connection, workspace, &parsed.root, reveal).await?;
     let compiled = compile(&parsed, &catalog, &storage, now).map_err(issues_error)?;
     Ok(NewSegmentVersion {
         definition,
@@ -262,6 +264,7 @@ pub(crate) async fn create_segment(
     workspace: WorkspaceId,
     created_by: Option<UserId>,
     request: CreateSegmentRequest,
+    reveal: bool,
 ) -> Result<(Segment, SegmentVersion), ApiError> {
     let name = check_name(&request.name)?.to_owned();
     check_description(&request.description)?;
@@ -270,7 +273,7 @@ pub(crate) async fn create_segment(
         .map_or(Ok(DEFAULT_CADENCE_MINUTES), check_cadence)?;
     let mut tx = zirv_flow_store::begin(pool).await?;
     zirv_flow_store::lock_segments(&mut tx, workspace).await?;
-    let content = prepare(&mut tx, workspace, request.definition).await?;
+    let content = prepare(&mut tx, workspace, request.definition, reveal).await?;
     let new = NewSegment {
         id: Uuid::now_v7(),
         name,
@@ -309,6 +312,7 @@ pub(crate) async fn update_segment(
     id: Uuid,
     updated_by: Option<UserId>,
     request: UpdateSegmentRequest,
+    reveal: bool,
 ) -> Result<(Segment, SegmentVersion), ApiError> {
     let mut fields: Vec<&'static str> = Vec::new();
     let name = request
@@ -337,7 +341,7 @@ pub(crate) async fn update_segment(
     let mut tx = zirv_flow_store::begin(pool).await?;
     zirv_flow_store::lock_segments(&mut tx, workspace).await?;
     let version = match request.definition {
-        Some(definition) => Some(prepare(&mut tx, workspace, definition).await?),
+        Some(definition) => Some(prepare(&mut tx, workspace, definition, reveal).await?),
         None => None,
     };
     let patch = SegmentPatch {
@@ -539,7 +543,7 @@ pub(crate) async fn list(
     responses(
         (status = 201, description = "The new segment with its first version", body = SegmentDetailBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
-        (status = 403, description = "A key without the write scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "A key without the write scope, a missing CSRF token, or a condition that orders or prefixes a personal trait or event property for a caller who may not see personal values (`code` is `pii_trait_not_searchable` or `pii_property_not_explorable`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "A live segment has that name", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "An invalid name, description or cadence, or a definition that does not validate (`code` is `segment_invalid`, with `issues`)", body = Problem, content_type = "application/problem+json")
@@ -553,12 +557,14 @@ pub(crate) async fn create(
     ApiJson(body): ApiJson<CreateSegmentRequest>,
 ) -> Result<(StatusCode, Json<SegmentDetailBody>), ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
+    let reveal = may_view_pii(&state, &principal, workspace.id).await;
     let (segment, version) = create_segment(
         &state.pool,
         &principal.context(),
         workspace.id,
         principal.user_id(),
         body,
+        reveal,
     )
     .await?;
     Ok((
@@ -629,7 +635,7 @@ pub(crate) async fn get(
     responses(
         (status = 200, description = "The updated segment with its current version", body = SegmentDetailBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
-        (status = 403, description = "A key without the write scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "A key without the write scope, a missing CSRF token, or a condition that orders or prefixes a personal trait or event property for a caller who may not see personal values (`code` is `pii_trait_not_searchable` or `pii_property_not_explorable`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or segment, or no access", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "Another live segment has that name, or the segment is archived (`code` is `segment_archived`)", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "An invalid field, no field at all, a definition that does not validate (`segment_invalid`, with `issues`), or a definition that closes a reference cycle (`segment_cycle`, with `cycle`)", body = Problem, content_type = "application/problem+json")
@@ -643,6 +649,7 @@ pub(crate) async fn update(
     ApiJson(body): ApiJson<UpdateSegmentRequest>,
 ) -> Result<Json<SegmentDetailBody>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
+    let reveal = may_view_pii(&state, &principal, workspace.id).await;
     let (segment, version) = update_segment(
         &state.pool,
         &principal.context(),
@@ -650,6 +657,7 @@ pub(crate) async fn update(
         path_id(&id)?,
         principal.user_id(),
         body,
+        reveal,
     )
     .await?;
     Ok(Json(SegmentDetailBody::new(&segment, &version)))
