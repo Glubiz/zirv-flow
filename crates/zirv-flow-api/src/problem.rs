@@ -291,6 +291,17 @@ impl ApiError {
         }
     }
 
+    /// A value holds a number or nesting PostgreSQL stores but the drain cannot read back
+    /// (`zirv_flow_core::readable`). `place` says where.
+    pub(crate) fn unreadable(place: &str, why: zirv_flow_core::readable::Unreadable) -> Self {
+        use zirv_flow_core::readable::{MAX_DEPTH, Unreadable};
+        let rule = match why {
+            Unreadable::NumberOutOfRange => "a number is beyond the supported range".to_owned(),
+            Unreadable::TooDeep => format!("nesting is deeper than {MAX_DEPTH} levels"),
+        };
+        Self::bad_request(format!("{place}: {rule}")).with_code(why.code())
+    }
+
     /// An unexpected failure; the cause is deliberately not shown to the caller.
     pub(crate) fn internal() -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal error")

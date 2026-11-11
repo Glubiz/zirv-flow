@@ -634,6 +634,11 @@ as `contains_nul`, with the path to it as the field. A NUL in another field fail
 own check, for example `invalid_message_id`. A signed webhook payload with a NUL in any key or
 string value is refused as `contains_nul` too, and a CSV or sync record that holds one becomes a
 reject of its own row instead of failing the run.
+A request body, or a signed webhook payload, with a number of `1e308` or beyond in size
+(`number_out_of_range`) or arrays and objects nested deeper than 100 levels (`too_deep`) is a 400
+and nothing is stored: the database keeps such a value, but the drain could not read it back. A
+stored row that cannot be read anyway ends as one `apply_failed` reject and the rest of its batch
+applies; an erasure treats it as naming nobody.
 
 **Limits.** A body over `ingest.max_request_bytes` is a 413 and more than `ingest.max_batch_items`
 items is a 400 (`too_many_items`). Each key has a token bucket of `ingest.burst_per_key` items

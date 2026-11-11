@@ -17,6 +17,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_core::mapping::walk_path;
 use zirv_flow_core::no_nul::{CONTAINS_NUL, find_nul_in_members};
+use zirv_flow_core::readable::find_unreadable_in_members;
 use zirv_flow_core::signature::Scheme;
 use zirv_flow_core::{SecretId, SecretPurpose};
 use zirv_flow_store::HookReceive;
@@ -198,6 +199,12 @@ async fn accept(state: &AppState, id: &str, request: Request) -> Result<(), Refu
                         .collect(),
                     reason: CONTAINS_NUL.to_owned(),
                 }]),
+            "invalid_payload",
+        ));
+    }
+    if let Some(why) = find_unreadable_in_members(&payload) {
+        return Err(Refusal::new(
+            ApiError::unreadable("the payload", why),
             "invalid_payload",
         ));
     }

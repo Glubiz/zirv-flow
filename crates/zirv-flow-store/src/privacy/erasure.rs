@@ -596,8 +596,8 @@ async fn lock_inbox(
     let mut after = 0_i64;
     let mut locked = Vec::new();
     loop {
-        let rows: Vec<(i64, Value)> = sqlx::query_as(
-            "SELECT id, item FROM ingest_inbox WHERE workspace_id = $1 AND id > $2 \
+        let rows: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT id, item::text FROM ingest_inbox WHERE workspace_id = $1 AND id > $2 \
              ORDER BY id LIMIT $3 FOR UPDATE",
         )
         .bind(workspace.as_uuid())
@@ -613,7 +613,8 @@ async fn lock_inbox(
         locked.extend(rows.iter().map(|(id, item)| {
             LockedRow {
                 id: *id,
-                hashes: item_identifiers(item)
+                // An item that does not parse names nobody; the drain rejects it.
+                hashes: item_identifiers(&serde_json::from_str(item).unwrap_or(Value::Null))
                     .into_iter()
                     .filter_map(|(kind, value)| Identifier::parse(&kind, &value).ok())
                     .map(|identifier| identifier_hash(key, &identifier).to_vec())
@@ -1176,6 +1177,37 @@ mod tests {
                 .unwrap()
             };
             assert!(unknown.is_none());
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_pending_row_serde_json_cannot_read_back_does_not_block_the_erasure(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let Seeded { ws, person, .. } = seed_everything(&pool).await;
+            let request = request(&pool, ws, person).await;
+            // The largest double, which jsonb takes and prints back as 309 digits.
+            sqlx::query(
+                "INSERT INTO ingest_inbox                     (workspace_id, api_key_id, kind, item, message_id, received_at, trace_id,                      affinity)                  SELECT workspace_id, api_key_id, kind,                     jsonb_set(item, '{properties}', '{\"x\": 1.7976931348623157e308}'::jsonb),                     'poison', received_at, trace_id, affinity                  FROM ingest_inbox LIMIT 1",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            let before = inbox_messages(&pool).await;
+            assert!(before.iter().any(|id| id == "poison"), "{before:?}");
+
+            let outcome = erase(&pool, ws, request.id).await;
+
+            assert!(matches!(
+                outcome,
+                EraseOutcome::Completed {
+                    person_found: true,
+                    ..
+                }
+            ));
+            // The drain, not the erasure, rejects the row it cannot read.
+            assert!(inbox_messages(&pool).await.contains(&"poison".to_owned()));
         })
         .await;
     }
