@@ -15,3 +15,12 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.281.1 (2026-11-11)
+
+### Chores
+
+- bump the workspace to 0.280.1
+- read only client backends in the refresh-lock tests
+- leave the append wakes out of the drain equivalence
+- test the batched event path in the files that hold it
+
