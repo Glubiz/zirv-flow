@@ -205,12 +205,7 @@ pub(crate) async fn preview(
             .map_err(read_error)?,
     );
     let definition = parse_and_validate(&body.definition, &catalog).map_err(issues_error)?;
-    if !reveal {
-        let clear = zirv_flow_store::explain_clear_fields(&mut tx, workspace.id)
-            .await
-            .map_err(read_error)?;
-        refuse_personal_probes(&definition.root, &clear, reveal)?;
-    }
+    refuse_personal_probes(&mut tx, workspace.id, &definition.root, reveal).await?;
     let compiled = compile(&definition, &catalog, &storage, compiled_at).map_err(issues_error)?;
     let (count, sample) = zirv_flow_store::run_segment_preview(
         &mut tx,

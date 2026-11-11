@@ -12,24 +12,27 @@ use zirv_flow_store::ClearFields;
 
 use crate::problem::ApiError;
 
-/// Whether `op` can be answered without telling the caller anything about the value.
 fn is_presence_or_equality(op: Op) -> bool {
     matches!(op, Op::Eq | Op::Exists | Op::NotExists)
 }
 
 /// Refuses a condition on a personal trait or event property that is not `eq`, `exists` or
 /// `not_exists`: 403 `pii_trait_not_searchable` for a trait, 403 `pii_property_not_explorable`
-/// for an event property. A caller who may see personal values passes `reveal` and is never
-/// refused.
-pub(crate) fn refuse_personal_probes(
+/// for an event property. A caller who may see personal values (`reveal`) is never refused, and
+/// nothing is read for them.
+pub(crate) async fn refuse_personal_probes(
+    connection: &mut zirv_flow_store::PgConnection,
+    workspace: zirv_flow_core::WorkspaceId,
     node: &Node,
-    clear: &ClearFields,
     reveal: bool,
 ) -> Result<(), ApiError> {
     if reveal {
         return Ok(());
     }
-    check(node, clear)
+    let clear = zirv_flow_store::explain_clear_fields(connection, workspace)
+        .await
+        .map_err(super::preview::read_error)?;
+    check(node, &clear)
 }
 
 fn check(node: &Node, clear: &ClearFields) -> Result<(), ApiError> {
@@ -113,7 +116,11 @@ mod tests {
 
     fn verdict(definition: Value, reveal: bool) -> Result<(), ApiError> {
         let parsed = parse_and_validate(&definition, &catalog()).expect("valid");
-        refuse_personal_probes(&parsed.root, &clear(), reveal)
+        if reveal {
+            Ok(())
+        } else {
+            check(&parsed.root, &clear())
+        }
     }
 
     #[test]

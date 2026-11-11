@@ -247,10 +247,7 @@ async fn prepare(
         catalog_of(zirv_flow_store::segment_catalog(connection, workspace).await?);
     let now = zirv_flow_store::database_now(&mut *connection).await?;
     let parsed = parse_and_validate(&definition, &catalog).map_err(issues_error)?;
-    if !reveal {
-        let clear = zirv_flow_store::explain_clear_fields(connection, workspace).await?;
-        refuse_personal_probes(&parsed.root, &clear, reveal)?;
-    }
+    refuse_personal_probes(connection, workspace, &parsed.root, reveal).await?;
     let compiled = compile(&parsed, &catalog, &storage, now).map_err(issues_error)?;
     Ok(NewSegmentVersion {
         definition,
