@@ -35,6 +35,10 @@ use crate::people::{
 };
 use crate::{NewDecision, PgPool, StoreError, append_decision, begin, commit};
 
+mod group;
+
+pub(crate) use group::apply_event_group;
+
 const MAX_MESSAGE_ID_CHARS: usize = 256;
 
 /// One event, as the event path receives it.
@@ -145,9 +149,9 @@ pub(crate) struct EventBatch {
     /// The prefetched ids that already had an event, with the event they repeat. Their repeats
     /// were counted when they were prefetched.
     known_duplicates: HashMap<String, Uuid>,
-    /// The ids this batch claimed after a prefetch: a later record with one is a repeat the
-    /// prefetch could not see.
-    claimed: HashSet<String>,
+    /// The ids this batch claimed after a prefetch, with the event each claimed: a later record
+    /// with one is a repeat the prefetch could not see.
+    claimed: HashMap<String, Uuid>,
 }
 
 impl EventBatch {
@@ -219,7 +223,7 @@ impl EventBatch {
         if let Some(original) = self.known_duplicates.get(message_id) {
             return Ok(Some(*original));
         }
-        if self.prefetched.contains(message_id) && !self.claimed.contains(message_id) {
+        if self.prefetched.contains(message_id) && !self.claimed.contains_key(message_id) {
             return Ok(None);
         }
         count_duplicate(connection, workspace, message_id).await
@@ -311,12 +315,26 @@ pub(crate) async fn apply_event_record(
         crate::changes::cache_change_readers(connection, workspace).await?;
     }
     let outcome = judge_event_record(connection, workspace, key, batch, record).await?;
+    observe(connection, workspace, key, batch, record, &outcome).await?;
+    Ok(outcome)
+}
+
+/// What follows an outcome in the batch: an accepted event may wake a waiting enrollment, and
+/// while the workspace is watched the outcome gets its debugger feed row.
+async fn observe(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    key: &HmacKey,
+    batch: &mut EventBatch,
+    record: &EventRecord,
+    outcome: &EventOutcome,
+) -> Result<(), StoreError> {
     if let EventOutcome::Accepted {
         event_id,
         person_id,
         flags,
         ..
-    } = &outcome
+    } = outcome
         && !flags.contains(&EventFlag::NoTriggers)
     {
         batch.arrivals.push(Arrival {
@@ -326,10 +344,10 @@ pub(crate) async fn apply_event_record(
         });
     }
     if batch.watched(connection, workspace).await? {
-        feed_outcome(connection, workspace, key, batch, record, &outcome).await?;
+        feed_outcome(connection, workspace, key, batch, record, outcome).await?;
         batch.fed = true;
     }
-    Ok(outcome)
+    Ok(())
 }
 
 /// Writes the debugger feed row of one outcome: the redacted properties, never the raw ones.
@@ -545,7 +563,7 @@ async fn judge_event_record(
             return Err(StoreError::retryable_race());
         }
         if !batch.prefetched.is_empty() {
-            batch.claimed.insert(message_id.clone());
+            batch.claimed.insert(message_id.clone(), event_id);
         }
     }
 

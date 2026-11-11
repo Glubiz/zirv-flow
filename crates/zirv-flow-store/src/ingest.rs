@@ -28,8 +28,8 @@ use zirv_flow_core::{Cause, HmacKey, TraceContext, TraceId, WorkspaceId};
 
 use crate::contacts::{lock_contacts, replace_stored_fields};
 use crate::events::{
-    DroppedTraits, EventBatch, EventOutcome, EventRecord, FailedItem, Refusal, apply_event_record,
-    insert_dropped_traits_reject, insert_record_rejects, reject_apply_failed,
+    DroppedTraits, EventBatch, EventOutcome, EventRecord, FailedItem, Refusal, apply_event_group,
+    apply_event_record, insert_dropped_traits_reject, insert_record_rejects, reject_apply_failed,
 };
 use crate::jobs::{DEFAULT_MAX_ATTEMPTS, NOTIFY_CHANNEL};
 use crate::lists::ListCounts;
@@ -1100,6 +1100,25 @@ fn tally_event(outcome: &mut DrainOutcome, result: &EventOutcome) {
     outcome.count("track", label);
 }
 
+/// Applies the event rows of `run` together ([`apply_event_group`]), tallies them and empties it.
+async fn apply_event_run(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    key: &HmacKey,
+    events: &mut EventBatch,
+    run: &mut Vec<&EventRecord>,
+    outcome: &mut DrainOutcome,
+) -> Result<(), StoreError> {
+    if run.is_empty() {
+        return Ok(());
+    }
+    for result in apply_event_group(connection, workspace, key, events, run).await? {
+        tally_event(outcome, &result);
+    }
+    run.clear();
+    Ok(())
+}
+
 /// Applies up to `limit` of the workspace's oldest inbox rows of `shard` in id order and
 /// deletes them, all in one transaction. Concurrent drainers skip each other's locked rows, so a row is
 /// never applied twice, and a crash leaves every row in place.
@@ -1125,6 +1144,31 @@ pub(crate) async fn drain_batch_using(
     key: &HmacKey,
     limit: i64,
     cursors: &TakeCursors,
+) -> Result<DrainOutcome, StoreError> {
+    drain_batch_as(pool, workspace, shard, key, limit, cursors, Events::Batched).await
+}
+
+/// How a drain batch applies its event rows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Events {
+    /// Each run of consecutive event rows through [`apply_event_group`]: a statement per kind of
+    /// write for the run, and [`apply_event_record`] only for a row it cannot judge in memory.
+    Batched,
+    /// Each event row through [`apply_event_record`] on its own, as before the batched path: the
+    /// reference the tests hold the batched path to.
+    #[cfg(test)]
+    OneByOne,
+}
+
+/// [`drain_batch_using`] applying its event rows as `mode` says.
+async fn drain_batch_as(
+    pool: &PgPool,
+    workspace: WorkspaceId,
+    shard: Shard,
+    key: &HmacKey,
+    limit: i64,
+    cursors: &TakeCursors,
+    mode: Events,
 ) -> Result<DrainOutcome, StoreError> {
     let mut tx = begin(pool).await?;
     crate::changes::cache_change_readers(&mut tx, workspace).await?;
@@ -1159,13 +1203,23 @@ pub(crate) async fn drain_batch_using(
             }),
         )
         .await?;
-    for (row, mapped) in rows.iter().zip(mapped) {
+    // The event rows between two other rows go through the batched path together; any other row
+    // reads what the rows before it wrote, so the run before it is written first.
+    let mut run: Vec<&EventRecord> = Vec::new();
+    for (row, mapped) in rows.iter().zip(&mapped) {
+        if let Mapped::Event(record) = mapped
+            && mode == Events::Batched
+        {
+            run.push(record);
+            continue;
+        }
+        apply_event_run(&mut tx, workspace, key, &mut events, &mut run, &mut outcome).await?;
         match mapped {
             Mapped::Profile(record) => {
                 let result = apply_profile_record_into(
                     &mut tx,
                     workspace,
-                    &record,
+                    record,
                     &mut events.profiles,
                     &mut events.decisions,
                 )
@@ -1174,7 +1228,7 @@ pub(crate) async fn drain_batch_using(
                 tally_profile(&mut outcome, "identify", &result);
             }
             Mapped::Contact(record) => {
-                let result = apply_contact_into(&mut tx, workspace, &record, &mut events).await?;
+                let result = apply_contact_into(&mut tx, workspace, record, &mut events).await?;
                 // Rolls the batch back, so that the row is isolated and rejected singly.
                 if !dropped_fields(&result).is_empty() {
                     return Err(StoreError::poison());
@@ -1183,21 +1237,22 @@ pub(crate) async fn drain_batch_using(
             }
             Mapped::Event(record) => {
                 let result =
-                    apply_event_record(&mut tx, workspace, key, &mut events, &record).await?;
+                    apply_event_record(&mut tx, workspace, key, &mut events, record).await?;
                 tally_event(&mut outcome, &result);
             }
             Mapped::Hook(HookMapped::Record(record)) => {
                 let result =
-                    apply_hook_record(&mut tx, workspace, key, &mut events, &mut lists, &record)
+                    apply_hook_record(&mut tx, workspace, key, &mut events, &mut lists, record)
                         .await?;
                 tally_hook(&mut outcome, &result);
             }
             Mapped::Hook(HookMapped::Rejected(rejected)) => {
-                reject_hook(&mut tx, workspace, row, &rejected).await?;
+                reject_hook(&mut tx, workspace, row, rejected).await?;
                 outcome.count("webhook", "rejected");
             }
         }
     }
+    apply_event_run(&mut tx, workspace, key, &mut events, &mut run, &mut outcome).await?;
     events.finish(&mut tx, workspace).await?;
     delete_rows(&mut tx, workspace, &rows).await?;
     crate::changes::request_reevaluation(&mut tx, workspace).await?;
@@ -4243,6 +4298,608 @@ mod tests {
                     .any(|bucket| cursors.start(ws, &[bucket]).after[0] > 0),
                 "the takes read from their cursors"
             );
+        })
+        .await;
+    }
+
+    /// The API key both arms of a comparison append with, so their causes match.
+    const SAME_KEY: Uuid = Uuid::from_u128(0x5eed_0000_0000_7000_8000_0000_0000_0001);
+
+    fn user(id: &str) -> (&'static str, String) {
+        ("external:user_id", id.to_owned())
+    }
+
+    fn visitor(id: &str) -> (&'static str, String) {
+        ("anonymous_id", id.to_owned())
+    }
+
+    fn mail(id: &str) -> (&'static str, String) {
+        ("email", format!("{id}@x.example"))
+    }
+
+    fn item(
+        identifiers: &[(&str, String)],
+        message_id: &str,
+        at: OffsetDateTime,
+        payload: IngestPayload,
+    ) -> IngestItem {
+        IngestItem {
+            identifiers: identifiers
+                .iter()
+                .map(|(kind, value)| ((*kind).to_owned(), value.clone()))
+                .collect(),
+            timestamp: Some(at),
+            message_id: Some(message_id.to_owned()),
+            payload,
+        }
+    }
+
+    fn seen(
+        identifiers: &[(&str, String)],
+        message_id: &str,
+        name: &str,
+        at: OffsetDateTime,
+    ) -> IngestItem {
+        let properties = if name == "checked" {
+            json!({"n": "text"})
+        } else {
+            json!({"path": "/"})
+        };
+        item(
+            identifiers,
+            message_id,
+            at,
+            IngestPayload::Track {
+                event: name.to_owned(),
+                properties: object(properties),
+            },
+        )
+    }
+
+    fn told(
+        identifiers: &[(&str, String)],
+        message_id: &str,
+        traits: Value,
+        at: OffsetDateTime,
+    ) -> IngestItem {
+        item(
+            identifiers,
+            message_id,
+            at,
+            IngestPayload::Identify {
+                traits: object(traits),
+            },
+        )
+    }
+
+    async fn append_as(pool: &PgPool, ws: WorkspaceId, trace: &TraceContext, items: &[IngestItem]) {
+        let appended = append_inbox(pool, ws, SAME_KEY, trace, items)
+            .await
+            .unwrap();
+        assert_eq!(appended, items.len());
+    }
+
+    /// A workspace whose segments read every change class, with a `page` schema that allows
+    /// anything and a `checked` schema that blocks a non-integer `n`.
+    async fn compared_workspace(pool: &PgPool, slug: &str) -> WorkspaceId {
+        let ws = workspace(pool, slug).await;
+        crate::segments::tests_support::segment_reading(
+            pool,
+            ws,
+            zirv_flow_core::segment::ChangeClasses::from_bits(63),
+        )
+        .await;
+        for (name, mode, properties) in [
+            ("page", zirv_flow_core::events::EventMode::Allow, json!([])),
+            (
+                "checked",
+                zirv_flow_core::events::EventMode::Block,
+                json!([{"name": "n", "type": "integer"}]),
+            ),
+        ] {
+            crate::create_event_schema(
+                pool,
+                ws,
+                &crate::NewEventSchema {
+                    name: name.into(),
+                    mode,
+                    description: String::new(),
+                    properties: serde_json::from_value(properties).unwrap(),
+                },
+            )
+            .await
+            .unwrap();
+            let mut tx = begin(pool).await.unwrap();
+            crate::publish_schema_draft(&mut tx, ws, name, None)
+                .await
+                .unwrap();
+            commit(tx).await.unwrap();
+        }
+        ws
+    }
+
+    /// Every row a drain writes for `ws`, with each id replaced by the order it first appears in:
+    /// first the tables with a key of their own (identities by kind and value, ledger rows by
+    /// their key, events, dedupe rows and rejects by message id, decisions in the order made),
+    /// then the rest sorted. Two workspaces that ended the same, ids aside, read the same.
+    async fn settled(pool: &PgPool, ws: WorkspaceId) -> Vec<(&'static str, Vec<String>)> {
+        fn relabel(value: &mut Value, labels: &mut HashMap<Uuid, usize>, assign: bool) {
+            match value {
+                Value::String(text) => {
+                    if let Ok(id) = Uuid::parse_str(text) {
+                        let next = labels.len();
+                        *text = match labels.get(&id) {
+                            Some(label) => format!("#{label}"),
+                            None if assign => {
+                                labels.insert(id, next);
+                                format!("#{next}")
+                            }
+                            None => "#?".to_owned(),
+                        };
+                    }
+                }
+                Value::Array(items) => {
+                    for item in items {
+                        relabel(item, labels, assign);
+                    }
+                }
+                Value::Object(map) => {
+                    for item in map.values_mut() {
+                        relabel(item, labels, assign);
+                    }
+                }
+                _ => {}
+            }
+        }
+        const VOLATILE: &str = "- 'workspace_id' - 'created_at' - 'updated_at' - 'changed_at' \
+             - 'recorded_at' - 'received_at'";
+        let keyed = [
+            ("identities", "t.kind, t.value"),
+            ("source_records", "t.source, t.stream, t.record_key"),
+            ("events", "t.message_id"),
+            ("event_dedupe", "t.message_id"),
+            ("ingest_rejects", "t.message_id, t.reason"),
+            ("decision_records", "t.recorded_at, t.id"),
+        ];
+        let loose = [
+            "person_merges",
+            "identity_conflicts",
+            "person_changes",
+            "people",
+        ];
+        let mut labels: HashMap<Uuid, usize> = HashMap::new();
+        let mut state = Vec::new();
+        for (table, order) in keyed
+            .iter()
+            .map(|(t, o)| (*t, Some(*o)))
+            .chain(loose.iter().map(|t| (*t, None)))
+        {
+            let rows: Vec<Value> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "SELECT to_jsonb(t) {VOLATILE} FROM {table} t WHERE t.workspace_id = $1 \
+                 ORDER BY {}",
+                order.unwrap_or("1")
+            )))
+            .bind(ws.as_uuid())
+            .fetch_all(pool)
+            .await
+            .unwrap();
+            let mut rows: Vec<Value> = if order.is_some() {
+                rows
+            } else {
+                let mut sorted: Vec<(String, Value)> = rows
+                    .into_iter()
+                    .map(|row| {
+                        let mut known = row.clone();
+                        relabel(&mut known, &mut labels, false);
+                        (known.to_string(), row)
+                    })
+                    .collect();
+                sorted.sort_by(|a, b| a.0.cmp(&b.0));
+                sorted.into_iter().map(|(_, row)| row).collect()
+            };
+            let mut texts = Vec::with_capacity(rows.len());
+            for row in &mut rows {
+                relabel(row, &mut labels, true);
+                texts.push(row.to_string());
+            }
+            if order.is_none() {
+                texts.sort();
+            }
+            state.push((table, texts));
+        }
+        state
+    }
+
+    /// One batch through the drain's fallback: whole first, and row by row when that fails with
+    /// an error no retry cures, as `ingest.drain` runs it.
+    async fn drain_once(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        key: &HmacKey,
+        mode: Events,
+    ) -> (DrainOutcome, bool) {
+        match drain_batch_as(pool, ws, Shard::ALL, key, 500, &TAKE_CURSORS, mode).await {
+            Ok(outcome) => (outcome, false),
+            Err(error) => {
+                assert!(!error.is_retryable(), "{error}");
+                let outcome = drain_batch_singly(pool, ws, Shard::ALL, key, 500)
+                    .await
+                    .unwrap();
+                (outcome, true)
+            }
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_batched_drain_ends_as_the_one_by_one_drain(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let trace = TraceContext::root(Cause::api("req"));
+            let now = OffsetDateTime::now_utc();
+            let at = now - time::Duration::hours(1);
+            let long_ago = now - time::Duration::days(30);
+            let key = key();
+            let (u, a, e) = (user, visitor, mail);
+            let seed = vec![
+                told(&[u("u1"), e("u1")], "s-1", json!({"plan": "free"}), at),
+                seen(&[a("a1")], "s-2", "page", at),
+                seen(&[u("u2")], "s-3", "page", at),
+                seen(&[u("u3")], "s-4", "page", at),
+            ];
+            let main = vec![
+                // A known person, a new one and the new one again, a repeat inside the batch and
+                // one of a stored event.
+                seen(&[a("a1")], "m-1", "page", at),
+                seen(&[a("a9")], "m-2", "page", at),
+                seen(&[a("a9")], "m-3", "page", at),
+                seen(&[a("a1")], "m-1", "page", at),
+                seen(&[u("u2")], "s-3", "page", at),
+                // A known person gaining an identifier; a new person with two, gaining a third.
+                seen(&[u("u2"), a("a2")], "m-4", "page", at),
+                seen(&[u("u6"), a("a6")], "m-5", "page", at),
+                seen(&[u("u6"), e("u6")], "m-6", "page", at),
+                // Refused by the schema, the second naming a person this batch made.
+                seen(&[a("a7")], "m-7", "checked", at),
+                seen(&[a("a9")], "m-8", "checked", at),
+                // A merge, and an event of the survivor.
+                told(&[a("a1"), u("u1")], "m-9", json!({"plan": "pro"}), at),
+                seen(&[a("a1"), u("u1")], "m-10", "page", at),
+                // Two people's identifiers, and a second user id for one person.
+                seen(&[u("u2"), u("u3")], "m-11", "page", at),
+                seen(&[u("u2"), u("u9")], "m-18", "page", at),
+                // Repeats of ids claimed before the identify.
+                seen(&[a("a9")], "m-3", "page", at),
+                seen(&[a("a9")], "m-2", "page", at),
+                // Late, unplanned, and a new id repeated at once.
+                seen(&[a("a9")], "m-12", "page", long_ago),
+                seen(&[u("u7")], "m-13", "new_name", at),
+                seen(&[a("a11")], "m-14", "page", at),
+                seen(&[a("a11")], "m-14", "page", at),
+                // A person made by an identify, then tracked.
+                told(&[u("u8")], "m-15", json!({"plan": "basic"}), at),
+                seen(&[u("u8")], "m-16", "page", at),
+                // Refused by the input checks.
+                seen(&[("email", "not-an-email".to_owned())], "m-17", "page", at),
+            ];
+            let refused = vec![
+                seen(&[a("a1")], "r-1", "page", at),
+                seen(&[a("a20")], "r-2", "refused", at),
+                seen(&[a("a21")], "r-3", "page", at),
+                seen(&[a("a1")], "r-1", "page", at),
+            ];
+
+            // Two workspaces per arm; the second has no seed.
+            let arms = [Events::OneByOne, Events::Batched];
+            let mut spaces = Vec::new();
+            for arm in arms {
+                let one = compared_workspace(&pool, &format!("one-{arm:?}").to_lowercase()).await;
+                let two = compared_workspace(&pool, &format!("two-{arm:?}").to_lowercase()).await;
+                spaces.push((arm, one, two));
+            }
+            let mut outcomes: Vec<Vec<(DrainOutcome, bool)>> = Vec::new();
+            for (arm, one, two) in &spaces {
+                let mut drained = Vec::new();
+                append_as(&pool, *one, &trace, &seed).await;
+                drained.push(drain_once(&pool, *one, &key, *arm).await);
+                for ws in [*one, *two] {
+                    append_as(&pool, ws, &trace, &main).await;
+                    drained.push(drain_once(&pool, ws, &key, *arm).await);
+                }
+                outcomes.push(drained);
+            }
+            crate::subtransactions::testing::poison(&pool, "events", "NEW.name = 'refused'").await;
+            for (index, (arm, one, two)) in spaces.iter().enumerate() {
+                for ws in [*one, *two] {
+                    append_as(&pool, ws, &trace, &refused).await;
+                    outcomes[index].push(drain_once(&pool, ws, &key, *arm).await);
+                }
+            }
+
+            assert_eq!(outcomes[0], outcomes[1]);
+            let fell_back: Vec<bool> = outcomes[1].iter().map(|(_, singly)| *singly).collect();
+            assert_eq!(
+                fell_back,
+                [false, false, false, true, true],
+                "only a refusal falls back"
+            );
+            let (seeded, _) = &outcomes[1][1];
+            assert_eq!(seeded.rows, main.len());
+            assert_eq!(seeded.applied[&("track", "duplicate")], 5, "{seeded:?}");
+            assert_eq!(seeded.late, 1);
+            let (refusal, _) = &outcomes[1][3];
+            assert_eq!(
+                refusal.applied[&("track", "apply_failed")],
+                1,
+                "{refusal:?}"
+            );
+            for (seeded, (one_by_one, batched)) in [
+                (true, (spaces[0].1, spaces[1].1)),
+                (false, (spaces[0].2, spaces[1].2)),
+            ] {
+                let (expected, actual) = (
+                    settled(&pool, one_by_one).await,
+                    settled(&pool, batched).await,
+                );
+                for ((table, expected), (_, actual)) in expected.iter().zip(&actual) {
+                    assert!(!seeded || !expected.is_empty(), "{table} is empty");
+                    assert_eq!(actual, expected, "{table}");
+                }
+            }
+        })
+        .await;
+    }
+
+    /// Whether a drain error is PostgreSQL's deadlock.
+    fn deadlocked(error: &StoreError) -> bool {
+        format!("{error:?}").contains("40P01")
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn two_lanes_with_the_same_message_ids_store_each_event_once_and_count_each_repeat_once(
+        pool: PgPool,
+    ) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            crate::segments::tests_support::segment_reading(
+                &pool,
+                ws,
+                zirv_flow_core::segment::ChangeClasses::from_bits(63),
+            )
+            .await;
+            let trace = TraceContext::root(Cause::api("req"));
+            // Each message id twice, once in each lane (even and odd buckets), from people the
+            // lanes share, so they make, lock and claim the same rows at the same time.
+            sqlx::query(
+                "INSERT INTO ingest_inbox \
+                    (workspace_id, api_key_id, kind, item, message_id, trace_id, affinity) \
+                 SELECT $1, gen_random_uuid(), 'track', \
+                        jsonb_build_object('identifiers', \
+                            jsonb_build_array(jsonb_build_array('external:user_id', \
+                                'u' || ((n + lane * 7) % 60))), \
+                            'timestamp', null, 'event', 'seen', 'properties', '{}'::jsonb), \
+                        'm-' || n, $2, 2 * (n % 32) + lane \
+                 FROM generate_series(1, 1500) AS n, generate_series(0, 1) AS lane \
+                 ORDER BY n, lane",
+            )
+            .bind(ws.as_uuid())
+            .bind(trace.trace_id.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+            let key = std::sync::Arc::new(key());
+
+            let lane = |pool: PgPool, key: std::sync::Arc<HmacKey>, index: u32| async move {
+                let shard = Shard { index, count: 2 };
+                let (mut deadlocks, mut retries) = (0, 0);
+                loop {
+                    match drain_batch(&pool, ws, shard, &key, 50).await {
+                        Ok(outcome) if outcome.rows == 0 => break,
+                        Ok(_) => {}
+                        Err(error) if error.is_retryable() => {
+                            deadlocks += usize::from(deadlocked(&error));
+                            retries += 1;
+                            assert!(retries < 500, "the lane kept conflicting");
+                        }
+                        Err(error) => panic!("{error}"),
+                    }
+                }
+                deadlocks
+            };
+            let (first, second) = tokio::join!(
+                lane(pool.clone(), key.clone(), 0),
+                lane(pool.clone(), key.clone(), 1)
+            );
+
+            assert_eq!((first, second), (0, 0), "no deadlock");
+            let (events, distinct, repeats, dedupe): (i64, i64, i64, i64) = sqlx::query_as(
+                "SELECT (SELECT count(*) FROM events), \
+                        (SELECT count(DISTINCT message_id) FROM events), \
+                        (SELECT COALESCE(sum(duplicates), 0)::bigint FROM event_dedupe), \
+                        (SELECT count(*) FROM event_dedupe)",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                (events, distinct, repeats, dedupe),
+                (1500, 1500, 1500, 1500)
+            );
+            let people: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM identities WHERE kind = 'external:user_id'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(people, 60, "each person made once");
+            assert_eq!(inbox_count(&pool).await, 0);
+        })
+        .await;
+    }
+
+    /// The event rows of one batch: for each of `n`, a known person's event, a new person's two,
+    /// a repeat inside the batch and a repeat of a stored event.
+    fn statement_batch(n: usize) -> Vec<IngestItem> {
+        let at = OffsetDateTime::now_utc() - time::Duration::hours(1);
+        (0..n)
+            .flat_map(|i| {
+                let known = [user(&format!("k{}", i % 4))];
+                let new = [visitor(&format!("n{i}"))];
+                [
+                    seen(&known, &format!("m-{i}"), "seen", at),
+                    seen(&new, &format!("x-{i}"), "seen", at),
+                    seen(&new, &format!("y-{i}"), "seen", at),
+                    seen(&known, &format!("m-{i}"), "seen", at),
+                    seen(&known, &format!("s-{}", i % 4), "seen", at),
+                ]
+            })
+            .collect()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_drained_batch_of_events_runs_as_many_statements_whatever_its_size(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let trace = TraceContext::root(Cause::api("req"));
+            let at = OffsetDateTime::now_utc() - time::Duration::hours(1);
+            let mut counts = Vec::new();
+            for mode in [Events::Batched, Events::OneByOne] {
+                for n in [4, 12] {
+                    let ws = workspace(&pool, &format!("w{n}-{mode:?}").to_lowercase()).await;
+                    crate::segments::tests_support::segment_reading(
+                        &pool,
+                        ws,
+                        zirv_flow_core::segment::ChangeClasses::from_bits(63),
+                    )
+                    .await;
+                    let known: Vec<IngestItem> = (0..4)
+                        .map(|k| seen(&[user(&format!("k{k}"))], &format!("s-{k}"), "seen", at))
+                        .collect();
+                    append_as(&pool, ws, &trace, &known).await;
+                    drain_batch(&pool, ws, Shard::ALL, &key(), 500)
+                        .await
+                        .unwrap();
+                    append_as(&pool, ws, &trace, &statement_batch(n)).await;
+
+                    let (outcome, statements) = crate::people::statements_of(drain_batch_as(
+                        &pool,
+                        ws,
+                        Shard::ALL,
+                        &key(),
+                        500,
+                        &TAKE_CURSORS,
+                        mode,
+                    ))
+                    .await;
+
+                    let outcome = outcome.unwrap();
+                    assert_eq!(outcome.rows, 5 * n);
+                    assert_eq!(outcome.applied[&("track", "duplicate")], 2 * n as u64);
+                    counts.push((mode, n, statements.len(), statements));
+                }
+            }
+            let (small, large) = (&counts[0], &counts[1]);
+            assert_eq!(
+                small.2, large.2,
+                "20 and 60 rows: {:#?}\n{:#?}",
+                small.3, large.3
+            );
+            assert!(small.2 <= 40, "{} statements: {:#?}", small.2, small.3);
+            // Every repeat is of a stored id or of one claimed in the same pass: the claim joins
+            // no counted ids (a join that stale statistics plan as a walk of the workspace).
+            for (_, _, _, statements) in &counts[..2] {
+                let joined = statements.iter().filter(|sql| sql.contains("WITH counted"));
+                assert_eq!(joined.count(), 0, "{statements:#?}");
+            }
+            // The measure sees per-row statements: the one-by-one path grows with the rows.
+            assert!(
+                counts[3].2 > counts[2].2 + 100,
+                "{} and {}",
+                counts[2].2,
+                counts[3].2
+            );
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_full_batch_with_refusals_stays_within_the_subtransaction_cache_batched_or_singly(
+        pool: PgPool,
+    ) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            use crate::subtransactions::testing::{poison, record_at_commit, recorded};
+
+            let ws = workspace(&pool, "ours").await;
+            crate::segments::tests_support::segment_reading(
+                &pool,
+                ws,
+                zirv_flow_core::segment::ChangeClasses::from_bits(63),
+            )
+            .await;
+            let trace = TraceContext::root(Cause::api("req"));
+            let at = OffsetDateTime::now_utc() - time::Duration::hours(1);
+            // The worker's default batch with repeats, new and known people, and every tenth
+            // event refused by the database.
+            let items = |tag: &str| -> Vec<IngestItem> {
+                (0..500)
+                    .map(|n| {
+                        let name = if n % 10 == 3 { "refused" } else { "seen" };
+                        // The last 50 repeat the even ids before them, which none refused.
+                        let id = if n < 450 { n } else { 2 * (n - 450) };
+                        seen(
+                            &[user(&format!("u{}", n % 150))],
+                            &format!("{tag}-{id}"),
+                            name,
+                            at,
+                        )
+                    })
+                    .collect()
+            };
+            poison(&pool, "events", "NEW.name = 'refused'").await;
+            record_at_commit(&pool, "ingest_inbox").await;
+
+            append(&pool, ws, &trace, &items("a")).await;
+            let whole = drain_batch(&pool, ws, Shard::ALL, &key(), 500)
+                .await
+                .unwrap_err();
+            assert!(!whole.is_retryable(), "{whole}");
+            assert_eq!(
+                inbox_count(&pool).await,
+                500,
+                "the failed batch left every row"
+            );
+            let outcome = drain_batch_singly(&pool, ws, Shard::ALL, &key(), 500)
+                .await
+                .unwrap();
+
+            assert_eq!(outcome.rows, 500);
+            assert_eq!(outcome.applied[&("track", "apply_failed")], 45);
+            let (subxacts, overflowed, rows) = recorded(&pool).await;
+            assert!(rows > 0, "the commit was recorded");
+            assert!(
+                !overflowed && subxacts <= 64,
+                "subxacts {subxacts}, overflowed {overflowed}"
+            );
+
+            // The same batch with nothing refused commits whole, in no subtransaction at all.
+            sqlx::query("DROP TRIGGER subxact_poison ON events")
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("TRUNCATE subxact_probe")
+                .execute(&pool)
+                .await
+                .unwrap();
+            append(&pool, ws, &trace, &items("b")).await;
+            let outcome = drain_batch(&pool, ws, Shard::ALL, &key(), 500)
+                .await
+                .unwrap();
+            assert_eq!(outcome.rows, 500);
+            assert_eq!(outcome.applied[&("track", "duplicate")], 50);
+            let (subxacts, overflowed, rows) = recorded(&pool).await;
+            assert!(rows > 0, "the commit was recorded");
+            assert_eq!((subxacts, overflowed), (0, false));
         })
         .await;
     }

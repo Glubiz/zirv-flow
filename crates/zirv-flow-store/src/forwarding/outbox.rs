@@ -1568,6 +1568,7 @@ mod tests {
     /// must call one of these in its transaction and be added here; the test fails until it is.
     const WRITERS: &[(&str, &str)] = &[
         ("zirv-flow-store/src/events/apply.rs", "forwards.push"),
+        ("zirv-flow-store/src/events/apply/group.rs", "forwards.push"),
         (
             "zirv-flow-store/src/flows/delivery.rs",
             "enqueue_forwarding",
