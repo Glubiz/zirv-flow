@@ -15,3 +15,26 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.281.0 (2026-11-11)
+
+### Fixes
+
+- rebuild 0095's index when the one under its name is invalid or different
+
+### Performance
+
+- mark records seen only in a run that sweeps
+- lock a batch with no merging owner in one pass
+- read only the ledger records that hold traits
+
+### Documentation
+
+- keep round measurements out of the ledger read comments
+- the ledger's traits index, the one-pass lock, sweep marks and 0095's upgrade cost
+
+### Chores
+
+- a key whose only record empties leaves the person and its sources
+- name the batch's record lookup seen_ids
+- bump 0.281.0
+
