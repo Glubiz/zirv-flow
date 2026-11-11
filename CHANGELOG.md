@@ -15,3 +15,17 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.283.0 (2026-11-11)
+
+### Fixes
+
+- a send the provider refused passes the consent and suppression gates again on its retry
+
+### Documentation
+
+- say the refused call, not its retry, went nowhere
+
+### Chores
+
+- drop the carried alias and document the refusal rule for gateway errors
+
