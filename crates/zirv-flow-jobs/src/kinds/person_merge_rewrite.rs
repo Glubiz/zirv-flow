@@ -17,7 +17,7 @@ pub(crate) struct PersonMergeRewrite;
 
 impl JobKind for PersonMergeRewrite {
     const KIND: &'static str = zirv_flow_store::REWRITE_JOB_KIND;
-    // A moved membership marks the survivor in the lists class.
+    // A moved membership or event marks the survivor in the lists or events class.
     const NEEDS_CHANGE_READERS: bool = true;
 
     async fn run(&self, ctx: &mut JobContext<'_>, payload: Value) -> Result<(), JobError> {

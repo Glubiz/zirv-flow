@@ -139,7 +139,10 @@ Read it with `GET /api/v1/workspaces/{ws}/people/{id}/lists` (the lists a person
 
 **Merges.** When two people are merged, the survivor is in every list either of them was in,
 keeps the earlier of the two `added_at` times, and the counts follow. The merged person's
-history moves to the survivor.
+history moves to the survivor. So do its events, after which the survivor is evaluated again on
+them: it enters an event segment the merged person was in (a `segment.entered`, which starts a
+segment-triggered flow) and leaves one the moved events rule out, once the merge's
+`person.merge.rewrite` job has run.
 
 ## Segment assistant
 
