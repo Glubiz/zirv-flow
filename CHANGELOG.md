@@ -15,3 +15,26 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.280.0 (2026-11-11)
+
+### Fixes
+
+- roll a failed drain batch back before it returns
+
+### Performance
+
+- apply a drain batch's event runs with one statement per write
+- mark a batch's trait changes in one statement
+
+### Documentation
+
+- say that a paused flow skips the sends it had queued
+- correct event disk sizing and warn about repeat sends after a restore
+- describe the drain's batched event path
+
+### Chores
+
+- judge an event by its policy and schema in one place
+- compare the outbox and the jobs of the two drain paths
+- bump the workspace to 0.280.0
+
