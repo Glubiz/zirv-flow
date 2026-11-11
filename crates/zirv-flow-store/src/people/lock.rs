@@ -233,7 +233,7 @@ const UPDATE_WITH_ZONE: &str = "WITH locked AS MATERIALIZED ( \
 
 /// [`PersonLock::Update`] that also returns when each locked row was created, which a batch keeps
 /// for the merges its records may make ([`super::batch::ProfileBatch`]).
-const UPDATE_WITH_CREATED: &str = "WITH locked AS MATERIALIZED ( \
+pub(super) const UPDATE_WITH_CREATED: &str = "WITH locked AS MATERIALIZED ( \
          SELECT id, workspace_id, merged_into, created_at FROM people \
          WHERE id = ANY($2) ORDER BY id FOR UPDATE) \
      SELECT id, merged_into, created_at FROM locked WHERE workspace_id = $1 ORDER BY id";

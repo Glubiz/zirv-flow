@@ -22,6 +22,10 @@ use super::merge::merge_people;
 use crate::StoreError;
 use crate::changes::mark_person;
 
+mod planned;
+
+pub(crate) use planned::Planned;
+
 /// How many times a record's resolution runs when identity inserts keep losing races.
 const MAX_ATTEMPTS: u32 = 3;
 

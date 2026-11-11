@@ -50,7 +50,7 @@ pub use registry::{
     find_trait_definition, find_trait_definition_for_update, list_trait_definitions,
     update_trait_definition,
 };
-pub(crate) use resolve::{find_known_person, resolve_person};
+pub(crate) use resolve::{Planned, find_known_person, resolve_person};
 pub(crate) use search::strongest_identifiers;
 pub use search::{PersonSearch, SearchError, SearchHit, SearchPage, TraitOp, search_people};
 pub use slots::{

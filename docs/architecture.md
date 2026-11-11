@@ -465,6 +465,31 @@ batch also takes the segment guard and the shared slot lock once, reads each tra
 once, and does not lock again, or look the identities up a second time, for a record whose
 people it already holds. A path that applies records in savepoints gives each its own batch.
 
+The drain applies a batch's event rows together, not one by one (`events/apply/group.rs`). Before
+any row applies, one statement finds the batch's message ids already stored and counts each repeat
+(`prefetch_duplicates`): a stored duplicate is known before its person is resolved, and the claim
+of a new id follows its person, since `event_dedupe.person_id` references it. The event rows
+between two other rows form a run, and a profile, contact or webhook row reads what the rows
+before it wrote, so the run before it is written first. A run is judged in memory and written in
+passes. One statement looks up the owners of every identifier of the pass, one locks the owners
+the batch does not hold yet (`FOR UPDATE` in id order), and a second lookup checks that none
+moved; one reads the identities of the owners the pass adds an identifier to. Then one statement
+inserts the pass's new people (in id order), one its new identities (in `(kind, value)` order),
+one claims its message ids in `event_dedupe` (in message-id order) and adds the repeats seen
+inside the batch to `duplicates`, one inserts its events, and one writes its change marks. A row
+the pass cannot judge in memory ends the pass and, once the pass is written, goes through the
+per-event path: a row refused by the input checks or the event policy, one whose identifiers
+name two people (a merge or a conflict) or would split a person, one whose owner a merge moved,
+and one whose message id was not looked up. The next pass starts after it. So a batch of plain
+events runs the same statements whatever its size, and each such row adds a pass. A claim joins
+`event_dedupe` with counted ids only when there are repeats of an earlier pass's claims:
+statistics taken before a workspace had dedupe rows plan that join, even with no ids, as a walk
+over all of that workspace's rows (6,759 buffer hits for one message id in round 7e1's bench). A lost race
+(an owner moved after the lookup, or another transaction claimed an identity or a message id
+first) is a retryable race that retries the batch, so two lanes with one message id still store
+one event and count the other as a repeat. A row the database refuses fails the whole batch,
+which then falls back to applying its rows one at a time (see "Subtransactions" below).
+
 **Subtransactions.** PostgreSQL 16 caches 64 subtransaction ids per backend; past that the backend
 is marked overflowed and every snapshot check in the cluster reads `pg_subtrans` until its
 transaction ends (Investigation Q measured 13 to 24 backends in `LWLock:SubtransSLRU`). A savepoint
@@ -495,7 +520,10 @@ dirty: a membership change reaches dependent segments through topological evalua
 through the dirty set. A mark carries the trace and cause of the latest change, which the entries and exits it causes continue; the writer's transaction enqueues `segment.reevaluate` once, only to cut latency, and skips the enqueue when another open transaction holds the job's key (it never waits for it, #531; the safety net below covers the lost wake).
 The live dependency classes are read once per workspace and transaction, using the
 workspace's segment index, and cached in transaction-local state. With no matching reader,
-the writer adds neither marks nor a re-evaluation request.
+the writer adds neither marks nor a re-evaluation request. A batch buffers its event and
+identifier marks per pass and its trait marks to its end (`changes::MarkBuffer`), and writes each
+buffer in one statement, in person-id order: per person the classes OR-ed, the latest trace and
+cause, and the earliest `late_from`, as the marks one by one would leave it.
 
 As built (identify / track ingestion): `POST /api/v1/ingest/{identify,track,batch}` validate
 structure, charge the key's in-process token bucket (items, per `serve` process), and append
@@ -543,8 +571,11 @@ deadlock between them is the retryable `40P01`. The worker pool holds `(concurre
 batch's ids without locking, locks those rows with `FOR UPDATE SKIP LOCKED` (a batch never
 applies past a row it could not lock: the rest of that bucket's picked rows wait for the next
 batch, and a batch that takes nothing ends the loop), applies them in id order through the
-transaction-taking profile and event paths of apply-batch, deletes them and commits, so a crash leaves them in place and concurrent
-drainers never apply a row twice. A retryable error retries the batch with jittered backoff;
+transaction-taking profile path of apply-batch and, for its runs of event rows, the batched event
+path above, deletes them and commits, so a crash leaves them in place and concurrent
+drainers never apply a row twice. A failed batch rolls back before it returns: a dropped
+transaction's rollback waits for the pool's next use of the connection, and until then its rows
+stay locked and a retry would take none of them. A retryable error retries the batch with jittered backoff;
 any other error applies the batch's rows one at a time, each kept or refused alone as with a
 savepoint per row (see "Subtransactions" below), and a row that still fails becomes an
 `apply_failed` ingest reject. The job never re-enqueues itself, since it

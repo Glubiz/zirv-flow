@@ -16,9 +16,9 @@ use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 use zirv_flow_core::decision_actions::{self, DecisionSpec};
 use zirv_flow_core::events::{
-    EventFlag, RESERVED_EVENT_CODE, Reason, UnplannedPolicy, ValidationState, apply_time_rules,
-    check_properties, evaluate, infer_properties, is_reserved_event_name, mask_sample, redact,
-    validate_event_name,
+    EventFlag, RESERVED_EVENT_CODE, Reason, Timing, UnplannedPolicy, ValidationState,
+    apply_time_rules, check_properties, evaluate, infer_properties, is_reserved_event_name,
+    mask_sample, redact, validate_event_name,
 };
 use zirv_flow_core::segment::ChangeClasses;
 use zirv_flow_core::{Cause, HmacKey, TraceContext, TraceId, WorkspaceId};
@@ -34,6 +34,10 @@ use crate::people::{
     ProfileBatch, find_known_person, normalize_identifiers, record_resolution, resolve_person,
 };
 use crate::{NewDecision, PgPool, StoreError, append_decision, begin, commit};
+
+mod group;
+
+pub(crate) use group::apply_event_group;
 
 const MAX_MESSAGE_ID_CHARS: usize = 256;
 
@@ -145,9 +149,9 @@ pub(crate) struct EventBatch {
     /// The prefetched ids that already had an event, with the event they repeat. Their repeats
     /// were counted when they were prefetched.
     known_duplicates: HashMap<String, Uuid>,
-    /// The ids this batch claimed after a prefetch: a later record with one is a repeat the
-    /// prefetch could not see.
-    claimed: HashSet<String>,
+    /// The ids this batch claimed after a prefetch, with the event each claimed: a later record
+    /// with one is a repeat the prefetch could not see.
+    claimed: HashMap<String, Uuid>,
 }
 
 impl EventBatch {
@@ -219,7 +223,7 @@ impl EventBatch {
         if let Some(original) = self.known_duplicates.get(message_id) {
             return Ok(Some(*original));
         }
-        if self.prefetched.contains(message_id) && !self.claimed.contains(message_id) {
+        if self.prefetched.contains(message_id) && !self.claimed.contains_key(message_id) {
             return Ok(None);
         }
         count_duplicate(connection, workspace, message_id).await
@@ -288,6 +292,96 @@ impl EventBatch {
         self.schemas.insert(name.to_owned(), found.clone());
         Ok(found)
     }
+
+    /// Judges `record` by the workspace's event policy, the schema published for its name and
+    /// the time rules, and returns the policy with the verdict.
+    async fn verdict(
+        &mut self,
+        connection: &mut PgConnection,
+        workspace: WorkspaceId,
+        record: &EventRecord,
+    ) -> Result<(EventPolicy, Verdict), StoreError> {
+        let policy = self.policy(connection, workspace).await?;
+        let (state, schema_version, reasons) =
+            match self.schema(connection, workspace, &record.name).await? {
+                None => match policy.unplanned {
+                    UnplannedPolicy::Reject => {
+                        let refused = Verdict::Refused {
+                            reason: "unplanned_event",
+                            reasons: Vec::new(),
+                            published: None,
+                        };
+                        return Ok((policy, refused));
+                    }
+                    UnplannedPolicy::Draft => (ValidationState::Unplanned, None, Vec::new()),
+                },
+                Some(schema) => {
+                    let reasons = check_properties(&record.properties, &schema.properties);
+                    let Some(state) = evaluate(schema.mode, &reasons) else {
+                        let refused = Verdict::Refused {
+                            reason: "validation_failed",
+                            reasons,
+                            published: Some(schema),
+                        };
+                        return Ok((policy, refused));
+                    };
+                    (state, Some(schema.version), reasons)
+                }
+            };
+        let mut timing = apply_time_rules(
+            record.timestamp,
+            record.received_at,
+            i64::from(policy.future_skew_seconds),
+            i64::from(policy.lateness_seconds),
+        );
+        if self.no_triggers {
+            timing.flags.push(EventFlag::NoTriggers);
+        }
+        let accepted = Verdict::Accepted {
+            state,
+            schema_version,
+            reasons,
+            timing,
+        };
+        Ok((policy, accepted))
+    }
+
+    /// Drafts the inferred schema of an unplanned event's name, once per batch.
+    async fn draft(
+        &mut self,
+        connection: &mut PgConnection,
+        workspace: WorkspaceId,
+        record: &EventRecord,
+    ) -> Result<(), StoreError> {
+        if self.drafted.insert(record.name.clone()) {
+            draft_inferred_schema(
+                connection,
+                workspace,
+                &record.name,
+                &infer_properties(&record.properties),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+}
+
+/// How the policy, the published schema and the time rules judge an event.
+enum Verdict {
+    /// Stored as `state`; an unplanned one has its name's inferred schema drafted
+    /// ([`EventBatch::draft`]).
+    Accepted {
+        state: ValidationState,
+        schema_version: Option<i32>,
+        reasons: Vec<Reason>,
+        timing: Timing,
+    },
+    /// Refused for `reason`.
+    Refused {
+        reason: &'static str,
+        reasons: Vec<Reason>,
+        published: Option<PublishedSchema>,
+    },
 }
 
 /// Why an event is refused, with what the reject row keeps of it.
@@ -311,12 +405,26 @@ pub(crate) async fn apply_event_record(
         crate::changes::cache_change_readers(connection, workspace).await?;
     }
     let outcome = judge_event_record(connection, workspace, key, batch, record).await?;
+    observe(connection, workspace, key, batch, record, &outcome).await?;
+    Ok(outcome)
+}
+
+/// What follows an outcome in the batch: an accepted event may wake a waiting enrollment, and
+/// while the workspace is watched the outcome gets its debugger feed row.
+async fn observe(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    key: &HmacKey,
+    batch: &mut EventBatch,
+    record: &EventRecord,
+    outcome: &EventOutcome,
+) -> Result<(), StoreError> {
     if let EventOutcome::Accepted {
         event_id,
         person_id,
         flags,
         ..
-    } = &outcome
+    } = outcome
         && !flags.contains(&EventFlag::NoTriggers)
     {
         batch.arrivals.push(Arrival {
@@ -326,10 +434,10 @@ pub(crate) async fn apply_event_record(
         });
     }
     if batch.watched(connection, workspace).await? {
-        feed_outcome(connection, workspace, key, batch, record, &outcome).await?;
+        feed_outcome(connection, workspace, key, batch, record, outcome).await?;
         batch.fed = true;
     }
-    Ok(outcome)
+    Ok(())
 }
 
 /// Writes the debugger feed row of one outcome: the redacted properties, never the raw ones.
@@ -439,55 +547,30 @@ async fn judge_event_record(
         });
     }
 
-    let policy = batch.policy(connection, workspace).await?;
-    let published = batch.schema(connection, workspace, &record.name).await?;
-    let (state, schema_version, reasons) = match &published {
-        None => match policy.unplanned {
-            UnplannedPolicy::Reject => {
-                let refusal = Refusal {
-                    reason: "unplanned_event",
-                    reasons: &[],
-                    published: None,
-                    person_id: find_known_person(connection, workspace, &identifiers).await?,
-                };
-                return refuse(connection, workspace, key, batch, record, &refusal).await;
-            }
-            UnplannedPolicy::Draft => {
-                if batch.drafted.insert(record.name.clone()) {
-                    draft_inferred_schema(
-                        connection,
-                        workspace,
-                        &record.name,
-                        &infer_properties(&record.properties),
-                    )
-                    .await?;
-                }
-                (ValidationState::Unplanned, None, Vec::new())
-            }
-        },
-        Some(schema) => {
-            let reasons = check_properties(&record.properties, &schema.properties);
-            let Some(state) = evaluate(schema.mode, &reasons) else {
-                let refusal = Refusal {
-                    reason: "validation_failed",
-                    reasons: &reasons,
-                    published: Some(schema),
-                    person_id: find_known_person(connection, workspace, &identifiers).await?,
-                };
-                return refuse(connection, workspace, key, batch, record, &refusal).await;
+    let (policy, verdict) = batch.verdict(connection, workspace, record).await?;
+    let (state, schema_version, reasons, timing) = match verdict {
+        Verdict::Accepted {
+            state,
+            schema_version,
+            reasons,
+            timing,
+        } => (state, schema_version, reasons, timing),
+        Verdict::Refused {
+            reason,
+            reasons,
+            published,
+        } => {
+            let refusal = Refusal {
+                reason,
+                reasons: &reasons,
+                published: published.as_ref(),
+                person_id: find_known_person(connection, workspace, &identifiers).await?,
             };
-            (state, Some(schema.version), reasons)
+            return refuse(connection, workspace, key, batch, record, &refusal).await;
         }
     };
-
-    let mut timing = apply_time_rules(
-        record.timestamp,
-        record.received_at,
-        i64::from(policy.future_skew_seconds),
-        i64::from(policy.lateness_seconds),
-    );
-    if batch.no_triggers {
-        timing.flags.push(EventFlag::NoTriggers);
+    if state == ValidationState::Unplanned {
+        batch.draft(connection, workspace, record).await?;
     }
     let event_id = Uuid::now_v7();
 
@@ -545,7 +628,7 @@ async fn judge_event_record(
             return Err(StoreError::retryable_race());
         }
         if !batch.prefetched.is_empty() {
-            batch.claimed.insert(message_id.clone());
+            batch.claimed.insert(message_id.clone(), event_id);
         }
     }
 

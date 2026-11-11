@@ -12,8 +12,9 @@
 //!   once its identities are claimed);
 //! - the trait recomputes its records owe. [`ProfileBatch::finish`] runs them for the whole batch
 //!   at once: one statement locks and reads the people, one reads their ledger contributions for
-//!   the keys that changed, one reads the definitions the batch has not read, and one writes every
-//!   person whose value or source changed ([`recompute_people`]).
+//!   the keys that changed, one reads the definitions the batch has not read, one writes every
+//!   person whose value or source changed ([`recompute_people`]), and one marks them
+//!   ([`MarkBuffer`]).
 //!
 //! The people stay locked in the order the records lock them; the recompute only reads and
 //! writes rows the batch already holds (a person it does not hold yet, as in `traits.recompute`,
@@ -40,7 +41,7 @@ use super::apply::same_value;
 use super::lock::{LockedRow, UPDATE_WITH_TRAITS};
 use super::registry::Definitions;
 use super::slots::{lock_and_read_writer_slots, lock_slots_shared, slot_assignments_sql};
-use crate::changes::mark_people;
+use crate::changes::MarkBuffer;
 use crate::decisions::DecisionBuffer;
 use crate::{NewDecision, StoreError};
 
@@ -179,13 +180,13 @@ impl ProfileBatch {
         let changed =
             recompute_people(connection, workspace, &wanted, &mut self.definitions).await?;
         let mut applied = Vec::with_capacity(owed.len());
-        let mut marks: Vec<(&TraceContext, Uuid)> = Vec::new();
+        let mut marks = MarkBuffer::default();
         for entry in &owed {
             let value_changed = changed
                 .get(&entry.person)
                 .is_some_and(|keys| entry.keys.iter().any(|key| keys.contains(key)));
             if value_changed || (entry.created && !entry.moved_from) {
-                marks.push((&entry.trace, entry.person));
+                marks.push(entry.person, ChangeClasses::TRAITS, &entry.trace, None);
             }
             if value_changed {
                 decisions.push_as(
@@ -208,30 +209,9 @@ impl ProfileBatch {
                 applied.push(value_changed);
             }
         }
-        // One statement per run of records on one trace, in the records' order, so the latest
-        // change's trace is the one a mark keeps.
-        let mut start = 0;
-        while start < marks.len() {
-            let trace = marks[start].0;
-            let end = marks[start..]
-                .iter()
-                .position(|(other, _)| *other != trace)
-                .map_or(marks.len(), |offset| start + offset);
-            let people: Vec<Uuid> = marks[start..end]
-                .iter()
-                .map(|(_, person)| *person)
-                .collect();
-            mark_people(
-                connection,
-                workspace,
-                &people,
-                ChangeClasses::TRAITS,
-                trace,
-                None,
-            )
-            .await?;
-            start = end;
-        }
+        // One statement for all of them, in the records' order, so the latest change's trace is
+        // the one a mark keeps.
+        marks.flush(connection, workspace).await?;
         Ok(applied)
     }
 }

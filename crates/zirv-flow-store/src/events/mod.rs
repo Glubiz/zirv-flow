@@ -10,7 +10,9 @@ mod replay;
 mod retention;
 mod schemas;
 
-pub(crate) use apply::{EventBatch, FailedItem, apply_event_record, reject_apply_failed};
+pub(crate) use apply::{
+    EventBatch, FailedItem, apply_event_group, apply_event_record, reject_apply_failed,
+};
 pub use apply::{EventOutcome, EventRecord, apply_event_batch};
 #[cfg(test)]
 pub(crate) use apply::{NewEvent, insert_event};
