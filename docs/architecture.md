@@ -457,6 +457,10 @@ The trait recompute runs once per batch, not per record (`people/batch.rs`). Eac
 its ledger row and owes the keys it touched; when the batch ends, one statement locks and reads
 its people (`FOR UPDATE` in id order, rows the batch already holds), one reads their live ledger
 contributions for those keys only, and one writes every person whose value or source changed.
+The contributions are read through `source_records_traits_idx` (0095), a partial index of the
+live ledger rows that hold traits: on the 5x sim 78% of the rows hold none (a Kafka message's
+record carries identifiers only), and reading every row of the people fetched 3,736 rows to use
+122. A merge's read of the survivor's keys and `traits.recompute` read it the same way.
 So no person lock is held across a per-person recompute loop, and the lock order is unchanged:
 people in id order, list and segment locks after them, `ListCounts::apply` last. A record's
 `changed` and its `trait.change` decision are judged from the person as the batch found it to
@@ -714,7 +718,11 @@ the rows of the people it merges away), by id; then every person those identitie
 rows name, and the people they were merged into, `FOR UPDATE` by id. A record then waits only on
 what it creates, so two streams' units over the same people in
 different orders wait for each other at the start instead of deadlocking. A CSV import batch
-and `apply_profile_batch` take the same locks.
+and `apply_profile_batch` take the same locks. A unit none of whose records can merge, nearly
+every unit, locks its ledger rows in the scan that finds them by key, in id order; with owners to
+merge, the named rows and the owners' rows are gathered first and locked by primary key (round
+7e2: the second pass was 29% of a pull unit's block reads). A Kafka unit's keys are new, so its
+reads are the unique-key leaves it probes.
 An expired lease does not return the run to `queued`: the row stays `running`, the job system
 re-delivers the job, `attempt` counts it, and the next attempt resumes from the run's
 checkpoint; only the last failed attempt marks the run `failed` (the connector's fixed code for a read error that has one, else `source_error`,
@@ -731,7 +739,13 @@ is exhausted and the last unit committed, and before `finish_run`, `store::sync_
 removes the live ledger rows of the stream whose `last_seen_run` is not the run, 200 per fenced
 transaction (lease locked, run locked `running`), through `remove_contribution_in`, with a
 `deleted` decision per removal. A record read but not applied (refused by the mapping or the
-store, or only listed by a reconciliation) is marked seen, so it is never swept. Before the first
+store, or only listed by a reconciliation) is marked seen, so it is never swept. Only a run that
+sweeps marks (`SyncBatch::sweeps`, set by the job on the condition that runs the sweep): the
+sweep compares the mark with its own run and nothing else reads it, so a unit of an incremental
+run or a Kafka consumer looks its records up and writes none of them. Marking anyway rewrote
+every record a Kafka unit had just inserted (on main 0.279.0: 2,480 buffer hits and 606 WAL
+records per unit of 100, against 480 hits and none for the lookup). A stream's mode cannot change
+while it has an active run, so every attempt of a run marks alike. Before the first
 unit, one statement compares the unseen share of the live rows with `streams.sweep_limit`
 (default 0.5) and a run over it ends `failed` with `sweep_limit` and removes nothing. A reconcile
 run reads from the beginning, maps records only to split deleted from seen keys, and never writes

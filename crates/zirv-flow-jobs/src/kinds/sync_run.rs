@@ -608,6 +608,7 @@ impl Pass<'_> {
             checkpoint: &checkpoint.0,
             // A reconciliation never moves the stream's cursor.
             incremental: !self.reconcile && self.stream.sync_mode == SyncMode::Incremental.as_str(),
+            sweeps: self.sweeps(),
             offsets: &offsets,
             singly: false,
         };
@@ -706,6 +707,13 @@ impl Pass<'_> {
         self.started.map_or(0.0, |at| {
             (OffsetDateTime::now_utc() - at).as_seconds_f64().max(0.0)
         })
+    }
+
+    /// The run ends its complete read with a sweep: a full refresh or a reconciliation. Its
+    /// batches mark what they saw, and only then. A stream's mode cannot change while it has an
+    /// active run, so every attempt of a run answers the same.
+    pub(super) fn sweeps(&self) -> bool {
+        self.reconcile || self.stream.sync_mode == SyncMode::FullRefresh.as_str()
     }
 }
 
@@ -995,8 +1003,9 @@ async fn run_pass(
     }
     // The read is complete and committed: a full refresh and a reconciliation now remove what
     // the source no longer lists. Every other way out of the pass returned above, so a failed,
-    // cancelled or threshold-stopped run sweeps nothing.
-    if (reconcile || mode == SyncMode::FullRefresh)
+    // cancelled or threshold-stopped run sweeps nothing. The batches marked what they saw on the
+    // same condition (`Pass::sweeps`).
+    if pass.sweeps()
         && let Unit::Stop = pass.sweep(&prepared.source_text, stream).await?
     {
         return Ok(());

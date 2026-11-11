@@ -394,6 +394,77 @@ mod tests {
         }
     }
 
+    /// The oid, validity and definition of the index named `source_records_traits_idx`.
+    async fn traits_index(pool: &PgPool) -> (i64, bool, String) {
+        sqlx::query_as(
+            "SELECT indexrelid::int8, indisvalid, pg_get_indexdef(indexrelid) FROM pg_index \
+             WHERE indexrelid = 'source_records_traits_idx'::regclass",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_traits_index_migration_rebuilds_an_invalid_or_different_index_of_its_name(
+        pool: PgPool,
+    ) {
+        const WANTED: &str = "CREATE INDEX source_records_traits_idx ON public.source_records \
+             USING btree (workspace_id, person_id) \
+             WHERE ((deleted_at IS NULL) AND (traits <> '{}'::jsonb))";
+        let db = &pool;
+        let rerun = move || async move {
+            sqlx::raw_sql(include_str!(
+                "../migrations/0095_source_records_traits_index.sql"
+            ))
+            .execute(db)
+            .await
+            .unwrap();
+        };
+        let (built, valid, definition) = traits_index(&pool).await;
+        assert!(valid);
+        assert_eq!(definition, WANTED);
+        rerun().await;
+        assert_eq!(
+            traits_index(&pool).await.0,
+            built,
+            "the valid index is kept"
+        );
+
+        // A concurrent pre-build that failed leaves the index in place, invalid.
+        sqlx::raw_sql(
+            "UPDATE pg_index SET indisvalid = false \
+             WHERE indexrelid = 'source_records_traits_idx'::regclass",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        rerun().await;
+        let (rebuilt, valid, definition) = traits_index(&pool).await;
+        assert!(valid, "an invalid index is built again");
+        assert_ne!(rebuilt, built);
+        assert_eq!(definition, WANTED);
+
+        // Another index under the name: another predicate, or another table.
+        for other in [
+            "CREATE INDEX source_records_traits_idx ON source_records (workspace_id, person_id) \
+             WHERE deleted_at IS NULL",
+            "CREATE INDEX source_records_traits_idx ON people (workspace_id)",
+        ] {
+            sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+                "DROP INDEX source_records_traits_idx; {other}"
+            )))
+            .execute(&pool)
+            .await
+            .unwrap();
+            rerun().await;
+            let (_, valid, definition) = traits_index(&pool).await;
+            assert!(valid, "{other}");
+            assert_eq!(definition, WANTED, "{other}");
+        }
+    }
+
     #[sqlx::test(migrations = false)]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_view_pii_migration_gives_every_existing_membership_no_grant(pool: PgPool) {
