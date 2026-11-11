@@ -1119,6 +1119,48 @@ pub(crate) mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_key_whose_only_record_empties_leaves_the_person_and_its_sources(pool: PgPool) {
+        let ws = workspace(&pool, "sole").await;
+        let a = ["a@x.example"];
+        apply_profile_batch(
+            &pool,
+            ws,
+            &[
+                record("crm", "a", &a, json!({"tier": "gold"}), 1),
+                record("web", "a", &a, json!({"city": "Oslo"}), 1),
+                record("kafka", "a-1", &a, json!({}), 1),
+            ],
+        )
+        .await
+        .unwrap();
+        let (_, traits, sources) = person_of(&pool, ws, "a@x.example").await;
+        assert_eq!(traits, json!({"tier": "gold", "city": "Oslo"}));
+        assert_eq!(sources, json!({"tier": "crm", "city": "web"}));
+
+        // web/a, the only record holding the city, drops it: its traits become empty, and the
+        // read of the city's contributions finds no row of the person at all.
+        apply_profile_batch(
+            &pool,
+            ws,
+            &[record("web", "a", &a, json!({"city": null}), 2)],
+        )
+        .await
+        .unwrap();
+        let web: Value = sqlx::query_scalar(
+            "SELECT traits FROM source_records WHERE source = 'web' AND record_key = 'a'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(web, json!({}));
+        let (_, traits, sources) = person_of(&pool, ws, "a@x.example").await;
+        assert_eq!(traits, json!({"tier": "gold"}));
+        assert_eq!(sources, json!({"tier": "crm"}));
+        nothing_left_to_recompute(&pool, ws).await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_ledger_reads_return_the_rows_they_returned_without_the_traits_predicate(
         pool: PgPool,
     ) {
