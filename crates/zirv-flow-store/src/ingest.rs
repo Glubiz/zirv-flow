@@ -1100,7 +1100,6 @@ fn tally_event(outcome: &mut DrainOutcome, result: &EventOutcome) {
     outcome.count("track", label);
 }
 
-/// Applies the event rows of `run` together ([`apply_event_group`]), tallies them and empties it.
 async fn apply_event_run(
     connection: &mut PgConnection,
     workspace: WorkspaceId,

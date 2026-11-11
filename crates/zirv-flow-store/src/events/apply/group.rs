@@ -20,24 +20,20 @@
 
 use std::collections::BTreeMap;
 
-use hashbrown::HashMap;
 use serde_json::{Map, Value};
 use sqlx::PgConnection;
 use sqlx::types::Json;
 use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::decision_actions;
-use zirv_flow_core::events::{
-    EventFlag, Reason, UnplannedPolicy, ValidationState, apply_time_rules, check_properties,
-    evaluate, infer_properties, redact,
-};
+use zirv_flow_core::events::{Reason, ValidationState, redact};
 use zirv_flow_core::people::Identifier;
 use zirv_flow_core::segment::ChangeClasses;
 use zirv_flow_core::{Cause, HmacKey, TraceContext, WorkspaceId};
 
-use super::super::schemas::draft_inferred_schema;
 use super::{
-    EventBatch, EventOutcome, EventRecord, apply_event_record, checked_input, decide, observe,
+    EventBatch, EventOutcome, EventRecord, Verdict, apply_event_record, checked_input, decide,
+    observe,
 };
 use crate::changes::MarkBuffer;
 use crate::people::{Planned, record_resolution};
@@ -118,16 +114,7 @@ async fn resolvable(
         {
             continue;
         }
-        let policy = batch.policy(connection, workspace).await?;
-        let refused = match batch.schema(connection, workspace, &record.name).await? {
-            None => matches!(policy.unplanned, UnplannedPolicy::Reject),
-            Some(schema) => evaluate(
-                schema.mode,
-                &check_properties(&record.properties, &schema.properties),
-            )
-            .is_none(),
-        };
-        if refused {
+        if let (_, Verdict::Refused { .. }) = batch.verdict(connection, workspace, record).await? {
             break;
         }
         sets.push(identifiers);
@@ -169,40 +156,18 @@ async fn judge_planned(
         }
     }
 
-    let policy = batch.policy(connection, workspace).await?;
-    let published = batch.schema(connection, workspace, &record.name).await?;
-    let (state, schema_version, reasons) = match &published {
-        None => match policy.unplanned {
-            UnplannedPolicy::Reject => return Ok(None),
-            UnplannedPolicy::Draft => {
-                if batch.drafted.insert(record.name.clone()) {
-                    draft_inferred_schema(
-                        connection,
-                        workspace,
-                        &record.name,
-                        &infer_properties(&record.properties),
-                    )
-                    .await?;
-                }
-                (ValidationState::Unplanned, None, Vec::new())
-            }
-        },
-        Some(schema) => {
-            let reasons = check_properties(&record.properties, &schema.properties);
-            let Some(state) = evaluate(schema.mode, &reasons) else {
-                return Ok(None);
-            };
-            (state, Some(schema.version), reasons)
-        }
+    let (policy, verdict) = batch.verdict(connection, workspace, record).await?;
+    let Verdict::Accepted {
+        state,
+        schema_version,
+        reasons,
+        timing,
+    } = verdict
+    else {
+        return Ok(None);
     };
-    let mut timing = apply_time_rules(
-        record.timestamp,
-        record.received_at,
-        i64::from(policy.future_skew_seconds),
-        i64::from(policy.lateness_seconds),
-    );
-    if batch.no_triggers {
-        timing.flags.push(EventFlag::NoTriggers);
+    if state == ValidationState::Unplanned {
+        batch.draft(connection, workspace, record).await?;
     }
     let event_id = Uuid::now_v7();
     let Some(resolution) = plan.resolve(
@@ -332,9 +297,8 @@ struct EventRow {
     source_record_id: Option<Uuid>,
 }
 
-/// A message id a pass claims, for the event it stores.
+/// The claim of a message id in a pass, for the event it stores.
 struct Claim {
-    message_id: String,
     event_id: Uuid,
     occurred_at: OffsetDateTime,
     person_id: Uuid,
@@ -345,9 +309,8 @@ struct Claim {
 /// What a pass writes when it ends.
 #[derive(Default)]
 struct Writes {
-    claims: Vec<Claim>,
-    /// Where each message id of `claims` is.
-    claiming: HashMap<String, usize>,
+    /// The claims by message id, in the order they are locked.
+    claims: BTreeMap<String, Claim>,
     /// Repeats of message ids the batch claimed before this pass, by id.
     repeats: BTreeMap<String, i32>,
     events: Vec<EventRow>,
@@ -362,21 +325,19 @@ impl Writes {
         occurred_at: OffsetDateTime,
         person_id: Uuid,
     ) {
-        self.claiming
-            .insert(message_id.to_owned(), self.claims.len());
-        self.claims.push(Claim {
-            message_id: message_id.to_owned(),
+        let claim = Claim {
             event_id,
             occurred_at,
             person_id,
             repeats: 0,
-        });
+        };
+        self.claims.insert(message_id.to_owned(), claim);
     }
 
     /// Counts a repeat of a message id the batch claimed.
     fn repeat(&mut self, message_id: &str) {
-        match self.claiming.get(message_id) {
-            Some(index) => self.claims[*index].repeats += 1,
+        match self.claims.get_mut(message_id) {
+            Some(claim) => claim.repeats += 1,
             None => *self.repeats.entry(message_id.to_owned()).or_default() += 1,
         }
     }
@@ -394,44 +355,39 @@ impl Writes {
     }
 
     /// Claims the new message ids, each with the repeats that followed it in the pass, and adds
-    /// the pass's repeats of the ids claimed earlier in the batch. Sorted by message id, so two
+    /// the pass's repeats of the ids claimed earlier in the batch. In message id order, so two
     /// batches claiming the same ids take them in one order. A claim another transaction made
     /// first fails as a retryable race.
     async fn write_dedupe(
-        &mut self,
+        &self,
         connection: &mut PgConnection,
         workspace: WorkspaceId,
     ) -> Result<(), StoreError> {
         if self.claims.is_empty() && self.repeats.is_empty() {
             return Ok(());
         }
-        self.claims.sort_by(|a, b| a.message_id.cmp(&b.message_id));
-        let ids: Vec<&str> = self.claims.iter().map(|c| c.message_id.as_str()).collect();
-        let events: Vec<Uuid> = self.claims.iter().map(|c| c.event_id).collect();
-        let occurred: Vec<OffsetDateTime> = self.claims.iter().map(|c| c.occurred_at).collect();
-        let people: Vec<Uuid> = self.claims.iter().map(|c| c.person_id).collect();
-        let repeats: Vec<i32> = self.claims.iter().map(|c| c.repeats).collect();
+        let ids: Vec<&str> = self.claims.keys().map(String::as_str).collect();
+        let claims = || self.claims.values();
+        let events: Vec<Uuid> = claims().map(|c| c.event_id).collect();
+        let occurred: Vec<OffsetDateTime> = claims().map(|c| c.occurred_at).collect();
+        let people: Vec<Uuid> = claims().map(|c| c.person_id).collect();
+        let repeats: Vec<i32> = claims().map(|c| c.repeats).collect();
         let (again, counts): (Vec<&str>, Vec<i32>) = self
             .repeats
             .iter()
             .map(|(id, count)| (id.as_str(), *count))
             .unzip();
-        let query = if again.is_empty() {
-            sqlx::query_scalar(CLAIM)
-        } else {
-            sqlx::query_scalar(CLAIM_AND_COUNT)
+        let counted = !again.is_empty();
+        let mut query = sqlx::query_scalar(if counted { CLAIM_AND_COUNT } else { CLAIM })
+            .bind(workspace.as_uuid())
+            .bind(&ids)
+            .bind(&events)
+            .bind(&occurred)
+            .bind(&people)
+            .bind(&repeats);
+        if counted {
+            query = query.bind(&again).bind(&counts);
         }
-        .bind(workspace.as_uuid())
-        .bind(&ids)
-        .bind(&events)
-        .bind(&occurred)
-        .bind(&people)
-        .bind(&repeats);
-        let query = if again.is_empty() {
-            query
-        } else {
-            query.bind(&again).bind(&counts)
-        };
         let claimed: i64 = query
             .fetch_one(&mut *connection)
             .await
