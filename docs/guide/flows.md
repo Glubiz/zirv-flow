@@ -456,7 +456,7 @@ check them. Admins open **Settings → Sending limits** at
 A deferred message is checked again when it resumes before delivery. A retry
 of a delivery that may already have gone out (a call cut off, or a reply lost)
 follows the recorded delivery attempt rather than treating it as a new message
-with fresh person gates. A retry after a refusal went nowhere, so it passes
+with fresh person gates. A refused call went nowhere, so its retry passes
 consent, suppression and the caps again, and a person who unsubscribed
 meanwhile is skipped. A provider error reply (any 4xx or 5xx, including a
 gateway error such as 502 or 504) counts as a refusal, so the retry judges the
