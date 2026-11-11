@@ -271,8 +271,8 @@ pub async fn backfill_affinity(
     limit: i64,
 ) -> Result<usize, StoreError> {
     let mut tx = begin(pool).await?;
-    let rows: Vec<(i64, String, Value)> = sqlx::query_as(
-        "SELECT id, kind, item FROM ingest_inbox \
+    let rows: Vec<(i64, String, String)> = sqlx::query_as(
+        "SELECT id, kind, item::text FROM ingest_inbox \
          WHERE workspace_id = $1 AND affinity IS NULL \
          ORDER BY id LIMIT $2 FOR UPDATE",
     )
@@ -285,7 +285,7 @@ pub async fn backfill_affinity(
     let buckets: Vec<i16> = rows
         .iter()
         .map(|(_, kind, item)| {
-            StoredItem::parse(item).map_or(0, |stored| {
+            StoredItem::parse(&parse_item(item)).map_or(0, |stored| {
                 record_bucket(kind, &stored.identifiers, &KnownPeople::new())
             })
         })
@@ -682,6 +682,12 @@ pub(crate) struct InboxRow {
 /// accepted can still be one `serde_json` cannot read back (a number past the double range,
 /// nesting past its depth limit), so each row parses on its own and a bad one cannot fail the
 /// batch that holds it.
+/// The item an inbox row's text holds, or JSON `null` when it cannot be read back. A stored
+/// item is always an object, so `null` marks a row no kind maps.
+pub(crate) fn parse_item(text: &str) -> Value {
+    serde_json::from_str(text).unwrap_or(Value::Null)
+}
+
 #[derive(FromRow)]
 struct RawInboxRow {
     id: i64,
@@ -703,7 +709,7 @@ impl RawInboxRow {
             api_key_id: self.api_key_id,
             webhook_id: self.webhook_id,
             kind: self.kind,
-            item: serde_json::from_str(&self.item).unwrap_or(Value::Null),
+            item: parse_item(&self.item),
             message_id: self.message_id,
             received_at: self.received_at,
             trace_id: self.trace_id,

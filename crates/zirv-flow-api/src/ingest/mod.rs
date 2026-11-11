@@ -316,7 +316,7 @@ struct Accepted {
     request_body = IdentifyRequest,
     responses(
         (status = 202, description = "Appended to the inbox: durable, not yet applied", body = AcceptedBody),
-        (status = 400, description = "An invalid field; errors lists them by index, field name and reason code", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "An invalid field; errors lists them by index, field name and reason code; a number of 1e308 or beyond or nesting past 100 levels is refused as number_out_of_range or too_deep", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Missing or invalid API key", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A session, or a key without the ingest scope", body = Problem, content_type = "application/problem+json"),
         (status = 413, description = "The body is over ingest.max_request_bytes", body = Problem, content_type = "application/problem+json"),
@@ -343,7 +343,7 @@ pub(crate) async fn identify(
     request_body = TrackRequest,
     responses(
         (status = 202, description = "Appended to the inbox: durable, not yet applied", body = AcceptedBody),
-        (status = 400, description = "An invalid field; errors lists them by index, field name and reason code", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "An invalid field; errors lists them by index, field name and reason code; a number of 1e308 or beyond or nesting past 100 levels is refused as number_out_of_range or too_deep", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Missing or invalid API key", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A session, or a key without the ingest scope", body = Problem, content_type = "application/problem+json"),
         (status = 413, description = "The body is over ingest.max_request_bytes", body = Problem, content_type = "application/problem+json"),
@@ -371,7 +371,7 @@ pub(crate) async fn track(
     request_body = BatchRequest,
     responses(
         (status = 202, description = "Appended to the inbox: durable, not yet applied", body = AcceptedBody),
-        (status = 400, description = "An invalid item or too many items; errors lists them by index, field name and reason code", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "An invalid item or too many items; errors lists them by index, field name and reason code; a number of 1e308 or beyond or nesting past 100 levels is refused as number_out_of_range or too_deep", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Missing or invalid API key", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A session, or a key without the ingest scope", body = Problem, content_type = "application/problem+json"),
         (status = 413, description = "The body is over ingest.max_request_bytes", body = Problem, content_type = "application/problem+json"),

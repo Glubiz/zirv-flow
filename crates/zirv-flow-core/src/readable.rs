@@ -24,7 +24,6 @@ pub enum Unreadable {
 }
 
 impl Unreadable {
-    /// The code a refusal carries, wherever one is reported.
     pub fn code(self) -> &'static str {
         match self {
             Self::NumberOutOfRange => "number_out_of_range",
@@ -49,18 +48,9 @@ fn walk(value: &Value, depth: usize) -> Option<Unreadable> {
             .as_f64()
             .filter(|n| n.abs() >= MAX_NUMBER)
             .map(|_| Unreadable::NumberOutOfRange),
-        Value::Array(items) => {
-            if depth >= MAX_DEPTH {
-                return Some(Unreadable::TooDeep);
-            }
-            items.iter().find_map(|item| walk(item, depth + 1))
-        }
-        Value::Object(map) => {
-            if depth >= MAX_DEPTH {
-                return Some(Unreadable::TooDeep);
-            }
-            map.values().find_map(|item| walk(item, depth + 1))
-        }
+        Value::Array(_) | Value::Object(_) if depth >= MAX_DEPTH => Some(Unreadable::TooDeep),
+        Value::Array(items) => items.iter().find_map(|item| walk(item, depth + 1)),
+        Value::Object(map) => map.values().find_map(|item| walk(item, depth + 1)),
         Value::Null | Value::Bool(_) | Value::String(_) => None,
     }
 }

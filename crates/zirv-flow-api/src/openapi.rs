@@ -1526,6 +1526,7 @@ mod tests {
     fn computed_codes() -> Vec<&'static str> {
         use zirv_flow_core::csv_file::CsvError;
         use zirv_flow_core::mapping::MappingError;
+        use zirv_flow_core::readable::Unreadable;
         let column = || "c".to_owned();
         let mut codes = vec![
             CsvError::NotUtf8.code(),
@@ -1546,6 +1547,8 @@ mod tests {
             MappingError::InvalidEventProperty(column()).code(),
             MappingError::DuplicateEventProperty(column()).code(),
             MappingError::TooManyEventProperties.code(),
+            Unreadable::NumberOutOfRange.code(),
+            Unreadable::TooDeep.code(),
         ];
         codes.extend([
             "utm_pattern_invalid",
