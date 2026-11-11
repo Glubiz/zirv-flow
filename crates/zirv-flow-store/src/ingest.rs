@@ -1171,10 +1171,48 @@ async fn drain_batch_as(
     mode: Events,
 ) -> Result<DrainOutcome, StoreError> {
     let mut tx = begin(pool).await?;
-    crate::changes::cache_change_readers(&mut tx, workspace).await?;
-    let (rows, more, taken) = take_rows(&mut tx, workspace, shard, limit, cursors).await?;
-    let hooks = HookConfigs::load(&mut tx, workspace, &rows).await?;
-    lock_contact_rows(&mut tx, workspace, &rows).await?;
+    let drained = drain_rows_as(&mut tx, workspace, shard, key, limit, cursors, mode).await;
+    settle_batch(tx, workspace, cursors, drained).await
+}
+
+/// Commits a drain batch and moves the take cursors on, or rolls it back and returns its error.
+/// The rollback is awaited: a dropped transaction only queues it until the pool next uses the
+/// connection, and until then the batch's rows stay locked, so a retry at once would skip them
+/// and take nothing.
+async fn settle_batch(
+    tx: crate::Tx,
+    workspace: WorkspaceId,
+    cursors: &TakeCursors,
+    drained: Result<(DrainOutcome, Taken), StoreError>,
+) -> Result<DrainOutcome, StoreError> {
+    match drained {
+        Ok((outcome, taken)) => {
+            commit(tx).await?;
+            cursors.advance(workspace, &taken);
+            Ok(outcome)
+        }
+        Err(error) => {
+            // A rollback that fails leaves the connection broken, and the pool closes it.
+            let _ = tx.rollback().await;
+            Err(error)
+        }
+    }
+}
+
+/// The work of [`drain_batch_as`] in its transaction.
+async fn drain_rows_as(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    shard: Shard,
+    key: &HmacKey,
+    limit: i64,
+    cursors: &TakeCursors,
+    mode: Events,
+) -> Result<(DrainOutcome, Taken), StoreError> {
+    crate::changes::cache_change_readers(connection, workspace).await?;
+    let (rows, more, taken) = take_rows(connection, workspace, shard, limit, cursors).await?;
+    let hooks = HookConfigs::load(connection, workspace, &rows).await?;
+    lock_contact_rows(connection, workspace, &rows).await?;
     let mut outcome = DrainOutcome {
         rows: rows.len(),
         more,
@@ -1185,7 +1223,7 @@ async fn drain_batch_as(
     // The shared slot lock once for the batch, after the contact locks and before any person's:
     // the batch's records and events then share what they hold and read, and its profile records
     // recompute their traits together when the batch finishes.
-    events.profiles.guard(&mut tx, workspace).await?;
+    events.profiles.guard(connection, workspace).await?;
     let mut lists = ListCounts::default();
     let mapped: Vec<Mapped> = rows
         .iter()
@@ -1194,7 +1232,7 @@ async fn drain_batch_as(
     // One statement looks up every `messageId` of the batch, instead of one probe per event.
     events
         .prefetch_duplicates(
-            &mut tx,
+            connection,
             workspace,
             mapped.iter().filter_map(|mapped| match mapped {
                 Mapped::Event(record) => Some(record),
@@ -1213,22 +1251,30 @@ async fn drain_batch_as(
             run.push(record);
             continue;
         }
-        apply_event_run(&mut tx, workspace, key, &mut events, &mut run, &mut outcome).await?;
+        apply_event_run(
+            connection,
+            workspace,
+            key,
+            &mut events,
+            &mut run,
+            &mut outcome,
+        )
+        .await?;
         match mapped {
             Mapped::Profile(record) => {
                 let result = apply_profile_record_into(
-                    &mut tx,
+                    connection,
                     workspace,
                     record,
                     &mut events.profiles,
                     &mut events.decisions,
                 )
                 .await?;
-                record_dropped_traits(&mut tx, workspace, row, &result).await?;
+                record_dropped_traits(connection, workspace, row, &result).await?;
                 tally_profile(&mut outcome, "identify", &result);
             }
             Mapped::Contact(record) => {
-                let result = apply_contact_into(&mut tx, workspace, record, &mut events).await?;
+                let result = apply_contact_into(connection, workspace, record, &mut events).await?;
                 // Rolls the batch back, so that the row is isolated and rejected singly.
                 if !dropped_fields(&result).is_empty() {
                     return Err(StoreError::poison());
@@ -1237,30 +1283,36 @@ async fn drain_batch_as(
             }
             Mapped::Event(record) => {
                 let result =
-                    apply_event_record(&mut tx, workspace, key, &mut events, record).await?;
+                    apply_event_record(connection, workspace, key, &mut events, record).await?;
                 tally_event(&mut outcome, &result);
             }
             Mapped::Hook(HookMapped::Record(record)) => {
                 let result =
-                    apply_hook_record(&mut tx, workspace, key, &mut events, &mut lists, record)
+                    apply_hook_record(connection, workspace, key, &mut events, &mut lists, record)
                         .await?;
                 tally_hook(&mut outcome, &result);
             }
             Mapped::Hook(HookMapped::Rejected(rejected)) => {
-                reject_hook(&mut tx, workspace, row, rejected).await?;
+                reject_hook(connection, workspace, row, rejected).await?;
                 outcome.count("webhook", "rejected");
             }
         }
     }
-    apply_event_run(&mut tx, workspace, key, &mut events, &mut run, &mut outcome).await?;
-    events.finish(&mut tx, workspace).await?;
-    delete_rows(&mut tx, workspace, &rows).await?;
-    crate::changes::request_reevaluation(&mut tx, workspace).await?;
+    apply_event_run(
+        connection,
+        workspace,
+        key,
+        &mut events,
+        &mut run,
+        &mut outcome,
+    )
+    .await?;
+    events.finish(connection, workspace).await?;
+    delete_rows(connection, workspace, &rows).await?;
+    crate::changes::request_reevaluation(connection, workspace).await?;
     // Last, so the rows of the lists the batch added to are locked for the commit alone.
-    lists.apply(&mut tx).await?;
-    commit(tx).await?;
-    cursors.advance(workspace, &taken);
-    Ok(outcome)
+    lists.apply(connection).await?;
+    Ok((outcome, taken))
 }
 
 /// [`drain_batch`] that keeps or refuses each row alone, as in a savepoint of its own
@@ -1287,10 +1339,23 @@ pub(crate) async fn drain_batch_singly_using(
     cursors: &TakeCursors,
 ) -> Result<DrainOutcome, StoreError> {
     let mut tx = begin(pool).await?;
-    crate::changes::cache_change_readers(&mut tx, workspace).await?;
-    let (rows, more, taken) = take_rows(&mut tx, workspace, shard, limit, cursors).await?;
-    let hooks = HookConfigs::load(&mut tx, workspace, &rows).await?;
-    lock_contact_rows(&mut tx, workspace, &rows).await?;
+    let drained = drain_rows_singly(&mut tx, workspace, shard, key, limit, cursors).await;
+    settle_batch(tx, workspace, cursors, drained).await
+}
+
+/// The work of [`drain_batch_singly_using`] in its transaction.
+async fn drain_rows_singly(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    shard: Shard,
+    key: &HmacKey,
+    limit: i64,
+    cursors: &TakeCursors,
+) -> Result<(DrainOutcome, Taken), StoreError> {
+    crate::changes::cache_change_readers(connection, workspace).await?;
+    let (rows, more, taken) = take_rows(connection, workspace, shard, limit, cursors).await?;
+    let hooks = HookConfigs::load(connection, workspace, &rows).await?;
+    lock_contact_rows(connection, workspace, &rows).await?;
     let mut singly = SinglyRows {
         workspace,
         key,
@@ -1305,16 +1370,14 @@ pub(crate) async fn drain_batch_singly_using(
         lists: ListCounts::default(),
         attempt: DrainOutcome::default(),
     };
-    apply_isolated(&mut tx, &mut singly, rows.len(), MAX_RUNS).await?;
+    apply_isolated(connection, &mut singly, rows.len(), MAX_RUNS).await?;
     let SinglyRows {
         outcome, mut lists, ..
     } = singly;
-    delete_rows(&mut tx, workspace, &rows).await?;
-    crate::changes::request_reevaluation(&mut tx, workspace).await?;
-    lists.apply(&mut tx).await?;
-    commit(tx).await?;
-    cursors.advance(workspace, &taken);
-    Ok(outcome)
+    delete_rows(connection, workspace, &rows).await?;
+    crate::changes::request_reevaluation(connection, workspace).await?;
+    lists.apply(connection).await?;
+    Ok((outcome, taken))
 }
 
 /// The rows of [`drain_batch_singly`], and what they did so far.
@@ -2848,7 +2911,14 @@ mod tests {
         let drainer = |pool: PgPool, key: std::sync::Arc<HmacKey>| async move {
             loop {
                 match drain_batch(&pool, ws, Shard::ALL, &key, 100).await {
-                    Ok(outcome) if outcome.rows == 0 => break,
+                    // Done once the inbox is empty, not at a take that found the other drainer
+                    // holding every row left.
+                    Ok(outcome) if outcome.rows == 0 => {
+                        if !shard_pending(&pool, ws, Shard::ALL).await.unwrap() {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
                     Ok(_) => {}
                     Err(error) if error.is_retryable() => {}
                     Err(error) => panic!("{error}"),
@@ -2860,6 +2930,7 @@ mod tests {
             drainer(pool.clone(), key.clone())
         );
 
+        assert_eq!(inbox_count(&pool).await, 0);
         let (events, distinct, duplicates): (i64, i64, i64) = sqlx::query_as(
             "SELECT (SELECT count(*) FROM events), \
                     (SELECT count(DISTINCT message_id) FROM events), \
@@ -2869,7 +2940,6 @@ mod tests {
         .await
         .unwrap();
         assert_eq!((events, distinct, duplicates), (2000, 2000, 0));
-        assert_eq!(inbox_count(&pool).await, 0);
         })
         .await;
     }
@@ -4691,10 +4761,18 @@ mod tests {
 
             let lane = |pool: PgPool, key: std::sync::Arc<HmacKey>, index: u32| async move {
                 let shard = Shard { index, count: 2 };
-                let (mut deadlocks, mut retries) = (0, 0);
+                let (mut deadlocks, mut retries, mut empty) = (0, 0, 0);
                 loop {
                     match drain_batch(&pool, ws, shard, &key, 50).await {
-                        Ok(outcome) if outcome.rows == 0 => break,
+                        // Done once the shard is empty: no other lane takes its rows, so a take
+                        // of none while rows are left means rows still locked.
+                        Ok(outcome) if outcome.rows == 0 => {
+                            if !shard_pending(&pool, ws, shard).await.unwrap() {
+                                break;
+                            }
+                            empty += 1;
+                            assert!(empty < 100, "the lane's rows stayed locked");
+                        }
                         Ok(_) => {}
                         Err(error) if error.is_retryable() => {
                             deadlocks += usize::from(deadlocked(&error));
@@ -4712,6 +4790,7 @@ mod tests {
             );
 
             assert_eq!((first, second), (0, 0), "no deadlock");
+            assert_eq!(inbox_count(&pool).await, 0);
             let (events, distinct, repeats, dedupe): (i64, i64, i64, i64) = sqlx::query_as(
                 "SELECT (SELECT count(*) FROM events), \
                         (SELECT count(DISTINCT message_id) FROM events), \
@@ -4732,7 +4811,85 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(people, 60, "each person made once");
-            assert_eq!(inbox_count(&pool).await, 0);
+        })
+        .await;
+    }
+
+    /// How many of `ws`'s inbox rows another session can lock at once. It asks from a thread and
+    /// runtime of its own, so the test's runtime does not run meanwhile, and nothing the pool would
+    /// send later, such as a dropped transaction's queued rollback, reaches the server first.
+    fn lockable_now(pool: &PgPool, ws: WorkspaceId) -> Result<usize, String> {
+        let options = pool.connect_options();
+        std::thread::scope(|scope| {
+            let asked = scope.spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(async {
+                    use sqlx::Connection;
+                    let mut connection = PgConnection::connect_with(&options).await.unwrap();
+                    let rows = sqlx::query(
+                        "SELECT id FROM ingest_inbox WHERE workspace_id = $1 FOR UPDATE NOWAIT",
+                    )
+                    .bind(ws.as_uuid())
+                    .fetch_all(&mut connection)
+                    .await;
+                    connection.close().await.unwrap();
+                    rows.map(|rows| rows.len())
+                        .map_err(|error| error.to_string())
+                })
+            });
+            asked.join().unwrap()
+        })
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_drain_that_loses_a_claim_releases_its_rows_before_it_returns(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let trace = TraceContext::root(Cause::api("req"));
+            let at = OffsetDateTime::now_utc() - time::Duration::hours(1);
+            let key = key();
+            let mut lockable = Vec::new();
+            for singly in [false, true] {
+                let ws = workspace(&pool, if singly { "singly" } else { "whole" }).await;
+                append_as(&pool, ws, &trace, &[seen(&[user("u1")], "m-1", "seen", at)]).await;
+                // Another writer claims the message id, and commits once the drain waits on it.
+                let mut holder = begin(&pool).await.unwrap();
+                sqlx::query(
+                    "WITH p AS (INSERT INTO people (id, workspace_id) \
+                         VALUES (gen_random_uuid(), $1) RETURNING id) \
+                     INSERT INTO event_dedupe \
+                         (workspace_id, message_id, event_id, event_occurred_at, person_id) \
+                     SELECT $1, 'm-1', gen_random_uuid(), now(), id FROM p",
+                )
+                .bind(ws.as_uuid())
+                .execute(&mut *holder)
+                .await
+                .unwrap();
+                let drain = async {
+                    if singly {
+                        drain_batch_singly(&pool, ws, Shard::ALL, &key, 50).await
+                    } else {
+                        drain_batch(&pool, ws, Shard::ALL, &key, 50).await
+                    }
+                };
+                let claim = async {
+                    crate::workspace_credentials::testing::wait_until_a_backend_waits_on_a_lock(
+                        &pool,
+                    )
+                    .await;
+                    commit(holder).await.unwrap();
+                };
+                let (drained, ()) = tokio::join!(drain, claim);
+
+                let error = drained.unwrap_err();
+                assert!(error.is_retryable(), "{error}");
+                lockable.push(lockable_now(&pool, ws));
+            }
+            // The whole batch, then row by row: a retry at once can take the row.
+            assert_eq!(lockable, [Ok(1), Ok(1)]);
         })
         .await;
     }

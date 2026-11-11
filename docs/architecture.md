@@ -573,7 +573,9 @@ applies past a row it could not lock: the rest of that bucket's picked rows wait
 batch, and a batch that takes nothing ends the loop), applies them in id order through the
 transaction-taking profile path of apply-batch and, for its runs of event rows, the batched event
 path above, deletes them and commits, so a crash leaves them in place and concurrent
-drainers never apply a row twice. A retryable error retries the batch with jittered backoff;
+drainers never apply a row twice. A failed batch rolls back before it returns: a dropped
+transaction's rollback waits for the pool's next use of the connection, and until then its rows
+stay locked and a retry would take none of them. A retryable error retries the batch with jittered backoff;
 any other error applies the batch's rows one at a time, each kept or refused alone as with a
 savepoint per row (see "Subtransactions" below), and a row that still fails becomes an
 `apply_failed` ingest reject. The job never re-enqueues itself, since it
