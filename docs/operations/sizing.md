@@ -245,9 +245,13 @@ A shorter window permanently removes history; increasing it cannot restore rows.
 
 | Retained data | Disk growth basis |
 | --- | --- |
-| Million events | About **443 MB**, table plus indexes, calculated from the byte totals divided by the event count in [M4 seed data](../benchmarks/data/m4/seed.json). This is the stored seed shape, excluding WAL, decisions and other writes induced by ingestion. |
+| Million events | About **851 MB** with message ids: **581 bytes** per event in `events` (heap plus 5 indexes) and **270 bytes** per event in `event_dedupe` (one row for every event with a `messageId`, kept as long as the longest event window). Measured on 0.279.0 after `VACUUM`, from 337,567 events written through `/api/v1/ingest/batch`. Excludes WAL, decisions and other writes. The earlier figure of 443 MB came from the stored [M4 seed data](../benchmarks/data/m4/seed.json), which is not the shape ingestion writes; do not plan from it. |
 | Million messages | **not measured** in the available benchmark evidence; [#397](https://github.com/Glubiz/zirv-flow/issues/397). |
 | Million decision records | **not measured** in the permitted benchmark files/reports; [#378](https://github.com/Glubiz/zirv-flow/issues/378) supplies the measurement tool and [#397](https://github.com/Glubiz/zirv-flow/issues/397) must record its output. The figures in the people reference lack a supporting file here and are not used for sizing. |
+
+Worked example (estimate, from the measured 851 bytes per event): at a steady 1,000 events/s,
+which is 86.4 million events a day, plan for about 74 GB a day, or about 2.2 TB over a 30-day
+window. The same arithmetic at 3,490 events/s gives about 256 GB a day.
 
 Multiply measured bytes per record by retained records for your payloads and
 indexes, then allow separately for WAL, temporary queries, index maintenance,

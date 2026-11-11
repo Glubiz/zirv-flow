@@ -83,6 +83,29 @@ so nothing may serve traffic before it.
    Where it fails.
 7. **Start the roles:** `serve`, `worker`, `scheduler` (or `all`). Only now.
    Check: `curl -fsS localhost:8080/readyz` returns 200.
+   Messages the flows sent after the backup are sent again: see the next section first if that
+   matters to you.
+
+## Messages sent after the backup are sent again
+
+The restored `jobs`, `enrollments` and `messages` rows are those of the backup instant. Nothing in
+the database records what was delivered afterwards, so the restored stack wakes the same waiting
+enrollments and sends the same messages to the same people. In the restore rehearsal, 10
+enrollments were waiting at the backup; the original stack then sent 9 messages; the restored
+stack sent the same 9 again (seen three times). Within one database there was no duplicate.
+Enrollments made after the backup are lost, like every other write after it.
+
+To limit the repeat:
+
+- Prefer point-in-time recovery to the latest moment you can, so less is repeated.
+- If a repeat is not acceptable, pause the flows before the worker starts. In step 7 start only
+  `serve`, pause each published flow (`POST /api/v1/workspaces/<ws>/flows/<id>/pause`, or the Pause
+  action on the flow in the web UI), then start `worker` and `scheduler`. A paused flow holds a
+  step that falls due and sends nothing while it is paused.
+- Check what went out after the backup against your own record of sends, then resume
+  (`POST .../flows/<id>/resume`) the flows that are safe. For one that is not, end its in-flight
+  enrollments (`POST .../flows/<id>/versions/<n>/exit-enrollments` for an older version) or leave
+  it paused.
 
 ## Checks after the restore
 
