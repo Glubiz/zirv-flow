@@ -101,7 +101,9 @@ To limit the repeat:
 - If a repeat is not acceptable, pause the flows before the worker starts. In step 7 start only
   `serve`, pause each published flow (`POST /api/v1/workspaces/<ws>/flows/<id>/pause`, or the Pause
   action on the flow in the web UI), then start `worker` and `scheduler`. A paused flow holds a
-  step that falls due and sends nothing while it is paused.
+  step that falls due and sends nothing while it is paused. A message that was already queued
+  for sending when its flow is paused is skipped (`flow_paused`), not held, so resuming does not
+  send it ([#589](https://github.com/Glubiz/zirv-flow/issues/589)).
 - Check what went out after the backup against your own record of sends, then resume
   (`POST .../flows/<id>/resume`) the flows that are safe. For one that is not, end its in-flight
   enrollments (`POST .../flows/<id>/versions/<n>/exit-enrollments` for an older version) or leave
