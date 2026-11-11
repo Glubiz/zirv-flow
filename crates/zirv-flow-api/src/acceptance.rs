@@ -16223,4 +16223,149 @@ email,b@example.com,
             );
         }
     }
+
+    // ---- Segment previews share no connections with ingest (A5) ----
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_preview_waits_no_longer_than_the_acquire_timeout_and_answers_explorer_busy(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let explorer_pool =
+            zirv_flow_store::sized_like(&pool, 1, 0, std::time::Duration::from_millis(100));
+        let router = router(
+            AppState::new(pool.clone(), Arc::new(String::new))
+                .with_hmac_root(&zirv_flow_core::HmacRoot::bootstrap_from(
+                    &zirv_flow_core::MasterKey::generate(),
+                ))
+                .with_explorer_pool(explorer_pool.clone()),
+        );
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        define_plan(&pool, &ws).await;
+        let (_, key) = make_key(&router, &owner, &ws, &["read", "ingest"]).await;
+        let uri = format!("{}/preview", segments_uri(&ws));
+        let held = loop {
+            if let Ok(connection) = explorer_pool.acquire().await {
+                break connection;
+            }
+        };
+
+        let started = std::time::Instant::now();
+        let busy = call(
+            &router,
+            "POST",
+            &uri,
+            Some(json!({"definition": plan_is("pro")})),
+            Auth::Key(&key),
+        )
+        .await;
+        let waited = started.elapsed();
+        let ingested = call(
+            &router,
+            "POST",
+            "/api/v1/ingest/track",
+            Some(json!({"userId": "u-1", "event": "seen"})),
+            Auth::Key(&key),
+        )
+        .await;
+        drop(held);
+        let free = call(
+            &router,
+            "POST",
+            &uri,
+            Some(json!({"definition": plan_is("pro")})),
+            Auth::Key(&key),
+        )
+        .await;
+
+        assert_eq!(
+            busy.status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{:?}",
+            busy.body
+        );
+        assert_eq!(busy.body["code"], "explorer_busy");
+        assert!(busy.headers.contains_key(header::RETRY_AFTER));
+        assert!(
+            waited < std::time::Duration::from_secs(3),
+            "waited {waited:?}"
+        );
+        assert_eq!(ingested.status, StatusCode::ACCEPTED, "{:?}", ingested.body);
+        assert_eq!(free.status, StatusCode::OK, "{:?}", free.body);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_caller_at_the_preview_limit_is_refused_while_another_caller_is_served(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let router = router(
+            AppState::new(pool.clone(), Arc::new(String::new))
+                .with_hmac_root(&zirv_flow_core::HmacRoot::bootstrap_from(
+                    &zirv_flow_core::MasterKey::generate(),
+                ))
+                .with_max_previews_per_caller(1),
+        );
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        define_plan(&pool, &ws).await;
+        let (_, first_key) = make_key(&router, &owner, &ws, &["read"]).await;
+        let (_, second_key) = make_key(&router, &owner, &ws, &["read"]).await;
+        let uri = format!("{}/preview", segments_uri(&ws));
+        let body = json!({"definition": plan_is("pro")});
+        // A lock on the people table holds the first preview in its count query.
+        let mut blocker = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE people IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+
+        let running = call(
+            &router,
+            "POST",
+            &uri,
+            Some(body.clone()),
+            Auth::Key(&first_key),
+        );
+        let others = async {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let refused = call(
+                &router,
+                "POST",
+                &uri,
+                Some(body.clone()),
+                Auth::Key(&first_key),
+            )
+            .await;
+            let other_caller = tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                call(
+                    &router,
+                    "POST",
+                    &uri,
+                    Some(body.clone()),
+                    Auth::Key(&second_key),
+                ),
+            )
+            .await;
+            drop(blocker);
+            (refused, other_caller)
+        };
+        let (first, (refused, other_caller)) = tokio::join!(running, others);
+        let after = call(&router, "POST", &uri, Some(body), Auth::Key(&first_key)).await;
+
+        assert_eq!(first.status, StatusCode::OK, "{:?}", first.body);
+        assert_eq!(
+            refused.status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{:?}",
+            refused.body
+        );
+        assert_eq!(refused.body["code"], "explorer_busy");
+        assert!(refused.headers.contains_key(header::RETRY_AFTER));
+        // The other caller is not refused for the first one's slot: it waits on the same lock.
+        assert!(other_caller.is_err(), "the other caller was answered early");
+        assert_eq!(after.status, StatusCode::OK, "{:?}", after.body);
+    }
 }

@@ -25,6 +25,10 @@ pub(crate) use schema::{
 /// setting, and sits above the 15 s target of an aggregate preview (architecture 19).
 pub(crate) const PREVIEW_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// How many previews one caller may have running at once. A preview is the heaviest read a viewer can
+/// start, and it runs on the explorer pool, so one caller cannot take every connection of it.
+pub(crate) const MAX_PREVIEWS_PER_CALLER: usize = 2;
+
 /// The compiler's catalog and trait storage from the store's snapshot. Only slots in state
 /// `ready` are in the storage, and they come from the same snapshot as the catalog.
 pub(crate) fn catalog_of(snapshot: CatalogSnapshot) -> (Catalog, TraitStorage) {
