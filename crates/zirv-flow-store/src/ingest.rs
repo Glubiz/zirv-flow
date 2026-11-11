@@ -4450,7 +4450,8 @@ mod tests {
     }
 
     /// A workspace whose segments read every change class, with a `page` schema that allows
-    /// anything and a `checked` schema that blocks a non-integer `n`.
+    /// anything, a `checked` schema that blocks a non-integer `n`, and a rule that forwards every
+    /// `page` event.
     async fn compared_workspace(pool: &PgPool, slug: &str) -> WorkspaceId {
         let ws = workspace(pool, slug).await;
         crate::segments::tests_support::segment_reading(
@@ -4485,6 +4486,21 @@ mod tests {
                 .unwrap();
             commit(tx).await.unwrap();
         }
+        let destination = crate::forwarding::support::destination_in(pool, ws).await;
+        crate::forwarding::support::add_rule(
+            pool,
+            ws,
+            destination,
+            "page",
+            json!([]),
+            json!({
+                "id": {"from": "event.id"},
+                "person": {"from": "person.id"},
+                "name": {"from": "event.name"},
+                "path": {"from": "event.properties", "pointer": "/path"},
+            }),
+        )
+        .await;
         ws
     }
 
@@ -4522,7 +4538,9 @@ mod tests {
             }
         }
         const VOLATILE: &str = "- 'workspace_id' - 'created_at' - 'updated_at' - 'changed_at' \
-             - 'recorded_at' - 'received_at'";
+             - 'recorded_at' - 'received_at' - 'next_attempt_at' - 'idempotency_key'";
+        // The jobs by kind and payload: their ids, times and leases differ.
+        const JOBS: &str = "(SELECT workspace_id, kind, payload FROM jobs)";
         let keyed = [
             ("identities", "t.kind, t.value"),
             ("source_records", "t.source, t.stream, t.record_key"),
@@ -4536,6 +4554,8 @@ mod tests {
             "identity_conflicts",
             "person_changes",
             "people",
+            "forwarding_outbox",
+            JOBS,
         ];
         let mut labels: HashMap<Uuid, usize> = HashMap::new();
         let mut state = Vec::new();
