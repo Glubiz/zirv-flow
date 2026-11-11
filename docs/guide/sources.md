@@ -192,8 +192,9 @@ commits a unit of at least 500 records (a source batch is never split) in one tr
 profile changes, the retracted records, the rejects, one decision per record, the counters and
 the checkpoint. The transaction is fenced twice. It locks the job's lease, so a worker whose
 lease was taken over commits nothing, and it locks the run, so a cancelled run is not applied.
-Records are kept under the source id and the stream name, with `last_seen_run` set to the run.
-A record the source reports as deleted retracts its contribution.
+Records are kept under the source id and the stream name. A full refresh and a reconciliation
+also set each record's `last_seen_run` to the run, which their sweep reads; other runs leave it
+as it was. A record the source reports as deleted retracts its contribution.
 
 **Deleting what the source dropped.** A **full refresh** ends with a **sweep**: once the whole
 stream is read and committed, the stream's live records that the run did not see are removed
