@@ -454,8 +454,8 @@ check them. Admins open **Settings → Sending limits** at
   `server.public_url`. A destination rate limit can hold work for later.
 
 A deferred message is checked again when it resumes before delivery. A retry
-of a delivery that may already have gone out follows the recorded delivery
-attempt rather than treating it as a new message with fresh person gates.
+of a delivery that may already have gone out (a call cut off, or a reply lost) follows the recorded delivery
+attempt rather than treating it as a new message with fresh person gates. A retry after a definitive refusal (a 429 or 5xx) went nowhere, so it passes consent, suppression and the caps again, and a person who unsubscribed meanwhile is skipped.
 
 **Common mistake:** raising limits because an enrollment has not advanced yet.
 **Fix:** read the message outcome and gate reason first. A quiet-hours deferral,

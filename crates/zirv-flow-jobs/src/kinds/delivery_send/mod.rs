@@ -213,8 +213,20 @@ impl JobKind for DeliverySend {
             return Ok(());
         }
         // A message that was being delivered when an earlier run failed may have gone out: it is
-        // delivered again under the same key, without judging it by the gates once more.
-        let resuming = recorded == Some(MessageStatus::Sending);
+        // delivered again under the same key, without judging it by the gates once more. Only a
+        // call that may have been accepted counts (the unconfirmed or in-flight mark): after a
+        // definitive refusal (a 429, a 5xx) the row stays `sending` with neither mark, nothing
+        // went out, and the retry passes the person gates like a first attempt.
+        let resuming = if recorded == Some(MessageStatus::Sending) {
+            let pool = ctx
+                .pool()
+                .cloned()
+                .ok_or_else(|| JobError::new("the worker has no pool"))?;
+            message_unconfirmed(&pool, job.workspace, job.message).await?
+                || message_in_flight(&pool, job.workspace, job.message).await?
+        } else {
+            false
+        };
         match decide(ctx, &job, &payload, now, resuming).await? {
             Step::Over => Ok(()),
             Step::Finished(trail) => finish(ctx, &job, trail, now).await,
@@ -423,9 +435,8 @@ async fn decide(
     // retry), and read once, before this attempt writes its own in-flight mark (gate 9). A crash
     // after a definitive reply but before the clear there also counts as carried: that is
     // deliberately conservative.
-    let carried = resuming
-        && (message_unconfirmed(&pool, workspace, job.message).await?
-            || message_in_flight(&pool, workspace, job.message).await?);
+    // (`resuming` is true only when one of those marks was set when this run began.)
+    let carried = resuming;
     let current_hash = gates::address_hash(&key, &address);
     // An earlier call that may have been accepted went to the stored address. If the person's
     // address changed since, the resumed call must not go to the new one under the same
@@ -1154,6 +1165,30 @@ mod tests {
                     source: ChangeSource::Api,
                     evidence: json!({}),
                     occurred_at: self.clock.now() - Span::hours(1),
+                    actor: None,
+                },
+                &TraceContext::root(Cause::api("t")),
+            )
+            .await
+            .unwrap();
+            zirv_flow_store::commit(tx).await.unwrap();
+        }
+
+        /// The person withdraws consent for email, now.
+        async fn withdraw(&self, person: Uuid) {
+            let mut tx = zirv_flow_store::begin(&self.pool).await.unwrap();
+            set_consent(
+                &mut tx,
+                self.ws,
+                &ConsentChange {
+                    dimensions: Default::default(),
+                    person,
+                    channel: Channel::Email,
+                    topic: None,
+                    status: ConsentStatus::Unsubscribed,
+                    source: ChangeSource::Api,
+                    evidence: json!({}),
+                    occurred_at: self.clock.now(),
                     actor: None,
                 },
                 &TraceContext::root(Cause::api("t")),
@@ -2932,6 +2967,11 @@ mod tests {
             let queued = env.queue(person, template, 5).await;
             env.attempt().await.unwrap_err();
             assert_eq!(env.message(queued.message).await.status, "sending");
+            // The fake answers 503 for a lost reply; a 503 alone proves nothing was accepted, so the
+            // lost reply is marked as the real one would be.
+            zirv_flow_store::mark_message_unconfirmed(&env.pool, env.ws, queued.message)
+                .await
+                .unwrap();
             let long_ago = (env.clock.now() - Span::hours(7))
                 .format(&time::format_description::well_known::Rfc3339)
                 .unwrap();
@@ -3728,6 +3768,9 @@ mod tests {
             let queued = env.queue(person, template, 5).await;
             env.attempt().await.unwrap_err();
             assert_eq!(env.message(queued.message).await.status, "sending");
+            zirv_flow_store::mark_message_unconfirmed(&env.pool, env.ws, queued.message)
+                .await
+                .unwrap();
             zirv_flow_store::archive_destination(&env.pool, env.ws, env.destination)
                 .await
                 .unwrap();
@@ -5450,6 +5493,120 @@ mod tests {
                     ("delivered".to_owned(), 3)
                 ]
             );
+            assert_eq!(fake.accepted().len(), 1);
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_429_then_an_unsubscribe_skips_the_retry_for_no_consent(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            use zirv_flow_connectors::destinations::{
+                FakeProvider, FakeProviderOptions, FakeProviderScript,
+            };
+
+            let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+            let env = provider_env(pool, "one", &fake).await;
+            let template = env.template("marketing", LINKED).await;
+            let person = env.person(PERSONAL_DATA.email).await;
+            env.subscribe(person).await;
+            let queued = env.queue(person, template, 5).await;
+            fake.script(FakeProviderScript::Status {
+                status: 429,
+                body: json!({}),
+                retry_after: Some(30),
+            });
+            env.attempt().await.unwrap_err();
+            env.withdraw(person).await;
+
+            env.attempt().await.unwrap();
+
+            let ended = env.message(queued.message).await;
+            assert_eq!(
+                (ended.status.as_str(), ended.reason.as_deref()),
+                ("skipped", Some("no_consent"))
+            );
+            assert!(fake.accepted().is_empty(), "nothing was sent");
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_503_then_a_suppression_skips_the_retry_as_suppressed(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            use zirv_flow_connectors::destinations::{
+                FakeProvider, FakeProviderOptions, FakeProviderScript,
+            };
+
+            let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+            let env = provider_env(pool, "one", &fake).await;
+            let template = env.plain_template("transactional").await;
+            let person = env.person(PERSONAL_DATA.email).await;
+            let queued = env.queue(person, template, 5).await;
+            fake.script(FakeProviderScript::Status {
+                status: 503,
+                body: json!({}),
+                retry_after: None,
+            });
+            env.attempt().await.unwrap_err();
+            add_suppression(
+                &env.pool,
+                env.ws,
+                &NewSuppression {
+                    identifier_hash: crate_hash(PERSONAL_DATA.email),
+                    kind: "email",
+                    reason: zirv_flow_core::consent::SuppressionReason::Complaint,
+                    source: "api",
+                    note: None,
+                    created_by: None,
+                },
+            )
+            .await
+            .unwrap();
+
+            env.attempt().await.unwrap();
+
+            let ended = env.message(queued.message).await;
+            assert_eq!(
+                (ended.status.as_str(), ended.reason.as_deref()),
+                ("skipped", Some("suppressed"))
+            );
+            assert!(fake.accepted().is_empty(), "nothing was sent");
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_call_that_may_have_been_accepted_resumes_without_the_person_gates(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            use zirv_flow_connectors::destinations::{
+                FakeProvider, FakeProviderOptions, FakeProviderScript,
+            };
+
+            let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+            let env = provider_env(pool, "one", &fake).await;
+            let template = env.template("marketing", LINKED).await;
+            let person = env.person(PERSONAL_DATA.email).await;
+            env.subscribe(person).await;
+            let queued = env.queue(person, template, 5).await;
+            fake.script(FakeProviderScript::Status {
+                status: 429,
+                body: json!({}),
+                retry_after: Some(30),
+            });
+            env.attempt().await.unwrap_err();
+            // The next attempt wrote its pre-call mark and was cut off before it knew the outcome.
+            mark_message_sending(&env.pool, env.ws, queued.message, 1, None)
+                .await
+                .unwrap();
+            env.withdraw(person).await;
+
+            env.attempt().await.unwrap();
+
+            assert_eq!(env.message(queued.message).await.status, "sent");
             assert_eq!(fake.accepted().len(), 1);
         })
         .await;
