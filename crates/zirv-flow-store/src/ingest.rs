@@ -4538,8 +4538,12 @@ mod tests {
         }
         const VOLATILE: &str = "- 'workspace_id' - 'created_at' - 'updated_at' - 'changed_at' \
              - 'recorded_at' - 'received_at' - 'next_attempt_at' - 'idempotency_key'";
-        // The jobs by kind and payload: their ids, times and leases differ.
-        const JOBS: &str = "(SELECT workspace_id, kind, payload FROM jobs)";
+        // The jobs by kind and payload: their ids, times and leases differ. Without the drain
+        // wakes, which the appends enqueue and no drain does: a wake goes to the shard of each
+        // appended row's bucket, and a row naming a known person hashes `person:<id>`, an id the
+        // two arms draw at random.
+        const JOBS: &str =
+            "(SELECT workspace_id, kind, payload FROM jobs WHERE kind <> 'ingest.drain')";
         let keyed = [
             ("identities", "t.kind, t.value"),
             ("source_records", "t.source, t.stream, t.record_key"),
