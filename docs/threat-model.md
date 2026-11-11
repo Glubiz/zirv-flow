@@ -184,6 +184,12 @@ it does not certify content delivered to a recipient's mail client.
 
 Asset URLs are public by design. Do not treat an unguessable image hash as workspace authorization.
 
+### Import uploads
+
+| Threat and priority | Control in code | Proving test |
+| --- | --- | --- |
+| High: an editor or a `write` key fills the database with CSV files (denial of service for every workspace) | [`crates/zirv-flow-store/src/imports/upload.rs`](../crates/zirv-flow-store/src/imports/upload.rs), `ImportUpload::begin_within` refuses past `imports.max_open` open imports or `imports.max_workspace_bytes` of stored files, `write` stops a body that outgrows the room left and `finish` checks the total again under a per-workspace lock; the API maps these to `import_open_limit` (409) and `import_quota_exceeded` (413) | `an_upload_past_the_open_limit_is_refused_until_one_is_cancelled` and `an_upload_past_the_workspace_quota_is_refused_until_a_file_is_deleted` (`crates/zirv-flow-store/src/imports/upload.rs`) |
+
 ### Test sends
 
 | Threat and priority | Control in code | Proving test |

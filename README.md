@@ -133,6 +133,8 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `ingest.drain_batch_size` | u32 | 50 | at least 1; inbox rows `ingest.drain` applies per transaction |
 | `ingest.drain_shards` | u32 | 8 | 1 to 64; drain jobs per workspace, one per shard of the inbox buckets, run in the workers' drain slots |
 | `imports.max_file_bytes` | u64 | 536870912 | at least 1; a larger CSV upload is refused with 413 |
+| `imports.max_workspace_bytes` | u64 | 4294967296 | at least 1; an upload that would take the stored import files of a workspace (finished uploads whose file is not yet deleted) past this is refused with 413 (`import_quota_exceeded`) |
+| `imports.max_open` | u32 | 20 | at least 1; the most imports a workspace may have open (uploading, uploaded, mapped or dry-run); another upload is refused with 409 (`import_open_limit`) until one runs or is cancelled |
 | `assets.max_file_bytes` | u64 | 5242880 | at least 1; a larger image upload is refused with 413 (`asset_too_large`) |
 | `assets.max_workspace_bytes` | u64 | 1073741824 | at least 1; an upload that would take a workspace's images past this is refused with 413 (`asset_quota_exceeded`) |
 | `explorer.interactive_timeout_ms` | u64 | 5000 | at least 1; how long an explorer count, breakdown or page of rows may run before it is cancelled (`503`, code `query_timeout`) |

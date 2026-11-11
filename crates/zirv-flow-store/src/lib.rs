@@ -197,11 +197,11 @@ pub use imports::{
     DRY_RUN_JOB_KIND, DryRunBatch, Import, ImportBatch, ImportErasure, ImportPhase, ImportReject,
     ImportRetention, ImportStatus, ImportUpload, REJECT_CHECK_MIN_ROWS, REJECT_RETENTION_DAYS,
     RUN_JOB_KIND, RejectReason, RejectedRow, RowDetail, StoredReason, TransitionError,
-    UPLOAD_ABANDONED_AFTER_DAYS, UploadScan, UploadStart, cancel_import, commit_dry_run_batch,
-    commit_import_batch, delete_expired_import_data, discard_unfinished_import, enqueue_import_job,
-    erase_import_values, fail_import, find_import, finish_import_dry_run, finish_import_run,
-    import_source_labels, list_import_rejects, list_imports, read_import_chunk, set_import_mapping,
-    start_import_dry_run, start_import_run,
+    UPLOAD_ABANDONED_AFTER_DAYS, UploadQuota, UploadScan, UploadStart, cancel_import,
+    commit_dry_run_batch, commit_import_batch, delete_expired_import_data,
+    discard_unfinished_import, enqueue_import_job, erase_import_values, fail_import, find_import,
+    finish_import_dry_run, finish_import_run, import_source_labels, list_import_rejects,
+    list_imports, read_import_chunk, set_import_mapping, start_import_dry_run, start_import_run,
 };
 pub use ingest::{
     DRAIN_JOB_KIND, DrainOutcome, InboxHead, IngestItem, IngestPayload, Shard, append_inbox,
@@ -454,6 +454,8 @@ enum StoreErrorKind {
     PoolTimeout,
     RunActive,
     Erased,
+    ImportQuota,
+    ImportOpenLimit,
     AuditSummary,
 }
 
@@ -590,6 +592,26 @@ impl StoreError {
         Self::new(StoreErrorKind::Erased)
     }
 
+    /// An import upload the workspace's stored import files would not leave room for.
+    pub(crate) fn import_quota() -> Self {
+        Self::new(StoreErrorKind::ImportQuota)
+    }
+
+    /// An import upload refused because the workspace has too many open imports.
+    pub(crate) fn import_open_limit() -> Self {
+        Self::new(StoreErrorKind::ImportOpenLimit)
+    }
+
+    /// Whether the upload was refused by the workspace's import file quota.
+    pub fn is_import_quota(&self) -> bool {
+        matches!(self.kind, StoreErrorKind::ImportQuota)
+    }
+
+    /// Whether the upload was refused by the workspace's open-import limit.
+    pub fn is_import_open_limit(&self) -> bool {
+        matches!(self.kind, StoreErrorKind::ImportOpenLimit)
+    }
+
     /// An audit summary that holds a banned key or a value shaped like personal data.
     pub(crate) fn audit_summary(issue: zirv_flow_core::audit::SummaryIssue) -> Self {
         Self::with_source(StoreErrorKind::AuditSummary, issue)
@@ -687,6 +709,12 @@ impl fmt::Display for StoreError {
             }
             StoreErrorKind::Erased => {
                 formatter.write_str("the import was erased while it was being uploaded")
+            }
+            StoreErrorKind::ImportQuota => {
+                formatter.write_str("the workspace's stored import files would pass the quota")
+            }
+            StoreErrorKind::ImportOpenLimit => {
+                formatter.write_str("the workspace has too many open imports")
             }
             StoreErrorKind::Retryable => {
                 formatter
