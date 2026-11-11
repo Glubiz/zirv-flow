@@ -50,8 +50,7 @@ fn identity_bucket(kind: &str, value: &str) -> i32 {
 /// tombstoned, locked in id order by the scan that finds them through the unique key; each comes
 /// back with its person and `true`. For a batch none of whose records can merge, which is nearly
 /// every batch: one pass over the rows, where [`LOCK_NAMED_AND_OWNED`] reads each found row again
-/// through the primary key (round 7e2: 29% of a pull unit's block reads and 36% of its buffer
-/// hits).
+/// through the primary key.
 const LOCK_NAMED: &str = "SELECT s.person_id, true FROM source_records s \
      JOIN (SELECT DISTINCT * FROM unnest($2::text[], $3::text[], $4::text[])) \
          AS l(source, stream, record_key) \

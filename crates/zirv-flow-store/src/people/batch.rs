@@ -221,8 +221,8 @@ type Contributions = HashMap<String, Vec<Contribution<Value>>>;
 
 /// The live ledger contributions of the people `$2` to the `(person, key)` pairs `$3`, `$4`. A
 /// record with no traits holds no key, so `traits <> '{}'` changes no row of the result; it lets
-/// the read walk `source_records_traits_idx` (0095), the live records that hold traits (22% of
-/// the ledger on the 5x sim), instead of fetching every record of the people.
+/// the read walk `source_records_traits_idx` (0095), the live records that hold traits, instead
+/// of fetching every record of the people.
 pub(super) const LEDGER_CONTRIBUTIONS: &str = "SELECT s.person_id, w.key, s.id, s.source, \
          s.traits -> w.key \
      FROM source_records s \
@@ -945,7 +945,7 @@ pub(crate) mod tests {
         );
     }
 
-    // The ledger reads that skip the records holding no traits (round 7e2, migration 0095).
+    // The ledger reads that skip the records holding no traits (migration 0095).
 
     /// Main's three reads before they gained `traits <> '{}'`: the reference the new ones must
     /// agree with.
@@ -1227,9 +1227,9 @@ pub(crate) mod tests {
     async fn the_ledger_reads_walk_the_traits_index_on_a_ledger_of_mostly_empty_records(
         pool: PgPool,
     ) {
-        let ws = workspace(&pool, "five-x").await;
-        // 10,000 people with 12 records each, 22% of them holding traits: the shape of the 5x
-        // sim's ledger.
+        let ws = workspace(&pool, "mostly-empty").await;
+        // 10,000 people with 12 records each, 22% of them holding traits: a ledger fed mostly by
+        // records that carry identifiers only.
         sqlx::query(
             "INSERT INTO people (id, workspace_id) \
              SELECT md5('p' || p)::uuid, $1 FROM generate_series(0, 9999) p",
