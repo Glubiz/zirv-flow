@@ -15,3 +15,16 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.284.0 (2026-11-11)
+
+### Fixes
+
+- run previews on the explorer pool with a per-caller limit
+- refuse ordered and prefix conditions on personal values without the grant
+
+### Chores
+
+- regenerate the API schema for the preview responses
+- one guard entry point, and note the publish trust in the threat model
+- bump the workspace to 0.284.0
+
