@@ -98,6 +98,103 @@ pub(crate) async fn mark_people(
     Ok(())
 }
 
+/// Marks made one after another, written by [`MarkBuffer::flush`] in one statement that ends in
+/// what [`mark_people`] called once per mark, in the same order, leaves: per person the kept
+/// marks' classes OR-ed, the trace and cause of its latest kept mark and the earliest `late_from`.
+/// A mark of a class no live segment reads is left out before that, as [`mark_people`] skips it.
+#[derive(Debug, Default)]
+pub(crate) struct MarkBuffer {
+    people: Vec<Uuid>,
+    classes: Vec<i16>,
+    traces: Vec<Uuid>,
+    kinds: Vec<&'static str>,
+    causes: Vec<String>,
+    late_from: Vec<Option<OffsetDateTime>>,
+}
+
+/// The statement of [`MarkBuffer::flush`]: `$2..$7` are the marks in the order made.
+const MARK_BUFFERED: &str = "WITH readers AS MATERIALIZED ( \
+         SELECT (NULLIF(current_setting('zirv_flow.change_readers', true), '')::jsonb \
+                 ->> $1::text)::smallint AS classes), \
+     kept AS MATERIALIZED ( \
+         SELECT m.* FROM unnest($2::uuid[], $3::int2[], $4::uuid[], $5::text[], $6::text[], \
+                                $7::timestamptz[]) \
+             WITH ORDINALITY AS m(person_id, classes, trace_id, cause_kind, cause_id, late_from, n) \
+         WHERE ((SELECT classes FROM readers) & m.classes) <> 0), \
+     latest AS ( \
+         SELECT DISTINCT ON (person_id) person_id, trace_id, cause_kind, cause_id \
+         FROM kept ORDER BY person_id, n DESC), \
+     folded AS ( \
+         SELECT person_id, bit_or(classes) AS classes, min(late_from) AS late_from \
+         FROM kept GROUP BY person_id), \
+     marked AS ( \
+         INSERT INTO person_changes \
+            (workspace_id, person_id, classes, trace_id, cause_kind, cause_id, late_from) \
+         SELECT $1, l.person_id, f.classes, l.trace_id, l.cause_kind, l.cause_id, f.late_from \
+         FROM latest l JOIN folded f USING (person_id) ORDER BY l.person_id \
+         ON CONFLICT (workspace_id, person_id) DO UPDATE SET \
+             classes = person_changes.classes | EXCLUDED.classes, \
+             trace_id = EXCLUDED.trace_id, cause_kind = EXCLUDED.cause_kind, \
+             cause_id = EXCLUDED.cause_id, \
+             late_from = LEAST(person_changes.late_from, EXCLUDED.late_from) RETURNING 1), \
+     marked_workspaces AS ( \
+         SELECT COALESCE(NULLIF(current_setting('zirv_flow.marked_workspaces', true), '')::jsonb, \
+                         '[]') AS workspaces) \
+     SELECT readers.classes, \
+         CASE WHEN NOT (workspaces ? $1::text) AND EXISTS (SELECT 1 FROM marked) THEN \
+             set_config('zirv_flow.marked_workspaces', \
+                        (workspaces || jsonb_build_array($1::text))::text, true) END \
+     FROM readers CROSS JOIN marked_workspaces";
+
+impl MarkBuffer {
+    /// Queues a mark of `person` in `classes`, as [`mark_people`] would make it now.
+    pub(crate) fn push(
+        &mut self,
+        person: Uuid,
+        classes: ChangeClasses,
+        trace: &TraceContext,
+        late_from: Option<OffsetDateTime>,
+    ) {
+        self.people.push(person);
+        self.classes.push(i16::from(classes.bits()));
+        self.traces.push(trace.trace_id.as_uuid());
+        self.kinds.push(trace.cause.kind.as_str());
+        self.causes.push(trace.cause.id.clone());
+        self.late_from.push(late_from);
+    }
+
+    /// Writes every queued mark in one statement and empties the buffer. Sorted by person, so two
+    /// writers marking overlapping people take the rows in one order. Like [`mark_people`], it
+    /// needs [`cache_change_readers`] first.
+    pub(crate) async fn flush(
+        &mut self,
+        connection: &mut PgConnection,
+        workspace: WorkspaceId,
+    ) -> Result<(), StoreError> {
+        if self.people.is_empty() {
+            return Ok(());
+        }
+        let (readers, _): (Option<i16>, Option<String>) = sqlx::query_as(MARK_BUFFERED)
+            .bind(workspace.as_uuid())
+            .bind(&self.people)
+            .bind(&self.classes)
+            .bind(&self.traces)
+            .bind(&self.kinds)
+            .bind(&self.causes)
+            .bind(&self.late_from)
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(StoreError::query)?;
+        if readers.is_none() {
+            return Err(StoreError::query(sqlx::Error::Protocol(
+                "person changes require cache_change_readers before other locks".into(),
+            )));
+        }
+        *self = Self::default();
+        Ok(())
+    }
+}
+
 /// Take the shared workspace segment lock before any other transaction lock, then cache the
 /// live readers. Repeated calls reuse the cache without acquiring a lock. Call outside record
 /// savepoints so rolling back a bad row retains the guard; `mark_people` rejects a missing cache.
