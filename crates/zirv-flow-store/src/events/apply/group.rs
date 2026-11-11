@@ -474,3 +474,179 @@ impl Writes {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use sqlx::PgPool;
+    use time::macros::datetime;
+    use zirv_flow_core::{HmacPurpose, HmacRoot, MasterKey, Slug, WorkspaceName};
+
+    use super::super::{apply_event_batch, apply_event_records};
+    use super::*;
+    use crate::{begin, commit, create_workspace};
+
+    #[test]
+    fn a_pass_claims_in_message_id_order_and_counts_each_repeat_with_its_claim() {
+        let mut writes = Writes::default();
+        let (at, event, person) = (
+            datetime!(2026-06-01 12:00 UTC),
+            Uuid::from_u128(1),
+            Uuid::from_u128(2),
+        );
+        writes.claim("m-2", event, at, person);
+        writes.claim("m-1", event, at, person);
+        writes.repeat("m-2");
+        writes.repeat("m-2");
+        // An id an earlier pass of the batch claimed.
+        writes.repeat("m-0");
+
+        let claims: Vec<(&str, i32)> = writes
+            .claims
+            .iter()
+            .map(|(id, claim)| (id.as_str(), claim.repeats))
+            .collect();
+        assert_eq!(claims, [("m-1", 0), ("m-2", 2)]);
+        let earlier: Vec<(&str, i32)> = writes
+            .repeats
+            .iter()
+            .map(|(id, count)| (id.as_str(), *count))
+            .collect();
+        assert_eq!(earlier, [("m-0", 1)]);
+    }
+
+    fn key() -> HmacKey {
+        HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction)
+    }
+
+    fn page(identifiers: &[(&str, &str)], message_id: &str) -> EventRecord {
+        EventRecord {
+            source_record_id: None,
+            source: "web".to_owned(),
+            identifiers: identifiers
+                .iter()
+                .map(|(kind, value)| ((*kind).to_owned(), (*value).to_owned()))
+                .collect(),
+            name: "page".to_owned(),
+            properties: Map::new(),
+            timestamp: None,
+            received_at: OffsetDateTime::now_utc(),
+            message_id: Some(message_id.to_owned()),
+            trace: TraceContext::root(Cause::api("test")),
+        }
+    }
+
+    /// `records` as one run through [`apply_event_group`], in a transaction as the drain's.
+    async fn apply_run(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        key: &HmacKey,
+        records: &[EventRecord],
+    ) -> Vec<EventOutcome> {
+        let mut tx = begin(pool).await.unwrap();
+        crate::changes::cache_change_readers(&mut tx, ws)
+            .await
+            .unwrap();
+        let mut batch = EventBatch::default();
+        batch.readers_cached(ws);
+        batch
+            .prefetch_duplicates(&mut tx, ws, records)
+            .await
+            .unwrap();
+        let run: Vec<&EventRecord> = records.iter().collect();
+        let outcomes = apply_event_group(&mut tx, ws, key, &mut batch, &run)
+            .await
+            .unwrap();
+        batch.finish(&mut tx, ws).await.unwrap();
+        commit(tx).await.unwrap();
+        outcomes
+    }
+
+    fn label(outcome: &EventOutcome) -> &'static str {
+        match outcome {
+            EventOutcome::Accepted { state, .. } => state.as_str(),
+            EventOutcome::Duplicate { .. } => "duplicate",
+            EventOutcome::Rejected { reason, .. } => reason,
+        }
+    }
+
+    /// What `ws` holds, ids aside: each event by message id with its state and its person's
+    /// identifiers, each dedupe row by message id, and the identifiers of each person.
+    async fn stored(pool: &PgPool, ws: WorkspaceId) -> Vec<Vec<String>> {
+        let mut state = Vec::new();
+        for sql in [
+            "SELECT e.message_id || ' ' || e.validation_state || ' ' || \
+                 (SELECT string_agg(i.kind || ':' || i.value, ',' ORDER BY i.kind, i.value) \
+                  FROM people p JOIN identities i ON i.person_id = COALESCE(p.merged_into, p.id) \
+                  WHERE p.id = e.person_id) \
+             FROM events e WHERE e.workspace_id = $1 ORDER BY 1",
+            "SELECT message_id || ' ' || duplicates FROM event_dedupe \
+             WHERE workspace_id = $1 ORDER BY 1",
+            "SELECT string_agg(kind || ':' || value, ',' ORDER BY kind, value) FROM identities \
+             WHERE workspace_id = $1 GROUP BY person_id ORDER BY 1",
+        ] {
+            let rows: Vec<String> = sqlx::query_scalar(sql)
+                .bind(ws.as_uuid())
+                .fetch_all(pool)
+                .await
+                .unwrap();
+            state.push(rows);
+        }
+        state
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_run_ends_as_its_events_applied_one_by_one(pool: PgPool) {
+        let key = key();
+        let seed = [
+            page(&[("external:user_id", "u1")], "s-1"),
+            page(&[("anonymous_id", "a2")], "s-2"),
+        ];
+        let run = [
+            // A known person, a new one and the new one again.
+            page(&[("external:user_id", "u1")], "m-1"),
+            page(&[("anonymous_id", "a1")], "m-2"),
+            page(&[("anonymous_id", "a1")], "m-3"),
+            // A repeat inside the pass and one of a stored event.
+            page(&[("external:user_id", "u1")], "m-1"),
+            page(&[("external:user_id", "u1")], "s-1"),
+            // The new person gaining an identifier.
+            page(
+                &[("anonymous_id", "a1"), ("email", "a1@example.com")],
+                "m-4",
+            ),
+            // Refused by the input checks: one by one, and a new pass after it.
+            page(&[("email", "not-an-email")], "m-5"),
+            // A repeat of an id the first pass claimed.
+            page(&[("anonymous_id", "a1")], "m-2"),
+            // Two people's identifiers (a merge, one by one), then a new person.
+            page(&[("external:user_id", "u1"), ("anonymous_id", "a2")], "m-6"),
+            page(&[("anonymous_id", "a3")], "m-7"),
+        ];
+        let mut ended = Vec::new();
+        for slug in ["grouped", "singly"] {
+            let name = WorkspaceName::parse(slug).unwrap();
+            let ws = create_workspace(&pool, &name, &Slug::parse(slug).unwrap())
+                .await
+                .unwrap()
+                .id;
+            apply_event_batch(&pool, ws, &key, &seed).await.unwrap();
+            let outcomes = if slug == "grouped" {
+                apply_run(&pool, ws, &key, &run).await
+            } else {
+                let mut tx = begin(&pool).await.unwrap();
+                let outcomes = apply_event_records(&mut tx, ws, &key, &run).await.unwrap();
+                commit(tx).await.unwrap();
+                outcomes
+            };
+            let labels: Vec<&str> = outcomes.iter().map(label).collect();
+            ended.push((labels, stored(&pool, ws).await));
+        }
+
+        let (grouped, singly) = (&ended[0], &ended[1]);
+        assert_eq!(grouped, singly);
+        let duplicates = grouped.0.iter().filter(|label| **label == "duplicate");
+        assert_eq!(duplicates.count(), 3, "{:?}", grouped.0);
+        assert_eq!(grouped.1[1].len(), 8, "a dedupe row per stored event");
+    }
+}

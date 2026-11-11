@@ -1629,10 +1629,12 @@ mod tests {
             .is_ok()
     }
 
-    /// How many backends wait for a lock the backend `pid` holds.
+    /// How many client backends wait for a lock the backend `pid` holds; an autovacuum worker
+    /// waiting on it is not one of the batches.
     async fn waiting_for(pool: &PgPool, pid: i32) -> i64 {
         sqlx::query_scalar(
-            "SELECT count(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))",
+            "SELECT count(*) FROM pg_stat_activity \
+             WHERE backend_type = 'client backend' AND $1 = ANY(pg_blocking_pids(pid))",
         )
         .bind(pid)
         .fetch_one(pool)
@@ -2031,16 +2033,17 @@ mod tests {
         (ws, seg, ada, run, holder, holder_pid)
     }
 
-    /// The backends of this database, other than the caller and `holder`, that are in a
-    /// transaction: their state, transaction id, xmin and last statement.
+    /// The client backends of this database, other than the caller and `holder`, that are in a
+    /// transaction: their state, transaction id, xmin and last statement. An autovacuum or
+    /// parallel worker of the database has no `state` and is not a pass.
     async fn in_transaction(
         pool: &PgPool,
         holder: i32,
     ) -> Vec<(String, Option<String>, Option<String>, String)> {
         sqlx::query_as(
             "SELECT state, backend_xid::text, backend_xmin::text, query FROM pg_stat_activity \
-             WHERE datname = current_database() AND pid <> pg_backend_pid() AND pid <> $1 \
-               AND xact_start IS NOT NULL",
+             WHERE datname = current_database() AND backend_type = 'client backend' \
+               AND pid <> pg_backend_pid() AND pid <> $1 AND xact_start IS NOT NULL",
         )
         .bind(holder)
         .fetch_all(pool)
