@@ -241,7 +241,7 @@ pub async fn commit_sync_batch(
         )
         .chain(batch.seen.iter().map(String::as_str))
         .collect();
-    let seen = mark_seen(&mut tx, batch, &seen_keys).await?;
+    let seen = seen_ids(&mut tx, batch, &seen_keys).await?;
     let events = apply_events(&mut tx, batch, &results, &seen, held).await?;
     link_event_rejects(&mut tx, batch, &events).await?;
     let mut lists = ListCounts::default();
@@ -883,7 +883,7 @@ async fn join_lists(
 /// mark of a run that never sweeps (incremental, a Kafka stream) has no reader. Writing it anyway
 /// rewrote every record a unit had just inserted or updated: one more row version per record,
 /// with an entry in every index unless the update was heap-only.
-async fn mark_seen(
+async fn seen_ids(
     tx: &mut crate::Tx,
     batch: &SyncBatch<'_>,
     keys: &[&str],
