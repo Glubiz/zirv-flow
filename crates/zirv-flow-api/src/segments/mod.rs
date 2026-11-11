@@ -3,6 +3,7 @@
 
 pub(crate) mod crud;
 pub(crate) mod explain;
+mod guard;
 pub(crate) mod members;
 pub(crate) mod preview;
 mod schema;
@@ -15,6 +16,7 @@ use zirv_flow_store::{CatalogSnapshot, SegmentError, SegmentRef};
 
 use crate::problem::{ApiError, SegmentIssueProblem, SegmentRefProblem};
 
+pub(crate) use guard::refuse_personal_probes;
 pub(crate) use schema::{
     NODE as SEGMENT_NODE_SCHEMA, PROPERTY_FILTER as SEGMENT_FILTER_SCHEMA, SegmentSchemas,
 };

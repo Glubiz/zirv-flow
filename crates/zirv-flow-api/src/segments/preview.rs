@@ -13,7 +13,7 @@ use uuid::Uuid;
 use zirv_flow_segments::{Param, Query, compile, parse_and_validate};
 use zirv_flow_store::{DataAge, SqlParam, SqlQuery, StoreError};
 
-use super::{catalog_of, issues_error};
+use super::{catalog_of, issues_error, refuse_personal_probes};
 use crate::AppState;
 use crate::auth::{Need, Principal, authorize, may_view_pii, path_id};
 use crate::json::ApiJson;
@@ -146,6 +146,9 @@ pub(super) fn read_error(error: StoreError) -> ApiError {
 /// Previews a definition without saving it: how many people match, a sample of them and the age
 /// of the data. A definition that does not validate is 422 `segment_invalid` with its issues. A
 /// preview that runs past its time limit is 503 with the code `segment_preview_timeout`.
+/// A caller who may not see personal values cannot preview a condition that orders or prefixes a
+/// personal trait or event property (403 `pii_trait_not_searchable` or `pii_property_not_explorable`);
+/// `eq`, `exists` and `not_exists` stay allowed.
 /// Identifier values in the sample are shown to the owner, workspace admins and `admin` keys and
 /// masked for everyone else.
 #[utoipa::path(
@@ -158,7 +161,7 @@ pub(super) fn read_error(error: StoreError) -> ApiError {
     responses(
         (status = 200, description = "The count, a sample and the data age", body = PreviewBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
-        (status = 403, description = "A key without the read scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "A key without the read scope, a missing CSRF token, or a condition that orders or prefixes a personal trait or event property for a caller who may not see personal values (`code` is `pii_trait_not_searchable` or `pii_property_not_explorable`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "A definition that does not validate (`code` is `segment_invalid`, with `issues`), or a sample size out of range", body = Problem, content_type = "application/problem+json"),
         (status = 503, description = "The preview ran past its time limit (`code` is `segment_preview_timeout`)", body = Problem, content_type = "application/problem+json")
@@ -186,6 +189,12 @@ pub(crate) async fn preview(
             .map_err(read_error)?,
     );
     let definition = parse_and_validate(&body.definition, &catalog).map_err(issues_error)?;
+    if !reveal {
+        let clear = zirv_flow_store::explain_clear_fields(&mut tx, workspace.id)
+            .await
+            .map_err(read_error)?;
+        refuse_personal_probes(&definition.root, &clear, reveal)?;
+    }
     let compiled = compile(&definition, &catalog, &storage, compiled_at).map_err(issues_error)?;
     let (count, sample) = zirv_flow_store::run_segment_preview(
         &mut tx,
