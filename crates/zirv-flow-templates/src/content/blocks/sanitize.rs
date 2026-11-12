@@ -72,6 +72,16 @@ fn builder(keep: impl Fn(&str) -> bool + Send + Sync + 'static) -> Builder<'stat
         .attribute_filter(|element, attribute, value| {
             if element == "a" && attribute == UTM_ATTRIBUTE {
                 is_utm_off(value).then_some(Cow::Borrowed(UTM_OFF))
+            } else if element == "a" && attribute == "href" && value.contains(['\t', '\n', '\r']) {
+                // Browsers drop tab, LF and CR inside a URL, and ammonia's URL parser does too,
+                // so `http<TAB>://x` passes its scheme test. Drop them here so the output
+                // holds the URL as it is read, and the allowlist check reads the same scheme.
+                Some(Cow::Owned(
+                    value
+                        .chars()
+                        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+                        .collect(),
+                ))
             } else {
                 Some(Cow::Borrowed(value))
             }
@@ -426,6 +436,20 @@ mod tests {
         check_sanitize_source(include_bytes!(
             "../../../tests/fixtures/fuzz/sanitize_source-crash-49a04ec5.bin"
         ));
+    }
+
+    #[test]
+    fn rendered_url_with_a_tab_in_its_scheme_regression() {
+        let data =
+            include_bytes!("../../../tests/fixtures/fuzz/sanitize_source-crash-7f20e6fa.bin");
+        let source = std::str::from_utf8(data).unwrap();
+        let rendered = clean_rendered(source);
+        assert!(!rendered.contains("http	:"), "{rendered:?}");
+        assert!(
+            rendered.contains("href=\"http://flow.example"),
+            "{rendered:?}"
+        );
+        check_sanitize_source(data);
     }
 
     #[test]
