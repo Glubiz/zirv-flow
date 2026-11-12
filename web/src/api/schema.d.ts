@@ -21082,7 +21082,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The Idempotency-Key is in use: `idempotency_key_in_flight` while the first request runs (see Retry-After), or `idempotency_key_replayed` once it uploaded the import, with resource_id as the import's id; the response is not kept */
+            /** @description The Idempotency-Key is in use: `idempotency_key_in_flight` while the first request runs (see Retry-After), or `idempotency_key_replayed` once it uploaded the import, with resource_id as the import's id; the response is not kept; or `import_open_limit`: the workspace already has imports.max_open open imports */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -21091,7 +21091,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The file is over imports.max_file_bytes */
+            /** @description import_file_too_large: the file is over imports.max_file_bytes; import_quota_exceeded: the workspace's stored import files would pass imports.max_workspace_bytes */
             413: {
                 headers: {
                     [name: string]: unknown;

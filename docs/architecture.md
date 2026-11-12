@@ -3540,10 +3540,11 @@ months; enforcement drops whole expired partitions, with no hard volume cap
 (OQ-28, ruling ca12b4e5). Only events, messages and the decision log can be
 shortened per workspace, within the deployment policy; audit, ingest rejects,
 import files and job history retention are deployment-only (ruling d732a27c).
+A workspace's stored import files are capped by `imports.max_workspace_bytes` (default 4 GiB) and its open imports by `imports.max_open` (default 20); an upload past either is refused (`import_quota_exceeded` 413, `import_open_limit` 409).
 Assistant transcripts are not stored unless a workspace opts in to a 1 to 30
 day window (default 7), which a retention job purges (13.4, OQ-26).
 
-`events.retention` commits each batch of event deletes, ingest rejects, dedupe records and
+`events.retention` drops the wholly expired partitions first, so shortening a retention frees disk at once, and only then deletes the rows of partly expired partitions in batches. It commits each batch of event deletes, ingest rejects, dedupe records and
 test-send log rows on the worker's pool, independently of the job's transaction. Event deletes
 and their handled markers remain one statement. Each partition drop and its markers commit in
 one separate transaction: it takes `lock_retention_overrides` before reading the cutoff and

@@ -12,7 +12,7 @@ use futures_util::StreamExt;
 use serde_json::json;
 use zirv_flow_core::csv_file::{CsvError, CsvParser, detect_delimiter};
 use zirv_flow_core::mapping::{Header, HeaderError};
-use zirv_flow_store::{ImportUpload, UploadScan, UploadStart};
+use zirv_flow_store::{ImportUpload, StoreError, UploadQuota, UploadScan, UploadStart};
 
 use super::{CsvImportDetailBody, ImportLimits, SAMPLE_ROWS};
 use crate::AppState;
@@ -243,6 +243,26 @@ fn too_large() -> ApiError {
         .with_code("import_file_too_large")
 }
 
+/// The refusal of an upload the workspace's import quota has no room for; any other store error
+/// keeps its usual problem.
+fn quota_problem(error: StoreError) -> ApiError {
+    if error.is_import_quota() {
+        ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "the workspace's stored import files would pass imports.max_workspace_bytes",
+        )
+        .with_code("import_quota_exceeded")
+    } else if error.is_import_open_limit() {
+        ApiError::new(
+            StatusCode::CONFLICT,
+            "the workspace has imports.max_open open imports; run or cancel one first",
+        )
+        .with_code("import_open_limit")
+    } else {
+        error.into()
+    }
+}
+
 fn is_csv(headers: &HeaderMap) -> bool {
     headers
         .get(CONTENT_TYPE)
@@ -287,7 +307,7 @@ async fn receive(
                 )
                 .with_code("import_erased")
             } else {
-                error.into()
+                quota_problem(error)
             }
         })?;
         scan.push(&piece).map_err(csv_problem)?;
@@ -366,8 +386,8 @@ async fn drain(
         (status = 403, description = "A key without the write scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
         (status = 408, description = "No byte arrived for 60 seconds; the upload was abandoned and nothing was kept", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "The Idempotency-Key is in use: `idempotency_key_in_flight` while the first request runs (see Retry-After), or `idempotency_key_replayed` once it uploaded the import, with resource_id as the import's id; the response is not kept", body = Problem, content_type = "application/problem+json"),
-        (status = 413, description = "The file is over imports.max_file_bytes", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "The Idempotency-Key is in use: `idempotency_key_in_flight` while the first request runs (see Retry-After), or `idempotency_key_replayed` once it uploaded the import, with resource_id as the import's id; the response is not kept; or `import_open_limit`: the workspace already has imports.max_open open imports", body = Problem, content_type = "application/problem+json"),
+        (status = 413, description = "import_file_too_large: the file is over imports.max_file_bytes; import_quota_exceeded: the workspace's stored import files would pass imports.max_workspace_bytes", body = Problem, content_type = "application/problem+json"),
         (status = 415, description = "The content type is not text/csv", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "Not UTF-8, empty, or a header with blank or repeated names", body = Problem, content_type = "application/problem+json")
     ),
@@ -415,7 +435,7 @@ pub(crate) async fn upload(
         };
 
     let trace = request_trace();
-    let mut upload = ImportUpload::begin(
+    let mut upload = ImportUpload::begin_within(
         &state.pool,
         workspace.id,
         &UploadStart {
@@ -426,8 +446,13 @@ pub(crate) async fn upload(
             created_by: principal.user_id(),
             trace: &trace,
         },
+        &UploadQuota {
+            max_workspace_bytes: limits.max_workspace_bytes,
+            max_open: limits.max_open,
+        },
     )
-    .await?;
+    .await
+    .map_err(quota_problem)?;
     let received = receive(
         &mut upload,
         request.into_body(),
@@ -461,7 +486,8 @@ pub(crate) async fn upload(
             header: &names,
             rows_total: scanned.rows,
         })
-        .await?;
+        .await
+        .map_err(quota_problem)?;
     let body = CsvImportDetailBody::new(&import, samples, may_see);
     let committed = async {
         admin::audit(

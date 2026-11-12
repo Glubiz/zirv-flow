@@ -39,6 +39,14 @@ pub struct UploadScan<'a> {
     pub rows_total: i64,
 }
 
+/// What one workspace may keep: the bytes of its stored import files and the imports that are
+/// not yet running (`uploading`, `uploaded`, `mapped`, `dry_running` or `dry_run_done`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UploadQuota {
+    pub max_workspace_bytes: u64,
+    pub max_open: u32,
+}
+
 /// An upload in progress. Dropping it unfinished deletes the import.
 pub struct ImportUpload {
     pool: PgPool,
@@ -48,17 +56,57 @@ pub struct ImportUpload {
     pending: Vec<u8>,
     hasher: Sha256,
     size: i64,
+    /// The most bytes this upload may reach, from the quota when it began; none without one.
+    allowed: Option<i64>,
+    /// The workspace limit, for the check [`Self::finish`] repeats.
+    limit: Option<i64>,
     settled: bool,
 }
 
 impl ImportUpload {
-    /// Inserts the import in the `uploading` state.
+    /// Inserts the import in the `uploading` state, with no quota.
     pub async fn begin(
         pool: &PgPool,
         workspace: WorkspaceId,
         start: &UploadStart<'_>,
     ) -> Result<Self, StoreError> {
+        Self::insert(pool, workspace, start, None).await
+    }
+
+    /// Like [`Self::begin`], but refuses the upload when the workspace already has
+    /// `quota.max_open` open imports ([`StoreError::is_import_open_limit`]) or no room is left in
+    /// its stored files ([`StoreError::is_import_quota`]). [`Self::write`] and [`Self::finish`]
+    /// refuse a body that outgrows the room left.
+    pub async fn begin_within(
+        pool: &PgPool,
+        workspace: WorkspaceId,
+        start: &UploadStart<'_>,
+        quota: &UploadQuota,
+    ) -> Result<Self, StoreError> {
+        Self::insert(pool, workspace, start, Some(quota)).await
+    }
+
+    async fn insert(
+        pool: &PgPool,
+        workspace: WorkspaceId,
+        start: &UploadStart<'_>,
+        quota: Option<&UploadQuota>,
+    ) -> Result<Self, StoreError> {
         let id = Uuid::now_v7();
+        let mut tx = begin(pool).await?;
+        let (mut allowed, mut limit) = (None, None);
+        if let Some(quota) = quota {
+            lock_workspace_imports(&mut tx, workspace).await?;
+            let (open, used) = import_usage(&mut tx, workspace).await?;
+            if open >= i64::from(quota.max_open) {
+                return Err(StoreError::import_open_limit());
+            }
+            let max = i64::try_from(quota.max_workspace_bytes).unwrap_or(i64::MAX);
+            if used >= max {
+                return Err(StoreError::import_quota());
+            }
+            (allowed, limit) = (Some(max - used), Some(max));
+        }
         sqlx::query(
             "INSERT INTO imports \
                 (id, workspace_id, name, source, stream, file_name, file_sha256, size_bytes, \
@@ -74,9 +122,10 @@ impl ImportUpload {
         .bind(start.file_name)
         .bind(start.created_by.map(|user| user.as_uuid()))
         .bind(start.trace.trace_id.as_uuid())
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(StoreError::query)?;
+        crate::commit(tx).await?;
         Ok(Self {
             pool: pool.clone(),
             id,
@@ -85,6 +134,8 @@ impl ImportUpload {
             pending: Vec::with_capacity(CHUNK_BYTES),
             hasher: Sha256::new(),
             size: 0,
+            allowed,
+            limit,
             settled: false,
         })
     }
@@ -97,7 +148,12 @@ impl ImportUpload {
     /// Takes the next bytes of the file, storing every full chunk.
     pub async fn write(&mut self, bytes: &[u8]) -> Result<(), StoreError> {
         self.hasher.update(bytes);
-        self.size += i64::try_from(bytes.len()).unwrap_or(i64::MAX);
+        self.size = self
+            .size
+            .saturating_add(i64::try_from(bytes.len()).unwrap_or(i64::MAX));
+        if self.allowed.is_some_and(|allowed| self.size > allowed) {
+            return Err(StoreError::import_quota());
+        }
         let mut rest = bytes;
         while !rest.is_empty() {
             let room = CHUNK_BYTES - self.pending.len();
@@ -147,6 +203,15 @@ impl ImportUpload {
         self.flush().await?;
         let digest: [u8; 32] = self.hasher.clone().finalize().into();
         let mut tx = begin(&self.pool).await?;
+        if let Some(limit) = self.limit {
+            // Uploads that ran side by side each saw the same room, so the total is checked
+            // again, under the lock, against what the others have stored since.
+            lock_workspace_imports(&mut tx, self.workspace).await?;
+            let (_, used) = import_usage(&mut tx, self.workspace).await?;
+            if used.saturating_add(self.size) > limit {
+                return Err(StoreError::import_quota());
+            }
+        }
         let updated = sqlx::query(
             "UPDATE imports SET status = 'uploaded', file_sha256 = $3, size_bytes = $4, \
                 delimiter = $5, header = $6, rows_total = $7, updated_at = now() \
@@ -197,6 +262,28 @@ impl ImportUpload {
         self.settled = true;
         delete_unfinished(&self.pool, self.workspace, self.id).await;
     }
+}
+
+/// Serialises the quota checks of one workspace's uploads until the transaction ends.
+async fn lock_workspace_imports(tx: &mut Tx, workspace: WorkspaceId) -> Result<(), StoreError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('imports:' || $1::text, 0))")
+        .bind(workspace.as_uuid())
+        .execute(&mut **tx)
+        .await
+        .map_err(StoreError::query)?;
+    Ok(())
+}
+
+/// The workspace's open imports (not yet running, the one that is uploading included) and the
+/// bytes of the finished uploads whose file is still stored.
+async fn import_usage(tx: &mut Tx, workspace: WorkspaceId) -> Result<(i64, i64), StoreError> {
+    sqlx::query_as(
+        "SELECT count(*) FILTER (WHERE status IN                     ('uploading', 'uploaded', 'mapped', 'dry_running', 'dry_run_done')),                 coalesce(sum(size_bytes) FILTER (WHERE status <> 'uploading' AND EXISTS (                     SELECT 1 FROM import_chunks c WHERE c.import_id = i.id AND c.seq = 0)), 0)::bigint          FROM imports i WHERE workspace_id = $1",
+    )
+    .bind(workspace.as_uuid())
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(StoreError::query)
 }
 
 /// Deletes an import that is still `uploading`; failures are left to the hourly upkeep.
@@ -291,6 +378,98 @@ mod tests {
         .await
         .unwrap();
         sizes.into_iter().map(|size| size as usize).collect()
+    }
+
+    async fn quota_workspace(pool: &PgPool) -> WorkspaceId {
+        let name = WorkspaceName::parse("quota").unwrap();
+        let slug = Slug::parse(&format!("w{}", Uuid::now_v7().simple())).unwrap();
+        create_workspace(pool, &name, &slug).await.unwrap().id
+    }
+
+    /// Uploads `bytes` as one finished file under `quota`, or the error that refused it.
+    async fn upload_within(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        bytes: &[u8],
+        quota: &UploadQuota,
+    ) -> Result<Uuid, StoreError> {
+        let header = vec!["a".to_owned()];
+        let trace = TraceContext::root(Cause::api("t"));
+        let start = UploadStart {
+            name: "n",
+            source: "csv",
+            stream: "n",
+            file_name: "n.csv",
+            created_by: None,
+            trace: &trace,
+        };
+        let mut upload = ImportUpload::begin_within(pool, ws, &start, quota).await?;
+        if let Err(error) = upload.write(bytes).await {
+            upload.abort().await;
+            return Err(error);
+        }
+        let (import, tx) = upload
+            .finish(&UploadScan {
+                delimiter: ',',
+                header: &header,
+                rows_total: 0,
+            })
+            .await?;
+        crate::commit(tx).await?;
+        Ok(import.id)
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_upload_past_the_workspace_quota_is_refused_until_a_file_is_deleted(pool: PgPool) {
+        let ws = quota_workspace(&pool).await;
+        let quota = UploadQuota {
+            max_workspace_bytes: 100,
+            max_open: 50,
+        };
+        let first = upload_within(&pool, ws, &[b'x'; 60], &quota).await.unwrap();
+
+        let refused = upload_within(&pool, ws, &[b'y'; 60], &quota)
+            .await
+            .unwrap_err();
+        assert!(refused.is_import_quota(), "{refused}");
+        let uploading: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM imports WHERE workspace_id = $1 AND status = 'uploading'",
+        )
+        .bind(ws.as_uuid())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(uploading, 0, "the refused upload kept nothing");
+
+        sqlx::query("DELETE FROM import_chunks WHERE import_id = $1")
+            .bind(first)
+            .execute(&pool)
+            .await
+            .unwrap();
+        upload_within(&pool, ws, &[b'y'; 60], &quota).await.unwrap();
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_upload_past_the_open_limit_is_refused_until_one_is_cancelled(pool: PgPool) {
+        let ws = quota_workspace(&pool).await;
+        let quota = UploadQuota {
+            max_workspace_bytes: 1 << 30,
+            max_open: 2,
+        };
+        let first = upload_within(&pool, ws, b"a", &quota).await.unwrap();
+        upload_within(&pool, ws, b"b", &quota).await.unwrap();
+
+        let refused = upload_within(&pool, ws, b"c", &quota).await.unwrap_err();
+        assert!(refused.is_import_open_limit(), "{refused}");
+
+        sqlx::query("UPDATE imports SET status = 'cancelled' WHERE id = $1")
+            .bind(first)
+            .execute(&pool)
+            .await
+            .unwrap();
+        upload_within(&pool, ws, b"c", &quota).await.unwrap();
     }
 
     #[sqlx::test]

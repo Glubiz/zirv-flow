@@ -8510,6 +8510,66 @@ email,b@example.com,
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn uploads_past_the_workspace_quota_or_the_open_limit_are_refused(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let router = router(
+            AppState::new(pool.clone(), Arc::new(String::new)).with_import_limits(
+                crate::ImportLimits {
+                    max_workspace_bytes: 50,
+                    max_open: 2,
+                    ..crate::ImportLimits::default()
+                },
+            ),
+        );
+        admin::create_owner(&pool, &Context::system(), OWNER_EMAIL, PASSWORD)
+            .await
+            .unwrap();
+        let owner = login(&router, OWNER_EMAIL).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let file = "Email
+a@example.com
+";
+        assert!(file.len() < 25);
+
+        let (first, _) = upload_csv(&router, &ws, "name=a", file, Auth::Session(&owner)).await;
+        let (second, _) = upload_csv(&router, &ws, "name=b", file, Auth::Session(&owner)).await;
+        let (open, open_body) =
+            upload_csv(&router, &ws, "name=c", file, Auth::Session(&owner)).await;
+        let big = format!(
+            "Email
+{}",
+            "ada@example.com
+"
+            .repeat(5)
+        );
+        sqlx::query("UPDATE imports SET status = 'cancelled'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (over, over_body) =
+            upload_csv(&router, &ws, "name=d", &big, Auth::Session(&owner)).await;
+        sqlx::query("DELETE FROM import_chunks")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (freed, _) = upload_csv(&router, &ws, "name=e", file, Auth::Session(&owner)).await;
+
+        assert_eq!((first, second), (StatusCode::CREATED, StatusCode::CREATED));
+        assert_eq!(open, StatusCode::CONFLICT, "{open_body}");
+        assert!(
+            open_body.to_string().contains("import_open_limit"),
+            "{open_body}"
+        );
+        assert_eq!(over, StatusCode::PAYLOAD_TOO_LARGE, "{over_body}");
+        assert!(
+            over_body.to_string().contains("import_quota_exceeded"),
+            "{over_body}"
+        );
+        assert_eq!(freed, StatusCode::CREATED);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_bad_file_is_refused_and_leaves_nothing_behind(pool: PgPool) {
         let router = app(&pool).await;
         let owner = owner(&pool, &router).await;

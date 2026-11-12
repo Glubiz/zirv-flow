@@ -249,6 +249,8 @@ A test reads the sources and fails when a code used there is missing from this l
 | `blank_header` | A CSV header name is blank |
 | `duplicate_header` | Two CSV header names are the same |
 | `import_file_too_large` | An import file is over `imports.max_file_bytes` |
+| `import_quota_exceeded` | The workspace's stored import files would pass `imports.max_workspace_bytes` |
+| `import_open_limit` | The workspace already has `imports.max_open` open imports |
 | `import_erased` | The import was erased while it was being uploaded |
 | `import_job_pending` | A job for the import is still queued or dead |
 | `import_state` | The import is not in a state that allows the step |
