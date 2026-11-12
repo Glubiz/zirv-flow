@@ -45,13 +45,18 @@ fn splits_a_character_before_gt(text: &str) -> bool {
 /// The byte length of the token that starts at the `<` opening `rest`, or `None` when it never
 /// closes. Quoted attribute values (`="..."`) may hold a `>`.
 fn token_end(rest: &str) -> Option<usize> {
-    if rest.starts_with("<!--[if") {
-        let close = rest.find(']')?;
-        return if rest[close + 1..].starts_with('>') {
-            Some(close + 2)
-        } else {
-            rest.find("-->").map(|at| at + 3)
-        };
+    // Conditional comments, as `parse_conditional_comment_impl` reads them: up to the first `]`,
+    // then the first of `>-->`, `><!-->`, `-->` or `>`.
+    if ["<!--[if", "<![if", "<![endif]", "<!--<![endif"]
+        .iter()
+        .any(|prefix| rest.starts_with(prefix))
+    {
+        let close = rest.find(']')? + 1;
+        let tail = &rest[close..];
+        let trailer = [">-->", "><!-->", "-->", ">"]
+            .into_iter()
+            .find(|trailer| tail.starts_with(trailer))?;
+        return Some(close + trailer.len());
     }
     for (open, close) in [("<!--", "-->"), ("<![CDATA[", "]]>"), ("<?", "?>")] {
         if let Some(body) = rest.strip_prefix(open) {
@@ -267,6 +272,23 @@ mod tests {
             None
         );
         assert!(!reached.get());
+        // Conditional comments end later than their `]>`: the text node after them starts at `€`.
+        for input in [
+            "<p><!--[if IE]>-->€>y</p>",
+            "<p><!--[if !IE]><!-->€>y</p>",
+            "<p><![if !IE]><!-->€>y</p>",
+        ] {
+            let reached = std::cell::Cell::new(false);
+            assert_eq!(
+                with_tokenizer(input, |_| reached.set(true)),
+                None,
+                "{input}"
+            );
+            assert!(!reached.get(), "{input}");
+        }
+        // A revealed conditional comment before ASCII text is still read.
+        let revealed = "<p><![if !IE]><!-->Hello > there<![endif]></p>";
+        assert!(with_tokenizer(revealed, |tokens| tokens.count()).is_some());
         // Text that cannot split a character is still read, as is a `>` inside a tag.
         // Only the first `>` of a text node is sliced, so the second `>` after `€ ` is fine.
         for ok in [
