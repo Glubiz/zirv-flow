@@ -8,11 +8,9 @@ from that data, and run automation flows for everyone or for a segment.
 
 ## Focus areas
 
-- **Segmentation** -- define and maintain segments of people from the data you
-  connect.
+- **Segmentation** -- define and maintain segments of people from the data you connect.
 - **Data sources** -- bring internal and external data into one place.
-- **Integrations** -- reach people and systems through the channels and tools
-  you already use.
+- **Integrations** -- reach people and systems through the channels and tools you already use.
 
 ## Status
 
