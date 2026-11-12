@@ -17,26 +17,60 @@ use crate::context::RenderExtras;
 use crate::document::{Channel, TemplateDocument};
 use crate::issue::{FieldCatalog, Issue};
 
-/// `htmlparser` 0.2.1 slices a text node at `first '>' - 2` to look for `]]>` and panics when that
-/// byte is inside a multi-byte character (for example `</u >.Ýr>`). A `>` that follows a tag's
-/// own `>` since the last `<`, or follows no `<` at all, is in a text node, so refuse such a
-/// `>` when the byte two before it is not a character boundary. A `>` closing a tag is exempt.
+/// `htmlparser` 0.2.1 reads a text node up to the next `<` (any `<` starts a token, so `a < b`
+/// is a tag start that errors and ends the iteration), then slices it at `first '>' - 2` to look
+/// for `]]>`. That panics when the byte is inside a multi-byte character, for example the text
+/// `.Ýr>` in `</u >.Ýr>`. Walk the text nodes as the tokenizer does and refuse only a node whose
+/// FIRST `>` has such a split character. Later `>` in the node are never sliced.
 fn splits_a_character_before_gt(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    let mut in_tag = false;
-    for (at, &byte) in bytes.iter().enumerate() {
-        match byte {
-            b'<' => in_tag = true,
-            b'>' => {
-                if !in_tag && at >= 2 && !text.is_char_boundary(at - 2) {
-                    return true;
-                }
-                in_tag = false;
+    let mut rest = text;
+    while !rest.is_empty() {
+        let node_end = rest.find('<').unwrap_or(rest.len());
+        let node = &rest[..node_end];
+        if let Some(at) = node.find('>')
+            && at >= 2
+            && !node.is_char_boundary(at - 2)
+        {
+            return true;
+        }
+        rest = &rest[node_end..];
+        let Some(end) = token_end(rest) else {
+            return false;
+        };
+        rest = &rest[end..];
+    }
+    false
+}
+
+/// The byte length of the token that starts at the `<` opening `rest`, or `None` when it never
+/// closes. Quoted attribute values (`="..."`) may hold a `>`.
+fn token_end(rest: &str) -> Option<usize> {
+    if rest.starts_with("<!--[if") {
+        let close = rest.find(']')?;
+        return if rest[close + 1..].starts_with('>') {
+            Some(close + 2)
+        } else {
+            rest.find("-->").map(|at| at + 3)
+        };
+    }
+    for (open, close) in [("<!--", "-->"), ("<![CDATA[", "]]>"), ("<?", "?>")] {
+        if let Some(body) = rest.strip_prefix(open) {
+            return body.find(close).map(|at| open.len() + at + close.len());
+        }
+    }
+    let bytes = rest.as_bytes();
+    let mut at = 1;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'>' => return Some(at + 1),
+            quote @ (b'"' | b'\'') if rest[..at].trim_end().ends_with('=') => {
+                at += 1 + rest[at + 1..].find(quote as char)?;
             }
             _ => {}
         }
+        at += 1;
     }
-    false
+    None
 }
 
 /// Guard known conditional-comment panics before tokenizing and catch unknown tokenizer panics.
@@ -226,8 +260,22 @@ mod tests {
         let reached = std::cell::Cell::new(false);
         assert_eq!(with_tokenizer(content, |_| reached.set(true)), None);
         assert!(!reached.get());
+        // A hand-built node: the first `>` of `b` follows the 3-byte `€`.
+        let reached = std::cell::Cell::new(false);
+        assert_eq!(
+            with_tokenizer("<p>a</p><b>€x>y</b>", |_| reached.set(true)),
+            None
+        );
+        assert!(!reached.get());
         // Text that cannot split a character is still read, as is a `>` inside a tag.
-        for ok in ["<p>ÝÝ></p>", "<p>aÝ>b</p>", "<img alt=\"é\">", "<p>€</p>"] {
+        // Only the first `>` of a text node is sliced, so the second `>` after `€ ` is fine.
+        for ok in [
+            "<p>ÝÝ></p>",
+            "<p>aÝ>b</p>",
+            "<img alt=\"é\">",
+            "<p>€</p>",
+            "<p>a > b, 5€ > 3</p>",
+        ] {
             let tokens = with_tokenizer(ok, |tokens| tokens.count());
             assert!(tokens.is_some(), "{ok}");
         }
