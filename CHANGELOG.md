@@ -15,3 +15,16 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.287.0 (2026-11-12)
+
+### Fixes
+
+- strip tab, LF and CR from link targets so the output matches the allowlist check
+- skip conditional comments to their full tokenizer end
+- refuse only the first > of a text node that splits a character
+- refuse text that splits a character before the tokenizer reads it
+
+### Chores
+
+- replay the split-character crash through the template_document harness
+
