@@ -21,6 +21,7 @@ pub mod mapping;
 pub mod no_nul;
 pub mod password;
 pub mod people;
+pub mod readable;
 mod role;
 pub mod schedule;
 mod scope;

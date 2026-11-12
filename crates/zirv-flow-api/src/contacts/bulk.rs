@@ -145,7 +145,7 @@ fn contacts_of(body: &Value) -> Result<&Vec<Value>, Vec<ItemProblem>> {
     request_body = BulkContactsRequest,
     responses(
         (status = 202, description = "Appended to the inbox: durable, not yet applied", body = BulkAcceptedBody),
-        (status = 400, description = "The body is not valid JSON", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "The body is not valid JSON, or holds a number of 1e308 or beyond (number_out_of_range) or nesting past 100 levels (too_deep)", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the write scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
