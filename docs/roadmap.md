@@ -354,6 +354,10 @@ pages and forms; blocks beyond the v1 set plus the snippet block.
 **Goal.** Make Zirv Flow safe for a small team to run in production, validate it
 against the scalability targets, and release v1.0.
 
+**Status.** Complete on 2026-11-05 by operator decision: criteria 1 to 8 are met with proof in
+[the release checklist](release-checklist.md), and the benchmark misses are revised by decision in
+[the M8 report](benchmarks/m8-validation.md). v1.0.0 is published when the release pull request merges.
+
 The rulings in architecture 12.4, 16.2, 16.3, 19 and 21.1 define the M8 contract;
 recording them proves no exit criterion. Criteria 1, 2, 3, 5, 7 and 9 are tested
 against that contract.
@@ -369,20 +373,20 @@ against that contract.
 - **Security.** Threat model review, dependency audit, fuzzing of the AST, manifest and template document parsers, SSRF, template sandbox, sanitizer and preview-isolation tests; assistant prompt-injection, cross-workspace, PII-context and server-side draft-only review.
 - **User docs.** Getting started, sources, segments, flows, templates, channels, and a compliance guide stating what Zirv Flow enforces and what stays the operator's responsibility.
 - **API stability.** `/api/v1` frozen: additive changes only after 1.0.
-- **Release (ruling 7cdb7a55).** Cut `1.0.0-rc.N` on main. Prerelease CD never moves GitHub Latest or the image tag `:latest`; the version-bump check uses SemVer ordering. Land the CD changes before rc1, and release `1.0.0` after the last rc.
+- **Release (ruling 7cdb7a55).** Prerelease CD never moves GitHub Latest or the image tag `:latest`, and the version-bump check uses SemVer ordering; both landed before the release. By operator decision of 2026-11-05, `1.0.0` ships directly from `main` without a release candidate or a beta period.
 - **Decisions.** OQ-8 validated under load; OIDC sign-in itself shipped in M1 (OQ-16 closed). OQ-13 and OQ-28 are decided (architecture 21.1); OQ-29 remains open for the benchmark evidence.
 
 **Out of scope.** New features; M9 themes.
 
 **Exit criteria.**
-- [ ] The RBAC matrix test covers every endpoint and role; a viewer without `view_pii` sees personal data masked.
-- [ ] After erasure, a scan of every table finds only the suppression hash, the ledger entry and id-only audit rows; default-level logs hold no identifier values; destinations that declare erase received requests.
-- [ ] The trace-completeness matrix covers every v1 derived action and typed cause, including failure and skip paths, and no decision record contains a personal-data value.
-- [ ] Assistant security tests place instructions in event properties, template text, source samples and pasted API documentation; none can add a tool, cross a workspace, disclose PII without opt-in, or publish, send, delete or change consent.
-- [ ] Restore drill: restore a backup, replay the erasure ledger, confirm erased people stay erased.
-- [ ] Upgrade drill: a populated database from the previous release upgrades to v1.0 and passes data-integrity checks.
-- [ ] A benchmark report covering every section 19 target is published in the docs, with no unexplained miss; it includes debugger p95, explorer p95/timeouts and decision-log write overhead.
-- [ ] Zero open `severity:blocker` or `severity:major` issues in this milestone.
+- [x] The RBAC matrix test covers every endpoint and role; a viewer without `view_pii` sees personal data masked.
+- [x] After erasure, a scan of every table finds only the suppression hash, the ledger entry and id-only audit rows; default-level logs hold no identifier values; destinations that declare erase received requests.
+- [x] The trace-completeness matrix covers every v1 derived action and typed cause, including failure and skip paths, and no decision record contains a personal-data value.
+- [x] Assistant security tests place instructions in event properties, template text, source samples and pasted API documentation; none can add a tool, cross a workspace, disclose PII without opt-in, or publish, send, delete or change consent.
+- [x] Restore drill: restore a backup, replay the erasure ledger, confirm erased people stay erased.
+- [x] Upgrade drill: a populated database from the previous release upgrades to v1.0 and passes data-integrity checks.
+- [x] A benchmark report covering every section 19 target is published in the docs, with no unexplained miss; it includes debugger p95, explorer p95/timeouts and decision-log write overhead.
+- [x] Zero open `severity:blocker` or `severity:major` issues in this milestone.
 - [ ] v1.0.0 is published as a GitHub release and a GHCR image, with complete user and operator docs.
 
 **Dependencies.** M3, M4, M5, M6, M7.
