@@ -271,8 +271,8 @@ pub async fn backfill_affinity(
     limit: i64,
 ) -> Result<usize, StoreError> {
     let mut tx = begin(pool).await?;
-    let rows: Vec<(i64, String, Value)> = sqlx::query_as(
-        "SELECT id, kind, item FROM ingest_inbox \
+    let rows: Vec<(i64, String, String)> = sqlx::query_as(
+        "SELECT id, kind, item::text FROM ingest_inbox \
          WHERE workspace_id = $1 AND affinity IS NULL \
          ORDER BY id LIMIT $2 FOR UPDATE",
     )
@@ -285,7 +285,7 @@ pub async fn backfill_affinity(
     let buckets: Vec<i16> = rows
         .iter()
         .map(|(_, kind, item)| {
-            StoredItem::parse(item).map_or(0, |stored| {
+            StoredItem::parse(&parse_item(item)).map_or(0, |stored| {
                 record_bucket(kind, &stored.identifiers, &KnownPeople::new())
             })
         })
@@ -678,6 +678,45 @@ pub(crate) struct InboxRow {
     pub(crate) trace_id: Uuid,
 }
 
+/// An inbox row with `item` as the text PostgreSQL prints for the jsonb. A value the store
+/// accepted can still be one `serde_json` cannot read back (a number past the double range,
+/// nesting past its depth limit), so each row parses on its own and a bad one cannot fail the
+/// batch that holds it.
+/// The item an inbox row's text holds, or JSON `null` when it cannot be read back. A stored
+/// item is always an object, so `null` marks a row no kind maps.
+pub(crate) fn parse_item(text: &str) -> Value {
+    serde_json::from_str(text).unwrap_or(Value::Null)
+}
+
+#[derive(FromRow)]
+struct RawInboxRow {
+    id: i64,
+    api_key_id: Option<Uuid>,
+    webhook_id: Option<Uuid>,
+    kind: String,
+    item: String,
+    message_id: String,
+    received_at: OffsetDateTime,
+    trace_id: Uuid,
+}
+
+impl RawInboxRow {
+    /// The row, with a JSON `null` item when the text does not parse: no kind maps that, so
+    /// the row ends as an `apply_failed` reject like any other poison row.
+    fn parse(self) -> InboxRow {
+        InboxRow {
+            id: self.id,
+            api_key_id: self.api_key_id,
+            webhook_id: self.webhook_id,
+            kind: self.kind,
+            item: parse_item(&self.item),
+            message_id: self.message_id,
+            received_at: self.received_at,
+            trace_id: self.trace_id,
+        }
+    }
+}
+
 impl InboxRow {
     pub(crate) fn trace(&self) -> TraceContext {
         let cause = match (self.webhook_id, self.api_key_id) {
@@ -805,8 +844,8 @@ async fn take_rows(
     }
     let returned = Instant::now();
     let ids: Vec<i64> = picked.iter().map(|(id, _)| *id).collect();
-    let fetched: Vec<InboxRow> = sqlx::query_as(
-        "SELECT id, api_key_id, webhook_id, kind, item, message_id, received_at, trace_id          FROM ingest_inbox WHERE workspace_id = $1 AND id = ANY($2)          ORDER BY id FOR UPDATE SKIP LOCKED",
+    let fetched: Vec<RawInboxRow> = sqlx::query_as(
+        "SELECT id, api_key_id, webhook_id, kind, item::text AS item, message_id, received_at, trace_id          FROM ingest_inbox WHERE workspace_id = $1 AND id = ANY($2)          ORDER BY id FOR UPDATE SKIP LOCKED",
     )
     .bind(workspace.as_uuid())
     .bind(&ids)
@@ -829,6 +868,7 @@ async fn take_rows(
     let rows: Vec<InboxRow> = fetched
         .into_iter()
         .filter(|row| keep.contains(&row.id))
+        .map(RawInboxRow::parse)
         .collect();
     let full = i64::try_from(picked.len()).is_ok_and(|n| n >= limit.max(1));
     let more = !rows.is_empty() && full;
@@ -3007,6 +3047,64 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(rejected, 1);
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_row_serde_json_cannot_read_back_is_one_reject_and_the_rest_apply(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            let trace = TraceContext::root(Cause::api("req"));
+            append(
+                &pool,
+                ws,
+                &trace,
+                &[
+                    track("u1", "m-1", "seen", json!({})),
+                    track("u1", "huge", "seen", json!({})),
+                    track("u1", "deep", "seen", json!({})),
+                    track("u1", "m-4", "seen", json!({})),
+                ],
+            )
+            .await;
+            // The largest double is accepted by jsonb and printed back as 309 digits, which
+            // serde_json cannot read; 127 levels of nesting read fine from a request but not
+            // once wrapped in the stored item.
+            sqlx::query(
+                "UPDATE ingest_inbox SET item = jsonb_set(item, '{properties}',                  '{\"x\": 1.7976931348623157e308}'::jsonb) WHERE message_id = 'huge'",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            let nested = format!("{}1{}", "[".repeat(127), "]".repeat(127));
+            sqlx::query(
+                "UPDATE ingest_inbox SET item = jsonb_set(item, '{properties}',                  ('{\"x\": ' || $1 || '}')::jsonb) WHERE message_id = 'deep'",
+            )
+            .bind(nested)
+            .execute(&pool)
+            .await
+            .unwrap();
+            let key = key();
+
+            // The drain job's way: the batch first, then row by row when the batch fails.
+            let outcome = match drain_batch(&pool, ws, Shard::ALL, &key, 500).await {
+                Ok(outcome) => outcome,
+                Err(_) => drain_batch_singly(&pool, ws, Shard::ALL, &key, 500)
+                    .await
+                    .unwrap(),
+            };
+            assert_eq!(outcome.rows, 4);
+            assert_eq!(outcome.applied[&("track", "apply_failed")], 2);
+            assert_eq!(inbox_count(&pool).await, 0);
+            let rejects: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM ingest_rejects WHERE reason = 'apply_failed'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(rejects, 2);
         })
         .await;
     }

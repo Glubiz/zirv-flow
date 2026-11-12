@@ -316,7 +316,7 @@ struct Accepted {
     request_body = IdentifyRequest,
     responses(
         (status = 202, description = "Appended to the inbox: durable, not yet applied", body = AcceptedBody),
-        (status = 400, description = "An invalid field; errors lists them by index, field name and reason code", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "An invalid field; errors lists them by index, field name and reason code; a number of 1e308 or beyond or nesting past 100 levels is refused as number_out_of_range or too_deep", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Missing or invalid API key", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A session, or a key without the ingest scope", body = Problem, content_type = "application/problem+json"),
         (status = 413, description = "The body is over ingest.max_request_bytes", body = Problem, content_type = "application/problem+json"),
@@ -343,7 +343,7 @@ pub(crate) async fn identify(
     request_body = TrackRequest,
     responses(
         (status = 202, description = "Appended to the inbox: durable, not yet applied", body = AcceptedBody),
-        (status = 400, description = "An invalid field; errors lists them by index, field name and reason code", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "An invalid field; errors lists them by index, field name and reason code; a number of 1e308 or beyond or nesting past 100 levels is refused as number_out_of_range or too_deep", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Missing or invalid API key", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A session, or a key without the ingest scope", body = Problem, content_type = "application/problem+json"),
         (status = 413, description = "The body is over ingest.max_request_bytes", body = Problem, content_type = "application/problem+json"),
@@ -371,7 +371,7 @@ pub(crate) async fn track(
     request_body = BatchRequest,
     responses(
         (status = 202, description = "Appended to the inbox: durable, not yet applied", body = AcceptedBody),
-        (status = 400, description = "An invalid item or too many items; errors lists them by index, field name and reason code", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "An invalid item or too many items; errors lists them by index, field name and reason code; a number of 1e308 or beyond or nesting past 100 levels is refused as number_out_of_range or too_deep", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Missing or invalid API key", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A session, or a key without the ingest scope", body = Problem, content_type = "application/problem+json"),
         (status = 413, description = "The body is over ingest.max_request_bytes", body = Problem, content_type = "application/problem+json"),
@@ -483,8 +483,12 @@ pub(crate) fn too_large() -> ApiError {
 /// when it cannot be read, and `400` when it is not JSON.
 pub(crate) async fn read_json(request: Request, max_bytes: usize) -> Result<Value, ApiError> {
     let bytes = read_body(request, max_bytes).await?;
-    serde_json::from_slice(&bytes)
-        .map_err(|_| ApiError::bad_request("request body is not valid JSON"))
+    let value: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| ApiError::bad_request("request body is not valid JSON"))?;
+    match zirv_flow_core::readable::find_unreadable(&value) {
+        Some(why) => Err(ApiError::unreadable("request body", why)),
+        None => Ok(value),
+    }
 }
 
 /// Whether the declared `Content-Length` is over `max_bytes`.
@@ -867,6 +871,37 @@ mod tests {
                 {"index": 2, "field": "traits.k", "reason": "contains_nul"},
             ])
         );
+        assert!(fx.inbox().await.is_empty());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_number_beyond_the_double_range_or_nesting_too_deep_is_a_400_and_nothing_is_stored(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        let huge: Value = serde_json::from_str(
+            r#"{"userId": "u-1", "traits": {"limit": 1.7976931348623157e308}}"#,
+        )
+        .unwrap();
+        let deep = format!("{}1{}", "[".repeat(110), "]".repeat(110));
+        let deep: Value = serde_json::from_str(&format!(
+            r#"{{"userId": "u-1", "traits": {{"x": {deep}}}}}"#
+        ))
+        .unwrap();
+
+        let single = fx.send("/api/v1/ingest/identify", huge.clone()).await;
+        let batch = fx
+            .send("/api/v1/ingest/batch", json!({"batch": [huge]}))
+            .await;
+        let nested = fx.send("/api/v1/ingest/identify", deep).await;
+
+        assert_eq!(single.status, StatusCode::BAD_REQUEST, "{:?}", single.body);
+        assert_eq!(single.body["code"], "number_out_of_range");
+        assert_eq!(batch.status, StatusCode::BAD_REQUEST, "{:?}", batch.body);
+        assert_eq!(batch.body["code"], "number_out_of_range");
+        assert_eq!(nested.status, StatusCode::BAD_REQUEST, "{:?}", nested.body);
+        assert_eq!(nested.body["code"], "too_deep");
         assert!(fx.inbox().await.is_empty());
     }
 

@@ -12174,7 +12174,7 @@ export interface operations {
                     "application/json": components["schemas"]["AcceptedBody"];
                 };
             };
-            /** @description An invalid item or too many items; errors lists them by index, field name and reason code */
+            /** @description An invalid item or too many items; errors lists them by index, field name and reason code; a number of 1e308 or beyond or nesting past 100 levels is refused as number_out_of_range or too_deep */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -12272,7 +12272,7 @@ export interface operations {
                     "application/json": components["schemas"]["AcceptedBody"];
                 };
             };
-            /** @description An invalid field; errors lists them by index, field name and reason code */
+            /** @description An invalid field; errors lists them by index, field name and reason code; a number of 1e308 or beyond or nesting past 100 levels is refused as number_out_of_range or too_deep */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -12370,7 +12370,7 @@ export interface operations {
                     "application/json": components["schemas"]["AcceptedBody"];
                 };
             };
-            /** @description An invalid field; errors lists them by index, field name and reason code */
+            /** @description An invalid field; errors lists them by index, field name and reason code; a number of 1e308 or beyond or nesting past 100 levels is refused as number_out_of_range or too_deep */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -15610,7 +15610,7 @@ export interface operations {
                     "application/json": components["schemas"]["BulkAcceptedBody"];
                 };
             };
-            /** @description The body is not valid JSON */
+            /** @description The body is not valid JSON, or holds a number of 1e308 or beyond (number_out_of_range) or nesting past 100 levels (too_deep) */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -32675,7 +32675,7 @@ export interface operations {
                     "application/json": components["schemas"]["WebhookAccepted"];
                 };
             };
-            /** @description The body is not a JSON object (code invalid_payload) */
+            /** @description The body is not a JSON object (code invalid_payload), or holds a number of 1e308 or beyond (number_out_of_range) or nesting past 100 levels (too_deep) */
             400: {
                 headers: {
                     [name: string]: unknown;

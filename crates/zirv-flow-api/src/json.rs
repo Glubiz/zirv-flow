@@ -83,6 +83,9 @@ fn into_body<T: DeserializeOwned>(value: Value) -> Result<ApiJson<T>, ApiError> 
     if zirv_flow_core::no_nul::find_nul(&value).is_some() {
         return Err(ApiError::contains_nul("request body"));
     }
+    if let Some(why) = zirv_flow_core::readable::find_unreadable(&value) {
+        return Err(ApiError::unreadable("request body", why));
+    }
     serde_json::from_value(value).map(ApiJson).map_err(|_| {
         ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,

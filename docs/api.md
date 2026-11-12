@@ -226,6 +226,8 @@ A test reads the sources and fails when a code used there is missing from this l
 | `idempotency_key_replayed` | The key already created `resource_id`; the response body is not kept |
 | `invalid_signature` | An inbound call's signature did not verify |
 | `invalid_payload` | An inbound body is not the JSON the receiver needs |
+| `number_out_of_range` | A body holds a number of 1e308 or beyond, which the drain could not read back (generic 400) |
+| `too_deep` | A body nests arrays or objects deeper than 100 levels (generic 400) |
 | `dedupe_missing` | The webhook payload has no usable value at the de-duplication field |
 | `last_admin` | The change would leave the workspace with no admin |
 | `owner_exists` | First-run setup was asked for after an owner exists |

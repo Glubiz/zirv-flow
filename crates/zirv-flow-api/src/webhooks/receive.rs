@@ -17,6 +17,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_core::mapping::walk_path;
 use zirv_flow_core::no_nul::{CONTAINS_NUL, find_nul_in_members};
+use zirv_flow_core::readable::find_unreadable_in_members;
 use zirv_flow_core::signature::Scheme;
 use zirv_flow_core::{SecretId, SecretPurpose};
 use zirv_flow_store::HookReceive;
@@ -53,7 +54,7 @@ pub(crate) struct WebhookAccepted {
     request_body(content = Object, description = "One JSON object, at most ingest.max_webhook_bytes", content_type = "application/json"),
     responses(
         (status = 202, description = "Appended to the inbox: durable, not yet applied", body = WebhookAccepted),
-        (status = 400, description = "The body is not a JSON object (code invalid_payload)", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "The body is not a JSON object (code invalid_payload), or holds a number of 1e308 or beyond (number_out_of_range) or nesting past 100 levels (too_deep)", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "The signature or timestamp is missing, malformed, outside the tolerance or wrong (code invalid_signature)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such hook, or it is not receiving (disabled or unmapped)", body = Problem, content_type = "application/problem+json"),
         (status = 413, description = "The body is over ingest.max_webhook_bytes", body = Problem, content_type = "application/problem+json"),
@@ -198,6 +199,12 @@ async fn accept(state: &AppState, id: &str, request: Request) -> Result<(), Refu
                         .collect(),
                     reason: CONTAINS_NUL.to_owned(),
                 }]),
+            "invalid_payload",
+        ));
+    }
+    if let Some(why) = find_unreadable_in_members(&payload) {
+        return Err(Refusal::new(
+            ApiError::unreadable("the payload", why),
             "invalid_payload",
         ));
     }
