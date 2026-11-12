@@ -356,7 +356,7 @@ against the scalability targets, and release v1.0.
 
 **Status.** Complete on 2026-11-05 by operator decision: criteria 1 to 8 are met with proof in
 [the release checklist](release-checklist.md), and the benchmark misses are revised by decision in
-[the M8 report](benchmarks/m8-validation.md). v1.0.0 is published when the release pull request merges.
+[the M8 report](benchmarks/m8-validation.md). v1.0.0 was published on 2026-11-12 ([release](https://github.com/Glubiz/zirv-flow/releases/tag/v1.0.0)).
 
 The rulings in architecture 12.4, 16.2, 16.3, 19 and 21.1 define the M8 contract;
 recording them proves no exit criterion. Criteria 1, 2, 3, 5, 7 and 9 are tested
@@ -387,7 +387,7 @@ against that contract.
 - [x] Upgrade drill: a populated database from the previous release upgrades to v1.0 and passes data-integrity checks.
 - [x] A benchmark report covering every section 19 target is published in the docs, with no unexplained miss; it includes debugger p95, explorer p95/timeouts and decision-log write overhead.
 - [x] Zero open `severity:blocker` or `severity:major` issues in this milestone.
-- [ ] v1.0.0 is published as a GitHub release and a GHCR image, with complete user and operator docs.
+- [x] v1.0.0 is published as a GitHub release and a GHCR image, with complete user and operator docs.
 
 **Dependencies.** M3, M4, M5, M6, M7.
 
