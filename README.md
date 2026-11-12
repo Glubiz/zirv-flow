@@ -14,12 +14,10 @@ from that data, and run automation flows for everyone or for a segment.
 
 ## Status
 
-Release 1.0: M0–M8 are implemented, and 1.x is the supported release line. The
-`/api/v1` HTTP API changes only additively from 1.0. The scalability figures were
-measured under reference-resource emulation, not on dedicated reference hardware; the
-[M8 validation report](docs/benchmarks/m8-validation.md) states each limit. See the
-[roadmap](docs/roadmap.md#m8--beta-hardening-and-v10) for what 1.0 covers and
-[architecture](docs/architecture.md) for the design.
+Release 1.0: M0–M8 are implemented, 1.x is the supported release line, and `/api/v1` changes only additively from 1.0.
+The scalability figures were measured under reference-resource emulation, not on dedicated reference hardware; the
+[M8 validation report](docs/benchmarks/m8-validation.md) states each limit. See the [roadmap](docs/roadmap.md#m8--beta-hardening-and-v10)
+for what 1.0 covers and [architecture](docs/architecture.md) for the design.
 
 ## Documentation
 
