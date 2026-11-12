@@ -17,6 +17,28 @@ use crate::context::RenderExtras;
 use crate::document::{Channel, TemplateDocument};
 use crate::issue::{FieldCatalog, Issue};
 
+/// `htmlparser` 0.2.1 slices a text node at `first '>' - 2` to look for `]]>` and panics when that
+/// byte is inside a multi-byte character (for example `</u >.Ýr>`). A `>` that follows a tag's
+/// own `>` since the last `<`, or follows no `<` at all, is in a text node, so refuse such a
+/// `>` when the byte two before it is not a character boundary. A `>` closing a tag is exempt.
+fn splits_a_character_before_gt(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut in_tag = false;
+    for (at, &byte) in bytes.iter().enumerate() {
+        match byte {
+            b'<' => in_tag = true,
+            b'>' => {
+                if !in_tag && at >= 2 && !text.is_char_boundary(at - 2) {
+                    return true;
+                }
+                in_tag = false;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Guard known conditional-comment panics before tokenizing and catch unknown tokenizer panics.
 fn with_tokenizer<'a, R>(
     text: &'a str,
@@ -38,6 +60,9 @@ fn with_tokenizer<'a, R>(
                 return None;
             }
         }
+    }
+    if splits_a_character_before_gt(text) {
+        return None;
     }
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         read(htmlparser::Tokenizer::from(text))
@@ -184,6 +209,28 @@ mod tests {
             .unwrap();
         // Without iteration, catch_unwind cannot mask a missing guard.
         assert_eq!(with_tokenizer(content, |_| ()), None);
+    }
+
+    #[test]
+    fn the_guard_rejects_a_text_node_whose_first_gt_follows_a_split_character() {
+        let document: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../../tests/fixtures/fuzz/template_document-crash-f2cdd899.bin"
+        ))
+        .unwrap();
+        let content = document["blocks"]["sections"][0]["columns"][0][0]["content"]
+            .as_str()
+            .unwrap();
+        assert!(content.contains("</u >.Ýr>"));
+        // The closure records whether the tokenizer was reached, so catch_unwind cannot mask a
+        // missing guard.
+        let reached = std::cell::Cell::new(false);
+        assert_eq!(with_tokenizer(content, |_| reached.set(true)), None);
+        assert!(!reached.get());
+        // Text that cannot split a character is still read, as is a `>` inside a tag.
+        for ok in ["<p>ÝÝ></p>", "<p>aÝ>b</p>", "<img alt=\"é\">", "<p>€</p>"] {
+            let tokens = with_tokenizer(ok, |tokens| tokens.count());
+            assert!(tokens.is_some(), "{ok}");
+        }
     }
 
     #[test]
