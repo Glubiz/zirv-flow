@@ -325,10 +325,11 @@ test("getting started on a clean Compose stack", async ({ page, request }) => {
     })));
     expect(decisions).toEqual(expect.arrayContaining([
       { action: "flow.enroll", outcome: "enrolled" },
-      { action: "send.gate", outcome: "passed" },
       { action: "message.send", outcome: "sent" },
     ]));
     expect(decisions.some((record) => record.action === "flow.step")).toBe(true);
+    // Passed gates write no record; a sent message implies every gate passed.
+    expect(decisions.some((record) => record.action === "send.gate")).toBe(false);
     expect(captured()).toHaveLength(2);
     const summary = process.env.GITHUB_STEP_SUMMARY;
     if (!summary) throw new Error("GITHUB_STEP_SUMMARY is required.");

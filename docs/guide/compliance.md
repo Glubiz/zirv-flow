@@ -16,7 +16,7 @@ a configuration key, a metric, a link or a test named on these pages does not ex
 | Consent before marketing mail | E1 consent policy with rules that deny a send; E2 consent per person, channel and topic, with an append-only history | Collect consent with clear wording and keep proof (duty 2) | [Consent](#consent-and-unsubscribe), [Reference](channels.md#consent-and-suppressions) |
 | Easy opt-out | E3 a signed unsubscribe link and a preference page in every marketing message | Test the link in the mail clients you care about | [Consent](#consent-and-unsubscribe), [Reference](channels.md#tracking-and-unsubscribe-links) |
 | Never mail an address again | E4 suppressions by keyed hash, per workspace and organization-wide | Import the suppressions you already hold elsewhere | [Suppressions](#suppressions) |
-| Stop a send that should not go | E5 send gates, each recorded in the trace; E6 quiet hours and frequency caps | Choose the caps and quiet hours that fit your promises | [Send gates](#send-gates-quiet-hours-and-frequency-caps), [architecture 10.1](../architecture.md#101-destinations-and-the-send-pipeline) |
+| Stop a send that should not go | E5 send gates, a stopping gate recorded in the trace; E6 quiet hours and frequency caps | Choose the caps and quiet hours that fit your promises | [Send gates](#send-gates-quiet-hours-and-frequency-caps), [architecture 10.1](../architecture.md#101-destinations-and-the-send-pipeline) |
 | Sender authentication | E7 a message is skipped unless its sending domain verified SPF, DKIM and DMARC | Publish the DNS records and look after sender reputation (duty 4) | [Sending domains](channels.md#sending-domains) |
 | Right to erasure | E8 erasure across every table; E9 merged identities; E10 erase calls to destinations that support them | Handle systems the product does not call (duty 12) | [Erasure](#erasure) |
 | Erasure survives a restore | E11 the ledger directory outside the database; E12 replay after a restore | Back up the ledger directory apart from the database and replay after a restore (duties 5 and 7) | [Erasure](#erasure), [backup and restore](../operations/backup-restore.md) |
@@ -80,12 +80,13 @@ other reason and cannot be removed. Admins manage them with `POST /api/v1/worksp
 
 ### Send gates, quiet hours and frequency caps
 
-**E5. Send gates.** Before a message leaves, `send.gate` decisions record each check in the trace:
-the sender, the address, consent, suppression, the frequency cap and quiet hours. A gate that stops
-a message ends it as skipped with a reason (`sender_unverified`, `no_address`, `no_consent`,
-`suppressed`, `frequency_cap`) or, for quiet hours, holds it. Consent and suppression name the
-deciding rule. A transactional template skips the consent gate, the caps and quiet hours, but not
-the suppression gate. The trace shows every gate of every message at `GET /api/v1/workspaces/{ws}/traces/{trace_id}`.
+**E5. Send gates.** Before a message leaves, it passes each check: the sender, the address, consent,
+suppression, the frequency cap and quiet hours. A gate that stops a message records a `send.gate` /
+`blocked` decision and ends it as skipped with a reason (`sender_unverified`, `no_address`,
+`no_consent`, `suppressed`, `frequency_cap`) or, for quiet hours, holds it. A passed gate writes no
+record of its own: `message.send` / `sent` means every gate passed. Consent and suppression name the deciding rule. A transactional template skips the consent
+gate, the caps and quiet hours, but not the suppression gate. The trace shows each message's outcome
+and any gate that stopped it at `GET /api/v1/workspaces/{ws}/traces/{trace_id}`.
 
 **E6. Quiet hours and frequency caps.** An admin sets them with
 `PUT /api/v1/workspaces/{ws}/sending/settings`. A cap is a number of messages per person in a window;

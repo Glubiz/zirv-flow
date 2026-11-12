@@ -353,8 +353,8 @@ The tree uses labels such as **A person was considered for a flow**
 (`flow.enroll`), **A branch chose a path** (`flow.branch`), **A flow step ran**
 (`flow.step`) and **A waiting enrollment woke up** (`flow.wake`). Send outcomes
 include **Message sent**, **Message skipped**, **Message failed** and **Message
-held for later** (`message.send`). The `send.gate` records name the checks that
-passed or stopped the message. Job attempts and operator decisions explain
+held for later** (`message.send`). A `send.gate` record names the check that
+stopped the message; a sent message passed every check and has none. Job attempts and operator decisions explain
 retries and skips.
 
 **Open in Traces** opens `/w/:ws/traces/:traceId`. This page shows the raw

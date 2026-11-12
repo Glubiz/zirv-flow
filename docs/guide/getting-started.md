@@ -256,8 +256,10 @@ because you selected that option; there is no separate Send button for this flow
 Open **Results**, find **Enrollments** below the counts table, and open the
 person's enrollment. Read its step history and **Trace**. The tree labels the
 decisions, including **A person was considered for a flow**, **A flow step ran**
-and **Message sent**. A send check is recorded as `send.gate`; a final send
-decision as `message.send`. A held or skipped message is not a successful send.
+and **Message sent**. The final send decision is recorded as `message.send`. A
+send check is recorded as `send.gate` only when it stops the message, so
+**Message sent** means every check passed. A held or skipped message is not a
+successful send.
 
 Choose **Open in Traces** to see the records at `/w/:ws/traces/:traceId`, with
 their action, outcome, reason, cause and subject ids. Decision records contain
