@@ -171,6 +171,19 @@ mod tests {
         Migrator::new(path).await.unwrap()
     }
 
+    #[test]
+    fn embedded_migrations_have_lf_line_endings() {
+        // The checksum covers the raw bytes, so an image built from a CRLF checkout and a
+        // released image would each refuse the other's database.
+        for migration in MIGRATOR.iter() {
+            assert!(
+                !migration.sql.as_str().contains('\r'),
+                "migration {} has CRLF line endings",
+                migration.version
+            );
+        }
+    }
+
     #[sqlx::test(migrations = false)]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn migrating_an_empty_database_brings_it_up_to_date(pool: PgPool) {

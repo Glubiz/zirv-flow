@@ -20,6 +20,10 @@
 /.dockerignore text eol=lf
 /docker-compose.yml text eol=lf
 
+# sqlx checksums each migration's raw bytes, so an image built from a CRLF
+# checkout and a released image would each refuse the other's database.
+/crates/zirv-flow-store/migrations/*.sql text eol=lf
+
 # Benchmark scripts are run with bash on any platform.
 /scripts/bench/** text eol=lf
 /scripts/check-bench-features.sh text eol=lf
