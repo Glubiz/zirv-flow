@@ -102,6 +102,13 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn split_character_before_gt_after_merge_tags_regression() {
+        check_template_document(include_bytes!(
+            "../tests/fixtures/fuzz/template_document-crash-f2cdd899.bin"
+        ));
+    }
+
     fn inputs() -> BoxedStrategy<Value> {
         let fixtures = [
             include_str!("../tests/fixtures/email_transactional.doc.json"),

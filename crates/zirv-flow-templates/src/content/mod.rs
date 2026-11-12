@@ -17,6 +17,67 @@ use crate::context::RenderExtras;
 use crate::document::{Channel, TemplateDocument};
 use crate::issue::{FieldCatalog, Issue};
 
+/// `htmlparser` 0.2.1 reads a text node up to the next `<` (any `<` starts a token, so `a < b`
+/// is a tag start that errors and ends the iteration), then slices it at `first '>' - 2` to look
+/// for `]]>`. That panics when the byte is inside a multi-byte character, for example the text
+/// `.Ýr>` in `</u >.Ýr>`. Walk the text nodes as the tokenizer does and refuse only a node whose
+/// FIRST `>` has such a split character. Later `>` in the node are never sliced.
+fn splits_a_character_before_gt(text: &str) -> bool {
+    let mut rest = text;
+    while !rest.is_empty() {
+        let node_end = rest.find('<').unwrap_or(rest.len());
+        let node = &rest[..node_end];
+        if let Some(at) = node.find('>')
+            && at >= 2
+            && !node.is_char_boundary(at - 2)
+        {
+            return true;
+        }
+        rest = &rest[node_end..];
+        let Some(end) = token_end(rest) else {
+            return false;
+        };
+        rest = &rest[end..];
+    }
+    false
+}
+
+/// The byte length of the token that starts at the `<` opening `rest`, or `None` when it never
+/// closes. Quoted attribute values (`="..."`) may hold a `>`.
+fn token_end(rest: &str) -> Option<usize> {
+    // Conditional comments, as `parse_conditional_comment_impl` reads them: up to the first `]`,
+    // then the first of `>-->`, `><!-->`, `-->` or `>`.
+    if ["<!--[if", "<![if", "<![endif]", "<!--<![endif"]
+        .iter()
+        .any(|prefix| rest.starts_with(prefix))
+    {
+        let close = rest.find(']')? + 1;
+        let tail = &rest[close..];
+        let trailer = [">-->", "><!-->", "-->", ">"]
+            .into_iter()
+            .find(|trailer| tail.starts_with(trailer))?;
+        return Some(close + trailer.len());
+    }
+    for (open, close) in [("<!--", "-->"), ("<![CDATA[", "]]>"), ("<?", "?>")] {
+        if let Some(body) = rest.strip_prefix(open) {
+            return body.find(close).map(|at| open.len() + at + close.len());
+        }
+    }
+    let bytes = rest.as_bytes();
+    let mut at = 1;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'>' => return Some(at + 1),
+            quote @ (b'"' | b'\'') if rest[..at].trim_end().ends_with('=') => {
+                at += 1 + rest[at + 1..].find(quote as char)?;
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    None
+}
+
 /// Guard known conditional-comment panics before tokenizing and catch unknown tokenizer panics.
 fn with_tokenizer<'a, R>(
     text: &'a str,
@@ -38,6 +99,9 @@ fn with_tokenizer<'a, R>(
                 return None;
             }
         }
+    }
+    if splits_a_character_before_gt(text) {
+        return None;
     }
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         read(htmlparser::Tokenizer::from(text))
@@ -184,6 +248,59 @@ mod tests {
             .unwrap();
         // Without iteration, catch_unwind cannot mask a missing guard.
         assert_eq!(with_tokenizer(content, |_| ()), None);
+    }
+
+    #[test]
+    fn the_guard_rejects_a_text_node_whose_first_gt_follows_a_split_character() {
+        let document: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../../tests/fixtures/fuzz/template_document-crash-f2cdd899.bin"
+        ))
+        .unwrap();
+        let content = document["blocks"]["sections"][0]["columns"][0][0]["content"]
+            .as_str()
+            .unwrap();
+        assert!(content.contains("</u >.Ýr>"));
+        // The closure records whether the tokenizer was reached, so catch_unwind cannot mask a
+        // missing guard.
+        let reached = std::cell::Cell::new(false);
+        assert_eq!(with_tokenizer(content, |_| reached.set(true)), None);
+        assert!(!reached.get());
+        // A hand-built node: the first `>` of `b` follows the 3-byte `€`.
+        let reached = std::cell::Cell::new(false);
+        assert_eq!(
+            with_tokenizer("<p>a</p><b>€x>y</b>", |_| reached.set(true)),
+            None
+        );
+        assert!(!reached.get());
+        // Conditional comments end later than their `]>`: the text node after them starts at `€`.
+        for input in [
+            "<p><!--[if IE]>-->€>y</p>",
+            "<p><!--[if !IE]><!-->€>y</p>",
+            "<p><![if !IE]><!-->€>y</p>",
+        ] {
+            let reached = std::cell::Cell::new(false);
+            assert_eq!(
+                with_tokenizer(input, |_| reached.set(true)),
+                None,
+                "{input}"
+            );
+            assert!(!reached.get(), "{input}");
+        }
+        // A revealed conditional comment before ASCII text is still read.
+        let revealed = "<p><![if !IE]><!-->Hello > there<![endif]></p>";
+        assert!(with_tokenizer(revealed, |tokens| tokens.count()).is_some());
+        // Text that cannot split a character is still read, as is a `>` inside a tag.
+        // Only the first `>` of a text node is sliced, so the second `>` after `€ ` is fine.
+        for ok in [
+            "<p>ÝÝ></p>",
+            "<p>aÝ>b</p>",
+            "<img alt=\"é\">",
+            "<p>€</p>",
+            "<p>a > b, 5€ > 3</p>",
+        ] {
+            let tokens = with_tokenizer(ok, |tokens| tokens.count());
+            assert!(tokens.is_some(), "{ok}");
+        }
     }
 
     #[test]
