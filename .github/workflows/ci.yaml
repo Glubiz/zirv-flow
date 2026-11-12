@@ -354,9 +354,9 @@ jobs:
       matrix:
         pg: [16, 18]
         # Four jobs per version share the tests, so a run stays under 20 minutes (three took 18.6 to
-        # 20.6). Each job compiles
-        # for about 5.5 minutes first, so more partitions gain less, and five would pass 20 concurrent
-        # jobs. Keep this list, the /4 in the job name and the nextest command in step.
+        # 20.6). Each job compiles for about 5.5 minutes first, so more partitions gain less, and five
+        # would take the run past 20 concurrent jobs. Keep this list, the /4 in the job name and the
+        # nextest command in step.
         partition: [1, 2, 3, 4]
     services:
       postgres:
