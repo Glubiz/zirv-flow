@@ -45,7 +45,7 @@ use zirv_flow_store::{
     JOB_HISTORY_DAYS_BOUNDS, TEST_SEND_MONTHS_BOUNDS,
 };
 
-pub(crate) const CONFIG_KEYS: [&str; 71] = [
+pub(crate) const CONFIG_KEYS: [&str; 73] = [
     "server.bind",
     "server.cookie_secure",
     "server.public_url",
@@ -95,6 +95,8 @@ pub(crate) const CONFIG_KEYS: [&str; 71] = [
     "ingest.kafka_unit_messages",
     "ingest.sync_unit_records",
     "imports.max_file_bytes",
+    "imports.max_workspace_bytes",
+    "imports.max_open",
     "assets.max_file_bytes",
     "assets.max_workspace_bytes",
     "explorer.interactive_timeout_ms",
@@ -482,6 +484,10 @@ struct SendingConfig {
 struct ImportsConfig {
     /// The largest uploaded file, in bytes.
     max_file_bytes: u64,
+    /// The most bytes the stored import files of one workspace may take together.
+    max_workspace_bytes: u64,
+    /// The most imports one workspace may have open (not yet running).
+    max_open: u32,
 }
 
 /// What an uploaded image and a workspace's images may be.
@@ -675,6 +681,11 @@ impl Config {
                 "imports.max_file_bytes",
                 536_870_912_u64,
             ))
+            .merge(Serialized::default(
+                "imports.max_workspace_bytes",
+                4_294_967_296_u64,
+            ))
+            .merge(Serialized::default("imports.max_open", 20_u32))
             .merge(Serialized::default("assets.max_file_bytes", 5_242_880_u64))
             .merge(Serialized::default(
                 "assets.max_workspace_bytes",
@@ -875,6 +886,22 @@ impl Config {
                 "must be at least 1",
                 source_for("imports.max_file_bytes", path, &env_sources),
             ));
+        }
+
+        for (key, value) in [
+            (
+                "imports.max_workspace_bytes",
+                config.imports.max_workspace_bytes,
+            ),
+            ("imports.max_open", u64::from(config.imports.max_open)),
+        ] {
+            if value == 0 {
+                return Err(ConfigError::new(
+                    key,
+                    "must be at least 1",
+                    source_for(key, path, &env_sources),
+                ));
+            }
         }
 
         for key in ["assets.max_file_bytes", "assets.max_workspace_bytes"] {
@@ -1417,6 +1444,8 @@ impl Config {
     pub(crate) fn import_limits(&self) -> zirv_flow_api::ImportLimits {
         zirv_flow_api::ImportLimits {
             max_file_bytes: self.imports.max_file_bytes,
+            max_workspace_bytes: self.imports.max_workspace_bytes,
+            max_open: self.imports.max_open,
             ..zirv_flow_api::ImportLimits::default()
         }
     }
@@ -2906,6 +2935,8 @@ endpoint = \"http://collector:4318\"
         );
         assert_eq!(defaults.import_limits().max_file_bytes, 536_870_912);
         assert_eq!(set.import_limits().max_file_bytes, 2048);
+        assert_eq!(defaults.import_limits().max_workspace_bytes, 4_294_967_296);
+        assert_eq!(defaults.import_limits().max_open, 20);
         assert!(toml::to_string(&defaults).unwrap().contains("[imports]"));
     }
 

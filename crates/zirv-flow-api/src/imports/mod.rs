@@ -27,6 +27,10 @@ use crate::problem::ApiError;
 pub struct ImportLimits {
     /// The largest file, in bytes.
     pub max_file_bytes: u64,
+    /// The most bytes the stored import files of one workspace may take together.
+    pub max_workspace_bytes: u64,
+    /// The most imports a workspace may have open (uploading, uploaded, mapped or dry-run).
+    pub max_open: u32,
     /// How long an upload may go without a byte arriving before it is abandoned.
     pub idle_timeout: std::time::Duration,
 }
@@ -35,6 +39,8 @@ impl Default for ImportLimits {
     fn default() -> Self {
         Self {
             max_file_bytes: 512 * 1024 * 1024,
+            max_workspace_bytes: 4 * 1024 * 1024 * 1024,
+            max_open: 20,
             idle_timeout: std::time::Duration::from_secs(60),
         }
     }

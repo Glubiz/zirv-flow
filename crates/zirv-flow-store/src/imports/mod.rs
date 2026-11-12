@@ -28,7 +28,7 @@ pub use retention::{
     erase_import_values,
 };
 pub use upload::{
-    CHUNK_BYTES, ImportUpload, UploadScan, UploadStart, discard_unfinished_import,
+    CHUNK_BYTES, ImportUpload, UploadQuota, UploadScan, UploadStart, discard_unfinished_import,
     read_import_chunk,
 };
 

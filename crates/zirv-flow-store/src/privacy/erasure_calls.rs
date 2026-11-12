@@ -1116,6 +1116,15 @@ mod tests {
 
     /// Runs the event retention as of a time long after everything the tests wrote.
     async fn purge_events(pool: &PgPool) -> u64 {
+        // A very long override elsewhere keeps the monthly partitions, so the rows are deleted
+        // one batch at a time (a wholly expired partition is dropped instead; see
+        // `a_dropped_partition_leaves_the_markers_of_its_sync_events`).
+        sqlx::query(
+            "INSERT INTO event_schemas (workspace_id, name, retention_days)              SELECT id, 'keeper', 20000 FROM workspaces LIMIT 1",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
         let later = OffsetDateTime::now_utc() + time::Duration::days(4000);
         crate::apply_event_retention(
             pool,

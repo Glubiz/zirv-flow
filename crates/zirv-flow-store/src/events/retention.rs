@@ -103,6 +103,10 @@ async fn apply_event_retention_in_batches(
 ) -> Result<(), StoreError> {
     let default_days = i32::try_from(settings.default_days).unwrap_or(i32::MAX);
 
+    // Wholly expired partitions go first: a drop frees the disk at once, while row deletes free
+    // nothing until vacuum and write WAL for every row. Only the partly expired ones are batched.
+    drop_old_partitions(pool, default_days, now, report).await?;
+
     delete_events_in_batches(
         pool,
         &overridden_delete(),
@@ -148,8 +152,7 @@ async fn apply_event_retention_in_batches(
 
     report.test_sends_deleted =
         crate::delete_test_sends_before(pool, now, windows.test_send_months).await?;
-
-    drop_old_partitions(pool, default_days, now, report).await
+    Ok(())
 }
 
 /// [`delete_in_batches`] for a statement built at run time that returns the number of rows it
@@ -427,6 +430,9 @@ mod tests {
         sqlx::raw_sql(
             "INSERT INTO event_schemas (workspace_id, name, retention_days)
              SELECT DISTINCT workspace_id, name, 100 FROM events;
+             -- A longer override elsewhere keeps the partition, so the rows are deleted in batches.
+             INSERT INTO event_schemas (workspace_id, name, retention_days)
+             SELECT DISTINCT workspace_id, 'keeper', 1000 FROM events;
              CREATE SEQUENCE retention_batches;
              CREATE FUNCTION pause_later_batch() RETURNS trigger LANGUAGE plpgsql AS $$
              BEGIN
@@ -923,6 +929,29 @@ mod tests {
                 .await
                 .unwrap();
         assert!(default.is_some());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_wholly_expired_partition_is_dropped_without_deleting_its_rows_one_batch_at_a_time(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "dropfirst").await;
+        sqlx::query(
+            "CREATE TABLE events_y2020m01 PARTITION OF events              FOR VALUES FROM ('2020-01-01 00:00:00+00') TO ('2020-02-01 00:00:00+00')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let old = (NOW - datetime!(2020-01-15 00:00 UTC)).whole_days();
+        store(&pool, ws, "ancient", old, None).await;
+        store(&pool, ws, "ancient", old, None).await;
+
+        let report = run(&pool).await;
+
+        assert_eq!(report.events_deleted, 0, "rows were deleted one by one");
+        assert!(report.partitions_dropped >= 1);
+        assert_eq!(remaining(&pool, "ancient").await, 0);
     }
 
     #[sqlx::test]
