@@ -1,0 +1,19 @@
+PostgreSQL 16.15 (Debian 16.15-1.pgdg13+2) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+autovacuum_max_workers=5
+autovacuum_naptime=5s
+bgwriter_delay=20ms
+bgwriter_lru_maxpages=1000
+checkpoint_timeout=1800s
+effective_cache_size=10485768kB
+effective_io_concurrency=200
+jit=off
+maintenance_work_mem=1048576kB
+max_connections=350
+max_wal_size=65536MB
+random_page_cost=1.1
+shared_buffers=5242888kB
+synchronous_commit=on
+track_wal_io_timing=on
+wal_compression=lz4
+work_mem=4096kB
+ncpu=32 mem=33526296576 kernel=6.18.58.1-microsoft-standard-WSL2

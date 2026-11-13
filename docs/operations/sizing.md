@@ -3,7 +3,7 @@
 For operators choosing a deployment size, connection budget and maintenance policy.
 The figures here come from development-machine and reference-resource runs, **not
 reference hardware** (ruling ef99d178). The [M8 run (#397)](https://github.com/Glubiz/zirv-flow/issues/397)
-will refresh them. Historical measurements below are workload-specific observations,
+will refresh them; the [5x simulated benchmark of 1.0.0](../benchmarks/simulated-5x.md) adds a [scaling section](#scaling-past-the-5x-simulated-load) below. Historical measurements below are workload-specific observations,
 not a capacity guarantee for the current release. Targets, configured limits and
 calculated budgets are labelled separately from measurements.
 
@@ -85,6 +85,43 @@ scheduler 4, 10 M people), in the [M8 validation report](../benchmarks/m8-valida
 - **Burst drain.** A 10-minute burst at 10,000 events/s is accepted without rejection
   (API p99 153.7 ms), but its 4.04 M row backlog took 1,506 s to drain, against the 900 s
   target. Sustained 2,000 events/s kept inbox-to-applied p95 at 65 ms.
+
+## Scaling past the 5x simulated load
+
+This section turns the [5x simulated benchmark of 1.0.0](../benchmarks/simulated-5x.md) into planning
+guidance. It was one development machine with CPU and memory caps, not reference hardware
+([#606](https://github.com/Glubiz/zirv-flow/issues/606)). "M" is measured and "D" is derived.
+
+- **The first limit is PostgreSQL CPU.** At the 5x daily-curve peak (6,500 events/s in total, about 4,400/s
+  through the ingest API) the database used 7.97 of its 8 cores and was throttled 7.7 s/s, while the app used
+  3.0 to 3.2 of its 8 cores (M). The planning arithmetic (D) is:
+  database cores = inbox items per second x database ms per item / 1000.
+  The measured database cost was 3.88 ms per item at 1,000/s, 2.96 at 2,500/s and 1.78 at the peak, because
+  batching amortises under load (M). A grown database costs more per item: a pre-release build on a database of
+  1.4M to 2.8M people measured 2.49 ms at the peak. Plan sustained rates on about 3 ms per item (D); at 3 ms,
+  8 cores carry about 2,700 items/s, and the measured W2 rate of 2,500/s sat at 7.83 cores. Inbox items
+  are `zirv_flow_ingest_applied_total`; the inbox slope, not the applied rate alone, shows whether you keep up.
+- **More app replicas do not raise throughput while the database is at its cap.** Add workers only when worker
+  CPU or the job queue is the limit (see the guidance above). Every added worker or drain slot raises the
+  connection budget: use the [connection arithmetic](#connection-arithmetic) with `ingest.drain_shards`,
+  `worker.drain_slots` and the per-worker connections `D + 3 x C + 1`, and keep PostgreSQL's `max_connections`
+  above the total. The benchmark used 16 drain shards, 4 workers with 4 drain slots each and
+  `max_connections` 350.
+- **Database memory.** The page cache filled the 10 GiB `zf-db` container in every window, and as the database
+  grew from 11.65 GB to 35.1 GB the buffer hit ratio fell from 0.991 to 0.984 and block reads per item rose from
+  1.8 to about 4 (M). More database memory is the lever for that, but its effect is **not measured**.
+- **Disk.** Size disk as retention days x daily growth. The benchmark's total database growth was 19.5 GB per
+  hour of load at the peak (M), about 467 GB a day at that pace and about 250 GB a day at the daily mean (D);
+  `events`, `event_dedupe` and `decision_records` together cost about 1.1 KB per event. The per-table figures
+  are in the [growth table](../benchmarks/simulated-5x.md#7-growth). The retention keys are
+  `events.retention_days` (default 760), `retention.messages_days` and `retention.decision_days` (default 395
+  each), defined in [config](../../crates/zirv-flow/src/config.rs). The run used 2 days and never reached the
+  retention horizon, so deletes at load are **not measured**. Add room for WAL, indexes' bloat and backups.
+- **The connection settings are optional and unproven.** `statement-cache-capacity=512` on every role (P1), and
+  that plus `options=-c plan_cache_mode=force_generic_plan` on workers only, never on `serve` (P12), are
+  database-URL settings. A pre-release run improved with them and the 1.0.0 run did not, and both ran in a fixed
+  order on a growing database. Do not adopt them as a default; measure them on your own workload. See
+  [section 8 of the benchmark](../benchmarks/simulated-5x.md#8-the-connection-settings-inconclusive).
 
 ## Connection arithmetic
 

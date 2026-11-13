@@ -1,0 +1,112 @@
+[
+ {
+  "window": "W1",
+  "route": "/api/v1/ingest/batch",
+  "requests": 9997,
+  "p50_ms": 3.3,
+  "p95_ms": 9.6,
+  "p99_ms": 22.3,
+  "statuses": {
+   "202": 9997
+  }
+ },
+ {
+  "window": "W1",
+  "route": "/hooks/{id}",
+  "requests": 17652,
+  "p50_ms": 2.7,
+  "p95_ms": 7.1,
+  "p99_ms": 16.6,
+  "statuses": {
+   "202": 17652
+  }
+ },
+ {
+  "window": "W2",
+  "route": "/api/v1/ingest/batch",
+  "requests": 25000,
+  "p50_ms": 11.9,
+  "p95_ms": 72.7,
+  "p99_ms": 95.0,
+  "statuses": {
+   "202": 25000
+  }
+ },
+ {
+  "window": "W2",
+  "route": "/hooks/{id}",
+  "requests": 44115,
+  "p50_ms": 7.4,
+  "p95_ms": 62.4,
+  "p99_ms": 92.8,
+  "statuses": {
+   "202": 44115
+  }
+ },
+ {
+  "window": "W3",
+  "route": "/api/v1/ingest/batch",
+  "requests": 44746,
+  "p50_ms": 19.4,
+  "p95_ms": 81.6,
+  "p99_ms": 97.8,
+  "statuses": {
+   "202": 44746
+  }
+ },
+ {
+  "window": "W3",
+  "route": "/hooks/{id}",
+  "requests": 73655,
+  "p50_ms": 7.7,
+  "p95_ms": 73.5,
+  "p99_ms": 95.7,
+  "statuses": {
+   "202": 73655
+  }
+ },
+ {
+  "window": "P1",
+  "route": "/api/v1/ingest/batch",
+  "requests": 45284,
+  "p50_ms": 20.2,
+  "p95_ms": 81.4,
+  "p99_ms": 97.7,
+  "statuses": {
+   "202": 45284
+  }
+ },
+ {
+  "window": "P1",
+  "route": "/hooks/{id}",
+  "requests": 76558,
+  "p50_ms": 7.8,
+  "p95_ms": 65.2,
+  "p99_ms": 94.0,
+  "statuses": {
+   "202": 76558
+  }
+ },
+ {
+  "window": "P12",
+  "route": "/api/v1/ingest/batch",
+  "requests": 44735,
+  "p50_ms": 20.7,
+  "p95_ms": 82.2,
+  "p99_ms": 101.3,
+  "statuses": {
+   "202": 44735
+  }
+ },
+ {
+  "window": "P12",
+  "route": "/hooks/{id}",
+  "requests": 76446,
+  "p50_ms": 8.1,
+  "p95_ms": 55.8,
+  "p99_ms": 94.2,
+  "statuses": {
+   "202": 76446
+  }
+ }
+]
