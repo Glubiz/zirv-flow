@@ -99,7 +99,7 @@ guidance. It was one development machine with CPU and memory caps, not reference
   The measured database cost was 3.88 ms per item at 1,000/s, 2.96 at 2,500/s and 1.78 at the peak, because
   batching amortises under load (M). A grown database costs more per item: a pre-release build on a database of
   1.4M to 2.8M people measured 2.49 ms at the peak. Plan sustained rates on about 3 ms per item (D); at 3 ms,
-  8 cores carry about 2,700 items/s, and the measured W2 rate of 2,500/s sat at 7.83 cores. Inbox items
+  8 cores carry about 2,700 items/s, and the measured W2 window applied 2,650/s at 7.83 cores. Inbox items
   are `zirv_flow_ingest_applied_total`; the inbox slope, not the applied rate alone, shows whether you keep up.
 - **More app replicas do not raise throughput while the database is at its cap.** Add workers only when worker
   CPU or the job queue is the limit (see the guidance above). Every added worker or drain slot raises the
@@ -116,7 +116,7 @@ guidance. It was one development machine with CPU and memory caps, not reference
   are in the [growth table](../benchmarks/simulated-5x.md#7-growth). The retention keys are
   `events.retention_days` (default 760), `retention.messages_days` and `retention.decision_days` (default 395
   each), defined in [config](../../crates/zirv-flow/src/config.rs). The run used 2 days and never reached the
-  retention horizon, so deletes at load are **not measured**. Add room for WAL, indexes' bloat and backups.
+  retention horizon, so deletes at load are **not measured**. Leave headroom for WAL, bloat and backups; none of them was measured here.
 - **The connection settings are optional and unproven.** `statement-cache-capacity=512` on every role (P1), and
   that plus `options=-c plan_cache_mode=force_generic_plan` on workers only, never on `serve` (P12), are
   database-URL settings. A pre-release run improved with them and the 1.0.0 run did not, and both ran in a fixed

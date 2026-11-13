@@ -17,18 +17,10 @@ image before the run; the migrate container applied migrations up to 95 on the e
 | --- | --- |
 | Load | The x5 profile: 500 k people and a daily-curve peak of 6,500 events/s in total, `sim.sh rate 3490`. About 4,400/s of the peak arrive through the ingest API (68%) and about 1,430/s through Kafka (22%) |
 | Rates | "The 5x daily-curve peak" is the peak of that curve. "The daily mean" is the peak divided by 1.862 (D), about 2,360/s through the ingest API. Window W3 runs the daily-curve peak (about 4,400/s offered through the ingest API), W2 (2,500/s) is just above the daily mean, and W1 (1,000/s) is a light load |
-| Database | `zf-db`: 8 CPUs, 10 GB; PostgreSQL 16.15 with the settings in [stack.txt](data/x5-1.0.0/stack.txt): `max_connections` 350, `jit` off, `checkpoint_timeout` 1800 s, `max_wal_size` 64 GB, `wal_compression` lz4, `work_mem` 4 MB, `synchronous_commit` on |
+| Database | `zf-db`: 8 CPUs, 10 GB; PostgreSQL 16.15 with the settings in [stack.txt](data/x5-1.0.0/stack.txt): `shared_buffers` 4 GB, `effective_cache_size` 8 GB, `max_connections` 350, `jit` off, `checkpoint_timeout` 1800 s, `max_wal_size` 64 GB, `wal_compression` lz4, `work_mem` 4 MB, `synchronous_commit` on |
 | App | 2 `serve` (1 CPU, 1 GB each), 4 workers (1.375 CPUs, 2 GB each), 1 scheduler (0.5 CPUs, 512 MB), the profile's caps, unchanged. 16 drain shards, 4 drain slots per worker |
 | Host | One Docker VM with 32 CPUs and 33.5 GB on WSL2 kernel 6.18, on an Intel Core i9-13900K. One development machine, not reference hardware |
 | Windows | W1, W2, W3, P1 and P12, each about 610 s, in that fixed order, after a dry run W0. P1 and P12 are the connection-setting windows of section 8 |
-
-`shared_buffers` reads 5 GB on the running server (M, [stack.txt](data/x5-1.0.0/stack.txt)), although the
-profile comment and variable ask for 4 GB
-([x5.env line 10](../../scripts/sim/profiles/x5.env) and
-[line 46](../../scripts/sim/profiles/x5.env), passed to the server at
-[compose.yaml line 82](../../scripts/sim/compose.yaml)). `effective_cache_size` likewise reads 10 GB
-against 8 GB requested. No file in `scripts/sim` sets the larger values, and the cause was not traced; treat the
-server's 5 GB as the value in effect.
 
 Two terms in the tables:
 
@@ -46,8 +38,8 @@ complete at 2,551 s. Sim-up time from the first start to `sim.sh down` was 118 m
 - **At the peak rate, 1.0.0 did not keep up.** At W1 and W2 the inbox stayed flat (slope 0 and -11/s). At
   W3, the 5x daily-curve peak, 1.0.0 applied 4,475/s and the inbox still grew by 195/s, from 179k to 298k
   items, with the inbox age rising from 51 to 138 s (M). That is about 4% short at the peak, with no steady
-  state: applied swung between 2,760 and 6,300/s in 30 s samples. The daily mean is far below this rate, so
-  the peak is the case to plan for.
+  state: applied swung between 2,760 and 6,300/s in 30 s samples. The daily mean is about half this rate, and
+  W2, just above the mean, kept up.
 - **The first limit is PostgreSQL CPU, the 8-core cap of `zf-db`.** The database used 7.83 of 8 cores at W2 and
   7.97 at W3, throttled 6.1 and 7.7 s per second (M). The app used 3.0 to 3.2 of its 8 cores (M).
 - **Inside the database the waits point at row contention.** The resolve path (`people ... FOR UPDATE`) had 4.6
@@ -172,7 +164,7 @@ Other growing tables (D, same method): `source_records` 469/s (38 GB/day at peak
 - **Retention was not reached.** Retention in the sim is 2 days (`SIM_RETENTION_DAYS=2`, passed as
   `events.retention_days`), which the 2-hour run never reached, so `event_dedupe` deletes were near zero: 0.35,
   0.34, 0.16, 0.12 and 0.13 per second against inserts of 1,363, 2,992, 4,371, 3,215 and 4,176 per second (M).
-  Every table therefore grew by its full insert rate.
+  The retained tables therefore grew by their full insert rate.
 - **The stack grew during the run.** It started at 501,786 people at the ready gate and ended at 1.62M (M),
   because the generators create people (429 inserts/s at W3). Later windows therefore ran on a bigger
   database. Block reads per item rose from 1.8 at W3 to 4.1 at P1 and 3.5 at P12, and the buffer hit ratio
@@ -234,8 +226,8 @@ smaller in this run, so the report cannot split the gain between the two.
   not measured.
 - Whether more database memory helps. The page cache filled the 10 GiB container and the hit ratio fell as the
   database grew, but no run varied the memory.
-- Mail delivery, email rendering and destinations. The load is ingest, hooks, contacts, Kafka and a few
-  segments and flows on the sim's fixtures.
+- Delivery to real mail providers or destinations. The flows' sends went to the sim's fixtures (about 63
+  messages/s at W3, M), and this page does not report send latency.
 - Any fix for the lock contention in section 6.
 
 ## 11. Data files
