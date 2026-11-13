@@ -1,0 +1,6 @@
+window,seconds,ingest_offered_per_s_derived,accepted_items_per_s,applied_per_s,inbox_slope_per_s,inbox_start,inbox_end,inbox_age_start_s,inbox_age_end_s,db_cores,db_throttled_s_per_s,app_cores,serve_cores,worker_cores,db_cpu_ms_per_applied,app_cpu_ms_per_applied,ingest_p50_ms,ingest_p95_ms,ingest_p99_ms,ingest_rejections
+W1,608,1000,999,1059,0,13,41,0,0,4.11,0.05,1.65,0.16,1.49,3.88,1.56,3.3,9.6,22.3,0
+W2,609,2500,2525,2650,-11,6723,276,5,0,7.83,6.13,3.02,0.5,2.52,2.96,1.14,11.9,72.7,95.0,0
+W3,610,4420,4456,4475,195,179371,298226,51,138,7.97,7.66,3.07,0.73,2.33,1.78,0.69,19.4,81.6,97.8,0
+P1,612,4420,4441,3230,1419,131278,999571,40,276,7.96,6.64,2.93,0.74,2.19,2.46,0.91,20.2,81.4,97.7,0
+P12,611,4420,4398,4151,441,29676,299209,17,120,7.94,6.01,3.17,0.75,2.42,1.91,0.76,20.7,82.2,101.3,0

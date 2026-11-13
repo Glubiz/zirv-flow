@@ -1,0 +1,502 @@
+[
+ {
+  "window": "W1",
+  "rank": 1,
+  "total_s": 185.9,
+  "pct": 14.2,
+  "calls": 26557,
+  "mean_ms": 7.0,
+  "ms_per_applied_item": 0.289,
+  "query": "WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr"
+ },
+ {
+  "window": "W1",
+  "rank": 2,
+  "total_s": 112.1,
+  "pct": 8.5,
+  "calls": 307226,
+  "mean_ms": 0.365,
+  "ms_per_applied_item": 0.174,
+  "query": "WITH readers AS MATERIALIZED ( SELECT (NULLIF(current_setting('zirv_flow.change_readers', true), '')::jsonb ->> $1::text)::smallint AS classes), marked AS ( INS"
+ },
+ {
+  "window": "W1",
+  "rank": 3,
+  "total_s": 81.0,
+  "pct": 6.2,
+  "calls": 38175,
+  "mean_ms": 2.122,
+  "ms_per_applied_item": 0.126,
+  "query": "WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, traits ->> $3 AS zone FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merg"
+ },
+ {
+  "window": "W1",
+  "rank": 4,
+  "total_s": 74.4,
+  "pct": 5.7,
+  "calls": 30118,
+  "mean_ms": 2.47,
+  "ms_per_applied_item": 0.116,
+  "query": "INSERT INTO identities (id, workspace_id, person_id, kind, value) SELECT t.id, $2, $3, t.kind, t.value FROM unnest($1::uuid[], $4::text[], $5::text[]) WITH ORDI"
+ },
+ {
+  "window": "W1",
+  "rank": 5,
+  "total_s": 59.7,
+  "pct": 4.5,
+  "calls": 570302,
+  "mean_ms": 0.105,
+  "ms_per_applied_item": 0.093,
+  "query": "UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, lease_token = gen_random_uuid(), lease_expires_at = (SELECT clock_timestamp()) + mak"
+ },
+ {
+  "window": "W1",
+  "rank": 6,
+  "total_s": 55.5,
+  "pct": 4.2,
+  "calls": 64711,
+  "mean_ms": 0.857,
+  "ms_per_applied_item": 0.086,
+  "query": "SELECT s.person_id, w.key, s.id, s.source, s.traits -> w.key FROM source_records s JOIN unnest($3::uuid[], $4::text[]) AS w(person_id, key) ON w.person_id = s.p"
+ },
+ {
+  "window": "W1",
+  "rank": 7,
+  "total_s": 50.0,
+  "pct": 3.8,
+  "calls": 56847,
+  "mean_ms": 0.88,
+  "ms_per_applied_item": 0.078,
+  "query": "INSERT INTO identities (id, workspace_id, person_id, kind, value) SELECT t.id, $1, t.person_id, t.kind, t.value FROM unnest($2::uuid[], $3::uuid[], $4::text[], "
+ },
+ {
+  "window": "W1",
+  "rank": 8,
+  "total_s": 39.0,
+  "pct": 3.0,
+  "calls": 156063,
+  "mean_ms": 0.25,
+  "ms_per_applied_item": 0.061,
+  "query": "INSERT INTO decision_records (id, workspace_id, trace_id, action, outcome, reason, cause_kind, cause_id, subject_ids, job_id, attempt) SELECT id, workspace_id, "
+ },
+ {
+  "window": "W1",
+  "rank": 9,
+  "total_s": 37.9,
+  "pct": 2.9,
+  "calls": 51556,
+  "mean_ms": 0.735,
+  "ms_per_applied_item": 0.059,
+  "query": "SELECT id, merged_into, created_at FROM people WHERE workspace_id = $1 AND id = ANY($2) ORDER BY id FOR UPDATE"
+ },
+ {
+  "window": "W1",
+  "rank": 10,
+  "total_s": 32.8,
+  "pct": 2.5,
+  "calls": 87232,
+  "mean_ms": 0.376,
+  "ms_per_applied_item": 0.051,
+  "query": "SELECT (EXISTS (SELECT 1 FROM generate_series($3::int, 63, $2::int) b WHERE EXISTS (SELECT 1 FROM ingest_inbox WHERE workspace_id = $1 AND affinity = b)) OR EXI"
+ },
+ {
+  "window": "W2",
+  "rank": 1,
+  "total_s": 952.4,
+  "pct": 16.3,
+  "calls": 53609,
+  "mean_ms": 17.767,
+  "ms_per_applied_item": 0.59,
+  "query": "WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr"
+ },
+ {
+  "window": "W2",
+  "rank": 2,
+  "total_s": 432.6,
+  "pct": 7.4,
+  "calls": 76934,
+  "mean_ms": 5.624,
+  "ms_per_applied_item": 0.268,
+  "query": "SELECT id FROM lists WHERE workspace_id = $1"
+ },
+ {
+  "window": "W2",
+  "rank": 3,
+  "total_s": 416.7,
+  "pct": 7.2,
+  "calls": 116481,
+  "mean_ms": 3.577,
+  "ms_per_applied_item": 0.258,
+  "query": "SELECT id, merged_into, created_at FROM people WHERE workspace_id = $1 AND id = ANY($2) ORDER BY id FOR UPDATE"
+ },
+ {
+  "window": "W2",
+  "rank": 4,
+  "total_s": 314.9,
+  "pct": 5.4,
+  "calls": 98177,
+  "mean_ms": 3.207,
+  "ms_per_applied_item": 0.195,
+  "query": "SELECT s.person_id, w.key, s.id, s.source, s.traits -> w.key FROM source_records s JOIN unnest($3::uuid[], $4::text[]) AS w(person_id, key) ON w.person_id = s.p"
+ },
+ {
+  "window": "W2",
+  "rank": 5,
+  "total_s": 237.6,
+  "pct": 4.1,
+  "calls": 180049,
+  "mean_ms": 1.319,
+  "ms_per_applied_item": 0.147,
+  "query": "WITH readers AS MATERIALIZED ( SELECT (NULLIF(current_setting($8, $9), $10)::jsonb ->> $1::text)::smallint AS classes), kept AS MATERIALIZED ( SELECT m.* FROM u"
+ },
+ {
+  "window": "W2",
+  "rank": 6,
+  "total_s": 214.1,
+  "pct": 3.7,
+  "calls": 98116,
+  "mean_ms": 2.182,
+  "ms_per_applied_item": 0.133,
+  "query": "INSERT INTO identities (id, workspace_id, person_id, kind, value) SELECT t.id, $1, t.person_id, t.kind, t.value FROM unnest($2::uuid[], $3::uuid[], $4::text[], "
+ },
+ {
+  "window": "W2",
+  "rank": 7,
+  "total_s": 205.0,
+  "pct": 3.5,
+  "calls": 200128,
+  "mean_ms": 1.024,
+  "ms_per_applied_item": 0.127,
+  "query": "INSERT INTO decision_records (id, workspace_id, trace_id, action, outcome, reason, cause_kind, cause_id, subject_ids, job_id, attempt) SELECT id, workspace_id, "
+ },
+ {
+  "window": "W2",
+  "rank": 8,
+  "total_s": 198.6,
+  "pct": 3.4,
+  "calls": 62702,
+  "mean_ms": 3.168,
+  "ms_per_applied_item": 0.123,
+  "query": "INSERT INTO identities (id, workspace_id, person_id, kind, value) SELECT t.id, $2, $3, t.kind, t.value FROM unnest($1::uuid[], $4::text[], $5::text[]) WITH ORDI"
+ },
+ {
+  "window": "W2",
+  "rank": 9,
+  "total_s": 125.2,
+  "pct": 2.1,
+  "calls": 485015,
+  "mean_ms": 0.258,
+  "ms_per_applied_item": 0.078,
+  "query": "WITH readers AS MATERIALIZED ( SELECT (NULLIF(current_setting('zirv_flow.change_readers', true), '')::jsonb ->> $1::text)::smallint AS classes), marked AS ( INS"
+ },
+ {
+  "window": "W2",
+  "rank": 10,
+  "total_s": 103.3,
+  "pct": 1.8,
+  "calls": 32009,
+  "mean_ms": 3.228,
+  "ms_per_applied_item": 0.064,
+  "query": "SELECT id FROM lists WHERE workspace_id = $1 AND id = $2 FOR KEY SHARE"
+ },
+ {
+  "window": "W3",
+  "rank": 1,
+  "total_s": 1453.2,
+  "pct": 15.5,
+  "calls": 87351,
+  "mean_ms": 16.636,
+  "ms_per_applied_item": 0.532,
+  "query": "WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr"
+ },
+ {
+  "window": "W3",
+  "rank": 2,
+  "total_s": 921.4,
+  "pct": 9.8,
+  "calls": 173018,
+  "mean_ms": 5.326,
+  "ms_per_applied_item": 0.338,
+  "query": "SELECT id, merged_into, created_at FROM people WHERE workspace_id = $1 AND id = ANY($2) ORDER BY id FOR UPDATE"
+ },
+ {
+  "window": "W3",
+  "rank": 3,
+  "total_s": 771.9,
+  "pct": 8.2,
+  "calls": 57540,
+  "mean_ms": 13.414,
+  "ms_per_applied_item": 0.283,
+  "query": "SELECT id FROM lists WHERE workspace_id = $1"
+ },
+ {
+  "window": "W3",
+  "rank": 4,
+  "total_s": 547.9,
+  "pct": 5.8,
+  "calls": 122650,
+  "mean_ms": 4.467,
+  "ms_per_applied_item": 0.201,
+  "query": "SELECT s.person_id, w.key, s.id, s.source, s.traits -> w.key FROM source_records s JOIN unnest($3::uuid[], $4::text[]) AS w(person_id, key) ON w.person_id = s.p"
+ },
+ {
+  "window": "W3",
+  "rank": 5,
+  "total_s": 304.3,
+  "pct": 3.2,
+  "calls": 167679,
+  "mean_ms": 1.815,
+  "ms_per_applied_item": 0.111,
+  "query": "INSERT INTO decision_records (id, workspace_id, trace_id, action, outcome, reason, cause_kind, cause_id, subject_ids, job_id, attempt) SELECT id, workspace_id, "
+ },
+ {
+  "window": "W3",
+  "rank": 6,
+  "total_s": 287.5,
+  "pct": 3.1,
+  "calls": 28553,
+  "mean_ms": 10.068,
+  "ms_per_applied_item": 0.105,
+  "query": "UPDATE lists SET member_count = member_count + $3 WHERE workspace_id = $1 AND id = $2"
+ },
+ {
+  "window": "W3",
+  "rank": 7,
+  "total_s": 244.8,
+  "pct": 2.6,
+  "calls": 25644,
+  "mean_ms": 9.547,
+  "ms_per_applied_item": 0.09,
+  "query": "SELECT id FROM people WHERE workspace_id = $1 AND id = ANY($2) ORDER BY id FOR KEY SHARE"
+ },
+ {
+  "window": "W3",
+  "rank": 8,
+  "total_s": 229.2,
+  "pct": 2.4,
+  "calls": 48493,
+  "mean_ms": 4.727,
+  "ms_per_applied_item": 0.084,
+  "query": "SELECT id FROM lists WHERE workspace_id = $1 AND id = $2 FOR KEY SHARE"
+ },
+ {
+  "window": "W3",
+  "rank": 9,
+  "total_s": 201.6,
+  "pct": 2.1,
+  "calls": 193819,
+  "mean_ms": 1.04,
+  "ms_per_applied_item": 0.074,
+  "query": "INSERT INTO events (id, workspace_id, person_id, name, schema_version, occurred_at, received_at, properties, source, message_id, trace_id, validation_state, val"
+ },
+ {
+  "window": "W3",
+  "rank": 10,
+  "total_s": 186.9,
+  "pct": 2.0,
+  "calls": 56445,
+  "mean_ms": 3.311,
+  "ms_per_applied_item": 0.068,
+  "query": "UPDATE event_dedupe d SET duplicates = d.duplicates + v.repeats FROM unnest($2::text[], $3::int4[]) AS v(message_id, repeats) WHERE d.workspace_id = $1 AND d.me"
+ },
+ {
+  "window": "P1",
+  "rank": 1,
+  "total_s": 3037.0,
+  "pct": 18.5,
+  "calls": 106351,
+  "mean_ms": 28.556,
+  "ms_per_applied_item": 1.536,
+  "query": "SELECT id FROM lists WHERE workspace_id = $1"
+ },
+ {
+  "window": "P1",
+  "rank": 2,
+  "total_s": 1883.5,
+  "pct": 11.5,
+  "calls": 65192,
+  "mean_ms": 28.891,
+  "ms_per_applied_item": 0.953,
+  "query": "WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr"
+ },
+ {
+  "window": "P1",
+  "rank": 3,
+  "total_s": 839.2,
+  "pct": 5.1,
+  "calls": 35846,
+  "mean_ms": 23.413,
+  "ms_per_applied_item": 0.424,
+  "query": "SELECT id FROM lists WHERE workspace_id = $1 AND id = $2 FOR KEY SHARE"
+ },
+ {
+  "window": "P1",
+  "rank": 4,
+  "total_s": 812.6,
+  "pct": 4.9,
+  "calls": 123861,
+  "mean_ms": 6.56,
+  "ms_per_applied_item": 0.411,
+  "query": "SELECT id, merged_into, created_at FROM people WHERE workspace_id = $1 AND id = ANY($2) ORDER BY id FOR UPDATE"
+ },
+ {
+  "window": "P1",
+  "rank": 5,
+  "total_s": 789.9,
+  "pct": 4.8,
+  "calls": 19751,
+  "mean_ms": 39.994,
+  "ms_per_applied_item": 0.4,
+  "query": "UPDATE lists SET member_count = member_count + $3 WHERE workspace_id = $1 AND id = $2"
+ },
+ {
+  "window": "P1",
+  "rank": 6,
+  "total_s": 618.8,
+  "pct": 3.8,
+  "calls": 35846,
+  "mean_ms": 17.263,
+  "ms_per_applied_item": 0.313,
+  "query": "INSERT INTO list_members (workspace_id, list_id, person_id, source) SELECT $1, $2, t.person_id, $4 FROM unnest($3::uuid[]) AS t(person_id) WHERE NOT EXISTS (SEL"
+ },
+ {
+  "window": "P1",
+  "rank": 7,
+  "total_s": 570.9,
+  "pct": 3.5,
+  "calls": 29115,
+  "mean_ms": 19.608,
+  "ms_per_applied_item": 0.289,
+  "query": "INSERT INTO list_member_changes (id, workspace_id, list_id, person_id, action, source, actor_user_id, trace_id) SELECT t.id, $1, $2, t.person_id, $3, $4, $5, $6"
+ },
+ {
+  "window": "P1",
+  "rank": 8,
+  "total_s": 570.4,
+  "pct": 3.5,
+  "calls": 88334,
+  "mean_ms": 6.457,
+  "ms_per_applied_item": 0.289,
+  "query": "SELECT s.person_id, w.key, s.id, s.source, s.traits -> w.key FROM source_records s JOIN unnest($3::uuid[], $4::text[]) AS w(person_id, key) ON w.person_id = s.p"
+ },
+ {
+  "window": "P1",
+  "rank": 9,
+  "total_s": 437.0,
+  "pct": 2.7,
+  "calls": 40364,
+  "mean_ms": 10.827,
+  "ms_per_applied_item": 0.221,
+  "query": "UPDATE event_dedupe d SET duplicates = d.duplicates + v.repeats FROM unnest($2::text[], $3::int4[]) AS v(message_id, repeats) WHERE d.workspace_id = $1 AND d.me"
+ },
+ {
+  "window": "P1",
+  "rank": 10,
+  "total_s": 433.5,
+  "pct": 2.6,
+  "calls": 167403,
+  "mean_ms": 2.59,
+  "ms_per_applied_item": 0.219,
+  "query": "INSERT INTO decision_records (id, workspace_id, trace_id, action, outcome, reason, cause_kind, cause_id, subject_ids, job_id, attempt) SELECT id, workspace_id, "
+ },
+ {
+  "window": "P12",
+  "rank": 1,
+  "total_s": 1816.6,
+  "pct": 12.1,
+  "calls": 106810,
+  "mean_ms": 17.007,
+  "ms_per_applied_item": 0.716,
+  "query": "SELECT id FROM lists WHERE workspace_id = $1"
+ },
+ {
+  "window": "P12",
+  "rank": 2,
+  "total_s": 1644.2,
+  "pct": 11.0,
+  "calls": 85764,
+  "mean_ms": 19.172,
+  "ms_per_applied_item": 0.648,
+  "query": "WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr"
+ },
+ {
+  "window": "P12",
+  "rank": 3,
+  "total_s": 909.2,
+  "pct": 6.1,
+  "calls": 162752,
+  "mean_ms": 5.586,
+  "ms_per_applied_item": 0.359,
+  "query": "SELECT id, merged_into, created_at FROM people WHERE workspace_id = $1 AND id = ANY($2) ORDER BY id FOR UPDATE"
+ },
+ {
+  "window": "P12",
+  "rank": 4,
+  "total_s": 712.2,
+  "pct": 4.7,
+  "calls": 114735,
+  "mean_ms": 6.207,
+  "ms_per_applied_item": 0.281,
+  "query": "SELECT s.person_id, w.key, s.id, s.source, s.traits -> w.key FROM source_records s JOIN unnest($3::uuid[], $4::text[]) AS w(person_id, key) ON w.person_id = s.p"
+ },
+ {
+  "window": "P12",
+  "rank": 5,
+  "total_s": 656.6,
+  "pct": 4.4,
+  "calls": 54787,
+  "mean_ms": 11.984,
+  "ms_per_applied_item": 0.259,
+  "query": "UPDATE event_dedupe d SET duplicates = d.duplicates + v.repeats FROM unnest($2::text[], $3::int4[]) AS v(message_id, repeats) WHERE d.workspace_id = $1 AND d.me"
+ },
+ {
+  "window": "P12",
+  "rank": 6,
+  "total_s": 648.8,
+  "pct": 4.3,
+  "calls": 96142,
+  "mean_ms": 6.748,
+  "ms_per_applied_item": 0.256,
+  "query": "WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, traits ->> 'timezone' AS zone FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT "
+ },
+ {
+  "window": "P12",
+  "rank": 7,
+  "total_s": 494.7,
+  "pct": 3.3,
+  "calls": 48326,
+  "mean_ms": 10.237,
+  "ms_per_applied_item": 0.195,
+  "query": "SELECT id FROM lists WHERE workspace_id = $1 AND id = $2 FOR KEY SHARE"
+ },
+ {
+  "window": "P12",
+  "rank": 8,
+  "total_s": 476.2,
+  "pct": 3.2,
+  "calls": 24852,
+  "mean_ms": 19.16,
+  "ms_per_applied_item": 0.188,
+  "query": "UPDATE lists SET member_count = member_count + $3 WHERE workspace_id = $1 AND id = $2"
+ },
+ {
+  "window": "P12",
+  "rank": 9,
+  "total_s": 430.4,
+  "pct": 2.9,
+  "calls": 176711,
+  "mean_ms": 2.436,
+  "ms_per_applied_item": 0.17,
+  "query": "INSERT INTO decision_records (id, workspace_id, trace_id, action, outcome, reason, cause_kind, cause_id, subject_ids, job_id, attempt) SELECT id, workspace_id, "
+ },
+ {
+  "window": "P12",
+  "rank": 10,
+  "total_s": 423.0,
+  "pct": 2.8,
+  "calls": 42446,
+  "mean_ms": 9.966,
+  "ms_per_applied_item": 0.167,
+  "query": "SELECT id FROM people WHERE workspace_id = $1 AND id = ANY($2) ORDER BY id FOR KEY SHARE"
+ }
+]
