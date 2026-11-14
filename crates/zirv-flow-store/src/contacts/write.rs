@@ -335,7 +335,9 @@ pub(crate) async fn replace_stored_fields(
 /// (a batch of new contacts reads neither), then reused. Only the archived flags of the registry
 /// matter here, and a key the batch itself infers is never archived, so the one way this goes
 /// stale is an archive that commits while the batch runs; that archive enqueues its own
-/// recompute, and the next batch reads it.
+/// recompute, and the next batch reads it. The same holds for a contact definition change. Later
+/// contacts in the batch are written under the registry and definition read at its start, and that
+/// write (an archived email identity kept via `archived_from`, say) is not undone.
 #[derive(Default)]
 pub(crate) struct ContactBatch {
     read: Option<(Vec<RegistryKey>, Option<ContactDefinition>)>,

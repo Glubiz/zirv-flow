@@ -1114,4 +1114,48 @@ mod tests {
             "exists on a number reads jsonb"
         );
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_slot_that_is_still_backfilling_falls_back_to_the_jsonb_answer(pool: PgPool) {
+        use crate::begin;
+        use crate::commit;
+        use crate::people::slots::{Assigned, assign_trait_slot};
+        let ws = workspace(&pool, "one").await;
+        define(&pool, ws, "age", TraitType::Number).await;
+        let mut ids_by_age = Vec::new();
+        for (n, age) in [10, 95, 100].into_iter().enumerate() {
+            let id = person(
+                &pool,
+                ws,
+                &n.to_string(),
+                &[("email", &format!("p{n}@example.com"))],
+                json!({ "age": age }),
+            )
+            .await;
+            ids_by_age.push(id);
+        }
+        let (ann, bob, cy) = (ids_by_age[0], ids_by_age[1], ids_by_age[2]);
+
+        // Assigned but never finished: the slot stays in its backfilling state.
+        let mut tx = begin(&pool).await.unwrap();
+        let Assigned::New(slot, _) = assign_trait_slot(&mut tx, ws, "age").await.unwrap() else {
+            panic!("not assigned");
+        };
+        commit(tx).await.unwrap();
+        // The slot column holds a value for one person only; the others are still NULL.
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE people SET {} = 95::float8 WHERE id = $1",
+            slot.as_str()
+        )))
+        .bind(bob)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let gt = by_trait("age", TraitOp::Gt, Some(json!(90)));
+        assert_eq!(ids(&pool, ws, gt).await, sorted(vec![bob, cy]), "gt");
+        let lte = by_trait("age", TraitOp::Lte, Some(json!(95)));
+        assert_eq!(ids(&pool, ws, lte).await, sorted(vec![ann, bob]), "lte");
+    }
 }
