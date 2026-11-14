@@ -101,25 +101,15 @@ fn edit_in(
     segments: &[&str],
     change: &mut dyn FnMut(Value) -> Option<Value>,
 ) {
-    match segments {
-        [] => {}
-        [last] => edit_key(object, last, change),
-        [first, rest @ ..] => {
-            // A key with dots in it is a path of one segment, and the same text is also a nested
-            // path: both copies are edited, at any depth.
-            for joined in 2..=segments.len() {
-                let key = segments[..joined].join(".");
-                if joined == segments.len() {
-                    edit_key(object, &key, change);
-                } else {
-                    match object.get_mut(&key) {
-                        Some(Value::Object(inner)) => edit_in(inner, &segments[joined..], change),
-                        Some(Value::Array(items)) => edit_items(items, &segments[joined..], change),
-                        _ => {}
-                    }
-                }
-            }
-            match object.get_mut(*first) {
+    // A key with dots in it is a path of one segment, and the same text is also a nested path:
+    // every way of joining leading segments into one key is edited, at any depth.
+    for joined in 1..=segments.len() {
+        let key = segments[..joined].join(".");
+        let rest = &segments[joined..];
+        if rest.is_empty() {
+            edit_key(object, &key, change);
+        } else {
+            match object.get_mut(&key) {
                 Some(Value::Object(inner)) => edit_in(inner, rest, change),
                 Some(Value::Array(items)) => edit_items(items, rest, change),
                 _ => {}

@@ -119,11 +119,9 @@ pub fn latest_slot(
 /// than once a minute.
 pub fn validate(cron: &str, timezone: &str) -> Result<(), ScheduleError> {
     parse_cron(cron)?;
-    let mut fields = cron.split_whitespace();
-    if fields.clone().count() == 6 {
-        let seconds = fields.next().unwrap_or_default();
-        let literal = !seconds.is_empty()
-            && seconds.len() <= 2
+    let fields: Vec<&str> = cron.split_whitespace().collect();
+    if let [seconds, _, _, _, _, _] = fields[..] {
+        let literal = seconds.len() <= 2
             && seconds.bytes().all(|b| b.is_ascii_digit())
             && seconds.parse::<u8>().is_ok_and(|value| value < 60);
         if !literal {
