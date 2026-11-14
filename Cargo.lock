@@ -35,9 +35,9 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "ammonia"
-version = "4.2.4"
+version = "4.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1f45dfa685e1ec33b1bf1a3b93b8047cbdbef41b6040deebbe6bea7720a45574"
+checksum = "b34ca49e407c06daac53f0c4debe8ff5df9cc2a4e9369d164a5d86ef8c219319"
 dependencies = [
  "cssparser",
  "html5ever",
@@ -5724,7 +5724,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "axum",
  "clap",
@@ -5759,7 +5759,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-ai"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "axum",
  "hashbrown 0.17.1",
@@ -5776,7 +5776,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-api"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -5817,7 +5817,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-connectors"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -5856,7 +5856,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-core"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "argon2",
  "base64 0.23.1",
@@ -5885,7 +5885,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-engine"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -5899,7 +5899,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-identity"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "axum",
  "chrono",
@@ -5915,7 +5915,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-jobs"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "axum",
  "chrono",
@@ -5944,7 +5944,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-loadgen"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "clap",
  "hashbrown 0.17.1",
@@ -5961,7 +5961,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-render"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "metrics",
  "rlimit",
@@ -5974,7 +5974,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-renderbench"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "clap",
  "serde_json",
@@ -5985,7 +5985,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-segments"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "hashbrown 0.17.1",
  "proptest",
@@ -5997,7 +5997,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-store"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "flate2",
  "futures-util",
@@ -6017,7 +6017,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-templates"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "ammonia",
  "hashbrown 0.17.1",
