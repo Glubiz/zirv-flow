@@ -343,6 +343,8 @@ fn valid_url(url: &str) -> bool {
         && Url::parse(url).is_ok_and(|parsed| {
             matches!(parsed.scheme(), "http" | "https")
                 && parsed.host_str().is_some_and(|host| !host.is_empty())
+                && parsed.username().is_empty()
+                && parsed.password().is_none()
         })
 }
 
@@ -1925,5 +1927,12 @@ mod tests {
                 issues
             );
         }
+    }
+
+    #[test]
+    fn a_webhook_url_with_userinfo_is_rejected() {
+        assert!(!valid_url("https://u:p@h.example.net/x"));
+        assert!(!valid_url("https://u@h.example.net/x"));
+        assert!(valid_url("https://h.example.net/x"));
     }
 }

@@ -92,14 +92,6 @@ fn edit(
     path: &str,
     change: &mut dyn FnMut(Value) -> Option<Value>,
 ) {
-    // A key with dots in it is a path of one segment, and the same text is also a nested path:
-    // both copies are edited.
-    if path.contains('.')
-        && let Some(value) = properties.remove(path)
-        && let Some(replacement) = change(value)
-    {
-        properties.insert(path.to_owned(), replacement);
-    }
     let segments: Vec<&str> = path.split('.').collect();
     edit_in(properties, &segments, change);
 }
@@ -111,18 +103,40 @@ fn edit_in(
 ) {
     match segments {
         [] => {}
-        [last] => {
-            if let Some(value) = object.remove(*last)
-                && let Some(replacement) = change(value)
-            {
-                object.insert((*last).to_owned(), replacement);
+        [last] => edit_key(object, last, change),
+        [first, rest @ ..] => {
+            // A key with dots in it is a path of one segment, and the same text is also a nested
+            // path: both copies are edited, at any depth.
+            for joined in 2..=segments.len() {
+                let key = segments[..joined].join(".");
+                if joined == segments.len() {
+                    edit_key(object, &key, change);
+                } else {
+                    match object.get_mut(&key) {
+                        Some(Value::Object(inner)) => edit_in(inner, &segments[joined..], change),
+                        Some(Value::Array(items)) => edit_items(items, &segments[joined..], change),
+                        _ => {}
+                    }
+                }
+            }
+            match object.get_mut(*first) {
+                Some(Value::Object(inner)) => edit_in(inner, rest, change),
+                Some(Value::Array(items)) => edit_items(items, rest, change),
+                _ => {}
             }
         }
-        [first, rest @ ..] => match object.get_mut(*first) {
-            Some(Value::Object(inner)) => edit_in(inner, rest, change),
-            Some(Value::Array(items)) => edit_items(items, rest, change),
-            _ => {}
-        },
+    }
+}
+
+fn edit_key(
+    object: &mut Map<String, Value>,
+    key: &str,
+    change: &mut dyn FnMut(Value) -> Option<Value>,
+) {
+    if let Some(value) = object.remove(key)
+        && let Some(replacement) = change(value)
+    {
+        object.insert(key.to_owned(), replacement);
     }
 }
 
@@ -149,6 +163,9 @@ fn truncate_ip(text: &str) -> Option<String> {
         }
         IpAddr::V6(address) => {
             let [a, b, c, ..] = address.segments();
+            // A 6to4 address (2002::/16) carries an IPv4 address in its next two segments: cut
+            // it to /24 like an IPv4 input.
+            let c = if a == 0x2002 { c & 0xff00 } else { c };
             Some(Ipv6Addr::new(a, b, c, 0, 0, 0, 0, 0).to_string())
         }
     }
@@ -398,5 +415,40 @@ mod tests {
             ..RedactionRules::default()
         };
         assert!(validate_rules(&many).is_err());
+    }
+
+    #[test]
+    fn truncate_ip_hides_the_ipv4_embedded_in_a_6to4_address() {
+        let mut properties = map(json!({"ip": "2002:cb00:7109:1::5"}));
+        redact(
+            &mut properties,
+            &rules(&[], &[], &["ip"]),
+            WorkspaceId::new(),
+            &key(),
+        );
+        let stored = properties["ip"].as_str().unwrap().to_owned();
+        assert!(!stored.contains("cb00:7109"), "kept: {stored}");
+        assert_eq!(stored, "2002:cb00:7100::");
+    }
+
+    #[test]
+    fn a_dotted_key_nested_in_an_object_is_matched_as_one_segment() {
+        let mut dropped = map(json!({"a": {"b.c": 1}}));
+        redact(
+            &mut dropped,
+            &rules(&["a.b.c"], &[], &[]),
+            WorkspaceId::new(),
+            &key(),
+        );
+        assert_eq!(Value::Object(dropped), json!({"a": {}}));
+
+        let mut hashed = map(json!({"a": {"b.c": "4111"}}));
+        redact(
+            &mut hashed,
+            &rules(&[], &["a.b.c"], &[]),
+            WorkspaceId::new(),
+            &key(),
+        );
+        assert_ne!(hashed["a"]["b.c"], json!("4111"));
     }
 }

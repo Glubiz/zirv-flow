@@ -114,8 +114,22 @@ pub fn latest_slot(
 }
 
 /// Checks that `cron` and `timezone` are usable, without computing a slot.
+///
+/// A six-field cron may only carry one literal seconds value (0-59), so no schedule fires more
+/// than once a minute.
 pub fn validate(cron: &str, timezone: &str) -> Result<(), ScheduleError> {
     parse_cron(cron)?;
+    let mut fields = cron.split_whitespace();
+    if fields.clone().count() == 6 {
+        let seconds = fields.next().unwrap_or_default();
+        let literal = !seconds.is_empty()
+            && seconds.len() <= 2
+            && seconds.bytes().all(|b| b.is_ascii_digit())
+            && seconds.parse::<u8>().is_ok_and(|value| value < 60);
+        if !literal {
+            return Err(ScheduleError::InvalidCron);
+        }
+    }
     parse_timezone(timezone)?;
     Ok(())
 }
@@ -409,5 +423,23 @@ mod tests {
             ScheduleError::NoNextSlot.to_string(),
             "the schedule has no later slot"
         );
+    }
+
+    #[test]
+    fn sub_minute_cron_expressions_are_rejected() {
+        assert_eq!(
+            validate("* * * * * *", "UTC"),
+            Err(ScheduleError::InvalidCron)
+        );
+        assert_eq!(
+            validate("*/5 * * * * *", "UTC"),
+            Err(ScheduleError::InvalidCron)
+        );
+        assert_eq!(
+            validate("0,30 * * * * *", "UTC"),
+            Err(ScheduleError::InvalidCron)
+        );
+        assert_eq!(validate("5 * * * * *", "UTC"), Ok(()));
+        assert_eq!(validate("* * * * *", "UTC"), Ok(()));
     }
 }

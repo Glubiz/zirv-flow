@@ -92,9 +92,11 @@ pub fn mask_event(
     }
     let plain = |name: &str| {
         schema.is_some_and(|declared| {
-            declared
-                .iter()
-                .any(|property| property.name == name && !property.pii)
+            declared.iter().any(|property| {
+                property.name == name
+                    && !property.pii
+                    && property.property_type != PropertyType::Object
+            })
         })
     };
     let mut masked: Vec<String> = properties
@@ -278,5 +280,16 @@ mod tests {
                 .count(),
             256
         );
+    }
+
+    #[test]
+    fn an_object_property_is_masked_even_when_declared_not_pii() {
+        let schema = vec![declared("context", PropertyType::Object, false)];
+        let props = json!({"context": {"email": "a@x.test"}});
+        let m = mask_event(props.as_object().unwrap(), Some(&schema), false);
+        assert_eq!(m.properties["context"], Value::Null);
+        assert_eq!(m.masked, vec!["context".to_string()]);
+        let revealed = mask_event(props.as_object().unwrap(), Some(&schema), true);
+        assert_eq!(revealed.properties["context"], json!({"email": "a@x.test"}));
     }
 }

@@ -468,7 +468,7 @@ fn cidr_start(text: &str) -> Option<usize> {
         at += if rest.starts_with('%') {
             macro_len(rest).unwrap_or(1)
         } else {
-            1
+            rest.chars().next().map_or(1, char::len_utf8)
         };
     }
     None
@@ -1323,5 +1323,13 @@ mod tests {
         let text = format!("{:?}", key());
 
         assert!(!text.contains(&key().public_key));
+    }
+
+    #[test]
+    fn a_non_ascii_spf_term_is_redacted_without_panicking() {
+        assert_eq!(
+            redact_observed(RecordKind::Spf, &["v=spf1 a:é ~all".to_string()]),
+            vec![OTHER_TXT.to_string()]
+        );
     }
 }
