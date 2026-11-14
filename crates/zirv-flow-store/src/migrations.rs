@@ -604,6 +604,53 @@ mod tests {
         }
     }
 
+    #[sqlx::test(migrations = false)]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_tombstone_migration_empties_removed_records_and_keeps_live_ones(pool: PgPool) {
+        crate::reset_database(&pool).await;
+        let mut connection = pool.acquire().await.unwrap();
+        MIGRATOR.run_to(95, &mut *connection).await.unwrap();
+        without_foreign_keys(&mut connection).await;
+        for (key, deleted) in [("gone", true), ("live", false)] {
+            sqlx::query(
+                "INSERT INTO source_records (id, workspace_id, source, stream, record_key, person_id, \n                     identifiers, traits, content_hash, deleted_at) \n                 VALUES (gen_random_uuid(), gen_random_uuid(), 'crm', 'contacts', $1, gen_random_uuid(), \n                     '[{\"kind\":\"email\",\"value\":\"a@b.c\"}]', \n                     '{\"plan\":{\"v\":\"free\",\"at\":\"2026-01-01T00:00:00Z\"}}', \n                     decode('0102', 'hex'), CASE WHEN $2 THEN now() END)",
+            )
+            .bind(key)
+            .bind(deleted)
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        }
+
+        MIGRATOR.run(&mut *connection).await.unwrap();
+
+        let rows: Vec<(String, serde_json::Value, serde_json::Value, Vec<u8>)> = sqlx::query_as(
+            "SELECT record_key, traits, identifiers, content_hash FROM source_records \
+             ORDER BY record_key",
+        )
+        .fetch_all(&mut *connection)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            (&rows[0].0[..], &rows[0].1, &rows[0].2, &rows[0].3[..]),
+            (
+                "gone",
+                &serde_json::json!({}),
+                &serde_json::json!([]),
+                &[][..]
+            ),
+            "the tombstone"
+        );
+        assert_ne!(rows[1].1, serde_json::json!({}), "the live record's traits");
+        assert_ne!(
+            rows[1].2,
+            serde_json::json!([]),
+            "the live record's identifiers"
+        );
+        assert_eq!(rows[1].3, vec![1, 2], "the live record's hash");
+    }
+
     const CAUSES: [&str; 6] = [
         "event",
         "schedule",

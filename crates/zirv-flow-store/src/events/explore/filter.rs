@@ -242,6 +242,13 @@ pub(super) fn plan(filter: &ExploreFilter, kind: Option<PropertyType>) -> Result
             _ => wrong(),
         },
         Some(T::Object) => wrong(),
+        // A number against an undeclared property is a numeric comparison, not a text one
+        // (`"10" < "9"`). The SQL test checks `jsonb_typeof = 'number'`, so a value of another
+        // type never matches.
+        None if compare != Compare::Eq && numeric(value).is_some() => {
+            let number = numeric(value).unwrap_or_default();
+            Ok(planned(Test::Numeric(compare, number), negate))
+        }
         Some(T::String) | None => match text(value, kind.is_none()) {
             Some(text) if filter.op == FilterOp::Prefix => Ok(planned(Test::Prefix(text), false)),
             Some(text) => Ok(planned(Test::Text(compare, text), negate)),
@@ -361,6 +368,22 @@ mod tests {
 
         assert_eq!(planned.test, Test::Text(Compare::Eq, "pro".to_owned()));
         assert!(planned.negate);
+    }
+
+    #[test]
+    fn a_numeric_range_on_an_undeclared_property_compares_numbers_not_text() {
+        for (op, compare) in [
+            (FilterOp::Gt, Compare::Gt),
+            (FilterOp::Gte, Compare::Gte),
+            (FilterOp::Lt, Compare::Lt),
+            (FilterOp::Lte, Compare::Lte),
+        ] {
+            let planned = plan(&filter("amount", op, Some(json!(9))), None).unwrap();
+            assert_eq!(planned.test, Test::Numeric(compare, "9".to_owned()));
+        }
+        // A string value is still the text comparison the caller asked for.
+        let text = plan(&filter("amount", FilterOp::Gt, Some(json!("9"))), None).unwrap();
+        assert_eq!(text.test, Test::Text(Compare::Gt, "9".to_owned()));
     }
 
     #[test]

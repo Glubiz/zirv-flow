@@ -20,11 +20,11 @@ pub use records::{
     Contact, ContactPage, ContactSearch, ContactSearchError, find_contact, list_contacts,
     search_contacts,
 };
+pub(crate) use write::{ContactBatch, lock_contacts, replace_stored_fields};
 pub use write::{
     ContactChange, Idempotency, WriteError, Written, delete_contact, erase_contact_idempotency,
     expire_contact_idempotency, write_contact,
 };
-pub(crate) use write::{lock_contacts, replace_stored_fields};
 
 #[cfg(test)]
 mod tests {

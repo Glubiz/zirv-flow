@@ -771,6 +771,21 @@ async fn count_duplicate(
     .map_err(StoreError::query)
 }
 
+/// A failed reject insert. The person it names can be erased between the lookup and the insert
+/// (SQLSTATE 23503 on `ingest_rejects_person_id_fkey`): nothing was committed, and the batch
+/// runs again, where the lookup finds no person.
+fn reject_insert_error(source: sqlx::Error) -> StoreError {
+    let erased = source.as_database_error().is_some_and(|error| {
+        error.is_foreign_key_violation()
+            && error.constraint() == Some("ingest_rejects_person_id_fkey")
+    });
+    if erased {
+        StoreError::retryable_race()
+    } else {
+        StoreError::query(source)
+    }
+}
+
 /// Writes the reject with its masked sample and redacted payload, and the decision. A
 /// message that already has an open reject writes nothing more.
 async fn refuse(
@@ -824,17 +839,22 @@ async fn refuse(
     .bind(Json(&policy.redaction))
     .fetch_optional(&mut *connection)
     .await
-    .map_err(StoreError::query)?;
+    .map_err(reject_insert_error)?;
     if inserted.is_none() {
-        let existing: Uuid = sqlx::query_scalar(
+        // The open reject this one conflicted with can be replayed and committed before this read:
+        // it is gone then, and the batch runs again against the replayed state.
+        let existing: Option<Uuid> = sqlx::query_scalar(
             "SELECT id FROM ingest_rejects \
              WHERE workspace_id = $1 AND message_id = $2 AND replayed_at IS NULL",
         )
         .bind(workspace.as_uuid())
         .bind(message_id)
-        .fetch_one(&mut *connection)
+        .fetch_optional(&mut *connection)
         .await
         .map_err(StoreError::query)?;
+        let Some(existing) = existing else {
+            return Err(StoreError::retryable_race());
+        };
         return Ok(EventOutcome::Rejected {
             reject_id: existing,
             reason: refusal.reason,
@@ -2308,5 +2328,120 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(jobs, 1);
+    }
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_refusal_naming_a_person_erased_meanwhile_fails_as_a_retryable_race(pool: PgPool) {
+        let ws = workspace(&pool, "erased").await;
+        let accepted = apply_one(&pool, ws, event("order", json!({}))).await;
+        assert!(matches!(accepted, EventOutcome::Accepted { .. }));
+        let person: Uuid = sqlx::query_scalar("SELECT person_id FROM events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let mut tx = begin(&pool).await.unwrap();
+        crate::privacy::delete_person(
+            &mut tx,
+            ws,
+            person,
+            crate::DeleteReason::Erasure,
+            &TraceContext::root(Cause::api("test")),
+        )
+        .await
+        .unwrap();
+        commit(tx).await.unwrap();
+
+        // The refusal looked the person up before the erasure committed.
+        let bad = event("order", json!({"total": "x"}));
+        let refusal = Refusal {
+            reason: "schema_violation",
+            reasons: &[],
+            published: None,
+            person_id: Some(person),
+        };
+        let mut tx = begin(&pool).await.unwrap();
+        let result = refuse(
+            &mut tx,
+            ws,
+            &key(),
+            &mut EventBatch::default(),
+            &bad,
+            &refusal,
+        )
+        .await;
+
+        let error = result.expect_err("the person is gone");
+        assert!(error.is_retryable(), "not retryable: {error:?}");
+    }
+
+    /// A reject of `message_id` that an operator replays between the apply's conflicting insert
+    /// and its re-read: a trigger on the insert waits on an advisory lock the test holds.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_replay_between_the_conflict_and_the_reread_fails_as_a_retryable_race(pool: PgPool) {
+        let ws = workspace(&pool, "replayed").await;
+        publish(
+            &pool,
+            ws,
+            "order",
+            EventMode::Block,
+            vec![property("total", PropertyType::Number, true, false)],
+        )
+        .await;
+        let mut bad = event("order", json!({"total": "x"}));
+        bad.message_id = Some("m-1".into());
+        let first = apply_one(&pool, ws, bad.clone()).await;
+        assert!(matches!(first, EventOutcome::Rejected { .. }));
+        sqlx::raw_sql(
+            "CREATE FUNCTION p622_wait() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+                 PERFORM pg_advisory_lock(622); PERFORM pg_advisory_unlock(622); RETURN NULL; END $$; \
+             CREATE TRIGGER p622 AFTER INSERT ON ingest_rejects \
+                 FOR EACH STATEMENT EXECUTE FUNCTION p622_wait()",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut holder = pool.acquire().await.unwrap();
+        sqlx::query("SELECT pg_advisory_lock(622)")
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+
+        let applying = pool.clone();
+        let task =
+            tokio::spawn(async move { apply_event_batch(&applying, ws, &key(), &[bad]).await });
+        // The insert has hit the open reject and waits in the trigger.
+        let mut waiting = false;
+        for _ in 0..200 {
+            let waits: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity \
+                 WHERE wait_event_type = 'Lock' AND wait_event = 'advisory'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waits > 0 {
+                waiting = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(waiting, "the apply never reached the trigger");
+        sqlx::query("UPDATE ingest_rejects SET replayed_at = now()")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("SELECT pg_advisory_unlock(622)")
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(20), task)
+            .await
+            .expect("the apply finished")
+            .unwrap();
+
+        let error = result.expect_err("the open reject was replayed meanwhile");
+        assert!(error.is_retryable(), "not retryable: {error:?}");
     }
 }

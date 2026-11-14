@@ -344,7 +344,9 @@ mod tests {
 
     /// The instant every fixture's webhook clock is fixed at, so a request signed at the edge of
     /// the tolerance window cannot age past it while the test works.
-    const FIXED_NOW: time::OffsetDateTime = time::macros::datetime!(2031-05-06 07:08:09 UTC);
+    // Before the real clock: a signed time ahead of it is clamped to the time of receipt, which would
+    // let a later delivery of an older payload overwrite a newer one.
+    const FIXED_NOW: time::OffsetDateTime = time::macros::datetime!(2026-05-06 07:08:09 UTC);
 
     fn now() -> i64 {
         FIXED_NOW.unix_timestamp()
