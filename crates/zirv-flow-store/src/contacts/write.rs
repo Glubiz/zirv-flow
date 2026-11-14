@@ -323,11 +323,9 @@ pub(crate) async fn replace_stored_fields(
     if let Some(contact) = find_contact(connection, workspace, &record.record_key).await? {
         let (registry, definition) = batch.read(connection, workspace).await?;
         retract_absent(&mut record.traits, &live_fields(&contact.fields, registry));
-        record.identifiers.extend(archived_from(
-            definition.as_ref(),
-            &contact.fields,
-            registry,
-        ));
+        record
+            .identifiers
+            .extend(archived_from(definition, &contact.fields, registry));
     }
     Ok(())
 }
@@ -348,7 +346,7 @@ impl ContactBatch {
         &mut self,
         connection: &mut PgConnection,
         workspace: WorkspaceId,
-    ) -> Result<(&[RegistryKey], &Option<ContactDefinition>), StoreError> {
+    ) -> Result<(&[RegistryKey], Option<&ContactDefinition>), StoreError> {
         let read = match &mut self.read {
             Some(read) => read,
             empty => {
@@ -357,7 +355,7 @@ impl ContactBatch {
                 empty.insert((registry, definition))
             }
         };
-        Ok((&read.0, &read.1))
+        Ok((&read.0, read.1.as_ref()))
     }
 }
 
