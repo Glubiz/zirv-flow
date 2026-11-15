@@ -11844,7 +11844,7 @@
         "tags": [
           "flows"
         ],
-        "summary": "How many enrollments entered, finished, wait at and failed at each node of one version,\ncomputed from the rows when asked.",
+        "summary": "How many enrollments entered, finished, wait at and failed at each node of one version,\ncomputed from the rows when asked. A version's counts are kept for 5 seconds, so a refresh of\nthe canvas shows counts up to that much out of date.",
         "operationId": "get_flow_version_counts",
         "parameters": [
           {
@@ -38800,7 +38800,8 @@
           },
           "ready": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "Exact up to 10000 per kind; above that, the planner's estimate, as the queue gauges report."
           },
           "running": {
             "type": "integer",

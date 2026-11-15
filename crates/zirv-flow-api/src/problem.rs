@@ -1373,6 +1373,12 @@ impl From<zirv_flow_core::ValidationError> for ApiError {
 
 impl From<zirv_flow_store::StoreError> for ApiError {
     fn from(error: zirv_flow_store::StoreError) -> Self {
+        Self::from(&error)
+    }
+}
+
+impl From<&zirv_flow_store::StoreError> for ApiError {
+    fn from(error: &zirv_flow_store::StoreError) -> Self {
         if error.is_timeout() {
             Self::search_timeout()
         } else if error.is_run_active() {

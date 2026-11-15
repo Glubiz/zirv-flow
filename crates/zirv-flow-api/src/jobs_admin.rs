@@ -32,6 +32,7 @@ pub(crate) struct DepthBody {
 pub(crate) struct KindDepthBody {
     #[schema(example = "maintenance.noop")]
     kind: String,
+    /// Exact up to 10000 per kind; above that, the planner's estimate, as the queue gauges report.
     ready: i64,
     running: i64,
     dead: i64,

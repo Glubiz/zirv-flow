@@ -1862,7 +1862,8 @@ export interface paths {
         };
         /**
          * How many enrollments entered, finished, wait at and failed at each node of one version,
-         *     computed from the rows when asked.
+         *     computed from the rows when asked. A version's counts are kept for 5 seconds, so a refresh of
+         *     the canvas shows counts up to that much out of date.
          */
         get: operations["get_flow_version_counts"];
         put?: never;
@@ -8041,7 +8042,10 @@ export interface components {
              * @description How long the longest-waiting runnable job has waited; null when none is runnable.
              */
             oldest_ready_seconds?: number | null;
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description Exact up to 10000 per kind; above that, the planner's estimate, as the queue gauges report.
+             */
             ready: number;
             /** Format: int64 */
             running: number;

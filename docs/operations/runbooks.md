@@ -32,7 +32,8 @@ flows run late; for `segment.refresh` segments are stale; for sends, messages go
 
 1. Metric: `sum by (kind) (zirv_flow_jobs{state="ready"})`, and the same with `state="running"`.
 2. As the owner, `GET $BASE/api/v1/admin/jobs` gives `ready`, `running`, `dead` and
-   `oldest_ready_seconds` per kind.
+   `oldest_ready_seconds` per kind. `ready` is exact up to 10000 per kind and the planner's
+   estimate above that (as the metric is); `oldest_ready_seconds` is always exact.
 3. Probe:
    `psql "$DATABASE_URL" -c "SELECT kind, state, count(*) FROM jobs GROUP BY 1, 2 ORDER BY 3 DESC LIMIT 10"`.
 4. Count the worker processes that are up: the `zirv_flow_jobs_total` counters should be rising.
