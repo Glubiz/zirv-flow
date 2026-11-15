@@ -183,7 +183,7 @@ If the definition drops an identifier field and no remaining field produces that
 kind, a `PATCH` keeps its stored value and identity until a `PUT` or bulk upsert retracts the
 field.
 
-**Search.** `GET .../contacts/search?q=` matches a contact key by prefix and an email address
+**Search.** `GET .../contacts/search?q=` matches a contact key by prefix (the matches come in byte order of the key, so `B1` sorts before `a1`) and an email address
 or phone number exactly, after normalisation. The value is then in the URL and the access
 logs, so for addresses and numbers use `POST .../contacts/search` with
 `{"identifier": {"kind": "email", "value": "..."}}` or `{"q": "..."}`; the web app does.

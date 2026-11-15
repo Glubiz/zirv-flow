@@ -144,7 +144,7 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `render.pool_size` | u32 | 2 | 1 to 32; render-host child processes, and so renders at once, in each `serve` and `worker` process; see [Render host](docs/operations/runtime.md#render-host) |
 | `render.deadline_ms` | u64 | 5000 | 1 to 600000; how long one render may take before its child is killed and replaced |
 | `render.memory_limit_mib` | u64 | 512 | 64 to 1048576; address space a child may use (`RLIMIT_AS`); applied on Linux only |
-| `privacy.export_max_bytes` | u64 | 268435456 | 1048576 to 4294967296; the most uncompressed JSON one person export may hold; past it the export fails with `export_too_large` |
+| `privacy.export_max_bytes` | u64 | 268435456 | 1048576 to 4294967296; the most uncompressed JSON one person export may hold, counted as the database writes each row (a space after every `:` and `,`, about 10 to 15% more than the compact file); past it the export fails with `export_too_large` |
 | `privacy.ledger_dir` | path | unset | a directory on storage shared by every worker where each completed erasure is also written as a file; see [After a restore](docs/people.md#privacy-ledger-dir) |
 | `sending.recheck_hours` | u32 | 6 | 1 to 720; hours a sending domain may go without a DNS check of its DKIM, SPF and DMARC records before the scheduler queues another; see [Sending domains](docs/guide/channels.md#sending-domains) |
 | `egress.allow` | list of CIDR ranges | `[]` | each entry a CIDR such as `10.0.5.7/32`, with no host bits set; see [Egress](docs/guide/sources.md#egress) |

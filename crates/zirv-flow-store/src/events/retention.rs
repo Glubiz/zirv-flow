@@ -4,7 +4,9 @@
 
 use sqlx::{PgConnection, PgExecutor, PgPool};
 use time::{Date, Duration, Month, OffsetDateTime};
+use uuid::Uuid;
 
+use super::EventKeys;
 use super::partitions::PARTITION_PREFIX;
 use crate::StoreError;
 use crate::decisions::next_month;
@@ -37,22 +39,123 @@ impl Default for EventRetention {
 }
 
 /// Deletes events past the retention of their own name, read from the schema row by every
-/// statement, so a batch always uses the override as it is now. Both event deletes also write the
+/// batch, so a batch always uses the override as it is now. Both event deletes also write the
 /// handled markers of the `sync.*` events they remove (`privacy::handled_markers`), in the same
 /// statement.
+///
+/// The batch reads the keys of the oldest expired events of each overridden name (through
+/// `events_name_idx`), then deletes those keys with the range they span as constants
+/// ([`delete_keys`]); the delete checks the override again, so one changed in between spares an
+/// event. It returns how many events it deleted.
+async fn delete_overridden_batch(
+    pool: &PgPool,
+    now: OffsetDateTime,
+    limit: i64,
+) -> Result<i64, StoreError> {
+    let schemas: Vec<(Uuid, String, i32)> = sqlx::query_as(
+        "SELECT workspace_id, name, retention_days FROM event_schemas \
+         WHERE retention_days IS NOT NULL ORDER BY workspace_id, name",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(StoreError::query)?;
+    let mut keys = Vec::new();
+    for (workspace, name, days) in schemas {
+        let room = limit - i64::try_from(keys.len()).unwrap_or(i64::MAX);
+        if room <= 0 {
+            break;
+        }
+        let oldest: Vec<(OffsetDateTime, Uuid)> = sqlx::query_as(
+            "SELECT occurred_at, id FROM events WHERE workspace_id = $1 AND name = $2 \
+               AND occurred_at < $3::timestamptz - make_interval(days => $4) \
+             ORDER BY occurred_at LIMIT $5",
+        )
+        .bind(workspace)
+        .bind(name)
+        .bind(now)
+        .bind(days)
+        .bind(room)
+        .fetch_all(pool)
+        .await
+        .map_err(StoreError::query)?;
+        keys.extend(oldest);
+    }
+    delete_keys(pool, &overridden_delete(), now, EventKeys::new(keys)).await
+}
+
+/// The delete of [`delete_overridden_batch`]: `$1` is `now`, `$2` and `$3` the keys, `$4` and
+/// `$5` the oldest and newest of them.
 fn overridden_delete() -> String {
     crate::privacy::delete_and_mark(&format!(
-        "DELETE FROM events e USING (             SELECT x.occurred_at, x.id FROM events x             JOIN event_schemas s ON s.workspace_id = x.workspace_id AND s.name = x.name             WHERE s.retention_days IS NOT NULL               AND x.occurred_at < $1::timestamptz - make_interval(days => s.retention_days)             LIMIT $2) d          WHERE e.occurred_at = d.occurred_at AND e.id = d.id RETURNING {}",
+        "DELETE FROM events e USING unnest($2::timestamptz[], $3::uuid[]) AS d(occurred_at, id) \
+         WHERE e.occurred_at BETWEEN $4 AND $5 AND e.occurred_at = d.occurred_at AND e.id = d.id \
+           AND EXISTS (SELECT 1 FROM event_schemas s \
+                       WHERE s.workspace_id = e.workspace_id AND s.name = e.name \
+                         AND s.retention_days IS NOT NULL \
+                         AND e.occurred_at < $1::timestamptz - make_interval(days => s.retention_days)) \
+         RETURNING {}",
         crate::privacy::event_columns("e")
     ))
 }
 
-/// Deletes the events past the deployment default that have no override, the same way.
+/// Deletes the events past the deployment default `cutoff` that have no override, the same way:
+/// the oldest keys first, which also keeps the range of a batch tight.
+async fn delete_default_batch(
+    pool: &PgPool,
+    cutoff: OffsetDateTime,
+    limit: i64,
+) -> Result<i64, StoreError> {
+    let oldest: Vec<(OffsetDateTime, Uuid)> = sqlx::query_as(
+        "SELECT occurred_at, id FROM events x WHERE occurred_at < $1 \
+           AND NOT EXISTS (SELECT 1 FROM event_schemas s \
+                           WHERE s.workspace_id = x.workspace_id AND s.name = x.name \
+                             AND s.retention_days IS NOT NULL) \
+         ORDER BY occurred_at, id LIMIT $2",
+    )
+    .bind(cutoff)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(StoreError::query)?;
+    delete_keys(pool, &default_delete(), cutoff, EventKeys::new(oldest)).await
+}
+
+/// The delete of [`delete_default_batch`], binding like [`overridden_delete`] with the cutoff
+/// as `$1`.
 fn default_delete() -> String {
     crate::privacy::delete_and_mark(&format!(
-        "DELETE FROM events e USING (             SELECT occurred_at, id FROM events x WHERE occurred_at < $1               AND NOT EXISTS (SELECT 1 FROM event_schemas s                               WHERE s.workspace_id = x.workspace_id AND s.name = x.name                                 AND s.retention_days IS NOT NULL)             LIMIT $2) d          WHERE e.occurred_at = d.occurred_at AND e.id = d.id RETURNING {}",
+        "DELETE FROM events e USING unnest($2::timestamptz[], $3::uuid[]) AS d(occurred_at, id) \
+         WHERE e.occurred_at BETWEEN $4 AND $5 AND e.occurred_at = d.occurred_at AND e.id = d.id \
+           AND e.occurred_at < $1 \
+           AND NOT EXISTS (SELECT 1 FROM event_schemas s \
+                           WHERE s.workspace_id = e.workspace_id AND s.name = e.name \
+                             AND s.retention_days IS NOT NULL) \
+         RETURNING {}",
         crate::privacy::event_columns("e")
     ))
+}
+
+/// Runs `statement` (see [`overridden_delete`]) for `keys` and returns the number of rows it
+/// deleted; no keys, nothing to run.
+async fn delete_keys(
+    pool: &PgPool,
+    statement: &str,
+    first: OffsetDateTime,
+    keys: EventKeys,
+) -> Result<i64, StoreError> {
+    let Some((oldest, newest)) = keys.span() else {
+        return Ok(0);
+    };
+    // The statements are built from constants of this module, never from input.
+    sqlx::query_scalar(sqlx::AssertSqlSafe(statement.to_owned()))
+        .bind(first)
+        .bind(&keys.occurred_at)
+        .bind(&keys.ids)
+        .bind(oldest)
+        .bind(newest)
+        .fetch_one(pool)
+        .await
+        .map_err(StoreError::query)
 }
 
 /// What one run removed.
@@ -107,24 +210,22 @@ async fn apply_event_retention_in_batches(
     // nothing until vacuum and write WAL for every row. Only the partly expired ones are batched.
     drop_old_partitions(pool, default_days, now, report).await?;
 
-    delete_events_in_batches(
-        pool,
-        &overridden_delete(),
-        batch_size,
-        &mut report.events_deleted,
-        |query| query.bind(now).bind(batch_size),
-    )
-    .await?;
+    loop {
+        let deleted = delete_overridden_batch(pool, now, batch_size).await?;
+        report.events_deleted += u64::try_from(deleted).unwrap_or(0);
+        if deleted < batch_size {
+            break;
+        }
+    }
 
     let default_cutoff = now - Duration::days(i64::from(settings.default_days));
-    delete_events_in_batches(
-        pool,
-        &default_delete(),
-        batch_size,
-        &mut report.events_deleted,
-        |query| query.bind(default_cutoff).bind(batch_size),
-    )
-    .await?;
+    loop {
+        let deleted = delete_default_batch(pool, default_cutoff, batch_size).await?;
+        report.events_deleted += u64::try_from(deleted).unwrap_or(0);
+        if deleted < batch_size {
+            break;
+        }
+    }
 
     delete_in_batches(
         pool,
@@ -153,32 +254,6 @@ async fn apply_event_retention_in_batches(
     report.test_sends_deleted =
         crate::delete_test_sends_before(pool, now, windows.test_send_months).await?;
     Ok(())
-}
-
-/// [`delete_in_batches`] for a statement built at run time that returns the number of rows it
-/// deleted as one `bigint` (the event deletes, which write markers). Each batch is added to
-/// `total` once it commits.
-async fn delete_events_in_batches<'q>(
-    pool: &PgPool,
-    statement: &str,
-    batch_size: i64,
-    total: &mut u64,
-    bind: impl Fn(
-        sqlx::query::QueryScalar<'q, sqlx::Postgres, i64, sqlx::postgres::PgArguments>,
-    ) -> sqlx::query::QueryScalar<'q, sqlx::Postgres, i64, sqlx::postgres::PgArguments>,
-) -> Result<(), StoreError> {
-    loop {
-        let deleted: i64 = bind(sqlx::query_scalar(sqlx::AssertSqlSafe(
-            statement.to_owned(),
-        )))
-        .fetch_one(pool)
-        .await
-        .map_err(StoreError::query)?;
-        *total += u64::try_from(deleted).unwrap_or(0);
-        if deleted < batch_size {
-            return Ok(());
-        }
-    }
 }
 
 async fn delete_in_batches<'q>(
@@ -874,12 +949,7 @@ mod tests {
                 update_event_schema(&mut pool.acquire().await.unwrap(), ws, "tuned", &update).await
             }
         };
-        let batch = |size: i64| {
-            sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(overridden_delete()))
-                .bind(NOW)
-                .bind(size)
-                .fetch_one(&pool)
-        };
+        let batch = |size: i64| delete_overridden_batch(&pool, NOW, size);
         set(Some(30)).await.unwrap();
 
         let first = batch(1).await.unwrap();

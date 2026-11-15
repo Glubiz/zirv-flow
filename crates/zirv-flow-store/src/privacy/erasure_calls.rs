@@ -121,12 +121,24 @@ async fn handled(
                           AND destination_id = $2 AND person_id = ANY($3)) \
              OR EXISTS (SELECT 1 FROM events WHERE workspace_id = $1 AND person_id = ANY($3) \
                           AND name IN ($4, $5) AND properties ->> 'destination_id' = $2::text) \
-             OR EXISTS (SELECT 1 FROM jobs j JOIN enrollments e \
-                          ON e.workspace_id = j.workspace_id \
-                         AND e.id::text = j.payload ->> 'enrollment_id' \
-                        WHERE j.workspace_id = $1 AND j.kind = $6 \
+             OR EXISTS (SELECT 1 FROM jobs j \
+                        WHERE j.workspace_id = $1 AND j.kind = $6 AND j.state = 'dead' \
                           AND j.payload ->> 'destination_id' = $2::text \
-                          AND e.person_id = ANY($3))",
+                          AND j.payload ->> 'enrollment_id' IN \
+                              (SELECT e.id::text FROM enrollments e \
+                               WHERE e.workspace_id = $1 AND e.person_id = ANY($3))) \
+             OR EXISTS (SELECT 1 FROM jobs j \
+                        WHERE j.workspace_id = $1 AND j.kind = $6 AND j.state = 'ready' \
+                          AND j.payload ->> 'destination_id' = $2::text \
+                          AND j.payload ->> 'enrollment_id' IN \
+                              (SELECT e.id::text FROM enrollments e \
+                               WHERE e.workspace_id = $1 AND e.person_id = ANY($3))) \
+             OR EXISTS (SELECT 1 FROM jobs j \
+                        WHERE j.workspace_id = $1 AND j.kind = $6 AND j.state = 'running' \
+                          AND j.payload ->> 'destination_id' = $2::text \
+                          AND j.payload ->> 'enrollment_id' IN \
+                              (SELECT e.id::text FROM enrollments e \
+                               WHERE e.workspace_id = $1 AND e.person_id = ANY($3)))",
     )
     .bind(workspace.as_uuid())
     .bind(destination)

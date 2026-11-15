@@ -225,7 +225,8 @@ pub enum EraseOutcome {
 }
 
 /// Carries an erasure request out, in the caller's transaction. After the shared segment guard,
-/// it locks pending inbox rows before the group's people, the order a drain uses; an identity insert
+/// it locks the pending inbox rows it will delete before the group's people, the order a drain
+/// uses (see [`lock_scanned`]); an identity insert
 /// takes a key-share lock on its person, so a concurrent attach waits for this transaction and
 /// then fails on the foreign key. Then:
 ///
@@ -234,8 +235,10 @@ pub enum EraseOutcome {
 ///    and the group's ids to its `person_ids`, so identities gained since the request count;
 /// 2. adds an `erased` suppression for every email and phone hash of the ledger row;
 /// 3. deletes the workspace's pending inbox rows with an identifier that hashes to any hash
-///    of the ledger row, locked `FOR UPDATE` so a concurrent drain has either applied them
-///    already (and the deletion below covers what it wrote) or never sees them;
+///    of the ledger row. The rows are found by a scan that locks nothing, then only the
+///    matches are locked `FOR UPDATE`, so a concurrent drain has either applied them already
+///    (and the deletion below covers what it wrote) or never sees them, and the drain of every
+///    other row goes on;
 /// 4. deletes the group, and any other id the ledger names that still exists, and the
 ///    workspace's test-send log rows whose recipient hash is one of the ledger's;
 /// 5. completes the ledger row and audits `privacy.erased` with the request id only.
@@ -285,15 +288,58 @@ pub async fn erase_person(
     // then waits for the person row, must never meet an erasure that holds the row and waits for
     // the lock. Once the erasure has it, no sync is between its call and its outcome for these
     // people, so the evidence `erasure_calls::plan` reads is complete.
-    let mut known = people.clone();
-    known.push(person);
-    if let Some(current) = crate::current_person(&mut *connection, workspace, person).await? {
-        known.extend(group_ids(connection, workspace, current).await?);
-    }
-    erasure_calls::lock_person_calls_exclusive(connection, workspace, &known).await?;
-    let inbox = lock_inbox(connection, workspace, key).await?;
+    // The inbox is read before any lock is taken, from the group as it is now: the scan hashes
+    // every pending row, which takes long on a deep backlog and must not hold the drain off. An
+    // identity that attaches (or a person that merges in) between that read and the lock on the
+    // group names rows the scan did not look for, and they cannot be locked now, after the
+    // people. So the attempt is undone to its savepoint, which releases the locks, and made
+    // again from a fresh read; an attach commits once, so the second attempt settles.
+    let (inbox, group, identities) = {
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            sqlx::query("SAVEPOINT erase_inbox")
+                .execute(&mut *connection)
+                .await
+                .map_err(StoreError::query)?;
+            let mut known = people.clone();
+            known.push(person);
+            let known_current = crate::current_person(&mut *connection, workspace, person).await?;
+            let mut read = Vec::new();
+            if let Some(current) = known_current {
+                known.extend(group_ids(connection, workspace, current).await?);
+                read = group_identities(connection, workspace, current).await?;
+            }
+            let target = InboxTarget::new(key, &hashes, &known, &read);
+            let scanned = scan_inbox(connection, workspace, key, &target, 0).await?;
+            erasure_calls::lock_person_calls_exclusive(connection, workspace, &known).await?;
+            let inbox = lock_scanned(connection, workspace, key, &target, scanned).await?;
+            let group = lock_group(connection, workspace, person).await?;
+            let identities = match &group {
+                Some(group) => group_identities(connection, workspace, group.current).await?,
+                None => Vec::new(),
+            };
+            let mut final_group = known.clone();
+            final_group.extend(group.iter().flat_map(|group| group.ids.iter().copied()));
+            let settled = InboxTarget::new(key, &hashes, &final_group, &identities);
+            if target.covers(&settled.hashes, &settled.needles) {
+                sqlx::query("RELEASE SAVEPOINT erase_inbox")
+                    .execute(&mut *connection)
+                    .await
+                    .map_err(StoreError::query)?;
+                break (inbox, group, identities);
+            }
+            sqlx::query("ROLLBACK TO SAVEPOINT erase_inbox")
+                .execute(&mut *connection)
+                .await
+                .map_err(StoreError::query)?;
+            if attempt == INBOX_ATTEMPTS {
+                return Err(StoreError::retryable_race());
+            }
+        }
+    };
     let mut survivor: Option<Uuid> = None;
-    if let Some(group) = lock_group(connection, workspace, person).await? {
+    if let Some(group) = group {
         survivor = Some(group.current);
         // A merge that committed meanwhile may have added members; a bucket for one is tried, never
         // waited for, now that row locks are held.
@@ -303,7 +349,7 @@ pub async fn erase_person(
                 people.push(id);
             }
         }
-        for (kind, value) in group_identities(connection, workspace, group.current).await? {
+        for (kind, value) in identities {
             values.push(value.clone());
             pairs.push((kind.clone(), value.clone()));
             // Stored identities are normalized already; one that no longer parses has no hash.
@@ -354,13 +400,7 @@ pub async fn erase_person(
         .chain(people.iter().copied())
         .collect();
     let needles = usable_needles(group.iter().map(Uuid::to_string).chain(values));
-    let wanted: HashSet<Vec<u8>> = hashes.iter().cloned().collect();
-    let inbox_rows = delete_inbox_rows(
-        connection,
-        workspace,
-        &matching_rows(&inbox, &wanted, &needles),
-    )
-    .await?;
+    let inbox_rows = delete_inbox_rows(connection, workspace, &inbox).await?;
     crate::ai::erase_ai_transcripts(connection, workspace, &needles).await?;
     crate::ai::erase_ai_drafts(connection, workspace, &needles).await?;
     crate::erase_unattributed_rejects(connection, workspace, &needles).await?;
@@ -584,7 +624,10 @@ async fn group_identities(
     .map_err(StoreError::query)
 }
 
-/// A locked pending inbox row and the hashes of the identifiers it names.
+/// How often an erasure reads the inbox again when its group changed under the first read.
+const INBOX_ATTEMPTS: usize = 3;
+
+/// A pending inbox row and the hashes of the identifiers it names.
 struct LockedRow {
     id: i64,
     hashes: Vec<Vec<u8>>,
@@ -593,20 +636,64 @@ struct LockedRow {
     raw: Option<String>,
 }
 
-/// Locks the workspace's pending inbox rows `FOR UPDATE`, in batches, and hashes the
-/// identifiers of each with core's normaliser. A concurrent drain skips locked rows.
-async fn lock_inbox(
+/// What the inbox scan looks for: the identifier hashes of the ledger row and the group, and the
+/// free-text needles of a row that does not parse.
+struct InboxTarget {
+    hashes: HashSet<Vec<u8>>,
+    needles: Vec<String>,
+}
+
+impl InboxTarget {
+    /// The target of an erasure from the ledger's `hashes`, the `group` of ids it will delete and
+    /// the group's `identities`, as they are read now.
+    fn new(
+        key: &HmacKey,
+        hashes: &[Vec<u8>],
+        group: &[Uuid],
+        identities: &[(String, String)],
+    ) -> Self {
+        let mut wanted: HashSet<Vec<u8>> = hashes.iter().cloned().collect();
+        for (kind, value) in identities {
+            if let Ok(identifier) = Identifier::parse(kind, value) {
+                wanted.insert(identifier_hash(key, &identifier).to_vec());
+            }
+        }
+        let needles = usable_needles(
+            group
+                .iter()
+                .map(Uuid::to_string)
+                .chain(identities.iter().map(|(_, value)| value.clone())),
+        );
+        Self {
+            hashes: wanted,
+            needles,
+        }
+    }
+
+    /// Whether the rows matched by this target are all the rows `hashes` and `needles` name.
+    fn covers(&self, hashes: &HashSet<Vec<u8>>, needles: &[String]) -> bool {
+        hashes.is_subset(&self.hashes) && needles.iter().all(|needle| self.needles.contains(needle))
+    }
+}
+
+/// The ids of the workspace's pending inbox rows after `after` that name `target`, and the
+/// greatest id read, found without locking anything. The rows are read in id order in batches of
+/// 1,000, and only the matching ids are kept, so a deep backlog costs time but no memory, and a
+/// drain is not held off.
+async fn scan_inbox(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     key: &HmacKey,
-) -> Result<Vec<LockedRow>, StoreError> {
+    target: &InboxTarget,
+    after: i64,
+) -> Result<(Vec<i64>, i64), StoreError> {
     const BATCH: i64 = 1000;
-    let mut after = 0_i64;
-    let mut locked = Vec::new();
+    let mut after = after;
+    let mut matched = Vec::new();
     loop {
         let rows: Vec<(i64, String, String)> = sqlx::query_as(
             "SELECT id, item::text, message_id FROM ingest_inbox WHERE workspace_id = $1 AND id > $2 \
-             ORDER BY id LIMIT $3 FOR UPDATE",
+             ORDER BY id LIMIT $3",
         )
         .bind(workspace.as_uuid())
         .bind(after)
@@ -615,22 +702,69 @@ async fn lock_inbox(
         .await
         .map_err(StoreError::query)?;
         let Some((last, ..)) = rows.last() else {
-            return Ok(locked);
+            return Ok((matched, after));
         };
         after = *last;
-        locked.extend(rows.iter().map(|(id, text, message_id)| {
-            let item = crate::ingest::parse_item(text);
-            LockedRow {
-                id: *id,
-                raw: item.is_null().then(|| format!("{text} \"{message_id}\"")),
-                hashes: item_identifiers(&item)
-                    .into_iter()
-                    .filter_map(|(kind, value)| Identifier::parse(&kind, &value).ok())
-                    .map(|identifier| identifier_hash(key, &identifier).to_vec())
-                    .collect(),
-            }
-        }));
+        let batch: Vec<LockedRow> = rows
+            .iter()
+            .map(|(id, text, message_id)| {
+                let item = crate::ingest::parse_item(text);
+                LockedRow {
+                    id: *id,
+                    raw: item.is_null().then(|| format!("{text} \"{message_id}\"")),
+                    hashes: item_identifiers(&item)
+                        .into_iter()
+                        .filter_map(|(kind, value)| Identifier::parse(&kind, &value).ok())
+                        .map(|identifier| identifier_hash(key, &identifier).to_vec())
+                        .collect(),
+                }
+            })
+            .collect();
+        matched.extend(matching_rows(&batch, &target.hashes, &target.needles));
     }
+}
+
+/// Locks the rows of `ids` that are still pending, `FOR UPDATE` in id order, and returns them. A
+/// concurrent drain skips locked rows; a row it applied meanwhile is gone and is not returned.
+async fn lock_inbox_rows(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    ids: &[i64],
+) -> Result<Vec<i64>, StoreError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_scalar(
+        "SELECT id FROM ingest_inbox WHERE workspace_id = $1 AND id = ANY($2) \
+         ORDER BY id FOR UPDATE",
+    )
+    .bind(workspace.as_uuid())
+    .bind(ids)
+    .fetch_all(connection)
+    .await
+    .map_err(StoreError::query)
+}
+
+/// Locks the rows [`scan_inbox`] matched (`scanned`, with the greatest id it read) and then scans
+/// and locks the rows that arrived after that id while the first scan ran, so the lock order of
+/// the drain (the inbox rows, then the people) is kept. Returns every locked row.
+///
+/// What is left open: a matching row inserted after the tail scan, before the transaction
+/// commits, is neither locked nor deleted. The old scan locked every row up to its last page
+/// and had the same window after it; what the drain does with such a row is decided by the
+/// people it then finds (the group is locked and deleted by then, so the drain retries into a
+/// new person). `a_matching_row_inserted_after_the_scan_is_left_in_the_inbox` pins it.
+async fn lock_scanned(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    key: &HmacKey,
+    target: &InboxTarget,
+    (matched, high_water): (Vec<i64>, i64),
+) -> Result<Vec<i64>, StoreError> {
+    let mut locked = lock_inbox_rows(connection, workspace, &matched).await?;
+    let (tail, _) = scan_inbox(connection, workspace, key, target, high_water).await?;
+    locked.extend(lock_inbox_rows(connection, workspace, &tail).await?);
+    Ok(locked)
 }
 
 /// The needles to search free text for: trimmed, without blanks (an empty needle would match
@@ -707,8 +841,8 @@ async fn lock_group(
     Err(StoreError::retryable_race())
 }
 
-/// Locks the workspace's pending inbox and deletes the rows with an identifier whose hash is
-/// one of `hashes`.
+/// Deletes the workspace's pending inbox rows with an identifier whose hash is one of `hashes`,
+/// locking only those rows ([`lock_scanned`]).
 async fn delete_inbox_by_hash(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -718,8 +852,13 @@ async fn delete_inbox_by_hash(
     if hashes.is_empty() {
         return Ok(0);
     }
-    let rows = lock_inbox(connection, workspace, key).await?;
-    delete_inbox_rows(connection, workspace, &matching_rows(&rows, hashes, &[])).await
+    let target = InboxTarget {
+        hashes: hashes.clone(),
+        needles: Vec::new(),
+    };
+    let scanned = scan_inbox(connection, workspace, key, &target, 0).await?;
+    let locked = lock_scanned(connection, workspace, key, &target, scanned).await?;
+    delete_inbox_rows(connection, workspace, &locked).await
 }
 
 async fn delete_inbox_rows(
@@ -817,6 +956,94 @@ mod tests {
             .unwrap()
     }
 
+    /// Inserts pending inbox rows copied from the bystander's: `emails` name each row's identifier.
+    async fn insert_inbox_rows(pool: &PgPool, emails: &[String]) {
+        sqlx::query(
+            "INSERT INTO ingest_inbox (workspace_id, api_key_id, kind, item, message_id, \
+                received_at, trace_id, affinity) \
+             SELECT i.workspace_id, i.api_key_id, i.kind, \
+                jsonb_build_object('identifiers', jsonb_build_array(jsonb_build_array('email', e)), \
+                    'properties', '{}'::jsonb), \
+                'row-' || e, i.received_at, i.trace_id, i.affinity \
+             FROM ingest_inbox i, unnest($1::text[]) e WHERE i.message_id = 'i-2'",
+        )
+        .bind(emails)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_erasure_locks_only_the_inbox_rows_it_removes(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let Seeded { ws, person, .. } = seed_everything(&pool).await;
+            let filler: Vec<String> = (0..30).map(|n| format!("filler{n}@example.com")).collect();
+            insert_inbox_rows(&pool, &filler).await;
+            let request = request(&pool, ws, person).await;
+
+            let mut eraser = begin(&pool).await.unwrap();
+            erase_person(
+                &mut eraser,
+                ws,
+                request.id,
+                &identifier_key(),
+                &[],
+                &trace(),
+            )
+            .await
+            .unwrap();
+            // The drain skips locked rows: every row the erasure does not remove must be free
+            // for it while the erasure transaction is open.
+            let mut probe = begin(&pool).await.unwrap();
+            let free: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM (SELECT id FROM ingest_inbox FOR UPDATE SKIP LOCKED) s",
+            )
+            .fetch_one(&mut *probe)
+            .await
+            .unwrap();
+            drop(probe);
+            commit(eraser).await.unwrap();
+
+            assert_eq!(free, 31, "the 30 filler rows and the bystander's stay free");
+            let left = inbox_messages(&pool).await;
+            assert_eq!(left.len(), 31);
+            assert!(
+                !left.contains(&"i-1".to_owned()),
+                "the person's row is gone"
+            );
+        })
+        .await;
+    }
+
+    /// The scan holds no lock, so a matching row that arrives after its tail pass is neither
+    /// locked nor removed by the erasure, as a row that arrived after the last page of the old
+    /// locking scan was not. The drain's lock on the person is what retries it (above).
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_matching_row_inserted_after_the_scan_is_left_in_the_inbox(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let Seeded { ws, person, .. } = seed_everything(&pool).await;
+            let request = request(&pool, ws, person).await;
+            let mut eraser = begin(&pool).await.unwrap();
+            erase_person(
+                &mut eraser,
+                ws,
+                request.id,
+                &identifier_key(),
+                &[],
+                &trace(),
+            )
+            .await
+            .unwrap();
+            insert_inbox_rows(&pool, &[EMAIL.to_owned()]).await;
+            commit(eraser).await.unwrap();
+
+            let left = inbox_messages(&pool).await;
+            assert_eq!(left, ["i-2".to_owned(), format!("row-{EMAIL}")]);
+        })
+        .await;
+    }
     #[test]
     fn a_status_round_trips_and_an_unknown_one_is_refused() {
         for status in [
@@ -1794,9 +2021,16 @@ mod tests {
         crate::decision_testing::checked(pool, |pool| async move {
             let Seeded { ws, person, .. } = seed_everything(&pool).await;
             let request = request(&pool, ws, person).await;
+            // A pending row names the address the lock-free scan does not know yet; only the
+            // rescan after the retry can remove it.
+            insert_inbox_rows(&pool, &["b@example.com".to_owned()]).await;
             // A concurrent ingest has attached a new address and not committed yet: its insert
             // holds a key-share lock on the person.
             let mut ingest = begin(&pool).await.unwrap();
+            let ingest_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *ingest)
+                .await
+                .unwrap();
             sqlx::query(
                 "INSERT INTO identities (id, workspace_id, person_id, kind, value) \
              VALUES ($1, $2, $3, 'email', 'b@example.com')",
@@ -1817,7 +2051,23 @@ mod tests {
                     commit(tx).await.unwrap();
                 }
             });
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            // The erasure reads the inbox lock-free before it takes any lock the ingest holds, so a
+            // backend blocked behind the ingest proves the first scan already ran.
+            let mut waiting = false;
+            for _ in 0..500 {
+                waiting = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity                      WHERE datname = current_database() AND wait_event_type = 'Lock'                        AND $1 = ANY (pg_blocking_pids(pid)))",
+                )
+                .bind(ingest_pid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                if waiting {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            assert!(waiting, "no backend ever waited on the ingest's lock");
             assert!(
                 !erasure.is_finished(),
                 "the erasure did not wait for the person"
@@ -1837,6 +2087,15 @@ mod tests {
                     .await
                     .unwrap();
             assert_eq!(gone, 0);
+            let left = inbox_messages(&pool).await;
+            assert!(
+                !left.contains(&"row-b@example.com".to_owned()),
+                "the row naming the attached identity is removed after the retry: {left:?}"
+            );
+            assert!(
+                left.contains(&"i-2".to_owned()),
+                "the bystander's row stays: {left:?}"
+            );
         })
         .await;
     }

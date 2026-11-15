@@ -8,6 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use sqlx::{PgConnection, PgExecutor};
+use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::decision_actions;
 use zirv_flow_core::segment::ChangeClasses;
@@ -19,6 +20,7 @@ use super::registry::Definitions;
 use super::slots::{lock_and_read_writer_slots, slot_nulls_sql};
 use crate::changes::{mark_people, mark_person, request_reevaluation};
 use crate::consent;
+use crate::events::EventKeys;
 use crate::{NewDecision, NewJob, StoreError, append_decision, enqueue};
 
 /// The job kind that re-points what [`merge_people`] leaves behind.
@@ -35,11 +37,10 @@ pub(super) const PERSON_LEDGER_KEYS: &str = "SELECT DISTINCT jsonb_object_keys(t
 
 /// Person-scoped columns that name a merged person and are re-pointed in batches rather than
 /// in the merge transaction, with the columns that identify a row within its workspace. The
-/// event table is partitioned, so its rows are found by `(occurred_at, id)`.
+/// events are not here: the table is partitioned, so [`rewrite_events`] moves them by their keys.
 const REWRITE_TARGETS: &[(&str, &str, &[&str])] = &[
     ("identity_conflicts", "person_id", &["id"]),
     ("identity_conflicts", "other_person_id", &["id"]),
-    ("events", "person_id", &["occurred_at", "id"]),
     ("event_dedupe", "person_id", &["message_id"]),
     ("ingest_rejects", "person_id", &["id"]),
     ("forwarding_outbox", "person_id", &["id"]),
@@ -390,6 +391,58 @@ async fn lock_merged_and_survivor(
     Err(StoreError::retryable_race())
 }
 
+/// Re-points the events of `merged` to `survivor` in batches of [`REWRITE_BATCH`]. A batch reads
+/// the keys of the newest events through `events_person_idx` and updates exactly those, with the
+/// range they span as constants ([`EventKeys`]), so the statement prunes to the partitions the
+/// batch lives in and probes the primary key instead of hash-joining the keys against a scan of
+/// every partition. Returns how many events moved.
+async fn rewrite_events(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    merged: Uuid,
+    survivor: Uuid,
+) -> Result<u64, StoreError> {
+    let mut total = 0;
+    loop {
+        let keys: Vec<(OffsetDateTime, Uuid)> = sqlx::query_as(
+            "SELECT occurred_at, id FROM events WHERE workspace_id = $1 AND person_id = $2 \
+             ORDER BY occurred_at DESC LIMIT $3",
+        )
+        .bind(workspace.as_uuid())
+        .bind(merged)
+        .bind(REWRITE_BATCH)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
+        let read = i64::try_from(keys.len()).unwrap_or(i64::MAX);
+        let keys = EventKeys::new(keys);
+        let Some((oldest, newest)) = keys.span() else {
+            return Ok(total);
+        };
+        total += sqlx::query(
+            "UPDATE events x SET person_id = $3 \
+             FROM unnest($4::timestamptz[], $5::uuid[]) AS d(occurred_at, id) \
+             WHERE x.workspace_id = $1 AND x.person_id = $2 \
+               AND x.occurred_at BETWEEN $6 AND $7 \
+               AND x.occurred_at = d.occurred_at AND x.id = d.id",
+        )
+        .bind(workspace.as_uuid())
+        .bind(merged)
+        .bind(survivor)
+        .bind(&keys.occurred_at)
+        .bind(&keys.ids)
+        .bind(oldest)
+        .bind(newest)
+        .execute(&mut *connection)
+        .await
+        .map_err(StoreError::query)?
+        .rows_affected();
+        if read < REWRITE_BATCH {
+            return Ok(total);
+        }
+    }
+}
+
 /// Re-points what still names `merged` to the person it was merged into, in batches of
 /// [`REWRITE_BATCH`] rows per statement, on `connection`. Returns how many rows moved; a
 /// second run moves none. Conflicts that end up between the survivor and itself are closed
@@ -452,7 +505,6 @@ pub async fn rewrite_merged_person(
         return Ok(0);
     };
     let mut total = 0;
-    let mut events_moved = 0;
     for (table, column, key) in REWRITE_TARGETS {
         if *table == "identity_conflicts" {
             close_conflicts_the_move_would_duplicate(
@@ -482,14 +534,13 @@ pub async fn rewrite_merged_person(
             .map_err(StoreError::query)?
             .rows_affected();
             total += moved;
-            if *table == "events" {
-                events_moved += moved;
-            }
             if i64::try_from(moved).is_ok_and(|moved| moved < REWRITE_BATCH) {
                 break;
             }
         }
     }
+    let events_moved = rewrite_events(connection, workspace, merged, survivor).await?;
+    total += events_moved;
     total += crate::lists::move_on_merge(connection, workspace, merged, survivor, trace).await?;
     // No other moved row is read by a segment: the lists marked their own class above.
     if events_moved > 0 {

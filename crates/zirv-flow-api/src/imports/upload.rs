@@ -243,6 +243,20 @@ fn too_large() -> ApiError {
         .with_code("import_file_too_large")
 }
 
+/// The refusal of an upload that an erasure fenced while it was being uploaded (`write` and
+/// `finish` both see it); any other store error is a quota refusal or its usual problem.
+fn upload_problem(error: StoreError) -> ApiError {
+    if error.is_erased() {
+        ApiError::new(
+            StatusCode::CONFLICT,
+            "the import was erased while it was being uploaded",
+        )
+        .with_code("import_erased")
+    } else {
+        quota_problem(error)
+    }
+}
+
 /// The refusal of an upload the workspace's import quota has no room for; any other store error
 /// keeps its usual problem.
 fn quota_problem(error: StoreError) -> ApiError {
@@ -299,17 +313,7 @@ async fn receive(
             return Err(too_large());
         }
         hash.update(&piece);
-        upload.write(&piece).await.map_err(|error| {
-            if error.is_erased() {
-                ApiError::new(
-                    StatusCode::CONFLICT,
-                    "the import was erased while it was being uploaded",
-                )
-                .with_code("import_erased")
-            } else {
-                quota_problem(error)
-            }
-        })?;
+        upload.write(&piece).await.map_err(upload_problem)?;
         scan.push(&piece).map_err(csv_problem)?;
     }
     let mut scanned = scan.finish().map_err(csv_problem)?;
@@ -487,7 +491,7 @@ pub(crate) async fn upload(
             rows_total: scanned.rows,
         })
         .await
-        .map_err(quota_problem)?;
+        .map_err(upload_problem)?;
     let body = CsvImportDetailBody::new(&import, samples, may_see);
     let committed = async {
         admin::audit(
