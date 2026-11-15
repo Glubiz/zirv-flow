@@ -2921,8 +2921,9 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Archives a segment; refused while a current version of another live segment references it.
-         *     Versions stay readable. Audited as `segment.archived`.
+         * Archives a segment; refused while a current version of another live segment references it or a
+         *     published or paused flow's running version uses it. Versions stay readable. Audited as
+         *     `segment.archived`.
          */
         post: operations["archive_segment"];
         delete?: never;
@@ -8636,8 +8637,8 @@ export interface components {
              */
             flow_issues?: components["schemas"]["FlowIssueProblem"][] | null;
             /**
-             * @description The active flows whose running version sends a template (`template_in_use`) or uses a
-             *     destination (`destination_in_use`).
+             * @description The active flows whose running version sends a template (`template_in_use`), uses a
+             *     destination (`destination_in_use`) or uses a segment (`segment_in_use`).
              */
             flows?: components["schemas"]["FlowRefProblem"][] | null;
             /** @description The active forwarding rules that deliver to a destination (`destination_in_use`). */
@@ -24649,7 +24650,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Another segment references it (`code` is `segment_referenced`), or it is already archived (`segment_archived`) */
+            /** @description Another segment references it (`code` is `segment_referenced`), a published or paused flow uses it (`segment_in_use`, with the flows in `flows`), or it is already archived (`segment_archived`) */
             409: {
                 headers: {
                     [name: string]: unknown;

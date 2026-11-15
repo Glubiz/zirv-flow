@@ -3091,4 +3091,129 @@ mod tests {
         })
         .await;
     }
+
+    fn segment_trigger(segment: Uuid) -> Value {
+        json!({"trigger": {"type": "segment", "segment_id": segment, "on": "entered"},
+               "reentry": {"mode": "once"}})
+    }
+
+    fn archive_segment_uri(f: &Fixture, segment: Uuid) -> String {
+        format!(
+            "/api/v1/workspaces/{}/segments/{segment}/archive",
+            f.ws.as_uuid()
+        )
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_segment_a_published_flow_runs_on_cannot_be_archived_until_the_flow_lets_go(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let f = fixture(&pool).await;
+            let segment = f
+                .lead_segment(
+                    "Pros",
+                    json!({"op": "eq", "trait": "plan", "value": "pro", "v": 1}),
+                )
+                .await;
+            let uri = archive_segment_uri(&f, segment);
+            // A draft that names the segment does not hold it.
+            f.create("Draft", simple_graph(), segment_trigger(segment))
+                .await;
+            let flow = publish_flow_named_with(&f, "Live", segment_trigger(segment)).await;
+            let refused = f.call("POST", &uri, None, Auth::Session(&f.lead)).await;
+            let paused = f.lead("POST", &format!("/{flow}/pause"), None).await;
+            let still = f.call("POST", &uri, None, Auth::Session(&f.lead)).await;
+            let archived_flow = f.lead("POST", &format!("/{flow}/archive"), None).await;
+            let allowed = f.call("POST", &uri, None, Auth::Session(&f.lead)).await;
+
+            assert_eq!(refused.status, StatusCode::CONFLICT, "{:?}", refused.body);
+            assert_eq!(refused.body["code"], "segment_in_use");
+            assert_eq!(refused.body["flows"][0]["flow_id"], flow);
+            assert_eq!(refused.body["flows"][0]["flow_name"], "Live");
+            assert_eq!(paused.status, StatusCode::OK, "{:?}", paused.body);
+            assert_eq!(still.status, StatusCode::CONFLICT, "{:?}", still.body);
+            assert_eq!(still.body["code"], "segment_in_use");
+            assert_eq!(
+                archived_flow.status,
+                StatusCode::OK,
+                "{:?}",
+                archived_flow.body
+            );
+            assert_eq!(allowed.status, StatusCode::OK, "{:?}", allowed.body);
+        })
+        .await;
+    }
+
+    async fn publish_flow_named_with(f: &Fixture, name: &str, settings: Value) -> String {
+        let flow = f.create(name, simple_graph(), settings).await;
+        let reply = f.lead("POST", &format!("/{flow}/publish"), None).await;
+        assert_eq!(reply.status, StatusCode::CREATED, "{:?}", reply.body);
+        flow
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_archive_waits_for_a_publish_in_progress_and_then_answers_segment_in_use(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let f = fixture(&pool).await;
+            let segment = f
+                .lead_segment(
+                    "Pros",
+                    json!({"op": "eq", "trait": "plan", "value": "pro", "v": 1}),
+                )
+                .await;
+            let flow = f
+                .create("Welcome", simple_graph(), segment_trigger(segment))
+                .await;
+            let flow_id: Uuid = flow.parse().unwrap();
+            let mut publishing = zirv_flow_store::begin(&pool).await.unwrap();
+            let locked = zirv_flow_store::lock_flow(&mut publishing, f.ws, flow_id)
+                .await
+                .unwrap();
+            zirv_flow_store::lock_segments_shared(&mut publishing, f.ws, &[segment])
+                .await
+                .unwrap();
+            zirv_flow_store::publish_flow(
+                &mut publishing,
+                &zirv_flow_store::Clock::default(),
+                f.ws,
+                &locked,
+                None,
+                &zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("t")),
+            )
+            .await
+            .unwrap();
+
+            let archive = {
+                let router = f.router.clone();
+                let uri = archive_segment_uri(&f, segment);
+                let login = Login {
+                    cookie: f.lead.cookie.clone(),
+                    csrf: f.lead.csrf.clone(),
+                };
+                tokio::spawn(async move {
+                    send(&router, "POST", &uri, None, Auth::Session(&login)).await
+                })
+            };
+            assert!(
+                blocked_on_table(&pool, "segments").await,
+                "the archive should wait for the share lock"
+            );
+            zirv_flow_store::commit(publishing).await.unwrap();
+
+            let reply = archive.await.unwrap();
+            assert_eq!(reply.status, StatusCode::CONFLICT, "{:?}", reply.body);
+            assert_eq!(reply.body["code"], "segment_in_use");
+            assert_eq!(
+                f.count("SELECT count(*) FROM segments WHERE archived_at IS NOT NULL")
+                    .await,
+                0
+            );
+        })
+        .await;
+    }
 }

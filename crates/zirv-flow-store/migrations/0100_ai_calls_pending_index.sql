@@ -1,0 +1,18 @@
+-- `reserve_ai_call` (`ai/calls.rs`) abandons the workspace's stale pending calls on every
+-- reservation, under the workspace's advisory lock:
+--     UPDATE ai_calls SET outcome = 'abandoned'
+--     WHERE workspace_id = $1 AND outcome = 'pending' AND created_at < now() - stale
+-- Both existing indexes lead with `(workspace_id, created_at)` and the `created_at` bound is open
+-- at the low end, so the statement read every call the workspace ever made (`ai_calls` is never
+-- purged) to find the few that are pending. This index lists only the pending rows, which are few
+-- and leave it as soon as the call finishes, so it stays tiny and the statement reads it alone.
+-- The query already says `outcome = 'pending'`, so the planner proves the predicate with no change.
+--
+-- Write cost: the finishing `UPDATE ... SET outcome` of a call is no longer heap-only, because
+-- `outcome` is now a column of an index predicate; a call is reserved, finished and logged a few
+-- times a minute at most, so this is negligible. `docs/operations/upgrade.md` has the numbers.
+--
+-- UPGRADE COST: the build takes SHARE on `ai_calls` until the migration commits, which blocks
+-- reservations and call records for the build; it scans the table once and writes only the
+-- pending rows. Reads go on.
+CREATE INDEX ai_calls_pending_idx ON ai_calls (workspace_id, created_at) WHERE outcome = 'pending';

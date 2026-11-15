@@ -43,6 +43,13 @@ pub struct SegmentFlowUse {
     pub uses: Vec<SegmentUse>,
 }
 
+/// A flow named as using a segment.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SegmentFlowRef {
+    pub flow_id: Uuid,
+    pub flow_name: String,
+}
+
 /// Where a segment is used.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SegmentWhereUsed {
@@ -119,6 +126,27 @@ async fn load_flow_uses(
                 live,
             }
         })
+        .collect())
+}
+
+/// The published or paused flows whose running version uses `segment`, by name. Call it under
+/// the segment's row lock, after [`lock_segments_shared`] has made a publish in progress wait.
+pub(super) async fn live_flows_using(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    segment: Uuid,
+) -> Result<Vec<SegmentFlowRef>, StoreError> {
+    let rows: Vec<(Uuid, String, serde_json::Value, serde_json::Value)> = sqlx::query_as(
+        "SELECT f.id, f.name, v.graph, v.settings          FROM flows f          JOIN flow_versions v ON v.flow_id = f.id AND v.version = f.current_version          WHERE f.workspace_id = $1 AND f.archived_at IS NULL             AND f.state IN ('published', 'paused')          ORDER BY lower(f.name), f.id",
+    )
+    .bind(workspace.as_uuid())
+    .fetch_all(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(rows
+        .into_iter()
+        .filter(|(_, _, graph, settings)| uses_of(graph, settings).contains_key(&segment))
+        .map(|(flow_id, flow_name, _, _)| SegmentFlowRef { flow_id, flow_name })
         .collect())
 }
 

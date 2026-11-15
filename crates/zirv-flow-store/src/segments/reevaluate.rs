@@ -437,7 +437,7 @@ pub async fn apply_reevaluation(
             .await?;
     }
     if capture {
-        let changes = captured.changes();
+        let changes = captured.changes(None);
         if !triggered.is_empty() {
             enqueue_segment_enrolls(connection, apply.workspace, &triggered, &changes).await?;
         }

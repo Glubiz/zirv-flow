@@ -60,8 +60,8 @@ pub struct Problem {
     /// How many templates `templates` is the first of.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<u32>,
-    /// The active flows whose running version sends a template (`template_in_use`) or uses a
-    /// destination (`destination_in_use`).
+    /// The active flows whose running version sends a template (`template_in_use`), uses a
+    /// destination (`destination_in_use`) or uses a segment (`segment_in_use`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flows: Option<Vec<FlowRefProblem>>,
     /// The active forwarding rules that deliver to a destination (`destination_in_use`).
@@ -569,6 +569,21 @@ impl ApiError {
             ..Self::new(
                 StatusCode::CONFLICT,
                 format!("referenced by {}", names.join(", ")),
+            )
+        }
+    }
+
+    /// An archive of a segment that published or paused flows still use, with those flows.
+    pub(crate) fn segment_in_use(flows: Vec<FlowRefProblem>) -> Self {
+        Self {
+            code: Some("segment_in_use"),
+            segment: Some(Box::new(SegmentExtra {
+                flows: Some(flows),
+                ..SegmentExtra::default()
+            })),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "published or paused flows still use the segment; remove it from them first",
             )
         }
     }
