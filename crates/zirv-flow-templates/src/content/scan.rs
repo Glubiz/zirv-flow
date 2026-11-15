@@ -37,3 +37,26 @@ pub(crate) fn local_names(bytes: &[u8], skip_slash: bool) -> impl Iterator<Item 
         Some(&bytes[local..run_end])
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::local_names;
+
+    fn names(source: &str, skip_slash: bool) -> Vec<&str> {
+        local_names(source.as_bytes(), skip_slash)
+            .map(|name| std::str::from_utf8(name).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn each_open_bracket_yields_the_local_name_it_opens() {
+        assert_eq!(names("<mj-text>a</mj-text>", false), ["mj-text", ""]);
+        assert_eq!(names("<mj-text>a</mj-text>", true), ["mj-text", "mj-text"]);
+        assert_eq!(names("<x:y:mj-include path='a'/>", false), ["mj-include"]);
+        assert_eq!(
+            names("<<<a:mj-include>", false),
+            ["mj-include", "mj-include", "mj-include"]
+        );
+        assert_eq!(names("a <", false), [""]);
+    }
+}
