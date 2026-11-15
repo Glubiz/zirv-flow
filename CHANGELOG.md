@@ -15,3 +15,13 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v1.0.4 (2026-11-15)
+
+### Fixes
+
+- flow enrol, segment archive, warm-up, refresh capture and AI erasure (#639-#645)
+
+### Chores
+
+- split one warm-up second into jobs of at most 1,000 people (#642)
+
