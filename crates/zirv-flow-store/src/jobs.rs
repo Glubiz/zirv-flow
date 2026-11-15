@@ -1232,22 +1232,60 @@ impl JobSummaryRow {
 /// Where the next page of dead jobs starts: strictly before this `(dead_at, id)`.
 pub type DeadCursor = (OffsetDateTime, Uuid);
 
-/// Job counts per kind and state, and the age of the oldest runnable job, in one query.
-/// Sorted by kind.
-pub async fn kind_depths<'e>(executor: impl PgExecutor<'e>) -> Result<Vec<KindDepth>, StoreError> {
-    sqlx::query_as(
-        "SELECT kind, \
-                count(*) FILTER (WHERE state = 'ready') AS ready, \
-                count(*) FILTER (WHERE state = 'running') AS running, \
-                count(*) FILTER (WHERE state = 'dead') AS dead, \
-                EXTRACT(EPOCH FROM now() - min(run_at) \
-                    FILTER (WHERE state = 'ready' AND run_at <= now()))::float8 \
-                    AS oldest_ready_seconds \
-         FROM jobs GROUP BY kind ORDER BY kind",
-    )
-    .fetch_all(executor)
-    .await
-    .map_err(StoreError::query)
+/// The longest the jobs-admin view's depth statements may run.
+const KIND_DEPTH_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Each kind with ready jobs and how long its longest-waiting runnable job has waited: the same
+/// skip scan as [`DEPTHS`] finds the kinds, and one first-entry probe of `jobs_ready_kind_idx`
+/// (kind, run_at) per kind reads the oldest `run_at`, so no part reads the backlog (#646).
+const OLDEST_READY: &str = "WITH RECURSIVE kinds (kind) AS ( \
+        (SELECT kind FROM jobs WHERE state = 'ready' ORDER BY kind LIMIT 1) \
+        UNION ALL \
+        SELECT (SELECT j.kind FROM jobs j WHERE j.state = 'ready' AND j.kind > k.kind \
+                ORDER BY j.kind LIMIT 1) \
+        FROM kinds k WHERE k.kind IS NOT NULL) \
+    SELECT k.kind, \
+        (SELECT EXTRACT(EPOCH FROM now() - j.run_at)::float8 FROM jobs j \
+         WHERE j.state = 'ready' AND j.kind = k.kind AND j.run_at <= now() \
+         ORDER BY j.run_at LIMIT 1) AS oldest_ready_seconds \
+    FROM kinds k WHERE k.kind IS NOT NULL";
+
+/// Job counts per kind and state, and the age of the oldest runnable job. Sorted by kind. The
+/// running and dead counts are exact, and so is each kind's ready count up to 10,000; above that
+/// it is the planner's estimate, as the queue gauges report it, so a deep queue costs no more to
+/// show than a short one. The age is exact.
+pub async fn kind_depths(pool: &PgPool) -> Result<Vec<KindDepth>, StoreError> {
+    let mut tx = crate::bounded::begin_bounded_for(pool, KIND_DEPTH_TIMEOUT).await?;
+    let depths = queue_depths(&mut tx).await?;
+    let oldest: Vec<(String, Option<f64>)> = sqlx::query_as(OLDEST_READY)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(StoreError::query)?;
+    tx.commit().await.map_err(StoreError::query)?;
+
+    let mut kinds: std::collections::BTreeMap<String, KindDepth> = Default::default();
+    for depth in depths {
+        let entry = kinds
+            .entry(depth.kind.clone())
+            .or_insert_with(|| KindDepth {
+                kind: depth.kind,
+                ready: 0,
+                running: 0,
+                dead: 0,
+                oldest_ready_seconds: None,
+            });
+        match depth.state.as_str() {
+            "ready" => entry.ready = depth.count,
+            "running" => entry.running = depth.count,
+            _ => entry.dead = depth.count,
+        }
+    }
+    for (kind, seconds) in oldest {
+        if let Some(entry) = kinds.get_mut(&kind) {
+            entry.oldest_ready_seconds = seconds;
+        }
+    }
+    Ok(kinds.into_values().collect())
 }
 
 /// Dead jobs, newest first, at most `limit`, starting after `before`. The flag is true when
@@ -1790,6 +1828,32 @@ mod tests {
         // against the whole table's.
         assert!(pages > 800, "{pages}");
         assert!(buffers < 400, "{buffers} buffers for {pages} pages\n{plan}");
+
+        // The jobs-admin view's age probe reads one index entry per kind, never the backlog.
+        let oldest: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {OLDEST_READY}"
+        )))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let top = &oldest[0]["Plan"];
+        let buffers = top["Shared Hit Blocks"].as_i64().unwrap()
+            + top["Shared Read Blocks"].as_i64().unwrap();
+        assert!(
+            plan_nodes(top)
+                .into_iter()
+                .all(|node| node["Node Type"] != "Seq Scan"),
+            "{oldest}"
+        );
+        assert!(buffers < 100, "{buffers} buffers\n{oldest}");
+        let listed = kind_depths(&pool).await.unwrap();
+        assert_eq!(
+            listed.iter().map(|d| d.kind.as_str()).collect::<Vec<_>>(),
+            ["a.kind", "b.kind", "c.kind"]
+        );
+        assert!(listed[0].ready > DEPTH_EXACT, "{listed:?}");
+        assert!(listed[0].oldest_ready_seconds.unwrap() > 59_000.0);
+        assert_eq!(listed[2].running, 1);
         let depths = sorted(
             queue_depths(&mut pool.acquire().await.unwrap())
                 .await

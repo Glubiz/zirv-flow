@@ -3,6 +3,11 @@
 //! `read` role. They run in bounded snapshot reads; one that runs past its limit is a `503` with
 //! the code `search_timeout`, and a bad parameter is a `400`.
 
+use hashbrown::HashMap;
+use std::future::Future;
+use std::sync::{Arc, PoisonError};
+use std::time::{Duration, Instant};
+
 use axum::Json;
 use axum::extract::{Path, RawQuery, State};
 use base64::Engine;
@@ -430,8 +435,124 @@ fn count_row(node_id: &str, node_type: String, count: Option<&NodeCount>) -> Nod
     }
 }
 
+/// How long a version's node counts are served from memory. The counts are computed on read
+/// (architecture 9.3, no counter rows); this only bounds how often that read runs for one
+/// version, so a canvas overlay may show counts up to this much out of date.
+const COUNTS_TTL: Duration = Duration::from_secs(5);
+
+/// The most versions whose counts one process keeps; past it the stale and idle ones go first,
+/// and a read that finds the map still full loads without keeping its result.
+const COUNTS_CACHE_VERSIONS: usize = 256;
+
+type NodeCounts = Arc<HashMap<String, NodeCount>>;
+
+/// What one version's slot holds: the counts of its last good read, and when and why its last
+/// read failed, which the reads that queued behind that one are given.
+struct CountsSlot<E> {
+    kept: Option<(Instant, NodeCounts)>,
+    failed: Option<(Instant, E)>,
+}
+
+impl<E> Default for CountsSlot<E> {
+    fn default() -> Self {
+        Self {
+            kept: None,
+            failed: None,
+        }
+    }
+}
+
+type SharedSlot<E> = Arc<tokio::sync::Mutex<CountsSlot<E>>>;
+
+/// The node counts of recently read versions, by (workspace, flow, version), for [`COUNTS_TTL`].
+/// A read of a version nobody else is reading runs the store read; the others that arrive while
+/// it runs wait for its result instead of repeating a scan of every step and message of the
+/// version (#650), and get its failure if it fails instead of each repeating the slow read in
+/// turn. A miss that finds nothing or fails is not kept: a read that starts after it runs again.
+pub(crate) struct CountsCache<E = Arc<zirv_flow_store::StoreError>> {
+    ttl: Duration,
+    slots: std::sync::Mutex<HashMap<(Uuid, Uuid, i32), SharedSlot<E>>>,
+}
+
+impl<E: Clone> Default for CountsCache<E> {
+    fn default() -> Self {
+        Self::new(COUNTS_TTL)
+    }
+}
+
+impl<E: Clone> CountsCache<E> {
+    fn new(ttl: Duration) -> Self {
+        Self {
+            ttl,
+            slots: std::sync::Mutex::default(),
+        }
+    }
+
+    /// The counts of the version: the kept ones while they are fresh, else what `load` reads.
+    async fn get_or_load<Fut>(
+        &self,
+        key: (Uuid, Uuid, i32),
+        load: impl FnOnce() -> Fut,
+    ) -> Result<Option<NodeCounts>, E>
+    where
+        Fut: Future<Output = Result<Option<HashMap<String, NodeCount>>, E>>,
+    {
+        let arrived = Instant::now();
+        let slot = {
+            let mut slots = self.slots.lock().unwrap_or_else(PoisonError::into_inner);
+            if slots.len() >= COUNTS_CACHE_VERSIONS && !slots.contains_key(&key) {
+                // A slot someone holds is being read or waited for; the rest are kept only
+                // while fresh.
+                slots.retain(|_, slot| {
+                    Arc::strong_count(slot) > 1
+                        || slot.try_lock().is_ok_and(|slot| {
+                            slot.kept
+                                .as_ref()
+                                .is_some_and(|(at, _)| at.elapsed() < self.ttl)
+                        })
+                });
+            }
+            if slots.len() >= COUNTS_CACHE_VERSIONS && !slots.contains_key(&key) {
+                None
+            } else {
+                Some(Arc::clone(slots.entry(key).or_default()))
+            }
+        };
+        let Some(slot) = slot else {
+            // Every slot is in use or fresh: this read is served without a slot of its own.
+            return Ok(load().await?.map(Arc::new));
+        };
+        let mut slot = slot.lock().await;
+        if let Some((at, counts)) = slot.kept.as_ref()
+            && at.elapsed() < self.ttl
+        {
+            return Ok(Some(Arc::clone(counts)));
+        }
+        if let Some((at, error)) = slot.failed.as_ref()
+            && *at >= arrived
+        {
+            // This read queued while the one that has just failed ran.
+            return Err(error.clone());
+        }
+        slot.kept = None;
+        match load().await {
+            Ok(Some(counts)) => {
+                let counts = Arc::new(counts);
+                slot.kept = Some((Instant::now(), Arc::clone(&counts)));
+                Ok(Some(counts))
+            }
+            Ok(None) => Ok(None),
+            Err(error) => {
+                slot.failed = Some((Instant::now(), error.clone()));
+                Err(error)
+            }
+        }
+    }
+}
+
 /// How many enrollments entered, finished, wait at and failed at each node of one version,
-/// computed from the rows when asked.
+/// computed from the rows when asked. A version's counts are kept for 5 seconds, so a refresh of
+/// the canvas shows counts up to that much out of date.
 #[utoipa::path(
     get,
     operation_id = "get_flow_version_counts",
@@ -461,8 +582,15 @@ pub(crate) async fn counts(
     let (graph, settings) = graph_of(&state, workspace.id, flow, version)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    let counts = zirv_flow_store::version_node_counts(&state.pool, workspace.id, flow, version)
-        .await?
+    let counts = state
+        .counts_cache
+        .get_or_load((workspace.id.as_uuid(), flow, version), || async {
+            zirv_flow_store::version_node_counts(&state.pool, workspace.id, flow, version)
+                .await
+                .map_err(Arc::new)
+        })
+        .await
+        .map_err(|error| ApiError::from(&*error))?
         .ok_or_else(ApiError::not_found)?;
     let mut nodes: Vec<NodeCountBody> = graph
         .nodes
@@ -610,6 +738,104 @@ mod tests {
 
         assert_eq!(decode_cursor(&text), Some(cursor));
         assert!(!text.contains(['=', '+', '/']));
+    }
+
+    #[tokio::test]
+    async fn concurrent_reads_of_one_version_share_one_load_until_the_counts_go_stale() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let cache = CountsCache::new(Duration::from_millis(200));
+        let loads = AtomicUsize::new(0);
+        let key = (Uuid::now_v7(), Uuid::now_v7(), 1);
+        let read = || {
+            cache.get_or_load(key, || async {
+                loads.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                Ok::<_, ()>(Some(HashMap::from([(
+                    "n".to_owned(),
+                    NodeCount::default(),
+                )])))
+            })
+        };
+
+        let first = futures_util::future::join_all((0..8).map(|_| read())).await;
+
+        assert!(first.iter().all(|reply| matches!(reply, Ok(Some(_)))));
+        assert_eq!(loads.load(Ordering::SeqCst), 1, "one load for eight reads");
+        read().await.unwrap();
+        assert_eq!(loads.load(Ordering::SeqCst), 1, "a fresh read is kept");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        read().await.unwrap();
+        assert_eq!(loads.load(Ordering::SeqCst), 2, "a stale read loads again");
+    }
+
+    #[tokio::test]
+    async fn reads_queued_behind_a_failed_load_get_its_failure_and_do_not_repeat_it() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let cache = CountsCache::new(Duration::from_secs(60));
+        let loads = AtomicUsize::new(0);
+        let key = (Uuid::now_v7(), Uuid::now_v7(), 1);
+        let read = || {
+            cache.get_or_load(key, || async {
+                loads.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                Err::<Option<HashMap<String, NodeCount>>, _>("search_timeout")
+            })
+        };
+
+        let replies = futures_util::future::join_all((0..8).map(|_| read())).await;
+
+        assert!(
+            replies
+                .iter()
+                .all(|reply| matches!(reply, Err("search_timeout")))
+        );
+        assert_eq!(loads.load(Ordering::SeqCst), 1, "one load for eight reads");
+        assert!(read().await.is_err());
+        assert_eq!(loads.load(Ordering::SeqCst), 2, "a later read loads again");
+    }
+
+    #[tokio::test]
+    async fn the_cache_never_holds_more_versions_than_its_cap_and_every_read_is_right() {
+        let cache = CountsCache::new(Duration::from_secs(60));
+        let flow = Uuid::now_v7();
+        let workspace = Uuid::now_v7();
+
+        for version in 1..=(COUNTS_CACHE_VERSIONS as i32 + 44) {
+            let counts = cache
+                .get_or_load((workspace, flow, version), || async move {
+                    Ok::<_, ()>(Some(HashMap::from([(
+                        version.to_string(),
+                        NodeCount::default(),
+                    )])))
+                })
+                .await
+                .unwrap()
+                .unwrap();
+
+            assert!(counts.contains_key(&version.to_string()));
+            let held = cache.slots.lock().unwrap().len();
+            assert!(held <= COUNTS_CACHE_VERSIONS, "{held} versions held");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_missing_version_and_a_failed_load_are_not_kept() {
+        let cache = CountsCache::new(Duration::from_secs(60));
+        let key = (Uuid::now_v7(), Uuid::now_v7(), 1);
+
+        let none = cache.get_or_load(key, || async { Ok::<_, ()>(None) }).await;
+        let failed = cache
+            .get_or_load(key, || async { Err::<Option<HashMap<_, _>>, _>(()) })
+            .await;
+        let found = cache
+            .get_or_load(key, || async { Ok::<_, ()>(Some(HashMap::new())) })
+            .await;
+
+        assert!(matches!(none, Ok(None)));
+        assert!(failed.is_err());
+        assert!(matches!(found, Ok(Some(_))));
     }
 
     #[test]

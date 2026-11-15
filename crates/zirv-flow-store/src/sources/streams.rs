@@ -210,10 +210,10 @@ pub async fn find_stream_by_id<'e>(
 /// Such a change is refused with [`StoreError::is_run_active`], and nothing is written, while
 /// the stream has a `queued` or `running` sync run: that run would write a checkpoint of the
 /// old cursor back, and a retried attempt would resume from it. The stream row is locked first,
-/// so a run cannot be queued between the check and the commit: queueing a run inserts a row that
-/// refers to the stream, and that waits for this lock. A run reads the stream's settings only
-/// when its job starts, after the run row is committed, so a run queued after this commit sees
-/// the new settings.
+/// so a run cannot be queued between the check and the commit: `queue_run` takes the stream
+/// `FOR KEY SHARE` before it inserts the run, and that waits for this lock, then copies the
+/// committed sync mode. A run reads the stream's other settings only when its job starts, after
+/// the run row is committed, so a run queued after this commit sees the new settings.
 pub async fn configure_stream(
     connection: &mut PgConnection,
     workspace: WorkspaceId,

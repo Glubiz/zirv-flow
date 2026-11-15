@@ -177,6 +177,22 @@ pub async fn queue_run(
         .execute(&mut *connection)
         .await
         .map_err(StoreError::query)?;
+    // Then the stream, so a save of its settings (which holds it `FOR UPDATE` to its commit) is
+    // waited for, and the insert below, a statement of its own with a fresh snapshot, copies the
+    // committed sync mode. A save that comes after finds this run when it looks for one.
+    let stream: Option<i32> = sqlx::query_scalar(
+        "SELECT 1 FROM streams WHERE workspace_id = $1 AND source_id = $2 AND id = $3 \
+         FOR KEY SHARE",
+    )
+    .bind(workspace.as_uuid())
+    .bind(source_id)
+    .bind(stream_id)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    if stream.is_none() {
+        return Ok(None);
+    }
     let run: Option<SyncRun> = sqlx::query_as(concat!(
         "WITH r AS ( \
             INSERT INTO sync_runs \
@@ -680,6 +696,28 @@ pub async fn rotate_stream_run(
     Ok(Rotated::Rotated(Box::new(next)))
 }
 
+/// The reaper's statement: fails the active runs whose job is dead or gone, and marks their
+/// streams failing in the same statement. A pull run's job is found by its unique key, a
+/// consumer run's (whatever the generation of its slice) by the run id in its payload, which
+/// `jobs_consume_run_idx` serves: a prefix range on the key could miss it under a non-C
+/// collation. The state tests spell out the live states so the partial indexes apply.
+const ORPHANED_RUNS: &str = "WITH failed AS ( \
+            UPDATE sync_runs r SET state = 'failed', error_code = 'job_failed', \
+                finished_at = now(), updated_at = now() \
+            WHERE r.state IN ('queued', 'running') \
+              AND NOT EXISTS (SELECT 1 FROM jobs j \
+                              WHERE j.unique_key = 'sync:run:' || r.id::text \
+                                AND j.state IN ('ready', 'running')) \
+              AND NOT EXISTS (SELECT 1 FROM jobs j \
+                              WHERE j.kind = 'kafka.consume' \
+                                AND j.payload ->> 'run_id' = r.id::text \
+                                AND j.state IN ('ready', 'running')) \
+            RETURNING r.id, r.workspace_id, r.stream_id), \
+         marked AS ( \
+            UPDATE streams s SET last_run_failed = true \
+            FROM failed f WHERE s.workspace_id = f.workspace_id AND s.id = f.stream_id) \
+         SELECT id FROM failed";
+
 /// Fails every active run whose job is dead or gone, with `job_failed`, and returns the ids.
 ///
 /// A job the reaper buried after its last lease expiry, or that was deleted, never runs its
@@ -688,25 +726,10 @@ pub async fn rotate_stream_run(
 /// are inserted in one transaction, so a run without a job row is never one still being
 /// queued.
 pub async fn fail_orphaned_runs(pool: &PgPool) -> Result<Vec<Uuid>, StoreError> {
-    // The streams of the failed runs are marked failing in the same statement.
-    sqlx::query_scalar(
-        "WITH failed AS ( \
-            UPDATE sync_runs r SET state = 'failed', error_code = 'job_failed', \
-                finished_at = now(), updated_at = now() \
-            WHERE r.state IN ('queued', 'running') \
-              AND NOT EXISTS (SELECT 1 FROM jobs j \
-                              WHERE (j.unique_key = 'sync:run:' || r.id::text \
-                                     OR j.unique_key LIKE 'kafka:consume:' || r.id::text || ':%') \
-                                AND j.state <> 'dead') \
-            RETURNING r.id, r.workspace_id, r.stream_id), \
-         marked AS ( \
-            UPDATE streams s SET last_run_failed = true \
-            FROM failed f WHERE s.workspace_id = f.workspace_id AND s.id = f.stream_id) \
-         SELECT id FROM failed",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(StoreError::query)
+    sqlx::query_scalar(ORPHANED_RUNS)
+        .fetch_all(pool)
+        .await
+        .map_err(StoreError::query)
 }
 
 /// A record a run refused, as the API shows it: codes and a masked sample.
@@ -1758,6 +1781,142 @@ pub(super) mod tests {
         assert!(!same, "the same key would drop the successor");
         assert!(next);
         assert_eq!(claimed.unique_key, Some(consume_unique_key(run.id, 0)));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_run_queued_while_the_sync_mode_changes_copies_the_committed_mode(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let (source, stream) = source_with_stream(&pool, ws, "crm", "full_refresh").await;
+        // A user saves the stream as a consumer stream; the save is not yet committed.
+        let mut save = pool.begin().await.unwrap();
+        configure_stream(
+            &mut save,
+            ws,
+            source,
+            "contacts",
+            &StreamSettings {
+                enabled: true,
+                sync_mode: "stream",
+                cursor_field: None,
+                primary_key: &[],
+                staleness_threshold_seconds: None,
+                reconcile_schedule: None,
+                sweep_limit: 0.5,
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        // A run is queued meanwhile, its statement starting before the save commits.
+        let mut queueing = pool.begin().await.unwrap();
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *queueing)
+            .await
+            .unwrap();
+        let queued = tokio::spawn(async move {
+            let run = queue_run(
+                &mut queueing,
+                ws,
+                source,
+                stream,
+                RunKind::Sync,
+                RunTrigger::Manual,
+                None,
+            )
+            .await
+            .unwrap();
+            queueing.commit().await.unwrap();
+            run
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let blocked: bool = sqlx::query_scalar("SELECT cardinality(pg_blocking_pids($1)) > 0")
+                .bind(pid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            if blocked || queued.is_finished() {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "never blocked");
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        save.commit().await.unwrap();
+
+        let run = queued.await.unwrap().unwrap();
+
+        let mode: String = sqlx::query_scalar("SELECT sync_mode FROM streams WHERE id = $1")
+            .bind(stream)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(mode, "stream");
+        assert_eq!(run.sync_mode, mode);
+        let kind: String = sqlx::query_scalar("SELECT kind FROM jobs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(kind, CONSUME_JOB_KIND);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_consumer_run_in_a_later_generation_is_not_orphaned_and_one_without_a_job_is(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let (source, stream) = source_with_stream(&pool, ws, "kafka", "stream").await;
+        let run = queue(&pool, ws, source, stream).await.unwrap();
+        start_stream_run(&pool, ws, run.id, false).await.unwrap();
+        sqlx::query("UPDATE jobs SET unique_key = $2, payload = payload || '{\"generation\": 3}' WHERE unique_key = $1")
+            .bind(consume_unique_key(run.id, 0))
+            .bind(consume_unique_key(run.id, 3))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let kept = fail_orphaned_runs(&pool).await.unwrap();
+        sqlx::query("DELETE FROM jobs")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let failed = fail_orphaned_runs(&pool).await.unwrap();
+
+        assert!(kept.is_empty());
+        assert_eq!(failed, [run.id]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_orphan_reaper_never_reads_the_whole_jobs_table(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let (source, stream) = source_with_stream(&pool, ws, "kafka", "stream").await;
+        queue(&pool, ws, source, stream).await.unwrap();
+        sqlx::query(
+            "INSERT INTO jobs (id, kind, payload, run_at, trace_id, cause_kind, cause_id) \
+             SELECT gen_random_uuid(), 'other.kind', '{}', now() - make_interval(secs => g), \
+                    gen_random_uuid(), 'api', 'x' FROM generate_series(1, 100000) g",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("ANALYZE jobs").execute(&pool).await.unwrap();
+
+        let plan: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN (FORMAT JSON) {ORPHANED_RUNS}"
+        )))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        fn scans_jobs(plan: &Value) -> bool {
+            let here = plan["Node Type"] == "Seq Scan" && plan["Relation Name"] == "jobs";
+            here || plan["Plans"]
+                .as_array()
+                .is_some_and(|children| children.iter().any(scans_jobs))
+        }
+        assert!(!scans_jobs(&plan[0]["Plan"]), "{plan}");
     }
 
     #[sqlx::test]
