@@ -280,17 +280,16 @@ async fn queue_waiting(
     let seconds = window.map(|(_, seconds)| seconds);
     let queued = sqlx::query(
         "WITH due AS ( \
-             SELECT w.*, \
+             SELECT w.*, a.admit_at, date_trunc('second', a.admit_at) AS slot \
+             FROM flow_warmup_waiting w, LATERAL (SELECT \
                     COALESCE($4::timestamptz + (trunc($5::numeric * 1000000 * w.admission_offset \
                                                       / 9007199254740992)::bigint) \
-                                               * interval '1 microsecond', now()) AS admit_at \
-             FROM flow_warmup_waiting w \
+                                               * interval '1 microsecond', now()) AS admit_at) a \
              WHERE w.workspace_id = $1 AND w.flow_id = $2), \
          numbered AS ( \
-             SELECT d.*, date_trunc('second', d.admit_at) AS slot, \
+             SELECT d.*, \
                     (row_number() OVER (PARTITION BY d.flow_version, d.trigger, d.trace_id, \
-                                                     d.cause_kind, d.cause_id, \
-                                                     date_trunc('second', d.admit_at) \
+                                                     d.cause_kind, d.cause_id, d.slot \
                                         ORDER BY d.person_id, d.occurrence_id) - 1) / $8 AS chunk \
              FROM due d), \
          bucketed AS ( \
@@ -1245,5 +1244,57 @@ mod tests {
             jobs.len(),
             "the same window queues the same jobs"
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn waiting_entries_of_one_second_are_split_into_jobs_of_at_most_the_enroll_limit(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one-slot").await;
+        let flow = create(&pool, ws, "Welcome").await.id;
+        publish_at(&pool, ws, flow, START).await;
+        // 2,500 entries of one trace, all admitted at the start of the window: one second.
+        let count = 2_500_i64;
+        sqlx::query("INSERT INTO people (id, workspace_id) SELECT gen_random_uuid(), $1 FROM generate_series(1, $2)")
+            .bind(ws.as_uuid())
+            .bind(count)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO flow_warmup_waiting (workspace_id, flow_id, person_id, occurrence_id, \
+                 flow_version, trigger, admission_offset, trace_id, cause_kind, cause_id) \
+             SELECT $1, $2, p.id, gen_random_uuid(), 1, 'manual', 0, $3, 'api', 't' \
+             FROM people p WHERE p.workspace_id = $1",
+        )
+        .bind(ws.as_uuid())
+        .bind(flow)
+        .bind(Uuid::now_v7())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut tx = begin(&pool).await.unwrap();
+
+        start(&mut tx, ws, flow, at(100)).await.unwrap();
+        commit(tx).await.unwrap();
+        let jobs = queued_jobs(&pool, flow).await;
+
+        let mut sizes: Vec<usize> = jobs.iter().map(|(pairs, ..)| pairs.len()).collect();
+        sizes.sort_unstable();
+        assert_eq!(sizes, [500, MAX_ENROLL_PEOPLE, MAX_ENROLL_PEOPLE]);
+        let mut people: Vec<Uuid> = jobs
+            .iter()
+            .flat_map(|(pairs, ..)| pairs.iter().map(|(person, _)| *person))
+            .collect();
+        people.sort_unstable();
+        people.dedup();
+        assert_eq!(people.len(), 2_500, "each person is in exactly one job");
+        let mut again = begin(&pool).await.unwrap();
+        start(&mut again, ws, flow, at(100)).await.unwrap();
+        commit(again).await.unwrap();
+        let repeated = queued_jobs(&pool, flow).await;
+        let carried: usize = repeated.iter().map(|(pairs, ..)| pairs.len()).sum();
+        assert_eq!((repeated.len(), carried), (3, 2_500), "no extra jobs");
     }
 }
