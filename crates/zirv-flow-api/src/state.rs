@@ -94,6 +94,8 @@ pub struct AppState {
     pub(crate) tracking_limiter: Arc<RateLimiter>,
     /// The API keys this process recently recorded as used.
     pub(crate) key_touches: Arc<KeyTouches>,
+    /// The node counts of recently read flow versions, for a few seconds.
+    pub(crate) counts_cache: Arc<crate::flows::inspector::CountsCache>,
 }
 
 /// OIDC sign-in, when it is configured.
@@ -145,6 +147,7 @@ impl AppState {
             prefetch_user_agents: Vec::new(),
             tracking_limiter: Arc::new(crate::tracking::limiter()),
             key_touches: Arc::default(),
+            counts_cache: Arc::default(),
         }
     }
 

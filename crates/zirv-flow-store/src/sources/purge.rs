@@ -46,6 +46,15 @@ pub struct PurgeBatchOutcome {
     pub more: bool,
 }
 
+/// The next live records of a source, by stream then id: `source_records_live_stream_idx`
+/// (workspace, source, stream, id) serves that order, and a record the purge tombstoned leaves the
+/// partial index, so every batch starts at the first live entry and steps over no tombstone.
+/// Ordered by `id` alone the index cannot serve the order, and each batch walked the source's
+/// whole range past its tombstones.
+const LIVE_RECORDS: &str = "SELECT stream, record_key FROM source_records \
+     WHERE workspace_id = $1 AND source = $2 AND deleted_at IS NULL \
+     ORDER BY stream, id LIMIT $3";
+
 /// Removes up to [`PURGE_BATCH`] live records of the source in the caller's transaction, each with
 /// a `deleted` decision on the job's trace, and asks for the segment re-evaluation the removals
 /// marked. The caller commits.
@@ -57,17 +66,13 @@ pub async fn purge_source_batch(
     job: Option<(Uuid, i32)>,
 ) -> Result<PurgeBatchOutcome, StoreError> {
     let source = source_id.to_string();
-    let live: Vec<(String, String)> = sqlx::query_as(
-        "SELECT stream, record_key FROM source_records \
-         WHERE workspace_id = $1 AND source = $2 AND deleted_at IS NULL \
-         ORDER BY id LIMIT $3",
-    )
-    .bind(workspace.as_uuid())
-    .bind(&source)
-    .bind(PURGE_BATCH)
-    .fetch_all(&mut *connection)
-    .await
-    .map_err(StoreError::query)?;
+    let live: Vec<(String, String)> = sqlx::query_as(LIVE_RECORDS)
+        .bind(workspace.as_uuid())
+        .bind(&source)
+        .bind(PURGE_BATCH)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
 
     let mut decisions = Vec::new();
     for (stream, key) in &live {
@@ -375,5 +380,64 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(left, [(other.as_uuid(),)]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_batch_starts_at_the_first_live_record_and_steps_over_no_tombstone(pool: PgPool) {
+        let ws = workspace(&pool).await;
+        let gone = Uuid::now_v7();
+        let outcomes = apply_profile_batch(
+            &pool,
+            ws,
+            &[record(gone, "1", &[("email", "a@example.com")], json!({}))],
+        )
+        .await
+        .unwrap();
+        let crate::ProfileOutcome::Applied { person_id, .. } = outcomes[0] else {
+            panic!("not applied");
+        };
+        // 60,000 records over three streams, the first 54,000 by (stream, id) already purged:
+        // the state of a purge that is 90% done.
+        sqlx::query(
+            "INSERT INTO source_records \
+                (id, workspace_id, source, stream, record_key, person_id, content_hash) \
+             SELECT gen_random_uuid(), $1, $2, 's' || (g % 3), g::text, $3, decode('00', 'hex') \
+             FROM generate_series(1, 60000) g",
+        )
+        .bind(ws.as_uuid())
+        .bind(gone.to_string())
+        .bind(person_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE source_records SET deleted_at = now() WHERE id IN ( \
+                SELECT id FROM source_records WHERE source = $1 AND record_key <> '1' \
+                ORDER BY stream, id LIMIT 54000)",
+        )
+        .bind(gone.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("ANALYZE source_records")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let plan: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {LIVE_RECORDS}"
+        )))
+        .bind(ws.as_uuid())
+        .bind(gone.to_string())
+        .bind(PURGE_BATCH)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let text = plan.to_string();
+        assert!(text.contains("source_records_live_stream_idx"), "{plan}");
+        assert!(!text.contains("Rows Removed by Filter"), "{plan}");
+        assert!(!text.contains("\"Sort\""), "{plan}");
     }
 }

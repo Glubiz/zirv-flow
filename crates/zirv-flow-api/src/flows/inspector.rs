@@ -3,6 +3,11 @@
 //! `read` role. They run in bounded snapshot reads; one that runs past its limit is a `503` with
 //! the code `search_timeout`, and a bad parameter is a `400`.
 
+use hashbrown::HashMap;
+use std::future::Future;
+use std::sync::{Arc, PoisonError};
+use std::time::{Duration, Instant};
+
 use axum::Json;
 use axum::extract::{Path, RawQuery, State};
 use base64::Engine;
@@ -430,8 +435,82 @@ fn count_row(node_id: &str, node_type: String, count: Option<&NodeCount>) -> Nod
     }
 }
 
+/// How long a version's node counts are served from memory. The counts are computed on read
+/// (architecture 9.3, no counter rows); this only bounds how often that read runs for one
+/// version, so a canvas overlay may show counts up to this much out of date.
+const COUNTS_TTL: Duration = Duration::from_secs(5);
+
+/// The most versions whose counts one process keeps; past it the stale and idle ones go first.
+const COUNTS_CACHE_VERSIONS: usize = 256;
+
+type NodeCounts = Arc<HashMap<String, NodeCount>>;
+type CountsSlot = Arc<tokio::sync::Mutex<Option<(Instant, NodeCounts)>>>;
+
+/// The node counts of recently read versions, by (workspace, flow, version), for [`COUNTS_TTL`].
+/// A read of a version nobody else is reading runs the store read; the others that arrive while
+/// it runs wait for its result instead of repeating a scan of every step and message of the
+/// version (#650). A miss that finds nothing or fails is not kept.
+pub(crate) struct CountsCache {
+    ttl: Duration,
+    slots: std::sync::Mutex<HashMap<(Uuid, Uuid, i32), CountsSlot>>,
+}
+
+impl Default for CountsCache {
+    fn default() -> Self {
+        Self::new(COUNTS_TTL)
+    }
+}
+
+impl CountsCache {
+    fn new(ttl: Duration) -> Self {
+        Self {
+            ttl,
+            slots: std::sync::Mutex::default(),
+        }
+    }
+
+    /// The counts of the version: the kept ones while they are fresh, else what `load` reads.
+    async fn get_or_load<E, Fut>(
+        &self,
+        key: (Uuid, Uuid, i32),
+        load: impl FnOnce() -> Fut,
+    ) -> Result<Option<NodeCounts>, E>
+    where
+        Fut: Future<Output = Result<Option<HashMap<String, NodeCount>>, E>>,
+    {
+        let slot = {
+            let mut slots = self.slots.lock().unwrap_or_else(PoisonError::into_inner);
+            if slots.len() >= COUNTS_CACHE_VERSIONS && !slots.contains_key(&key) {
+                // A slot someone holds is being read or waited for; the rest are kept only
+                // while fresh.
+                slots.retain(|_, slot| {
+                    Arc::strong_count(slot) > 1
+                        || slot.try_lock().is_ok_and(|kept| {
+                            kept.as_ref().is_some_and(|(at, _)| at.elapsed() < self.ttl)
+                        })
+                });
+            }
+            Arc::clone(slots.entry(key).or_default())
+        };
+        let mut kept = slot.lock().await;
+        if let Some((at, counts)) = kept.as_ref()
+            && at.elapsed() < self.ttl
+        {
+            return Ok(Some(Arc::clone(counts)));
+        }
+        *kept = None;
+        let Some(counts) = load().await? else {
+            return Ok(None);
+        };
+        let counts = Arc::new(counts);
+        *kept = Some((Instant::now(), Arc::clone(&counts)));
+        Ok(Some(counts))
+    }
+}
+
 /// How many enrollments entered, finished, wait at and failed at each node of one version,
-/// computed from the rows when asked.
+/// computed from the rows when asked. A version's counts are kept for 5 seconds, so a refresh of
+/// the canvas shows counts up to that much out of date.
 #[utoipa::path(
     get,
     operation_id = "get_flow_version_counts",
@@ -461,7 +540,11 @@ pub(crate) async fn counts(
     let (graph, settings) = graph_of(&state, workspace.id, flow, version)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    let counts = zirv_flow_store::version_node_counts(&state.pool, workspace.id, flow, version)
+    let counts = state
+        .counts_cache
+        .get_or_load((workspace.id.as_uuid(), flow, version), || {
+            zirv_flow_store::version_node_counts(&state.pool, workspace.id, flow, version)
+        })
         .await?
         .ok_or_else(ApiError::not_found)?;
     let mut nodes: Vec<NodeCountBody> = graph
@@ -610,6 +693,53 @@ mod tests {
 
         assert_eq!(decode_cursor(&text), Some(cursor));
         assert!(!text.contains(['=', '+', '/']));
+    }
+
+    #[tokio::test]
+    async fn concurrent_reads_of_one_version_share_one_load_until_the_counts_go_stale() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let cache = CountsCache::new(Duration::from_millis(200));
+        let loads = AtomicUsize::new(0);
+        let key = (Uuid::now_v7(), Uuid::now_v7(), 1);
+        let read = || {
+            cache.get_or_load(key, || async {
+                loads.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                Ok::<_, ()>(Some(HashMap::from([(
+                    "n".to_owned(),
+                    NodeCount::default(),
+                )])))
+            })
+        };
+
+        let first = futures_util::future::join_all((0..8).map(|_| read())).await;
+
+        assert!(first.iter().all(|reply| matches!(reply, Ok(Some(_)))));
+        assert_eq!(loads.load(Ordering::SeqCst), 1, "one load for eight reads");
+        read().await.unwrap();
+        assert_eq!(loads.load(Ordering::SeqCst), 1, "a fresh read is kept");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        read().await.unwrap();
+        assert_eq!(loads.load(Ordering::SeqCst), 2, "a stale read loads again");
+    }
+
+    #[tokio::test]
+    async fn a_missing_version_and_a_failed_load_are_not_kept() {
+        let cache = CountsCache::new(Duration::from_secs(60));
+        let key = (Uuid::now_v7(), Uuid::now_v7(), 1);
+
+        let none = cache.get_or_load(key, || async { Ok::<_, ()>(None) }).await;
+        let failed = cache
+            .get_or_load(key, || async { Err::<Option<HashMap<_, _>>, _>(()) })
+            .await;
+        let found = cache
+            .get_or_load(key, || async { Ok::<_, ()>(Some(HashMap::new())) })
+            .await;
+
+        assert!(matches!(none, Ok(None)));
+        assert!(failed.is_err());
+        assert!(matches!(found, Ok(Some(_))));
     }
 
     #[test]

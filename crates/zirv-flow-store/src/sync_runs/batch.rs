@@ -722,19 +722,27 @@ async fn apply_events(
     Ok(applied)
 }
 
+/// Whether the run of `$2` in workspace `$1` is the first sync of its stream. The earlier-success
+/// probe is one first-entry read of `sync_runs_succeeded_idx` (workspace, stream), where it once
+/// read the workspace's whole run history for every batch of a stream that had not yet succeeded.
+const IS_FIRST_SYNC: &str = "SELECT r.run_kind = 'sync' AND r.sync_mode <> 'stream' \
+        AND NOT EXISTS ( \
+            SELECT 1 FROM sync_runs p \
+            WHERE p.workspace_id = r.workspace_id AND p.stream_id = r.stream_id \
+              AND p.id <> r.id AND p.run_kind = 'sync' AND p.state = 'succeeded') \
+     FROM sync_runs r WHERE r.workspace_id = $1 AND r.id = $2";
+
 /// Whether the batch belongs to the first sync of a pull stream: no earlier run of the stream
 /// has succeeded. A retried first attempt, whose earlier batches already moved the cursor, is
 /// still the first sync. A reconcile run applies no events, and a consumer (stream-mode) run
 /// has no first sync: neither counts.
 async fn is_first_sync(tx: &mut crate::Tx, batch: &SyncBatch<'_>) -> Result<bool, StoreError> {
-    sqlx::query_scalar(
-        "SELECT r.run_kind = 'sync' AND r.sync_mode <> 'stream' AND NOT EXISTS (              SELECT 1 FROM sync_runs p              WHERE p.workspace_id = r.workspace_id AND p.stream_id = r.stream_id                AND p.id <> r.id AND p.run_kind = 'sync' AND p.state = 'succeeded')          FROM sync_runs r WHERE r.workspace_id = $1 AND r.id = $2",
-    )
-    .bind(batch.workspace.as_uuid())
-    .bind(batch.run_id)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(StoreError::query)
+    sqlx::query_scalar(IS_FIRST_SYNC)
+        .bind(batch.workspace.as_uuid())
+        .bind(batch.run_id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(StoreError::query)
 }
 
 /// The events of a `singly` batch, each with a batch of its own, and what became of each so far:
@@ -3358,6 +3366,62 @@ mod tests {
                 .filter(|sql| sql.contains("FROM people WHERE workspace_id = $1 AND id = ANY($2) ORDER BY id FOR UPDATE"))
                 .count();
             assert_eq!(relocks, 0, "{statements:#?}");
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_first_sync_check_probes_the_succeeded_index_and_not_the_run_history(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let fx = fixture(&pool, "one", "full_refresh").await;
+            // The workspace's history: 60,000 succeeded runs of thirty other streams.
+            for name in 0..30 {
+                let (other_source, other_stream) = super::super::testing::source_with_stream(
+                    &pool,
+                    fx.ws,
+                    &format!("other{name}"),
+                    "full_refresh",
+                )
+                .await;
+                sqlx::query(
+                "INSERT INTO sync_runs (id, workspace_id, source_id, stream_id, state, trigger, \
+                                        sync_mode, trace_id, created_at) \
+                 SELECT gen_random_uuid(), $1, $2, $3, 'succeeded', 'schedule', 'full_refresh', \
+                        gen_random_uuid(), now() - make_interval(secs => g) \
+                 FROM generate_series(1, 2000) g",
+            )
+            .bind(fx.ws.as_uuid())
+            .bind(other_source)
+            .bind(other_stream)
+            .execute(&pool)
+            .await
+            .unwrap();
+            }
+            sqlx::query("ANALYZE sync_runs")
+                .execute(&pool)
+                .await
+                .unwrap();
+
+            let first: bool = sqlx::query_scalar(IS_FIRST_SYNC)
+                .bind(fx.ws.as_uuid())
+                .bind(fx.run.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            let plan: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {IS_FIRST_SYNC}"
+            )))
+            .bind(fx.ws.as_uuid())
+            .bind(fx.run.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+            assert!(first, "no run of the stream has succeeded");
+            let text = plan.to_string();
+            assert!(text.contains("sync_runs_succeeded_idx"), "{plan}");
+            assert!(!text.contains("Seq Scan"), "{plan}");
         })
         .await;
     }
