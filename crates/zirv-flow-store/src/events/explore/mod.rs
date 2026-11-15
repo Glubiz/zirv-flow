@@ -226,9 +226,48 @@ pub struct PreparedScope {
     people: Option<Vec<Uuid>>,
     /// The properties of the published schema of the name, when there is a name and one.
     schema: Option<Vec<SchemaProperty>>,
+    /// For a viewer without access to values, each property a gated use (a non-exact filter, the
+    /// breakdown) reads: the schema versions that declare it plain. The scan covers only events of
+    /// those versions, the rule row masking applies to each event by its own version.
+    plain_versions: Vec<(String, Vec<i32>)>,
 }
 
 impl PreparedScope {
+    /// Limits the scan, for a property a viewer without access reads through a gated use, to
+    /// the events whose own schema version declares it non-PII and not an object.
+    async fn restrict_to_plain(
+        &mut self,
+        connection: &mut PgConnection,
+        workspace: WorkspaceId,
+        name: &str,
+        key: &str,
+    ) -> Result<(), ExploreError> {
+        if self.plain_versions.iter().any(|(held, _)| held == key) {
+            return Ok(());
+        }
+        let versions: Vec<(i32, Json<Vec<SchemaProperty>>)> = sqlx::query_as(
+            "SELECT version, properties FROM event_schema_versions \n             WHERE workspace_id = $1 AND name = $2",
+        )
+        .bind(workspace.as_uuid())
+        .bind(name)
+        .fetch_all(connection)
+        .await
+        .map_err(bounded)?;
+        let plain = versions
+            .into_iter()
+            .filter(|(_, properties)| {
+                properties.0.iter().any(|property| {
+                    property.name == key
+                        && !property.pii
+                        && property.property_type != PropertyType::Object
+                })
+            })
+            .map(|(version, _)| version)
+            .collect();
+        self.plain_versions.push((key.to_owned(), plain));
+        Ok(())
+    }
+
     /// The declared type of `key`; `None` when undeclared or there is no published schema.
     fn declared(&self, key: &str) -> Option<&SchemaProperty> {
         self.schema
@@ -277,6 +316,7 @@ async fn prepare(
         planned: Vec::new(),
         people: None,
         schema,
+        plain_versions: Vec::new(),
     };
     for filter in scope.filters {
         let declared = prepared.declared(&filter.key);
@@ -285,6 +325,14 @@ async fn prepare(
         if !reveal && !plain && !filter.op.is_exact() {
             check_key("filters.key", &filter.key).map_err(|(f, r)| invalid(f, r))?;
             return Err(ExploreError::PiiPropertyNotExplorable);
+        }
+        if !reveal
+            && !filter.op.is_exact()
+            && let Some(name) = scope.name
+        {
+            prepared
+                .restrict_to_plain(connection, workspace, name, &filter.key)
+                .await?;
         }
         let planned = plan(filter, kind).map_err(|(field, reason)| invalid(field, reason))?;
         prepared.planned.push(planned);
@@ -422,6 +470,11 @@ fn push_scope(
         qb.push(" AND ");
         push_test(qb, planned);
     }
+    for (_, versions) in &prepared.plain_versions {
+        qb.push(" AND e.schema_version = ANY(")
+            .push_bind(versions.clone())
+            .push(")");
+    }
 }
 
 fn row_limit(limits: ExploreLimits) -> i64 {
@@ -516,6 +569,12 @@ pub async fn explore_breakdown(
             .is_some_and(|declared| !declared.pii && declared.property_type != PropertyType::Object)
     {
         return Err(ExploreError::PiiPropertyNotExplorable);
+    }
+    let mut prepared = prepared;
+    if !reveal && let Some(name) = scope.name {
+        prepared
+            .restrict_to_plain(&mut tx, workspace, name, property)
+            .await?;
     }
     // One scan: the groups by value, then the top values and both totals from the groups.
     // `->>` is SQL NULL for an absent key and for a JSON null, exactly the events the old
@@ -1568,5 +1627,147 @@ mod tests {
         assert_eq!(first.rows[0], undecided(&plain.rows[0]));
         assert_eq!(second.rows[0], undecided(&plain.rows[1]));
         assert!(second.next.is_none());
+    }
+    /// Publishes a new version of `name` declaring `properties`.
+    async fn republish(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        name: &str,
+        properties: Vec<SchemaProperty>,
+    ) {
+        crate::events::save_schema_draft(pool, ws, name, &properties)
+            .await
+            .unwrap();
+        let mut tx = begin(pool).await.unwrap();
+        publish_schema_draft(&mut tx, ws, name, None).await.unwrap();
+        commit(tx).await.unwrap();
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_old_pii_value_stays_hidden_after_a_later_schema_unflags_the_property(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        publish(
+            &pool,
+            ws,
+            "order",
+            vec![property("email", PropertyType::String, true)],
+        )
+        .await;
+        send(
+            &pool,
+            ws,
+            "a@example.com",
+            "order",
+            3,
+            json!({"email": "a@example.com"}),
+        )
+        .await;
+        republish(
+            &pool,
+            ws,
+            "order",
+            vec![property("email", PropertyType::String, false)],
+        )
+        .await;
+        send(
+            &pool,
+            ws,
+            "b@example.com",
+            "order",
+            2,
+            json!({"email": "b@example.com"}),
+        )
+        .await;
+        let prefix = [ExploreFilter {
+            key: "email".into(),
+            op: FilterOp::Prefix,
+            value: Some(json!("a")),
+        }];
+
+        let breakdown = explore_breakdown(
+            &pool,
+            ws,
+            &scope(Some("order"), &[]),
+            "email",
+            LIMITS,
+            false,
+        )
+        .await
+        .unwrap();
+        let probe = explore_total(&pool, ws, &scope(Some("order"), &prefix), LIMITS, false)
+            .await
+            .unwrap();
+        let revealed = explore_total(&pool, ws, &scope(Some("order"), &prefix), LIMITS, true)
+            .await
+            .unwrap();
+
+        // Only the event of the version that declared the property plain is visible.
+        assert_eq!(
+            breakdown.values,
+            vec![("b@example.com".to_owned(), 1)],
+            "breakdown leaked: {breakdown:?}"
+        );
+        assert_eq!(probe, 0, "the prefix probe reached the old PII value");
+        assert_eq!(revealed, 1, "a viewer with access still sees it");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn events_of_an_older_version_that_declared_the_property_plain_stay_explorable(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        publish(
+            &pool,
+            ws,
+            "order",
+            vec![property("plan", PropertyType::String, false)],
+        )
+        .await;
+        send(
+            &pool,
+            ws,
+            "a@example.com",
+            "order",
+            3,
+            json!({"plan": "free"}),
+        )
+        .await;
+        republish(
+            &pool,
+            ws,
+            "order",
+            vec![
+                property("plan", PropertyType::String, false),
+                property("email", PropertyType::String, true),
+            ],
+        )
+        .await;
+        send(
+            &pool,
+            ws,
+            "b@example.com",
+            "order",
+            2,
+            json!({"plan": "pro"}),
+        )
+        .await;
+        send(
+            &pool,
+            ws,
+            "c@example.com",
+            "order",
+            1,
+            json!({"plan": "team"}),
+        )
+        .await;
+
+        let breakdown =
+            explore_breakdown(&pool, ws, &scope(Some("order"), &[]), "plan", LIMITS, false)
+                .await
+                .unwrap();
+
+        assert_eq!(breakdown.values.len(), 3, "{breakdown:?}");
     }
 }

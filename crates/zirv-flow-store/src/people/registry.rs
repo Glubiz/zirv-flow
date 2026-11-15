@@ -130,6 +130,10 @@ pub async fn list_trait_definitions<'e>(
 #[derive(Debug, Default)]
 pub(crate) struct Definitions {
     by_key: HashMap<String, Option<TraitDefinition>>,
+    /// The workspace's inferred definitions (archived ones included, they never go away), read
+    /// once per batch and counted up as the batch infers more: a soft cap, since a batch running
+    /// at the same time is not counted.
+    inferred: Option<i64>,
 }
 
 impl Definitions {
@@ -179,6 +183,33 @@ impl Definitions {
         let found = find_trait_definition(connection, workspace, key).await?;
         self.by_key.insert(key.to_owned(), found);
         Ok(())
+    }
+
+    /// How many inferred definitions the workspace holds, read on the first call of a batch.
+    pub(crate) async fn inferred_count(
+        &mut self,
+        connection: &mut sqlx::PgConnection,
+        workspace: WorkspaceId,
+    ) -> Result<i64, StoreError> {
+        if let Some(count) = self.inferred {
+            return Ok(count);
+        }
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM trait_definitions WHERE workspace_id = $1 AND inferred",
+        )
+        .bind(workspace.as_uuid())
+        .fetch_one(connection)
+        .await
+        .map_err(StoreError::query)?;
+        self.inferred = Some(count);
+        Ok(count)
+    }
+
+    /// Counts one more inferred definition this batch created.
+    pub(crate) fn note_inferred(&mut self) {
+        if let Some(count) = &mut self.inferred {
+            *count += 1;
+        }
     }
 
     /// The definition of a key [`Definitions::load`] has read; `None` when it has none or was

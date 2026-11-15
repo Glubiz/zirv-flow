@@ -28,7 +28,9 @@ use zirv_flow_core::contacts::{
 };
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
-use super::definition::{contact_registry, find_contact_definition, typed_definition};
+use super::definition::{
+    ContactDefinition, contact_registry, find_contact_definition, typed_definition,
+};
 use super::records::{Contact, find_contact};
 use crate::people::{
     NativeWrite, ProfileOutcome, ProfileRecord, apply_native_record, remove_contribution_in,
@@ -250,12 +252,22 @@ async fn archived_identifiers(
     stored: &Map<String, Value>,
     registry: &[RegistryKey],
 ) -> Result<Vec<(String, String)>, StoreError> {
-    let Some(definition) = find_contact_definition(&mut *connection, workspace).await? else {
-        return Ok(Vec::new());
+    let definition = find_contact_definition(&mut *connection, workspace).await?;
+    Ok(archived_from(definition.as_ref(), stored, registry))
+}
+
+/// [`archived_identifiers`] over a definition already read.
+fn archived_from(
+    definition: Option<&ContactDefinition>,
+    stored: &Map<String, Value>,
+    registry: &[RegistryKey],
+) -> Vec<(String, String)> {
+    let Some(definition) = definition else {
+        return Vec::new();
     };
-    Ok(definition
+    definition
         .fields
-        .into_iter()
+        .iter()
         .filter(|field| {
             registry
                 .iter()
@@ -263,9 +275,9 @@ async fn archived_identifiers(
         })
         .filter_map(|field| {
             let value = stored.get(&field.key)?.as_str()?;
-            Some((field.identifier?, value.to_owned()))
+            Some((field.identifier.clone()?, value.to_owned()))
         })
-        .collect())
+        .collect()
 }
 
 /// A patch keeps stored identifiers whose kind no writable definition field produces. Read
@@ -306,15 +318,48 @@ pub(crate) async fn replace_stored_fields(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     record: &mut ProfileRecord,
+    batch: &mut ContactBatch,
 ) -> Result<(), StoreError> {
     if let Some(contact) = find_contact(connection, workspace, &record.record_key).await? {
-        let registry = contact_registry(connection, workspace).await?;
-        retract_absent(&mut record.traits, &live_fields(&contact.fields, &registry));
+        let (registry, definition) = batch.read(connection, workspace).await?;
+        retract_absent(&mut record.traits, &live_fields(&contact.fields, registry));
         record
             .identifiers
-            .extend(archived_identifiers(connection, workspace, &contact.fields, &registry).await?);
+            .extend(archived_from(definition, &contact.fields, registry));
     }
     Ok(())
+}
+
+/// What a drain batch reads once for all its contacts: the field registry and the contact
+/// definition, which are the workspace's, not a contact's. Read at the first existing contact
+/// (a batch of new contacts reads neither), then reused. Only the archived flags of the registry
+/// matter here, and a key the batch itself infers is never archived, so the one way this goes
+/// stale is an archive that commits while the batch runs; that archive enqueues its own
+/// recompute, and the next batch reads it. A contact definition change is likewise first seen by
+/// the next batch, but enqueues no recompute. Later contacts in the batch are written under the
+/// registry and definition read at its start, and that write (an archived email identity kept via
+/// `archived_from`, say) is not undone.
+#[derive(Default)]
+pub(crate) struct ContactBatch {
+    read: Option<(Vec<RegistryKey>, Option<ContactDefinition>)>,
+}
+
+impl ContactBatch {
+    async fn read(
+        &mut self,
+        connection: &mut PgConnection,
+        workspace: WorkspaceId,
+    ) -> Result<(&[RegistryKey], Option<&ContactDefinition>), StoreError> {
+        let read = match &mut self.read {
+            Some(read) => read,
+            empty => {
+                let registry = contact_registry(connection, workspace).await?;
+                let definition = find_contact_definition(&mut *connection, workspace).await?;
+                empty.insert((registry, definition))
+            }
+        };
+        Ok((&read.0, read.1.as_ref()))
+    }
 }
 
 fn merge_patch(mut fields: Map<String, Value>, patch: Map<String, Value>) -> Map<String, Value> {

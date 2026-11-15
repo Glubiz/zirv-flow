@@ -327,8 +327,13 @@ pub(crate) async fn remove_contribution_in(
         .await
         .map_err(StoreError::query)?;
     let (record_id, person_id, traits, identifiers): (Uuid, Uuid, Value, Value) = sqlx::query_as(
-        "UPDATE source_records SET deleted_at = now(), updated_at = now() \
-             WHERE id = $1 RETURNING id, person_id, traits, identifiers",
+        // The tombstone keeps no personal data: the old traits and identifiers are returned for
+        // the key set and the identity cleanup, then emptied in the row itself.
+        "WITH old AS (SELECT id, person_id, traits, identifiers FROM source_records WHERE id = $1) \
+         UPDATE source_records s SET deleted_at = now(), updated_at = now(), \
+             traits = '{}'::jsonb, identifiers = '[]'::jsonb, content_hash = ''::bytea \
+         FROM old WHERE s.id = old.id \
+         RETURNING old.id, old.person_id, old.traits, old.identifiers",
     )
     .bind(locked_id)
     .fetch_one(&mut *connection)
@@ -832,6 +837,14 @@ pub(crate) fn normalize_identifiers(
     Ok(identifiers)
 }
 
+/// The most new inferred definitions one record may register; the rest of its unregistered keys
+/// are dropped as `not_inferable`. Registered keys are never affected.
+const MAX_INFERRED_PER_RECORD: usize = 50;
+
+/// The most inferred definitions a workspace may hold (archived ones count). Counted once per
+/// batch, so concurrent batches can overshoot it by one batch's worth.
+const MAX_INFERRED_PER_WORKSPACE: i64 = 1000;
+
 /// The accepted changes (`None` removes the key) and the dropped traits of a record.
 type Prepared = (Vec<(String, Option<Value>)>, Vec<DroppedTrait>);
 
@@ -857,6 +870,7 @@ async fn prepare_traits(
         .await?;
     let mut updates = Vec::new();
     let mut dropped = Vec::new();
+    let mut inferred_here = 0;
     for (key, value) in sorted {
         let mut drop = |reason: DropReason| {
             dropped.push(DroppedTrait {
@@ -890,7 +904,19 @@ async fn prepare_traits(
                     continue;
                 }
             };
-            insert_inferred_definition(connection, workspace, key, inferred).await?;
+            if inferred_here >= MAX_INFERRED_PER_RECORD
+                || definitions
+                    .inferred_count(&mut *connection, workspace)
+                    .await?
+                    >= MAX_INFERRED_PER_WORKSPACE
+            {
+                drop(DropReason::NotInferable);
+                continue;
+            }
+            if insert_inferred_definition(connection, workspace, key, inferred).await? {
+                inferred_here += 1;
+                definitions.note_inferred();
+            }
             definitions.reload(&mut *connection, workspace, key).await?;
             definition = known(definitions);
         }
@@ -1002,6 +1028,20 @@ struct Normalized<'a> {
     observed: Option<&'a [String]>,
 }
 
+/// How far ahead of the server clock a sender-supplied `observed_at` may be. A later one is
+/// taken as a wrong clock and stamped with the time of receipt: kept verbatim, it would make every
+/// later update of the key look stale.
+const FUTURE_SKEW: time::Duration = time::Duration::seconds(300);
+
+/// `observed_at`, or `now` when it is more than [`FUTURE_SKEW`] ahead of it.
+fn clamp_observed_at(observed_at: OffsetDateTime, now: OffsetDateTime) -> OffsetDateTime {
+    if observed_at > now + FUTURE_SKEW {
+        now
+    } else {
+        observed_at
+    }
+}
+
 async fn upsert_ledger_row(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -1016,8 +1056,8 @@ async fn upsert_ledger_row(
         hash,
         observed,
     } = normalized;
-    let at = record
-        .observed_at
+    let observed_at = clamp_observed_at(record.observed_at, OffsetDateTime::now_utc());
+    let at = observed_at
         .to_offset(UtcOffset::UTC)
         .format(&Rfc3339)
         .map_err(|_| decode_error("observed_at cannot be formatted"))?;
@@ -1036,7 +1076,7 @@ async fn upsert_ledger_row(
             .and_then(|entry| entry.get("at"))
             .and_then(Value::as_str)
             .and_then(|stored| OffsetDateTime::parse(stored, &Rfc3339).ok())
-            .is_some_and(|stored| record.observed_at < stored);
+            .is_some_and(|stored| observed_at < stored);
         if stale {
             skipped = true;
             continue;
@@ -3352,5 +3392,173 @@ mod tests {
         let removed = marks().await;
         assert_eq!(removed.len(), 1);
         assert_eq!(removed[0].1 & 3, 3);
+    }
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_removed_record_keeps_no_traits_or_identifiers_in_its_tombstone(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let at = datetime!(2026-01-01 00:00 UTC);
+        let outcomes = apply_profile_batch(
+            &pool,
+            ws,
+            &[
+                record(
+                    "crm",
+                    "1",
+                    "a@example.com",
+                    json!({"plan": "free", "tier": "gold"}),
+                    at,
+                ),
+                record("shop", "9", "a@example.com", json!({"tier": "gold"}), at),
+            ],
+        )
+        .await
+        .unwrap();
+        let person = person_of(&outcomes[0]);
+
+        assert!(
+            remove_contribution(&pool, ws, "crm", "contacts", "1", &trace())
+                .await
+                .unwrap()
+        );
+
+        let (traits, identifiers, hash): (Value, Value, Vec<u8>) = sqlx::query_as(
+            "SELECT traits, identifiers, content_hash FROM source_records \
+             WHERE source = 'crm' AND deleted_at IS NOT NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(traits, json!({}), "tombstone traits");
+        assert_eq!(identifiers, json!([]), "tombstone identifiers");
+        assert!(hash.is_empty(), "tombstone content hash");
+        // The person survives through the shop record: the removed record's own trait is gone,
+        // the shared one stays, and the shared email stays.
+        assert_eq!(trait_of(&pool, ws, person, "plan").await, None);
+        assert_eq!(
+            trait_of(&pool, ws, person, "tier").await,
+            Some(json!("gold"))
+        );
+    }
+
+    #[test]
+    fn an_observation_far_ahead_of_the_clock_is_stamped_with_the_time_of_receipt() {
+        let now = datetime!(2026-02-01 00:00 UTC);
+        assert_eq!(clamp_observed_at(datetime!(2099-01-01 00:00 UTC), now), now);
+        // Inside the skew, at the edge and in the past, the sender's time stands.
+        let edge = now + time::Duration::seconds(300);
+        assert_eq!(clamp_observed_at(edge, now), edge);
+        let past = datetime!(2020-01-01 00:00 UTC);
+        assert_eq!(clamp_observed_at(past, now), past);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_far_future_observation_does_not_freeze_later_updates_of_the_trait(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let far = record(
+            "crm",
+            "1",
+            "a@example.com",
+            json!({"plan": "free"}),
+            datetime!(2099-01-01 00:00 UTC),
+        );
+        let person = person_of(&apply_profile_batch(&pool, ws, &[far]).await.unwrap()[0]);
+        assert_eq!(
+            trait_of(&pool, ws, person, "plan").await,
+            Some(json!("free"))
+        );
+
+        // The far-future stamp was clamped to the time of receipt, so an update observed after
+        // it (a second later here) applies. Kept verbatim, 2099 would make it stale.
+        let later = record(
+            "crm",
+            "1",
+            "a@example.com",
+            json!({"plan": "pro"}),
+            OffsetDateTime::now_utc() + time::Duration::seconds(1),
+        );
+        apply_profile_batch(&pool, ws, &[later]).await.unwrap();
+
+        assert_eq!(
+            trait_of(&pool, ws, person, "plan").await,
+            Some(json!("pro"))
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn distinct_unregistered_keys_in_one_record_do_not_grow_the_registry_without_bound(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        define(&pool, ws, "plan", Precedence::Latest, &[]).await;
+        let mut traits = Map::new();
+        for n in 0..2000 {
+            traits.insert(format!("k{n:04}"), json!(1));
+        }
+        traits.insert("plan".to_owned(), json!("free"));
+        let mut one = record(
+            "crm",
+            "1",
+            "a@example.com",
+            json!({}),
+            datetime!(2026-01-01 00:00 UTC),
+        );
+        one.traits = traits;
+
+        let outcomes = apply_profile_batch(&pool, ws, &[one]).await.unwrap();
+
+        let inferred = crate::people::registry::list_trait_definitions(&pool, ws)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|definition| definition.inferred)
+            .count();
+        assert_eq!(inferred, MAX_INFERRED_PER_RECORD, "inferred definitions");
+        let person = person_of(&outcomes[0]);
+        // A registered key is never affected by the cap.
+        assert_eq!(
+            trait_of(&pool, ws, person, "plan").await,
+            Some(json!("free"))
+        );
+        let ProfileOutcome::Applied { dropped, .. } = &outcomes[0] else {
+            panic!("applied");
+        };
+        assert_eq!(dropped.len(), 2000 - MAX_INFERRED_PER_RECORD);
+        assert!(dropped.iter().all(|d| d.reason == "not_inferable"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_workspace_stops_inferring_definitions_at_its_cap(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let at = datetime!(2026-01-01 00:00 UTC);
+        // Fill the registry to just under the cap with inferred definitions.
+        sqlx::query(
+            "INSERT INTO trait_definitions (workspace_id, key, type, precedence, inferred) \
+             SELECT $1, 'f' || n, 'string', 'latest', true FROM generate_series(1, $2) n",
+        )
+        .bind(ws.as_uuid())
+        .bind(MAX_INFERRED_PER_WORKSPACE - 2)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut one = record("crm", "1", "a@example.com", json!({}), at);
+        one.traits = json!({"n1": 1, "n2": 2, "n3": 3, "n4": 4})
+            .as_object()
+            .cloned()
+            .unwrap();
+
+        apply_profile_batch(&pool, ws, &[one]).await.unwrap();
+
+        let inferred: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM trait_definitions WHERE workspace_id = $1 AND inferred",
+        )
+        .bind(ws.as_uuid())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(inferred, MAX_INFERRED_PER_WORKSPACE);
     }
 }

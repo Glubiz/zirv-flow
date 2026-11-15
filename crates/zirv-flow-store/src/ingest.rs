@@ -26,7 +26,7 @@ use zirv_flow_core::contacts;
 use zirv_flow_core::people::Identifier;
 use zirv_flow_core::{Cause, HmacKey, TraceContext, TraceId, WorkspaceId};
 
-use crate::contacts::{lock_contacts, replace_stored_fields};
+use crate::contacts::{ContactBatch, lock_contacts, replace_stored_fields};
 use crate::events::{
     DroppedTraits, EventBatch, EventOutcome, EventRecord, FailedItem, Refusal, apply_event_group,
     apply_event_record, insert_dropped_traits_reject, insert_record_rejects, reject_apply_failed,
@@ -971,20 +971,16 @@ async fn delete_rows(
 /// row is applied, so a single write of the same contact (which holds the lock while it reads
 /// and writes) and this drain see each other's fields. See the module doc of `contacts::write`
 /// for the lock orders.
-async fn lock_contact_rows(
+async fn lock_contact_rows<'a>(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
-    rows: &[InboxRow],
+    mapped: impl IntoIterator<Item = &'a Mapped>,
 ) -> Result<(), StoreError> {
-    let keys: Vec<String> = rows
-        .iter()
-        .filter(|row| row.kind == "contact")
-        .filter_map(|row| match map_row(row) {
-            Some(Mapped::Contact(record)) => Some(record.record_key),
-            _ => None,
-        })
-        .collect();
-    lock_contacts(connection, workspace, keys.iter().map(String::as_str)).await
+    let keys = mapped.into_iter().filter_map(|mapped| match mapped {
+        Mapped::Contact(record) => Some(record.record_key.as_str()),
+        _ => None,
+    });
+    lock_contacts(connection, workspace, keys).await
 }
 
 /// Applies a contact record so that it replaces the stored contact's fields.
@@ -994,7 +990,13 @@ async fn apply_contact(
     record: &ProfileRecord,
 ) -> Result<ProfileOutcome, StoreError> {
     let mut record = record.clone();
-    replace_stored_fields(connection, workspace, &mut record).await?;
+    replace_stored_fields(
+        connection,
+        workspace,
+        &mut record,
+        &mut ContactBatch::default(),
+    )
+    .await?;
     apply_profile_record(connection, workspace, &record).await
 }
 
@@ -1005,9 +1007,10 @@ async fn apply_contact_into(
     workspace: WorkspaceId,
     record: &ProfileRecord,
     events: &mut EventBatch,
+    contacts: &mut ContactBatch,
 ) -> Result<ProfileOutcome, StoreError> {
     let mut record = record.clone();
-    replace_stored_fields(connection, workspace, &mut record).await?;
+    replace_stored_fields(connection, workspace, &mut record, contacts).await?;
     apply_profile_record_into(
         connection,
         workspace,
@@ -1251,7 +1254,13 @@ async fn drain_rows_as(
     crate::changes::cache_change_readers(connection, workspace).await?;
     let (rows, more, taken) = take_rows(connection, workspace, shard, limit, cursors).await?;
     let hooks = HookConfigs::load(connection, workspace, &rows).await?;
-    lock_contact_rows(connection, workspace, &rows).await?;
+    // Each row is mapped once: the contact locks and the apply below read the same records.
+    let mapped: Vec<Mapped> = rows
+        .iter()
+        .map(|row| map_with(row, &hooks).ok_or_else(StoreError::poison))
+        .collect::<Result<_, _>>()?;
+    lock_contact_rows(connection, workspace, &mapped).await?;
+    let mut contacts = ContactBatch::default();
     let mut outcome = DrainOutcome {
         rows: rows.len(),
         more,
@@ -1264,10 +1273,6 @@ async fn drain_rows_as(
     // recompute their traits together when the batch finishes.
     events.profiles.guard(connection, workspace).await?;
     let mut lists = ListCounts::default();
-    let mapped: Vec<Mapped> = rows
-        .iter()
-        .map(|row| map_with(row, &hooks).ok_or_else(StoreError::poison))
-        .collect::<Result<_, _>>()?;
     // One statement looks up every `messageId` of the batch, instead of one probe per event.
     events
         .prefetch_duplicates(
@@ -1313,7 +1318,9 @@ async fn drain_rows_as(
                 tally_profile(&mut outcome, "identify", &result);
             }
             Mapped::Contact(record) => {
-                let result = apply_contact_into(connection, workspace, record, &mut events).await?;
+                let result =
+                    apply_contact_into(connection, workspace, record, &mut events, &mut contacts)
+                        .await?;
                 // Rolls the batch back, so that the row is isolated and rejected singly.
                 if !dropped_fields(&result).is_empty() {
                     return Err(StoreError::poison());
@@ -1394,13 +1401,14 @@ async fn drain_rows_singly(
     crate::changes::cache_change_readers(connection, workspace).await?;
     let (rows, more, taken) = take_rows(connection, workspace, shard, limit, cursors).await?;
     let hooks = HookConfigs::load(connection, workspace, &rows).await?;
-    lock_contact_rows(connection, workspace, &rows).await?;
+    let mapped: Vec<Option<Mapped>> = rows.iter().map(|row| map_with(row, &hooks)).collect();
+    lock_contact_rows(connection, workspace, mapped.iter().flatten()).await?;
     let mut singly = SinglyRows {
         workspace,
         key,
         rows: &rows,
         hooks: &hooks,
-        mapped: rows.iter().map(|row| map_with(row, &hooks)).collect(),
+        mapped,
         outcome: DrainOutcome {
             rows: rows.len(),
             more,
@@ -1721,6 +1729,56 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(appended, items.len());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_batch_of_existing_contacts_retracts_each_ones_absent_fields_in_one_drain_batch(
+        pool: PgPool,
+    ) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "ours").await;
+            let trace = TraceContext::root(Cause::api("req"));
+            let contact = |round: &str, i: usize, traits: Value| {
+                let mut item = identify("-", &format!("{round}-{i}"), json!({}));
+                item.identifiers = pairs(&[
+                    (contacts::KEY_KIND, &format!("c-{i}")),
+                    ("email", &format!("c{i}@example.com")),
+                ]);
+                item.payload = IngestPayload::Contact {
+                    traits: object(traits),
+                };
+                item
+            };
+            let first: Vec<IngestItem> = (0..3)
+                .map(|i| contact("a", i, json!({"first_name": "Ann", "plan": "pro"})))
+                .collect();
+            append(&pool, ws, &trace, &first).await;
+            drain_batch(&pool, ws, Shard::ALL, &key(), 500)
+                .await
+                .unwrap();
+
+            // The second round leaves `plan` out: the stored contacts lose it, all three in one batch.
+            let second: Vec<IngestItem> = (0..3)
+                .map(|i| contact("b", i, json!({"first_name": "Bea"})))
+                .collect();
+            append(&pool, ws, &trace, &second).await;
+            let outcome = drain_batch(&pool, ws, Shard::ALL, &key(), 500)
+                .await
+                .unwrap();
+
+            assert_eq!(outcome.rows, 3);
+            let mut connection = pool.acquire().await.unwrap();
+            for i in 0..3 {
+                let stored = crate::contacts::find_contact(&mut connection, ws, &format!("c-{i}"))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(stored.fields.get("first_name"), Some(&json!("Bea")));
+                assert_eq!(stored.fields.get("plan"), None, "contact {i}");
+            }
+        })
+        .await;
     }
 
     async fn inbox_count(pool: &PgPool) -> i64 {

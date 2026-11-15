@@ -2,7 +2,7 @@
 //! (architecture section 6; spec #125).
 //!
 //! The payload is `{workspace_id, key, slot}`, plus an `after` person-id cursor on a follow-up
-//! backfill batch. Each run covers one batch in its own transaction and enqueues the next on the
+//! backfill or clear batch. Each run covers one batch in its own transaction and enqueues the next on the
 //! same trace. The last batch enqueues a run with `finish: true`, which takes the exclusive slot
 //! lock as its first statement (holding no row locks) and moves the slot to `ready` (backfill)
 //! or frees it (clear). A job whose assignment has since changed does nothing.
@@ -97,6 +97,7 @@ impl JobKind for TraitsSlotClear {
             &work.key,
             work.slot,
             work.generation,
+            work.after,
         )
         .await?;
         follow_up(ctx, Self::KIND, &work, step).await
