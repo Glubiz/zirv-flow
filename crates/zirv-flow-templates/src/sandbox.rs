@@ -389,10 +389,13 @@ mod tests {
         TEMPLATES.with_borrow_mut(|cache| *cache = TemplateCache::new());
         render_cached(false, "text", "secret text", &context(), 100).unwrap();
         render_cached(true, "html", "secret html", &context(), 100).unwrap();
-        for name in ["t0.txt", "t1.html"] {
+        let macros = "{% macro f() %}secret macro{% endmacro %}";
+        render_cached(false, "text", macros, &context(), 100).unwrap();
+        for name in ["t0.txt", "t1.html", "t2.txt"] {
             for source in [
                 format!("{{% include '{name}' ignore missing %}}"),
-                format!("{{% import '{name}' as other %}}"),
+                format!("{{% import '{name}' as other %}}{{{{ other.f() }}}}"),
+                format!("{{% from '{name}' import f %}}{{{{ f() }}}}"),
                 format!("{{% extends '{name}' %}}"),
             ] {
                 let out = render_cached(false, "text", &source, &context(), 100);
