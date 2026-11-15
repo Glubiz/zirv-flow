@@ -219,6 +219,57 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_tombstone_unsubscribes_like_the_message_it_stands_for(pool: PgPool) {
+        let ws = workspace(&pool, "tomb").await;
+        let (person, id) = message(&pool, ws).await;
+        sqlx::query(
+            "INSERT INTO message_tombstones (message_id, workspace_id, person_id, enrollment_id, \
+                template_id, topic_id, dimensions, status, completed_at) \
+             SELECT id, workspace_id, person_id, enrollment_id, template_id, topic_id, \
+                dimensions, status, completed_at FROM messages WHERE id = $1",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("DELETE FROM messages WHERE id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let tracked = find_tracked_message(&pool, id).await.unwrap().unwrap();
+
+        let outcome = unsubscribe_message(
+            &pool,
+            &tracked,
+            datetime!(2031-05-06 07:08:09 UTC),
+            &trace(),
+        )
+        .await
+        .unwrap();
+
+        assert!(tracked.purged);
+        assert_eq!(outcome, Unsubscribed::Changed);
+        let status: String = sqlx::query_scalar(
+            "SELECT status FROM consent WHERE person_id = $1 AND channel = 'email'",
+        )
+        .bind(person)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "unsubscribed");
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT count(*) FROM events WHERE name = 'email.unsubscribed'"
+            )
+            .await,
+            1
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_unsubscribe_denies_consent_once_and_a_repeat_writes_nothing(pool: PgPool) {
         let ws = workspace(&pool, "unsub").await;
         let (person, id) = message(&pool, ws).await;

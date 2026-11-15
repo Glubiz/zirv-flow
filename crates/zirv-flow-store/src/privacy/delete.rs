@@ -149,6 +149,7 @@ const DELETIONS: &[&str] = &[
     "DELETE FROM message_links WHERE workspace_id = $1 AND message_id IN 
         (SELECT id FROM messages WHERE workspace_id = $1 AND person_id = ANY($2))",
     "DELETE FROM messages WHERE workspace_id = $1 AND person_id = ANY($2)",
+    "DELETE FROM message_tombstones WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM enrollments WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM template_preview_people WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM segment_members WHERE workspace_id = $1 AND person_id = ANY($2)",

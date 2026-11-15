@@ -60,6 +60,7 @@ pub const EXPORT_SECTIONS: &[(&str, &[&str])] = &[
     ("flow_entries", &["flow_entries"]),
     ("messages", &["messages"]),
     ("message_links", &["message_links"]),
+    ("message_tombstones", &["message_tombstones"]),
     ("forwarding_outbox", &["forwarding_outbox"]),
     ("erasure_handled_markers", &["erasure_handled_markers"]),
     ("ingest_rejects", &["ingest_rejects"]),
@@ -648,6 +649,14 @@ async fn person_document(
              ORDER BY m.created_at, l.message_id, l.link_index",
         )
         .await?;
+    let message_tombstones = section
+        .rows(
+            "SELECT message_id, person_id, enrollment_id, template_id, topic_id, dimensions, \
+               status, completed_at, created_at \
+               FROM message_tombstones WHERE workspace_id = $1 AND person_id = ANY($2) \
+               ORDER BY created_at, message_id",
+        )
+        .await?;
     let forwarding_outbox = section
         .rows(
             "SELECT id, destination_id, rule_id, event_id, person_id, idempotency_key, payload, \
@@ -713,6 +722,7 @@ async fn person_document(
                 flow_entries,
                 messages,
                 message_links,
+                message_tombstones,
                 forwarding_outbox,
                 erasure_handled_markers,
                 ingest_rejects,
@@ -760,6 +770,7 @@ struct Sections {
     flow_entries: Vec<Box<RawValue>>,
     messages: Vec<Box<RawValue>>,
     message_links: Vec<Box<RawValue>>,
+    message_tombstones: Vec<Box<RawValue>>,
     forwarding_outbox: Vec<Box<RawValue>>,
     erasure_handled_markers: Vec<Box<RawValue>>,
     ingest_rejects: Vec<Box<RawValue>>,
@@ -1017,6 +1028,7 @@ mod tests {
                 "the survivor's and the merged person's"
             );
             assert_eq!(count("message_links"), 1);
+            assert_eq!(count("message_tombstones"), 1);
             assert_eq!(
                 count("forwarding_outbox"),
                 3,

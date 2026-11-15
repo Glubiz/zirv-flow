@@ -11,7 +11,7 @@ mod settings;
 mod slots;
 
 pub use settings::{
-    CapMode, FrequencyCap, NewFrequencyCap, QuietHours, SendLimits, read_send_limits,
-    replace_send_limits,
+    CapMode, FrequencyCap, NewFrequencyCap, QuietHours, SendLimits, read_quiet_hours,
+    read_send_limits, replace_send_limits,
 };
 pub use slots::{CAP_LOCK_CLASS, CapVerdict, check_frequency_caps, record_message_deferral};

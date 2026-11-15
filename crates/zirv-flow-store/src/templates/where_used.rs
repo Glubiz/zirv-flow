@@ -79,31 +79,50 @@ pub struct TemplateFlowUse {
 }
 
 /// The active flows that send any of `templates`: flows whose running version names one of them,
-/// by the rule of [`template_where_used`]. An archived flow is not listed. By flow name.
+/// by the rule of [`template_where_used`]. An archived flow is not listed. By flow name. One read
+/// of the running versions, whatever the number of templates.
 pub async fn active_flows_using(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     templates: &[Uuid],
 ) -> Result<Vec<TemplateFlowUse>, StoreError> {
+    let named: Vec<String> = templates.iter().map(Uuid::to_string).collect();
+    let rows: Vec<(Uuid, String, String, String)> = sqlx::query_as(
+        "SELECT DISTINCT f.id, f.name, f.state, node ->> 'template' \
+           FROM flow_versions v \
+           JOIN flows f ON f.workspace_id = v.workspace_id AND f.id = v.flow_id \
+           AND f.current_version = v.version \
+           CROSS JOIN LATERAL jsonb_array_elements(CASE \
+           WHEN jsonb_typeof(v.graph -> 'nodes') = 'array' THEN v.graph -> 'nodes' \
+           ELSE '[]'::jsonb END) node \
+           WHERE v.workspace_id = $1 AND f.state <> 'archived' \
+           AND node ->> 'template' = ANY($2::text[])",
+    )
+    .bind(workspace.as_uuid())
+    .bind(&named)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
     let mut flows: HashMap<Uuid, TemplateFlowUse> = HashMap::new();
-    for &template in templates {
-        for used in template_where_used(&mut *connection, workspace, template).await? {
-            if !used.active || used.flow_state == "archived" {
-                continue;
-            }
-            flows
-                .entry(used.flow_id)
-                .or_insert_with(|| TemplateFlowUse {
-                    flow_id: used.flow_id,
-                    flow_name: used.flow_name.clone(),
-                    flow_state: used.flow_state.clone(),
-                    template_ids: Vec::new(),
-                })
-                .template_ids
-                .push(template);
-        }
+    for (flow_id, flow_name, flow_state, template) in rows {
+        let Ok(template) = template.parse::<Uuid>() else {
+            continue;
+        };
+        flows
+            .entry(flow_id)
+            .or_insert_with(|| TemplateFlowUse {
+                flow_id,
+                flow_name,
+                flow_state,
+                template_ids: Vec::new(),
+            })
+            .template_ids
+            .push(template);
     }
     let mut active: Vec<TemplateFlowUse> = flows.into_values().collect();
+    for flow in &mut active {
+        flow.template_ids.sort_unstable();
+    }
     active.sort_by(|a, b| {
         (a.flow_name.to_lowercase(), a.flow_id).cmp(&(b.flow_name.to_lowercase(), b.flow_id))
     });
@@ -353,10 +372,11 @@ mod tests {
         // Many templates, so the planner has a template to be selective about.
         sqlx::query(
             "INSERT INTO messages (id, workspace_id, person_id, enrollment_id, flow_id, node_id, \
-                template_id, destination_id, status, test, created_at, completed_at) \
+                template_id, template_version, destination_id, status, test, created_at, \
+                completed_at) \
              SELECT gen_random_uuid(), $1, $2, gen_random_uuid(), gen_random_uuid(), 'n', \
-                ('00000000-0000-7000-8000-' || lpad((n % 200)::text, 12, '0'))::uuid, \
-                gen_random_uuid(), 'sent', false, now(), now() \
+                ('00000000-0000-7000-8000-' || lpad((n % 200)::text, 12, '0'))::uuid, 1, \
+                gen_random_uuid(), 'sent', false, now() - (n % 100) * interval '1 day', now() \
              FROM generate_series(1, 4000) n",
         )
         .bind(ws.as_uuid())
@@ -416,5 +436,57 @@ mod tests {
         assert!(ids.contains(&running) && ids.contains(&also));
         assert_eq!(counts.get(&template), Some(&2));
         assert_eq!(counts.len(), 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_active_flows_are_found_by_their_running_version_in_one_read(pool: PgPool) {
+        let ws = flows::workspace(&pool, "one").await;
+        let (a, b) = (Uuid::now_v7(), Uuid::now_v7());
+        // Version 1 names `a`; the running version 2 names `b`.
+        let moved = publish_flow_naming(&pool, ws, "Moved", Some(a)).await;
+        republish_naming(&pool, ws, moved, b).await;
+        let archived = publish_flow_naming(&pool, ws, "Archived", Some(a)).await;
+        flows::lifecycle(&pool, ws, archived, crate::FlowAction::Archive)
+            .await
+            .unwrap();
+        let both = publish_flow_naming(&pool, ws, "Both", Some(a)).await;
+        let mut connection = pool.acquire().await.unwrap();
+        let patch = FlowPatch {
+            graph: Some(json!({"v": 1, "nodes": [
+                {"id": "x", "type": "action.send", "template": a.to_string()},
+                {"id": "y", "type": "action.send", "template": b.to_string()}], "edges": []})),
+            ..FlowPatch::default()
+        };
+        update_flow_draft(&mut connection, ws, both, &patch)
+            .await
+            .unwrap();
+        drop(connection);
+        flows::publish(&pool, ws, both).await.unwrap();
+
+        let mut connection = pool.acquire().await.unwrap();
+        let used = active_flows_using(&mut connection, ws, &[a, b])
+            .await
+            .unwrap();
+        let only_a = active_flows_using(&mut connection, ws, &[a]).await.unwrap();
+
+        let mut both_ids = vec![a, b];
+        both_ids.sort_unstable();
+        assert_eq!(
+            used.iter()
+                .map(|flow| (flow.flow_name.as_str(), flow.template_ids.clone()))
+                .collect::<Vec<_>>(),
+            vec![("Both", both_ids), ("Moved", vec![b])]
+        );
+        assert_eq!(
+            only_a.iter().map(|flow| flow.flow_id).collect::<Vec<_>>(),
+            vec![both]
+        );
+        assert!(
+            active_flows_using(&mut connection, ws, &[])
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

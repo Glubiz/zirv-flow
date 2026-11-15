@@ -146,7 +146,9 @@ pub(crate) async fn open(
             return gif();
         }
     };
-    let Some(message) = message.filter(|message| message.status == "sent") else {
+    // A purged message has only its tombstone: nothing is recorded against a message that is gone.
+    let Some(message) = message.filter(|message| message.status == "sent" && !message.purged)
+    else {
         return gif();
     };
     let now = state.clock.now_in_process();
@@ -216,8 +218,8 @@ pub(crate) async fn click(
 /// Records `email.clicked` for the link; the redirect does not wait on, or fail with, the write.
 async fn record_click(state: &AppState, claims: &Claims) {
     let message = match find_tracked_message(&state.pool, claims.message).await {
-        Ok(Some(message)) => message,
-        Ok(None) => return,
+        Ok(Some(message)) if !message.purged => message,
+        Ok(_) => return,
         Err(error) => {
             warn!(%error, "a click could not be recorded");
             return;
@@ -776,6 +778,65 @@ mod tests {
 
         assert_eq!((reply.status, reply.body.len()), (StatusCode::OK, 43));
         assert_eq!(fixture.count("SELECT count(*) FROM events").await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn after_the_message_is_purged_the_unsubscribe_link_works_and_open_and_click_do_not(
+        pool: PgPool,
+    ) {
+        let fixture = Fixture::new(pool, "purged", "sent", 3600).await;
+        record_message_links(
+            &fixture.pool,
+            fixture.ws,
+            fixture.message,
+            &[(0, "https://example.com/a".to_owned())],
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE messages SET created_at = now() - interval '400 days'")
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+        zirv_flow_store::apply_message_retention(
+            &fixture.pool,
+            &zirv_flow_store::MessageRetention::default(),
+            time::OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fixture.count("SELECT count(*) FROM messages").await, 0);
+        let unsubscribe = format!("/u/{}", fixture.token(TokenKind::Unsubscribe, 0));
+
+        let page = fixture.call("GET", &unsubscribe, None, "").await;
+        let one_click = fixture
+            .call("POST", &unsubscribe, None, "List-Unsubscribe=One-Click")
+            .await;
+        let open = fixture
+            .call(
+                "GET",
+                &format!("/t/o/{}", fixture.token(TokenKind::Open, 0)),
+                None,
+                "",
+            )
+            .await;
+        let click = fixture
+            .call(
+                "GET",
+                &format!("/t/c/{}", fixture.token(TokenKind::Click, 0)),
+                None,
+                "",
+            )
+            .await;
+
+        assert_eq!(page.status, StatusCode::OK);
+        assert_eq!(one_click.status, StatusCode::OK);
+        assert!(!fixture.allowed(None, &Dimensions::new()).await);
+        assert_eq!(fixture.events("email.unsubscribed").await.len(), 1);
+        assert_eq!((open.status, open.body.len()), (StatusCode::OK, 43));
+        assert!(fixture.events("email.opened").await.is_empty());
+        assert_eq!(click.status, StatusCode::NOT_FOUND);
+        assert!(fixture.events("email.clicked").await.is_empty());
     }
 
     #[sqlx::test]

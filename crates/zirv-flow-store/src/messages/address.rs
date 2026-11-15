@@ -21,42 +21,34 @@ pub async fn read_send_address(
     workspace: WorkspaceId,
     person: Uuid,
 ) -> Result<Option<String>, StoreError> {
-    let keys: Vec<String> = sqlx::query_scalar(
-        "SELECT key FROM trait_definitions \
-         WHERE workspace_id = $1 AND channel_address AND NOT archived ORDER BY key",
-    )
-    .bind(workspace.as_uuid())
-    .fetch_all(&mut *connection)
-    .await
-    .map_err(StoreError::query)?;
-    if !keys.is_empty() {
-        let traits: Option<Value> =
-            sqlx::query_scalar("SELECT traits FROM people WHERE workspace_id = $1 AND id = $2")
-                .bind(workspace.as_uuid())
-                .bind(person)
-                .fetch_optional(&mut *connection)
-                .await
-                .map_err(StoreError::query)?;
-        let held = traits.as_ref().and_then(Value::as_object);
-        let from_trait = keys
-            .iter()
-            .filter_map(|key| held?.get(key)?.as_str())
-            .find_map(email_of);
-        if from_trait.is_some() {
-            return Ok(from_trait);
-        }
+    // One statement, so the three reads share a snapshot and cost one round trip.
+    let (keys, traits, identities): (Option<Vec<String>>, Option<Value>, Option<Vec<String>>) =
+        sqlx::query_as(
+            "SELECT \
+               (SELECT array_agg(key ORDER BY key) FROM trait_definitions \
+               WHERE workspace_id = $1 AND channel_address AND NOT archived), \
+               (SELECT traits FROM people WHERE workspace_id = $1 AND id = $2), \
+               (SELECT array_agg(value ORDER BY created_at DESC, id DESC) FROM identities \
+               WHERE workspace_id = $1 AND person_id = $2 AND kind = 'email')",
+        )
+        .bind(workspace.as_uuid())
+        .bind(person)
+        .fetch_one(connection)
+        .await
+        .map_err(StoreError::query)?;
+    let held = traits.as_ref().and_then(Value::as_object);
+    let from_trait = keys
+        .iter()
+        .flatten()
+        .filter_map(|key| held?.get(key)?.as_str())
+        .find_map(email_of);
+    if from_trait.is_some() {
+        return Ok(from_trait);
     }
-    let identities: Vec<String> = sqlx::query_scalar(
-        "SELECT value FROM identities \
-         WHERE workspace_id = $1 AND person_id = $2 AND kind = 'email' \
-         ORDER BY created_at DESC, id DESC",
-    )
-    .bind(workspace.as_uuid())
-    .bind(person)
-    .fetch_all(&mut *connection)
-    .await
-    .map_err(StoreError::query)?;
-    Ok(identities.iter().find_map(|value| email_of(value)))
+    Ok(identities
+        .iter()
+        .flatten()
+        .find_map(|value| email_of(value)))
 }
 
 /// The normalized email address `value` stands for, if it is one.
@@ -189,6 +181,31 @@ mod tests {
                 .as_deref(),
             Some("fallback@identity.example"),
             "a flagged trait that holds no valid address falls back to the identity"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_address_is_one_statement_with_or_without_a_flagged_trait(pool: PgPool) {
+        let ws = workspace(&pool).await;
+        let one = person(&pool, ws, json!({"work_email": "ada@trait.example"})).await;
+        identity(&pool, ws, one, "email", "id@identity.example", 1).await;
+        let mut connection = pool.acquire().await.unwrap();
+        // A second dispatch keeps the statement capture from being lost to a cached callsite.
+        let _keep = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+
+        let (without, plain) =
+            crate::people::statements_of(read_send_address(&mut connection, ws, one)).await;
+        flag(&pool, ws, "work_email", true, false).await;
+        let (with, flagged) =
+            crate::people::statements_of(read_send_address(&mut connection, ws, one)).await;
+
+        assert_eq!(without.unwrap().as_deref(), Some("id@identity.example"));
+        assert_eq!(with.unwrap().as_deref(), Some("ada@trait.example"));
+        assert_eq!(
+            (plain.len(), flagged.len()),
+            (1, 1),
+            "{plain:?} {flagged:?}"
         );
     }
 

@@ -39,4 +39,6 @@ pub use ledger_files::{
     update_ledger_lists, write_ledger_file,
 };
 
-pub(crate) use handled_markers::{delete_and_mark, event_columns, mark_partition};
+pub(crate) use handled_markers::{
+    delete_and_mark, delete_and_mark_with, event_columns, mark_partition,
+};

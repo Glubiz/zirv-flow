@@ -468,4 +468,106 @@ mod tests {
             Err(SnippetError::NotFound)
         ));
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_draft_save_naming_a_snippet_waits_for_its_archive_check(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let snippet = create(&pool, ws, "Offer").await;
+        let template = crate::templates::tests_support::create(&pool, ws, "T").await;
+        // Stops the archive between its check of the drafts and its write.
+        sqlx::raw_sql(
+            "CREATE FUNCTION pause_archive() RETURNS trigger LANGUAGE plpgsql AS \
+               $$ BEGIN PERFORM pg_advisory_xact_lock(777); RETURN NEW; END $$; \
+               CREATE TRIGGER pause_archive BEFORE UPDATE OF archived_at ON snippets \
+               FOR EACH ROW EXECUTE FUNCTION pause_archive()",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut holder = pool.acquire().await.unwrap();
+        sqlx::query("SELECT pg_advisory_lock(777)")
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+        let archive = tokio::spawn({
+            let pool = pool.clone();
+            async move {
+                let mut tx = pool.begin().await.unwrap();
+                let archived = archive_snippet(&mut tx, ws, snippet.id).await;
+                tx.commit().await.unwrap();
+                archived
+            }
+        });
+        let archiver = wait_for(
+            &pool,
+            &archive,
+            "SELECT pid FROM pg_locks WHERE locktype = \
+               'advisory' AND NOT granted",
+            None,
+            "the archive waited for its write",
+        )
+        .await;
+
+        let save = tokio::spawn({
+            let pool = pool.clone();
+            async move {
+                let mut tx = pool.begin().await.unwrap();
+                let document = json!({"schema": 1, "channel": "email", "mode": "blocks",
+                    "blocks": {"sections": [{"columns": [[
+                        {"type": "snippet", "snippet_id": snippet.id}]]}]}});
+                crate::templates::save_template_draft(&mut tx, ws, template.id, &document, None)
+                    .await
+                    .unwrap();
+                tx.commit().await.unwrap();
+            }
+        });
+        // The save has to wait for the archive; saving past it is the race.
+        wait_for(
+            &pool,
+            &save,
+            "SELECT pid FROM pg_stat_activity WHERE $1 = \
+               ANY(pg_blocking_pids(pid))",
+            Some(archiver),
+            "the save waited for the archive",
+        )
+        .await;
+        sqlx::query("SELECT pg_advisory_unlock(777)")
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+
+        let archived = archive.await.unwrap().unwrap();
+        save.await.unwrap();
+        // Written after the archive, so the save may name the archived snippet, as it always could.
+        assert!(archived.archived_at.is_some());
+    }
+
+    /// Polls for the pid a statement returns, failing if `task` ends first.
+    async fn wait_for<T>(
+        pool: &PgPool,
+        task: &tokio::task::JoinHandle<T>,
+        sql: &'static str,
+        bind: Option<i32>,
+        until: &str,
+    ) -> i32 {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let mut query = sqlx::query_scalar::<_, i32>(sql);
+                if let Some(pid) = bind {
+                    query = query.bind(pid);
+                }
+                if let Some(pid) = query.fetch_optional(pool).await.unwrap() {
+                    return pid;
+                }
+                assert!(
+                    !task.is_finished(),
+                    "the transaction finished before {until}"
+                );
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the transaction must wait")
+    }
 }

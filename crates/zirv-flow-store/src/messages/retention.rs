@@ -2,6 +2,10 @@
 //! deleted in batches, and each batch writes the handled markers of the rows it removes in the
 //! same statement (`privacy::delete_and_mark`), so a purge never loses the fact that a
 //! destination handled a person. Every batch commits on its own and a rerun is idempotent.
+//!
+//! A `sent` message leaves a tombstone (`message_tombstones`) in the same statement, so the
+//! unsubscribe and preference links of its mail still work after the purge. Click links do not:
+//! `message_links` goes with the message.
 
 use hashbrown::HashMap;
 use sqlx::PgPool;
@@ -43,7 +47,7 @@ pub struct MessageRetentionReport {
 /// the default days and `$6` the shortest of all windows, which bounds the index scan. A message
 /// still `pending` or `sending` belongs to a live job and stays.
 fn batch_statement() -> String {
-    crate::privacy::delete_and_mark(
+    crate::privacy::delete_and_mark_with(
         "DELETE FROM messages m USING ( \
             SELECT x.workspace_id, x.id FROM messages x \
             WHERE x.status IN ('sent', 'skipped', 'failed') \
@@ -54,7 +58,17 @@ fn batch_statement() -> String {
             ORDER BY x.created_at, x.id LIMIT $2) d \
          WHERE m.workspace_id = d.workspace_id AND m.id = d.id \
          RETURNING m.workspace_id, m.person_id, m.destination_id::text AS destination, \
-                   m.created_at AS handled_at",
+                   m.created_at AS handled_at, m.id AS message_id, m.enrollment_id, \
+                   m.template_id, m.topic_id, m.dimensions, m.status, m.completed_at",
+        // A sent mail carries an unsubscribe and a preference link that name only its message id.
+        // The tombstone keeps what those pages read, so the links outlive the message.
+        ", tombstoned AS (INSERT INTO message_tombstones (message_id, workspace_id, person_id, \
+                enrollment_id, template_id, topic_id, dimensions, status, completed_at) \
+            SELECT g.message_id, g.workspace_id, g.person_id, g.enrollment_id, g.template_id, \
+                g.topic_id, g.dimensions, g.status, g.completed_at FROM gone g \
+            JOIN people p ON p.workspace_id = g.workspace_id AND p.id = g.person_id \
+            WHERE g.status = 'sent' \
+            ON CONFLICT (message_id) DO NOTHING RETURNING 1)",
     )
 }
 
@@ -132,6 +146,7 @@ mod tests {
     use time::macros::datetime;
 
     use super::*;
+    use crate::TrackedMessage;
     use crate::privacy::testing::seed_everything;
     use crate::{NewDestination, create_destination};
 
@@ -257,6 +272,7 @@ mod tests {
         assert!(sql.contains("status IN ('sent', 'skipped', 'failed')"));
         assert!(sql.contains("ORDER BY x.created_at, x.id LIMIT $2"));
         assert!(sql.contains("INSERT INTO erasure_handled_markers"));
+        assert!(sql.contains("INSERT INTO message_tombstones"));
     }
 
     #[sqlx::test]
@@ -272,6 +288,54 @@ mod tests {
         assert_eq!(report.messages_deleted, 1);
         assert_eq!(nodes(&pool).await, ["new"]);
         assert_eq!(count(&pool, "message_links").await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_purged_sent_message_leaves_a_tombstone_the_unsubscribe_link_still_reads(
+        pool: PgPool,
+    ) {
+        use crate::tracking::find_tracked_message;
+
+        let (ws, person, destination) = world(&pool).await;
+        let sent = message(&pool, (ws, person, destination), 400, "sent", "sent").await;
+        let skipped = message(&pool, (ws, person, destination), 400, "skipped", "skipped").await;
+        let kept = message(&pool, (ws, person, destination), 5, "sent", "kept").await;
+        link(&pool, ws, sent).await;
+        let before = find_tracked_message(&pool, sent).await.unwrap().unwrap();
+        let seeded = count(&pool, "message_tombstones").await;
+
+        run(&pool).await;
+
+        let tombstone = find_tracked_message(&pool, sent).await.unwrap().unwrap();
+        assert!(tombstone.purged && !before.purged);
+        assert_eq!(
+            TrackedMessage {
+                purged: false,
+                ..tombstone
+            },
+            before,
+            "the person, topic, dimensions and enrollment are those of the message"
+        );
+        assert_eq!(count(&pool, "message_links").await, 0, "clicks stay 404");
+        assert!(
+            find_tracked_message(&pool, skipped)
+                .await
+                .unwrap()
+                .is_none(),
+            "a mail that never went out has no link to keep"
+        );
+        assert!(
+            !find_tracked_message(&pool, kept)
+                .await
+                .unwrap()
+                .unwrap()
+                .purged
+        );
+        assert_eq!(count(&pool, "message_tombstones").await, seeded + 1);
+        // A second run purges nothing and writes no second tombstone.
+        run(&pool).await;
+        assert_eq!(count(&pool, "message_tombstones").await, seeded + 1);
     }
 
     #[sqlx::test]
