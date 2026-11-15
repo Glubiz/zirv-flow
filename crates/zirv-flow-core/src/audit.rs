@@ -280,7 +280,11 @@ fn looks_like_phone(text: &str) -> bool {
 /// A `Bearer ` header value, a JWT (three base64url parts) or a long unbroken run of token
 /// characters. A uuid is exempt.
 fn looks_like_token(text: &str) -> bool {
-    if text.len() >= 7 && text[..7].eq_ignore_ascii_case("bearer ") {
+    if text
+        .as_bytes()
+        .get(..7)
+        .is_some_and(|head| head.eq_ignore_ascii_case(b"bearer "))
+    {
         return true;
     }
     if uuid::Uuid::parse_str(text).is_ok() {
@@ -456,5 +460,10 @@ mod tests {
         assert_eq!(area("flow.created"), "flow");
         assert_eq!(area("identity_conflict.kept_separate"), "identity_conflict");
         assert_eq!(area("bare"), "bare");
+    }
+
+    #[test]
+    fn a_multibyte_character_across_the_bearer_prefix_does_not_panic() {
+        assert!(validate_summary(&serde_json::json!({"note": "abcdef日本"})).is_ok());
     }
 }
