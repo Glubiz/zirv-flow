@@ -747,7 +747,11 @@ async fn apply_record(
 /// Records what a resolution did beyond picking a person: the split from the person the
 /// record would have joined, identifiers left off a full person, and the identifiers shared
 /// with people it could not merge into. A conflict is one open row per person pair and
-/// source record, with a decision for each new one. The source record is absent for an event.
+/// source record, with a decision for each new one. The source record is absent for an event. A
+/// conflict the marketer already kept separate (same people, source record and identity) is not
+/// raised again: the partial unique index covers only open rows, so the insert checks for it. A
+/// resolution that commits between the check and the insert at worst leaves one open conflict
+/// to dismiss.
 pub(crate) async fn record_resolution(
     connection: &mut PgConnection,
     decisions: &mut DecisionBuffer,
@@ -786,7 +790,15 @@ pub(crate) async fn record_resolution(
             "INSERT INTO identity_conflicts \
                 (id, workspace_id, person_id, other_person_id, kind, source_record_id, reason, \
                  identity_id) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+             SELECT $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::text, $6::uuid, $7::text, \
+                    $8::uuid \
+             WHERE NOT EXISTS (SELECT 1 FROM identity_conflicts k \
+                 WHERE k.workspace_id = $2 AND k.person_id = $3 AND k.other_person_id = $4 \
+                   AND COALESCE(k.source_record_id, '00000000-0000-0000-0000-000000000000'::uuid) \
+                       = COALESCE($6, '00000000-0000-0000-0000-000000000000'::uuid) \
+                   AND COALESCE(k.identity_id, '00000000-0000-0000-0000-000000000000'::uuid) \
+                       = COALESCE($8, '00000000-0000-0000-0000-000000000000'::uuid) \
+                   AND k.resolution = 'kept_separate') \
              ON CONFLICT (workspace_id, person_id, other_person_id, \
                           (COALESCE(source_record_id, '00000000-0000-0000-0000-000000000000'::uuid)), \
                           (COALESCE(identity_id, '00000000-0000-0000-0000-000000000000'::uuid))) \

@@ -9421,6 +9421,58 @@ a@example.com
         }
     }
 
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_upload_erased_after_its_last_full_chunk_finishes_with_import_erased(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let router = router(AppState::new(pool.clone(), Arc::new(String::new)));
+        admin::create_owner(&pool, &Context::system(), OWNER_EMAIL, PASSWORD)
+            .await
+            .unwrap();
+        let owner = login(&router, OWNER_EMAIL).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let workspace_id: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
+        // Exactly one stored chunk, so nothing is pending when the body ends.
+        let mut first = format!("Email\n{}", "ada@example.com\n".repeat(70_000)).into_bytes();
+        first.resize(zirv_flow_store::CHUNK_BYTES, b'a');
+        let erasing = {
+            let pool = pool.clone();
+            futures_util::stream::once(async move {
+                let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+                zirv_flow_store::erase_import_values(
+                    &mut tx,
+                    workspace_id,
+                    &["ada@example.com".into()],
+                )
+                .await
+                .unwrap();
+                zirv_flow_store::commit(tx).await.unwrap();
+                Ok::<_, std::io::Error>(Vec::new())
+            })
+        };
+        let body = Body::from_stream(futures_util::StreamExt::chain(
+            futures_util::stream::iter([Ok::<_, std::io::Error>(first)]),
+            erasing,
+        ));
+        let request = Request::builder()
+            .method("POST")
+            .uri(imports_uri(&ws, "?name=x"))
+            .header(header::CONTENT_TYPE, "text/csv")
+            .header(header::COOKIE, &owner.cookie)
+            .header("x-csrf-token", &owner.csrf)
+            .body(body)
+            .unwrap();
+
+        let reply = router.clone().oneshot(request).await.unwrap();
+
+        assert_eq!(reply.status(), StatusCode::CONFLICT);
+        let bytes = axum::body::to_bytes(reply.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let problem: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(problem["code"], "import_erased");
+    }
+
     // ---- The event debugger, the explorer and reject replay (#45) ----
 
     fn app_limits(limits: crate::ExplorerLimits) -> impl Fn(&PgPool) -> Router {

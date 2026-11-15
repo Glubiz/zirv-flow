@@ -526,6 +526,7 @@ mod tests {
         let row = ConsentExportRow {
             person_id: PERSON.parse().unwrap(),
             channel: "email".into(),
+            topic_id: Some(Uuid::nil()),
             topic_key: Some("news".into()),
             dimensions: json!({"vertical": "retail"}),
             status: "unsubscribed".into(),

@@ -393,6 +393,28 @@ pub(super) async fn write_state(
     Ok((change_id, applied))
 }
 
+/// How often a read follows a merge that commits while it runs before it gives up.
+///
+/// Resolving the person and reading their rows are two statements, and a merge that commits
+/// between them moves the rows to the survivor (`move_on_merge`), so the read of the old id comes
+/// back empty (for `consent_read`, the topic's default policy then applies). Each read therefore
+/// resolves the person again afterwards ([`moved_to`]) and repeats for the new id when it
+/// changed. Merges are compressed to one hop, so the second resolution is final; a person that
+/// keeps changing is a retryable race.
+const CURRENT_ROUNDS: usize = 3;
+
+/// Where `person` stands after a read of the rows of `read`: `Ok(None)` when it is still `read`,
+/// `Ok(Some(None))` when the person is gone and `Ok(Some(Some(id)))` when a merge moved it.
+async fn moved_to(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    person: Uuid,
+    read: Uuid,
+) -> Result<Option<Option<Uuid>>, StoreError> {
+    let now = current_person(&mut *connection, workspace, person).await?;
+    Ok((now != Some(read)).then_some(now))
+}
+
 /// The current states of a person, the channel-wide one first and then by topic key. The
 /// person is followed through `merged_into`. `None` when the workspace has no such person.
 pub async fn consent_for(
@@ -400,22 +422,31 @@ pub async fn consent_for(
     workspace: WorkspaceId,
     person: Uuid,
 ) -> Result<Option<Vec<ConsentEntry>>, StoreError> {
-    let Some(person) = current_person(pool, workspace, person).await? else {
+    let mut connection = pool.acquire().await.map_err(StoreError::query)?;
+    let Some(mut used) = current_person(&mut *connection, workspace, person).await? else {
         return Ok(None);
     };
-    let entries = sqlx::query_as(
-        "SELECT c.channel, c.topic_id, t.key AS topic_key, t.name AS topic_name, c.dimensions, \
-                c.status, c.explicit, c.changed_at \
-         FROM consent c LEFT JOIN topics t ON t.workspace_id = c.workspace_id AND t.id = c.topic_id \
-         WHERE c.workspace_id = $1 AND c.person_id = $2 \
-         ORDER BY c.channel, t.key NULLS FIRST, c.dimensions_key",
-    )
-    .bind(workspace.as_uuid())
-    .bind(person)
-    .fetch_all(pool)
-    .await
-    .map_err(StoreError::query)?;
-    Ok(Some(entries))
+    for _ in 0..CURRENT_ROUNDS {
+        let entries = sqlx::query_as(
+            "SELECT c.channel, c.topic_id, t.key AS topic_key, t.name AS topic_name, \
+                    c.dimensions, c.status, c.explicit, c.changed_at \
+             FROM consent c \
+             LEFT JOIN topics t ON t.workspace_id = c.workspace_id AND t.id = c.topic_id \
+             WHERE c.workspace_id = $1 AND c.person_id = $2 \
+             ORDER BY c.channel, t.key NULLS FIRST, c.dimensions_key",
+        )
+        .bind(workspace.as_uuid())
+        .bind(used)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
+        match moved_to(&mut connection, workspace, person, used).await? {
+            None => return Ok(Some(entries)),
+            Some(Some(now)) => used = now,
+            Some(None) => return Ok(None),
+        }
+    }
+    Err(StoreError::retryable_race())
 }
 
 /// One row of the consent export: a person's state for a channel, topic and dimension scope.
@@ -423,6 +454,7 @@ pub async fn consent_for(
 pub struct ConsentExportRow {
     pub person_id: Uuid,
     pub channel: String,
+    pub topic_id: Option<Uuid>,
     pub topic_key: Option<String>,
     pub dimensions: Value,
     pub status: String,
@@ -436,7 +468,7 @@ impl ConsentExportRow {
         ConsentExportCursor {
             person_id: self.person_id,
             channel: self.channel.clone(),
-            topic_key: self.topic_key.clone().unwrap_or_default(),
+            topic_id: self.topic_id,
             dimensions_key: self.dimensions_key.clone(),
         }
     }
@@ -447,34 +479,57 @@ impl ConsentExportRow {
 pub struct ConsentExportCursor {
     person_id: Uuid,
     channel: String,
-    topic_key: String,
+    topic_id: Option<Uuid>,
     dimensions_key: String,
 }
 
-/// A page of every consent state of the workspace, in the order person, channel, topic key
-/// (the channel-wide state first) and canonical dimension scope, after `after`.
+/// A page of every consent state of the workspace, in the order person, channel, topic id
+/// (the channel-wide state last) and canonical dimension scope, after `after`. That is the order
+/// of the `consent_scope_key` index, so a page reads the index from the cursor and a late page
+/// costs the same as the first. The `topic_id` bound is written out because a row comparison
+/// cannot order a missing topic.
 pub async fn consent_export_page(
     pool: &PgPool,
     workspace: WorkspaceId,
     after: Option<&ConsentExportCursor>,
     limit: u32,
 ) -> Result<Vec<ConsentExportRow>, StoreError> {
+    // The bound on `person_id` leads, so the index scan starts at the cursor's person; the rest
+    // only drops that person's earlier rows.
+    const AFTER: &str = "AND c.person_id >= $2 AND (c.person_id > $2 OR c.channel > $3 \
+            OR (c.channel = $3 AND (($4::uuid IS NOT NULL AND (c.topic_id > $4 OR c.topic_id IS NULL)) \
+                OR (c.topic_id IS NOT DISTINCT FROM $4 AND c.dimensions_key > $5))))";
+    let page = |bound: &str| {
+        format!(
+            "SELECT p.person_id, p.channel, p.topic_id, t.key AS topic_key, p.dimensions, \
+                    p.status, p.dimensions_key \
+             FROM (SELECT c.workspace_id, c.person_id, c.channel, c.topic_id, c.dimensions, \
+                          c.status, c.dimensions_key \
+                   FROM consent c WHERE c.workspace_id = $1 {bound} \
+                   ORDER BY c.person_id, c.channel, c.topic_id NULLS LAST, c.dimensions_key \
+                   LIMIT $6) p \
+             LEFT JOIN topics t ON t.workspace_id = p.workspace_id AND t.id = p.topic_id \
+             ORDER BY p.person_id, p.channel, p.topic_id NULLS LAST, p.dimensions_key"
+        )
+    };
     let nil = ConsentExportCursor {
         person_id: Uuid::nil(),
         channel: String::new(),
-        topic_key: String::new(),
+        topic_id: None,
         dimensions_key: String::new(),
     };
     let start = after.unwrap_or(&nil);
-    sqlx::query_as(
-        "SELECT c.person_id, c.channel, t.key AS topic_key, c.dimensions, c.status,                 c.dimensions_key          FROM consent c          LEFT JOIN topics t ON t.workspace_id = c.workspace_id AND t.id = c.topic_id          WHERE c.workspace_id = $1            AND ($6 OR (c.person_id, c.channel, COALESCE(t.key, ''), c.dimensions_key)                     > ($2, $3, $4, $5))          ORDER BY c.person_id, c.channel, COALESCE(t.key, ''), c.dimensions_key LIMIT $7",
-    )
+    // The statements are built from the constants above, never from input.
+    sqlx::query_as(sqlx::AssertSqlSafe(page(if after.is_some() {
+        AFTER
+    } else {
+        ""
+    })))
     .bind(workspace.as_uuid())
     .bind(start.person_id)
     .bind(&start.channel)
-    .bind(&start.topic_key)
+    .bind(start.topic_id)
     .bind(&start.dimensions_key)
-    .bind(after.is_none())
     .bind(i64::from(limit))
     .fetch_all(pool)
     .await
@@ -540,21 +595,35 @@ pub async fn consent_read(
     {
         return Ok(ReadOutcome::NoSuchDimension);
     }
-    let Some(person) = current_person(&mut *connection, workspace, person).await? else {
+    let Some(mut used) = current_person(&mut *connection, workspace, person).await? else {
         return Ok(ReadOutcome::NoSuchPerson);
     };
-    let rows: Vec<RecordRow> = sqlx::query_as(
-        "SELECT t.key AS topic_key, c.dimensions, c.status, c.changed_at, c.last_change_id \
+    let mut settled = None;
+    for _ in 0..CURRENT_ROUNDS {
+        let rows: Vec<RecordRow> = sqlx::query_as(
+            "SELECT t.key AS topic_key, c.dimensions, c.status, c.changed_at, c.last_change_id \
              FROM consent c \
              LEFT JOIN topics t ON t.workspace_id = c.workspace_id AND t.id = c.topic_id \
              WHERE c.workspace_id = $1 AND c.person_id = $2 AND c.channel = $3",
-    )
-    .bind(workspace.as_uuid())
-    .bind(person)
-    .bind(channel.as_str())
-    .fetch_all(&mut *connection)
-    .await
-    .map_err(StoreError::query)?;
+        )
+        .bind(workspace.as_uuid())
+        .bind(used)
+        .bind(channel.as_str())
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
+        match moved_to(&mut connection, workspace, person, used).await? {
+            None => {
+                settled = Some(rows);
+                break;
+            }
+            Some(Some(now)) => used = now,
+            Some(None) => return Ok(ReadOutcome::NoSuchPerson),
+        }
+    }
+    let Some(rows) = settled else {
+        return Err(StoreError::retryable_race());
+    };
     let mut records = Vec::with_capacity(rows.len());
     for row in rows {
         let mut scope = dimensions_of(&row.dimensions);
@@ -594,31 +663,41 @@ pub async fn consent_history(
     before: Option<(OffsetDateTime, Uuid)>,
     within: &Dimensions,
 ) -> Result<Option<(Vec<ConsentHistoryEntry>, bool)>, StoreError> {
-    let Some(person) = current_person(pool, workspace, person).await? else {
+    let mut connection = pool.acquire().await.map_err(StoreError::query)?;
+    let Some(mut used) = current_person(&mut *connection, workspace, person).await? else {
         return Ok(None);
     };
-    let mut rows: Vec<ConsentHistoryEntry> = sqlx::query_as(
-        "SELECT c.id, c.channel, c.topic_id, t.key AS topic_key, c.dimensions, c.from_status, \
-                c.to_status, c.source, c.evidence, c.occurred_at, c.actor_user_id \
-         FROM consent_changes c \
-         LEFT JOIN topics t ON t.workspace_id = c.workspace_id AND t.id = c.topic_id \
-         WHERE c.workspace_id = $1 AND c.person_id = $2 \
-           AND ($3::timestamptz IS NULL OR (c.occurred_at, c.id) < ($3, $4)) \
-           AND c.dimensions @> $6 \
-         ORDER BY c.occurred_at DESC, c.id DESC LIMIT $5",
-    )
-    .bind(workspace.as_uuid())
-    .bind(person)
-    .bind(before.map(|(at, _)| at))
-    .bind(before.map(|(_, id)| id))
-    .bind(i64::from(limit) + 1)
-    .bind(dimensions_json(within))
-    .fetch_all(pool)
-    .await
-    .map_err(StoreError::query)?;
-    let more = rows.len() > limit as usize;
-    rows.truncate(limit as usize);
-    Ok(Some((rows, more)))
+    for _ in 0..CURRENT_ROUNDS {
+        let mut rows: Vec<ConsentHistoryEntry> = sqlx::query_as(
+            "SELECT c.id, c.channel, c.topic_id, t.key AS topic_key, c.dimensions, c.from_status, \
+                    c.to_status, c.source, c.evidence, c.occurred_at, c.actor_user_id \
+             FROM consent_changes c \
+             LEFT JOIN topics t ON t.workspace_id = c.workspace_id AND t.id = c.topic_id \
+             WHERE c.workspace_id = $1 AND c.person_id = $2 \
+               AND ($3::timestamptz IS NULL OR (c.occurred_at, c.id) < ($3, $4)) \
+               AND c.dimensions @> $6 \
+             ORDER BY c.occurred_at DESC, c.id DESC LIMIT $5",
+        )
+        .bind(workspace.as_uuid())
+        .bind(used)
+        .bind(before.map(|(at, _)| at))
+        .bind(before.map(|(_, id)| id))
+        .bind(i64::from(limit) + 1)
+        .bind(dimensions_json(within))
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
+        match moved_to(&mut connection, workspace, person, used).await? {
+            None => {
+                let more = rows.len() > limit as usize;
+                rows.truncate(limit as usize);
+                return Ok(Some((rows, more)));
+            }
+            Some(Some(now)) => used = now,
+            Some(None) => return Ok(None),
+        }
+    }
+    Err(StoreError::retryable_race())
 }
 
 #[cfg(test)]
@@ -632,6 +711,7 @@ mod tests {
     use zirv_flow_core::{Cause, Slug, WorkspaceName};
 
     use super::*;
+    use crate::consent::move_on_merge;
     use crate::people::{ProfileOutcome, ProfileRecord, apply_profile_batch};
     use crate::{NewTopic, begin, commit, create_topic, create_workspace, list_trace};
 
@@ -1290,7 +1370,7 @@ mod tests {
             let mut seen = Vec::new();
             let mut cursor = None;
             loop {
-                let page = consent_export_page(&pool, ws, cursor.as_ref(), 3)
+                let page = consent_export_page(&pool, ws, cursor.as_ref(), 2)
                     .await
                     .unwrap();
                 let Some(last) = page.last() else { break };
@@ -1308,13 +1388,15 @@ mod tests {
                     )
                 })
                 .collect();
+            // Within a person and channel the topics come in id order and the channel-wide
+            // state last (the order of the `consent_scope_key` index).
             let mut ordered = vec![
-                (ada, None, ""),
                 (ada, Some("news"), ""),
                 (ada, Some("news"), "vertical=retail"),
+                (ada, None, ""),
                 (bob, None, "vertical=retail"),
             ];
-            ordered.sort_by_key(|(who, topic, dims)| (*who, topic.unwrap_or(""), *dims));
+            ordered.sort_by_key(|(who, topic, dims)| (*who, topic.is_none(), *dims));
             assert_eq!(shown, ordered);
         })
         .await;
@@ -1831,6 +1913,166 @@ mod tests {
                 json!({"person": person, "consent_change": change}),
             )
             .await;
+        })
+        .await;
+    }
+
+    /// Merges `loser` into `survivor` in a transaction that holds `consent` locked, so a read
+    /// that resolved `loser` before the merge waits at its consent query and runs after the merge
+    /// committed.
+    async fn merge_while_reading<T: Send + 'static>(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        (loser, survivor): (Uuid, Uuid),
+        read: impl std::future::Future<Output = T> + Send + 'static,
+    ) -> T {
+        let mut tx = begin(pool).await.unwrap();
+        crate::changes::cache_change_readers(&mut tx, ws)
+            .await
+            .unwrap();
+        sqlx::query("LOCK TABLE consent IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let reading = tokio::spawn(read);
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        sqlx::query("UPDATE people SET merged_into = $1 WHERE id = $2")
+            .bind(survivor)
+            .bind(loser)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        move_on_merge(
+            &mut tx,
+            ws,
+            loser,
+            survivor,
+            &TraceContext::root(Cause::api("test")),
+        )
+        .await
+        .unwrap();
+        commit(tx).await.unwrap();
+        reading.await.unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_merge_committing_mid_read_does_not_turn_an_unsubscribe_into_allowed(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            let loser = person(&pool, ws, PERSONAL_DATA.email).await;
+            let survivor = person(&pool, ws, "ada2@example.com").await;
+            let news = topic(&pool, ws, "news").await;
+            let trace = TraceContext::root(Cause::api("test"));
+            set(
+                &pool,
+                ws,
+                &change(loser, Some(news), ConsentStatus::Unsubscribed, T1),
+                &trace,
+            )
+            .await;
+
+            let outcome = merge_while_reading(&pool, ws, (loser, survivor), {
+                let pool = pool.clone();
+                async move {
+                    consent_read(
+                        &pool,
+                        ws,
+                        loser,
+                        Channel::Email,
+                        Some(news),
+                        &Dimensions::new(),
+                    )
+                    .await
+                    .unwrap()
+                }
+            })
+            .await;
+
+            let ReadOutcome::Read { verdict, .. } = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert!(!verdict.allowed, "verdict: {verdict:?}");
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_merge_committing_mid_list_does_not_hide_the_survivors_states(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            let loser = person(&pool, ws, PERSONAL_DATA.email).await;
+            let survivor = person(&pool, ws, "ada2@example.com").await;
+            let news = topic(&pool, ws, "news").await;
+            let trace = TraceContext::root(Cause::api("test"));
+            set(
+                &pool,
+                ws,
+                &change(loser, Some(news), ConsentStatus::Unsubscribed, T1),
+                &trace,
+            )
+            .await;
+
+            let states = merge_while_reading(&pool, ws, (loser, survivor), {
+                let pool = pool.clone();
+                async move { consent_for(&pool, ws, loser).await.unwrap().unwrap() }
+            })
+            .await;
+
+            assert_eq!(states.len(), 1, "the unsubscribe moved to the survivor");
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_merge_committing_mid_history_does_not_hide_the_survivors_history(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            let loser = person(&pool, ws, PERSONAL_DATA.email).await;
+            let survivor = person(&pool, ws, "ada2@example.com").await;
+            let news = topic(&pool, ws, "news").await;
+            let trace = TraceContext::root(Cause::api("test"));
+            set(
+                &pool,
+                ws,
+                &change(loser, Some(news), ConsentStatus::Unsubscribed, T1),
+                &trace,
+            )
+            .await;
+            // `consent_changes` is locked with `consent`: the history read waits the same way.
+            let mut tx = begin(&pool).await.unwrap();
+            crate::changes::cache_change_readers(&mut tx, ws)
+                .await
+                .unwrap();
+            sqlx::query("LOCK TABLE consent_changes IN ACCESS EXCLUSIVE MODE")
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            let reading = tokio::spawn({
+                let pool = pool.clone();
+                async move {
+                    consent_history(&pool, ws, loser, 10, None, &Dimensions::new())
+                        .await
+                        .unwrap()
+                        .unwrap()
+                }
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            sqlx::query("UPDATE people SET merged_into = $1 WHERE id = $2")
+                .bind(survivor)
+                .bind(loser)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            move_on_merge(&mut tx, ws, loser, survivor, &trace)
+                .await
+                .unwrap();
+            commit(tx).await.unwrap();
+
+            let (history, _) = reading.await.unwrap();
+            assert_eq!(history.len(), 2, "the change and the merge's record");
         })
         .await;
     }
