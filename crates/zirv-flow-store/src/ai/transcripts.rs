@@ -74,11 +74,12 @@ pub async fn erase_ai_transcripts(
     if needles.is_empty() {
         return Ok(0);
     }
-    let done = sqlx::query(
+    let done = sqlx::query(concat!(
         "DELETE FROM ai_transcripts t WHERE t.workspace_id = $1 AND EXISTS ( \
-            SELECT 1 FROM unnest($2::text[]) AS needle \
-            WHERE position(lower(needle) IN lower(t.content::text)) > 0)",
-    )
+            SELECT 1 FROM unnest($2::text[]) AS needle WHERE ",
+        content_holds_needle!("t.content"),
+        ")"
+    ))
     .bind(workspace.as_uuid())
     .bind(&needles)
     .execute(connection)
@@ -243,6 +244,32 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+        assert_eq!(count(&pool, "ai_transcripts").await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn erasure_finds_an_identifier_with_a_backslash_a_quote_or_a_newline(pool: PgPool) {
+        let ws = workspace(&pool, "escaped").await;
+        let later = OffsetDateTime::now_utc() + Duration::days(7);
+        let values = [
+            "DOMAIN\\jdoe",
+            "o\"brien",
+            "\"quoted\"",
+            "line one\nline two",
+        ];
+        for value in values {
+            transcript(&pool, ws, json!({"m": value}), later).await;
+        }
+        transcript(&pool, ws, json!({"m": "unrelated"}), later).await;
+        let mut connection = pool.acquire().await.unwrap();
+
+        let needles = values.map(str::to_owned);
+        let deleted = erase_ai_transcripts(&mut connection, ws, &needles)
+            .await
+            .unwrap();
+
+        assert_eq!(deleted, 4);
         assert_eq!(count(&pool, "ai_transcripts").await, 1);
     }
 }

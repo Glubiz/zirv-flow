@@ -113,6 +113,8 @@ pub enum SegmentError {
     Cycle(Vec<SegmentRef>),
     /// Another live segment's current version references the segment.
     Referenced(Vec<SegmentRef>),
+    /// A published or paused flow's running version uses the segment.
+    UsedByFlows(Vec<super::uses::SegmentFlowRef>),
     /// A name already taken is [`StoreError::is_conflict`].
     Store(StoreError),
 }
@@ -130,6 +132,7 @@ impl fmt::Display for SegmentError {
             Self::Archived => formatter.write_str("the segment is archived"),
             Self::Cycle(_) => formatter.write_str("the segments would reference each other"),
             Self::Referenced(_) => formatter.write_str("another segment references the segment"),
+            Self::UsedByFlows(_) => formatter.write_str("a live flow uses the segment"),
             Self::Store(error) => error.fmt(formatter),
         }
     }
@@ -285,6 +288,27 @@ pub async fn update_segment(
     Ok((segment, saved))
 }
 
+/// Locks the segments among `ids` `FOR SHARE` for the rest of the transaction, in id order. A flow
+/// publish calls it before it validates the segments its draft names: an archive in progress
+/// (which holds the row exclusively) makes the publish wait and then see the segment archived, and
+/// a publish in progress makes an archive wait and then see the flow. An id that names no segment
+/// is skipped.
+pub async fn lock_segments_shared(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    ids: &[Uuid],
+) -> Result<(), StoreError> {
+    sqlx::query(
+        "SELECT id FROM segments WHERE workspace_id = $1 AND id = ANY($2) ORDER BY id FOR SHARE",
+    )
+    .bind(workspace.as_uuid())
+    .bind(ids)
+    .fetch_all(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(())
+}
+
 async fn lock_segment_row(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -303,8 +327,8 @@ async fn lock_segment_row(
     .ok_or(SegmentError::NotFound)
 }
 
-/// Archives a segment, unless another live segment's current version references it. Nothing is
-/// deleted: versions stay readable.
+/// Archives a segment, unless another live segment's current version references it or a published
+/// or paused flow's running version uses it. Nothing is deleted: versions stay readable.
 pub async fn archive_segment(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -333,6 +357,13 @@ pub async fn archive_segment(
                 .map(|(id, name)| SegmentRef { id, name })
                 .collect(),
         ));
+    }
+    // A flow that runs on the segment would be left on membership that no longer moves. A publish
+    // share-locks the segments its draft names (`lock_segments_shared`), so one in progress has
+    // committed by the time the row lock above was granted and is seen here.
+    let used = super::uses::live_flows_using(connection, workspace, id).await?;
+    if !used.is_empty() {
+        return Err(SegmentError::UsedByFlows(used));
     }
     super::schedule::remove_segment_schedule(connection, workspace, id).await?;
     sqlx::query_as(concat!(
@@ -863,5 +894,61 @@ mod tests {
 
         assert_eq!(names(&readers), ["Reader"]);
         assert!(none.is_empty());
+    }
+
+    async fn flow_triggered_by(pool: &PgPool, ws: WorkspaceId, name: &str, segment: Uuid) -> Uuid {
+        let flow = crate::flows::tests_support::create(pool, ws, name).await;
+        let mut connection = pool.acquire().await.unwrap();
+        crate::update_flow_draft(
+            &mut connection,
+            ws,
+            flow.id,
+            &crate::FlowPatch {
+                settings: Some(json!({
+                    "trigger": {"type": "segment", "segment_id": segment, "on": "entered"},
+                    "reentry": {"mode": "once"}
+                })),
+                ..crate::FlowPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        flow.id
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_segment_used_by_a_published_or_paused_flow_cannot_be_archived(pool: PgPool) {
+        let ws = workspace(&pool, "used-by-flow").await;
+        let seg = create(&pool, ws, "S", &[]).await;
+        let flow = flow_triggered_by(&pool, ws, "F", seg.id).await;
+        // Only the draft names it: the archive goes through.
+        let spare = create(&pool, ws, "Spare", &[]).await;
+        flow_triggered_by(&pool, ws, "Spare flow", spare.id).await;
+        let mut connection = pool.acquire().await.unwrap();
+        archive_segment(&mut connection, ws, spare.id)
+            .await
+            .unwrap();
+
+        crate::flows::tests_support::publish(&pool, ws, flow)
+            .await
+            .unwrap();
+        let published = archive_segment(&mut connection, ws, seg.id).await;
+        crate::flows::tests_support::lifecycle(&pool, ws, flow, crate::FlowAction::Pause)
+            .await
+            .unwrap();
+        let paused = archive_segment(&mut connection, ws, seg.id).await;
+
+        for refused in [published, paused] {
+            let Err(SegmentError::UsedByFlows(flows)) = refused else {
+                panic!("archive succeeded for a segment a live flow uses");
+            };
+            assert_eq!(flows.len(), 1);
+            assert_eq!(flows[0].flow_id, flow);
+        }
+        crate::flows::tests_support::lifecycle(&pool, ws, flow, crate::FlowAction::Archive)
+            .await
+            .unwrap();
+        archive_segment(&mut connection, ws, seg.id).await.unwrap();
     }
 }

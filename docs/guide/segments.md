@@ -77,7 +77,9 @@ members: `GET .../segments/{id}/members` and `.../history` read them, and
   is 422 `segment_cycle`, with `cycle: [{id, name}]` in path order and a detail such as
   "A → B → A". A reference to a missing or archived segment is `unknown_segment`.
 - **Archive.** `POST .../segments/{id}/archive` is refused with 409 `segment_referenced` while a
-  current version of another live segment references it. The list hides archived segments
+  current version of another live segment references it, and with 409 `segment_in_use` (naming
+  the flows) while a published or paused flow's running version uses it: archive or edit the flow
+  first. A draft that only names the segment does not block it. The list hides archived segments
   unless `?archived=true`.
 - **Fields in use.** Archiving a field (`PATCH .../traits/{key}` with `archived: true`) is
   refused with 409 `trait_referenced` while the current version of a live segment reads it; the

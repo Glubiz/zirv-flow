@@ -26,7 +26,7 @@ pub use crud::{
     CADENCE_MINUTES, DEFAULT_CADENCE_MINUTES, NewSegment, NewSegmentVersion, Segment, SegmentError,
     SegmentPatch, SegmentVersion, archive_segment, create_segment, find_segment,
     find_segment_version, list_segment_versions, list_segments, lock_segments,
-    segments_reading_trait, update_segment,
+    lock_segments_shared, segments_reading_trait, update_segment,
 };
 pub use cycle::SegmentRef;
 pub use data_age::{DataAge, FeedingSource, segment_data_age};
@@ -58,8 +58,8 @@ pub use refresh::{
 };
 pub use schedule::{reconcile_segment_schedules, segment_cron};
 pub use uses::{
-    FlowStage, SegmentFlowUse, SegmentListStats, SegmentWhereUsed, segment_list_stats,
-    segment_where_used,
+    FlowStage, SegmentFlowRef, SegmentFlowUse, SegmentListStats, SegmentWhereUsed,
+    segment_list_stats, segment_where_used,
 };
 
 /// Fixtures for the tests of this module.

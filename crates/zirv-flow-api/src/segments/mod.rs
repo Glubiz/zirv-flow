@@ -14,7 +14,7 @@ use std::time::Duration;
 use zirv_flow_segments::{Catalog, Issue, TraitStorage};
 use zirv_flow_store::{CatalogSnapshot, SegmentError, SegmentRef};
 
-use crate::problem::{ApiError, SegmentIssueProblem, SegmentRefProblem};
+use crate::problem::{ApiError, FlowRefProblem, SegmentIssueProblem, SegmentRefProblem};
 
 pub(crate) use guard::refuse_personal_probes;
 pub(crate) use schema::{
@@ -74,6 +74,15 @@ pub(crate) fn segment_error(error: SegmentError) -> ApiError {
         SegmentError::Archived => ApiError::segment_archived(),
         SegmentError::Cycle(cycle) => ApiError::segment_cycle(named(cycle)),
         SegmentError::Referenced(by) => ApiError::segment_referenced(&named(by)),
+        SegmentError::UsedByFlows(flows) => ApiError::segment_in_use(
+            flows
+                .into_iter()
+                .map(|used| FlowRefProblem {
+                    flow_id: used.flow_id,
+                    flow_name: used.flow_name,
+                })
+                .collect(),
+        ),
         SegmentError::Store(error) => name_taken(error),
     }
 }

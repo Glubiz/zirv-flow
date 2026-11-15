@@ -169,7 +169,8 @@ pub(crate) async fn flow_detail(
     workspace: WorkspaceId,
     flow: &Flow,
 ) -> Result<FlowDetailBody, ApiError> {
-    let counts = zirv_flow_store::warmup_counts(&state.pool, workspace, flow.id).await?;
+    let mut tx = zirv_flow_store::begin(&state.pool).await?;
+    let counts = zirv_flow_store::warmup_counts(&mut tx, workspace, flow.id).await?;
     let mut body = FlowDetailBody::from(flow);
     body.warmup = WarmupBody::new(&flow.warmup, counts);
     Ok(body)
