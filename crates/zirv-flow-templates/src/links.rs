@@ -85,13 +85,16 @@ fn skip_non_markup(html: &str, start: usize) -> Option<usize> {
     if rest.starts_with("<!--") {
         // `<!-->` and `<!--->` end the comment at once; `--!>` also closes one.
         let from = start + 2;
-        let close = [
-            html[from..].find("-->").map(|n| (from + n, 3)),
-            html[from..].find("--!>").map(|n| (from + n, 4)),
-        ]
-        .into_iter()
-        .flatten()
-        .min();
+        // `--!>` is searched only before the `-->`: one starting there cannot overlap it, and a
+        // search to the end of the document per comment would be quadratic.
+        let plain = html[from..].find("-->");
+        let window = plain.map_or(html.len(), |n| from + n + 1);
+        let bang = html[from..window].find("--!>");
+        let close = match (plain, bang) {
+            (_, Some(n)) => Some((from + n, 4)),
+            (Some(n), None) => Some((from + n, 3)),
+            (None, None) => None,
+        };
         return Some(close.map_or(html.len(), |(at, len)| at + len));
     }
     let bytes = html.as_bytes();
@@ -265,26 +268,31 @@ pub(crate) fn unescape(text: &str) -> String {
     while let Some(start) = rest.find('&') {
         out.push_str(&rest[..start]);
         rest = &rest[start..];
-        let decoded = rest.find(';').filter(|end| *end <= 10).and_then(|end| {
-            let name = &rest[1..end];
-            let character = match name {
-                "amp" => Some('&'),
-                "lt" => Some('<'),
-                "gt" => Some('>'),
-                "quot" => Some('"'),
-                "apos" => Some('\''),
-                // The one named entity `ammonia` writes besides the five: a no-break space.
-                "nbsp" => Some(' '),
-                _ => name.strip_prefix('#').and_then(|number| {
-                    let code = match number.strip_prefix(['x', 'X']) {
-                        Some(hex) => u32::from_str_radix(hex, 16).ok(),
-                        None => number.parse().ok(),
-                    };
-                    code.and_then(char::from_u32)
-                }),
-            };
-            character.map(|c| (c, end + 1))
-        });
+        let decoded = rest
+            .as_bytes()
+            .iter()
+            .take(11)
+            .position(|byte| *byte == b';')
+            .and_then(|end| {
+                let name = &rest[1..end];
+                let character = match name {
+                    "amp" => Some('&'),
+                    "lt" => Some('<'),
+                    "gt" => Some('>'),
+                    "quot" => Some('"'),
+                    "apos" => Some('\''),
+                    // The one named entity `ammonia` writes besides the five: a no-break space.
+                    "nbsp" => Some(' '),
+                    _ => name.strip_prefix('#').and_then(|number| {
+                        let code = match number.strip_prefix(['x', 'X']) {
+                            Some(hex) => u32::from_str_radix(hex, 16).ok(),
+                            None => number.parse().ok(),
+                        };
+                        code.and_then(char::from_u32)
+                    }),
+                };
+                character.map(|c| (c, end + 1))
+            });
         match decoded {
             Some((character, used)) => {
                 out.push(character);
@@ -552,6 +560,48 @@ mod tests {
             unescape("a&amp;b&#x2f;c&#47;d&lt;&quot;&#39;&bogus; &"),
             "a&b/c/d<\"'&bogus; &"
         );
+    }
+
+    #[test]
+    fn unescape_does_not_rescan_the_value_for_every_ampersand() {
+        // A semicolon-free run of `&` used to cost a scan to the end of the value per `&`.
+        let text = "&".repeat(400_000);
+        let started = std::time::Instant::now();
+        assert_eq!(unescape(&text), text);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "unescape took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn comment_scan_is_linear_in_the_number_of_comments() {
+        let html = format!(
+            "{}<a href=\"https://a.example\">x</a>",
+            "<!---->".repeat(70_000)
+        );
+        let started = std::time::Instant::now();
+        let found = hrefs(&html);
+        assert_eq!(found.len(), 1);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(1500),
+            "hrefs took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn comment_ends_keep_their_positions() {
+        let end = |html: &str| skip_non_markup(html, 0);
+        assert_eq!(end("<!-- a -->x"), Some(10));
+        assert_eq!(end("<!-- a --!>x"), Some(11));
+        assert_eq!(end("<!-->x"), Some(5));
+        assert_eq!(end("<!--->x"), Some(6));
+        assert_eq!(end("<!-- never closed"), Some(17));
+        // The earlier closer wins, whichever form it takes.
+        assert_eq!(end("<!-- a --!> b -->"), Some(11));
+        assert_eq!(end("<!-- a --> b --!>"), Some(10));
     }
 
     #[test]

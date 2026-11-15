@@ -13346,7 +13346,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The server has no master key to open the provider key, or (a template draft) the render host stopped (`render_child_exited`) or rendering is not available (`render_unavailable`) */
+            /** @description The server has no master key to open the provider key, or (a template draft) the render host stopped (`render_child_exited`), is saturated (`render_saturated`) or rendering is not available (`render_unavailable`) */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -26505,7 +26505,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The render host stopped (`render_child_exited`), or rendering is not available (`render_unavailable`) */
+            /** @description The render host stopped (`render_child_exited`), is saturated (`render_saturated`), or rendering is not available (`render_unavailable`) */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -29317,7 +29317,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The render host stopped (`render_child_exited`), or rendering is not available (`render_unavailable`) */
+            /** @description The render host stopped (`render_child_exited`), is saturated (`render_saturated`), or rendering is not available (`render_unavailable`) */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -31004,7 +31004,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The render host stopped (`render_child_exited`), or rendering is not available (`render_unavailable`) */
+            /** @description The render host stopped (`render_child_exited`), is saturated (`render_saturated`), or rendering is not available (`render_unavailable`) */
             503: {
                 headers: {
                     [name: string]: unknown;

@@ -1327,6 +1327,13 @@ impl ApiError {
                     "the render host stopped; try again",
                 )
             },
+            RenderFailure::Saturated => Self {
+                code: Some("render_saturated"),
+                ..Self::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "every render host is busy; try again shortly",
+                )
+            },
             RenderFailure::Protocol => Self {
                 code: Some("render_protocol"),
                 ..Self::new(

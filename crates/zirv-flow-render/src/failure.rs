@@ -25,6 +25,9 @@ pub enum RenderFailure {
     UnsupportedDocument,
     /// The request is over the frame bound, so it was not sent.
     RequestTooLarge,
+    /// An interactive caller (the API) waited for a free child past the bound and gave up, so
+    /// a burst of previews cannot queue without limit or hold the capacity sends need.
+    Saturated,
 }
 
 impl RenderFailure {
@@ -38,6 +41,7 @@ impl RenderFailure {
             Self::Protocol => "protocol",
             Self::RequestTooLarge => "request_too_large",
             Self::UnsupportedDocument => "unsupported_document",
+            Self::Saturated => "saturated",
         }
     }
 }
@@ -79,6 +83,7 @@ mod tests {
             (RenderFailure::Protocol, "protocol"),
             (RenderFailure::RequestTooLarge, "request_too_large"),
             (RenderFailure::UnsupportedDocument, "unsupported_document"),
+            (RenderFailure::Saturated, "saturated"),
             (
                 RenderFailure::Render(RenderError::InvalidBody),
                 "render_error",

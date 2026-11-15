@@ -13,7 +13,7 @@ use crate::links::{Hooks, links_to, rewrite_links, unsubscribe_headers};
 use crate::sandbox::{
     MAX_HEADER_COUNT, MAX_HEADER_VALUE_BYTES, MAX_HEADERS_BYTES, MAX_HTML_BYTES, MAX_SOURCE_BYTES,
     MAX_SUBJECT_BYTES, MAX_TEXT_BYTES, MAX_WEBHOOK_BODY_BYTES, environment, is_header_name,
-    map_error, render_string,
+    map_error, render_cached,
 };
 use crate::utm::{process_html, tag_text};
 
@@ -132,11 +132,9 @@ pub fn render_email_with(
         );
     }
     let email = email_of(doc)?;
-    let env = environment();
     let values = Value::from_serialize(context);
-    let subject = one_line(&render_string(
-        &env,
-        "subject.txt",
+    let subject = one_line(&render_cached(
+        false,
         "subject",
         &email.subject,
         &values,
@@ -145,26 +143,12 @@ pub fn render_email_with(
     if email.syntax == Syntax::Mjml && has_include(&email.html) {
         return Err(RenderError::MjmlInclude);
     }
-    let html = render_string(
-        &env,
-        "html.html",
-        "html",
-        &email.html,
-        &values,
-        MAX_HTML_BYTES,
-    )?;
+    let html = render_cached(true, "html", &email.html, &values, MAX_HTML_BYTES)?;
     let html = match email.syntax {
         Syntax::Html => html,
         Syntax::Mjml => mjml_to_html(&html)?,
     };
-    let text = render_string(
-        &env,
-        "text.txt",
-        "text",
-        &email.text,
-        &values,
-        MAX_TEXT_BYTES,
-    )?;
+    let text = render_cached(false, "text", &email.text, &values, MAX_TEXT_BYTES)?;
 
     finish_email(
         subject,
@@ -274,14 +258,7 @@ pub fn render_webhook(
     let mut header_bytes = 0usize;
     let mut headers = Vec::with_capacity(webhook.headers.len());
     for (name, source) in &webhook.headers {
-        let value = render_string(
-            &env,
-            "header.txt",
-            "headers",
-            source,
-            &values,
-            MAX_HEADER_VALUE_BYTES,
-        )?;
+        let value = render_cached(false, "headers", source, &values, MAX_HEADER_VALUE_BYTES)?;
         let value = one_line(&value);
         header_bytes = header_bytes.saturating_add(name.len() + value.len());
         if header_bytes > MAX_HEADERS_BYTES {
@@ -373,18 +350,13 @@ impl BodyRenderer<'_> {
             self.spend(text.len())?;
             return Ok(Json::String(text));
         }
-        let rendered = render_string(
-            self.env,
-            "body.txt",
-            "body",
-            &text,
-            self.values,
-            self.budget,
-        )
-        .map_err(|error| match error {
-            RenderError::OutputTooLarge { .. } => RenderError::BodyTooLarge,
-            other => other,
-        })?;
+        let rendered =
+            render_cached(false, "body", &text, self.values, self.budget).map_err(|error| {
+                match error {
+                    RenderError::OutputTooLarge { .. } => RenderError::BodyTooLarge,
+                    other => other,
+                }
+            })?;
         self.spend(rendered.len())?;
         Ok(Json::String(rendered))
     }

@@ -57,6 +57,10 @@ struct Shared {
     discoveries: Arc<AtomicUsize>,
     token: Arc<Mutex<Token>>,
     exchange_works: Arc<AtomicBool>,
+    /// Whether the signing key was rotated: the key set then holds the new key only.
+    rotated: Arc<AtomicBool>,
+    /// Whether a rotation also changed the key id.
+    new_key_id: Arc<AtomicBool>,
 }
 
 /// A running mock provider. It stops when the test's runtime does.
@@ -72,6 +76,8 @@ impl MockProvider {
             discoveries: Arc::new(AtomicUsize::new(0)),
             token: Arc::new(Mutex::new(Token::valid("unset"))),
             exchange_works: Arc::new(AtomicBool::new(true)),
+            rotated: Arc::new(AtomicBool::new(false)),
+            new_key_id: Arc::new(AtomicBool::new(false)),
         };
         let app = Router::new()
             .route("/.well-known/openid-configuration", get(discovery))
@@ -96,6 +102,18 @@ impl MockProvider {
         *self.shared.token.lock().unwrap() = token;
     }
 
+    /// Rotates the signing key: the key set now holds a new key under the same key id, and valid
+    /// tokens are signed with it. A provider that cached the old key set cannot verify them.
+    pub fn rotate_keys(&self) {
+        self.shared.rotated.store(true, Ordering::SeqCst);
+    }
+
+    /// Like [`rotate_keys`](Self::rotate_keys), and the new key has a new key id too.
+    pub fn rotate_keys_with_a_new_id(&self) {
+        self.shared.new_key_id.store(true, Ordering::SeqCst);
+        self.rotate_keys();
+    }
+
     /// Makes the token endpoint refuse every code.
     pub fn refuse_codes(&self) {
         self.shared.exchange_works.store(false, Ordering::SeqCst);
@@ -112,11 +130,21 @@ fn pem(slot: &'static OnceLock<String>) -> &'static str {
     })
 }
 
-fn signing_key(unknown: bool) -> CoreRsaPrivateSigningKey {
+/// One of the two test keys: `second` picks the one that is not published before a rotation.
+fn signing_key(second: bool, key_id: &str) -> CoreRsaPrivateSigningKey {
     static KNOWN: OnceLock<String> = OnceLock::new();
     static UNKNOWN: OnceLock<String> = OnceLock::new();
-    let pem = if unknown { pem(&UNKNOWN) } else { pem(&KNOWN) };
-    CoreRsaPrivateSigningKey::from_pem(pem, Some(JsonWebKeyId::new("test-key".into()))).unwrap()
+    let pem = if second { pem(&UNKNOWN) } else { pem(&KNOWN) };
+    CoreRsaPrivateSigningKey::from_pem(pem, Some(JsonWebKeyId::new(key_id.into()))).unwrap()
+}
+
+/// The key id the key set and the tokens use now.
+fn key_id(shared: &Shared) -> &'static str {
+    if shared.new_key_id.load(Ordering::SeqCst) {
+        "rotated-key"
+    } else {
+        "test-key"
+    }
 }
 
 async fn discovery(State(shared): State<Shared>) -> impl IntoResponse {
@@ -132,8 +160,8 @@ async fn discovery(State(shared): State<Shared>) -> impl IntoResponse {
     }))
 }
 
-async fn jwks() -> impl IntoResponse {
-    let key = signing_key(false);
+async fn jwks(State(shared): State<Shared>) -> impl IntoResponse {
+    let key = signing_key(shared.rotated.load(Ordering::SeqCst), key_id(&shared));
     axum::Json(CoreJsonWebKeySet::new(vec![key.as_verification_key()]))
 }
 
@@ -163,7 +191,11 @@ async fn token(State(shared): State<Shared>) -> Response {
     let access_token = AccessToken::new("the-access-token".into());
     let id_token = CoreIdToken::new(
         claims,
-        &signing_key(spec.signed_with_unknown_key),
+        // A token for a key the key set does not hold is signed with the other key.
+        &signing_key(
+            spec.signed_with_unknown_key != shared.rotated.load(Ordering::SeqCst),
+            key_id(&shared),
+        ),
         CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256,
         Some(&access_token),
         None,

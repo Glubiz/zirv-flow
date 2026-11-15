@@ -376,6 +376,7 @@ A test reads the sources and fails when a code used there is missing from this l
 | `render_memory_limit` | A render ran over its memory limit |
 | `render_request_too_large` | A render request is over the size limit |
 | `render_child_exited` | The renderer process exited during the render |
+| `render_saturated` | Every render child stayed busy for two seconds; try again (503) |
 | `render_protocol` | The renderer broke its protocol |
 | `ai_disabled` | The assistant is off for the workspace |
 | `ai_budget_exceeded` | The assistant's monthly budget is spent |
