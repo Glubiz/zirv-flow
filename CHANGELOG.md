@@ -15,3 +15,15 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v1.0.7 (2026-11-15)
+
+### Fixes
+
+- keep cached templates out of include, import and extends (#675)
+- linear template scans, cached sandbox compiles, a bounded interactive render queue, billed AI errors and OIDC key rotation (#671-#682)
+
+### Chores
+
+- cover the shared element-name scan in its own module (#672)
+- make the cached-template import and from cases observable (#675)
+
