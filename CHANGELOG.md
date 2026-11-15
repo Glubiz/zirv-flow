@@ -15,3 +15,11 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v1.0.6 (2026-11-15)
+
+### Fixes
+
+- re-test each dead forwarding row's own window on delete (#659)
+- keep re-driven forwarding rows and the send-slot lock (#659, #660)
+- template and snippet use, asset revalidation, message tombstones, forwarding retention and send-gate reads (#652-#661)
+
