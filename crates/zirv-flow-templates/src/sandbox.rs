@@ -2,12 +2,15 @@
 //! and a capped output (architecture 11.4).
 //!
 //! The environment loads no templates from anywhere: every template is a string passed in, with
-//! no loader, so `include`, `extends` and `import` find nothing (the `multi_template`
-//! feature is on only because the `fuel` feature does not compile without it in 2.24). The
+//! no loader, and every name `include`, `extends` or `import` asks for is turned into one no
+//! template has, so they find nothing, not even a template the per-thread cache registered (the
+//! `multi_template` feature is on only because the `fuel` feature does not compile without it in
+//! 2.24). The
 //! only globals are `range`, `dict` and `namespace`; `debug` is removed because it prints the
 //! whole context. The builtin filters read no clock and draw no random numbers.
 
 use hashbrown::HashMap;
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::io::{self, Write};
 
@@ -55,6 +58,8 @@ pub(crate) fn environment() -> Environment<'static> {
     env.set_recursion_limit(RECURSION_LIMIT);
     env.set_keep_trailing_newline(true);
     env.remove_global("debug");
+    // Only a lookup from inside a template is joined; the cache's own lookup is not.
+    env.set_path_join_callback(|_, _| Cow::Borrowed(""));
     env.set_auto_escape_callback(|name| {
         if name.ends_with(".html") {
             AutoEscape::Html
@@ -361,16 +366,42 @@ mod tests {
             assert!(cached_templates() <= CACHE_MAX_ENTRIES);
         }
         TEMPLATES.with_borrow_mut(|cache| *cache = TemplateCache::new());
-        let big = |tag: char| {
+        let big = |n: usize| {
             format!(
-                "{}{{{{ person.name }}}}",
-                tag.to_string().repeat(MAX_SOURCE_BYTES - 20)
+                "{n:04}{}{{{{ person.name }}}}",
+                "a".repeat(MAX_SOURCE_BYTES - 24)
             )
         };
-        for tag in ['a', 'b', 'c', 'd'].into_iter().cycle().take(100) {
-            let out = render_cached(false, "text", &big(tag), &context(), MAX_TEXT_BYTES).unwrap();
+        let sources = CACHE_MAX_BYTES / (MAX_SOURCE_BYTES - 20) + 2;
+        let mut evicted = false;
+        for n in 0..sources {
+            let before = cached_templates();
+            let out = render_cached(false, "text", &big(n), &context(), MAX_TEXT_BYTES).unwrap();
             assert!(out.ends_with("<b>Ann</b>"));
             assert!(TEMPLATES.with_borrow(|cache| cache.bytes) <= CACHE_MAX_BYTES);
+            evicted |= cached_templates() <= before;
+        }
+        assert!(evicted, "the byte bound never evicted");
+    }
+
+    #[test]
+    fn a_template_cannot_include_a_cached_template_by_its_name() {
+        TEMPLATES.with_borrow_mut(|cache| *cache = TemplateCache::new());
+        render_cached(false, "text", "secret text", &context(), 100).unwrap();
+        render_cached(true, "html", "secret html", &context(), 100).unwrap();
+        for name in ["t0.txt", "t1.html"] {
+            for source in [
+                format!("{{% include '{name}' ignore missing %}}"),
+                format!("{{% import '{name}' as other %}}"),
+                format!("{{% extends '{name}' %}}"),
+            ] {
+                let out = render_cached(false, "text", &source, &context(), 100);
+                assert!(
+                    out.as_deref().is_ok_and(str::is_empty)
+                        || out == Err(RenderError::Template { field: "text" }),
+                    "{source}: {out:?}"
+                );
+            }
         }
     }
 
