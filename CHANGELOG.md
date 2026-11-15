@@ -15,3 +15,14 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v1.0.3 (2026-11-15)
+
+### Fixes
+
+- bound privacy, consent, events and contacts scans (#628-#634, #636-#638)
+
+### Chores
+
+- wait for the erasure's lock instead of sleeping, and pin the conflict identity
+- cover the erasure rescan and a recurring moved-identifier conflict
+
