@@ -4,6 +4,7 @@
 mod apply;
 mod debugger;
 mod explore;
+mod keys;
 mod partitions;
 mod rejects;
 mod replay;
@@ -28,6 +29,7 @@ pub use explore::{
     RowsPage, explore_breakdown, explore_count, explore_rows, explore_rows_prepared, explore_start,
     explore_total,
 };
+pub(crate) use keys::EventKeys;
 pub use partitions::ensure_event_partitions;
 pub(crate) use rejects::{
     DroppedTraits, Refusal, insert_dropped_traits_reject, insert_record_rejects,

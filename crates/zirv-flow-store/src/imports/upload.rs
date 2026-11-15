@@ -229,7 +229,22 @@ impl ImportUpload {
         .map_err(StoreError::query)?
         .rows_affected();
         if updated != 1 {
-            return Err(StoreError::poison());
+            // An erase that fenced the import while no chunk was pending leaves it `failed` with
+            // the `erased` code; the flush above could not see it with an empty buffer.
+            let fenced: Option<(String, Option<String>)> = sqlx::query_as(
+                "SELECT status, error_code FROM imports WHERE workspace_id = $1 AND id = $2",
+            )
+            .bind(self.workspace.as_uuid())
+            .bind(self.id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(StoreError::query)?;
+            return Err(match fenced {
+                Some((status, Some(code))) if status == "failed" && code == "erased" => {
+                    StoreError::erased()
+                }
+                _ => StoreError::poison(),
+            });
         }
         let import = fetch_import(&mut *tx, self.workspace, self.id)
             .await?
@@ -598,5 +613,46 @@ mod tests {
         let sizes = chunk_sizes(&pool, &vec![1_u8; CHUNK_BYTES], 3).await;
 
         assert_eq!(sizes, [CHUNK_BYTES]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn finishing_after_an_erase_with_nothing_pending_reports_erased(pool: PgPool) {
+        let name = WorkspaceName::parse("one").unwrap();
+        let slug = Slug::parse("one").unwrap();
+        let ws = create_workspace(&pool, &name, &slug).await.unwrap().id;
+        let trace = TraceContext::root(Cause::api("t"));
+        let start = UploadStart {
+            name: "n",
+            source: "csv",
+            stream: "n",
+            file_name: "n.csv",
+            created_by: None,
+            trace: &trace,
+        };
+        let mut upload = ImportUpload::begin(&pool, ws, &start).await.unwrap();
+        // A whole chunk, so nothing is pending when the upload finishes.
+        let mut first = b"id\n42\n".to_vec();
+        first.resize(CHUNK_BYTES, b'z');
+        upload.write(&first).await.unwrap();
+        let mut tx = begin(&pool).await.unwrap();
+        crate::erase_import_values(&mut tx, ws, &["42".into()])
+            .await
+            .unwrap();
+        crate::commit(tx).await.unwrap();
+        let header = vec!["id".to_owned()];
+
+        let Err(error) = upload
+            .finish(&UploadScan {
+                delimiter: ',',
+                header: &header,
+                rows_total: 0,
+            })
+            .await
+        else {
+            panic!("finish must fail");
+        };
+
+        assert!(error.is_erased(), "not erased: {error:?}");
     }
 }

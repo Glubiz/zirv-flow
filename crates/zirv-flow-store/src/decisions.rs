@@ -113,9 +113,11 @@ impl GraphPoint {
 /// The `FROM` and `WHERE` of a subquery over the rows of a decision's `subject_ids` that hold a
 /// durable id (`s.key` is the name, `s.value` the id), used as `SELECT 1 FROM {ID_SUBJECTS} AND
 /// s.value = ...`. It leaves out the graph point's `node` and `version`, which are text the
-/// marketer chose and can equal anything, a person's id included. Erasure and the erasure scan
-/// match a person only through this, so a node id never reads as a reference to a person. The
-/// decision table must be aliased `d`.
+/// marketer chose and can equal anything, a person's id included. The erasure scan (a test
+/// scaffold) matches a person through this, any key at all, so a person-valued subject name
+/// that `privacy::delete::PERSON_SUBJECTS` misses fails it. The decision table must be aliased
+/// `d`.
+#[cfg(test)]
 pub(crate) const ID_SUBJECTS: &str =
     "jsonb_each_text(d.subject_ids) s WHERE s.key NOT IN ('node', 'version', 'admit_at')";
 

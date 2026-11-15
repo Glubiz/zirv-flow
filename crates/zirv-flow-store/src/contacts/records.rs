@@ -165,6 +165,25 @@ impl From<StoreError> for ContactSearchError {
     }
 }
 
+/// The least text that sorts after every text starting with `prefix` in byte order, which is
+/// the code point order of UTF-8: the prefix with its last character incremented (a character
+/// that cannot be incremented, `U+10FFFF`, is dropped first, and the surrogate range is skipped).
+/// `None` when no text sorts after them all, which includes the empty prefix.
+fn prefix_upper_bound(prefix: &str) -> Option<String> {
+    let mut chars: Vec<char> = prefix.chars().collect();
+    while let Some(last) = chars.pop() {
+        let next = match last as u32 {
+            0xD7FF => Some('\u{E000}'),
+            code => char::from_u32(code + 1),
+        };
+        if let Some(next) = next {
+            chars.push(next);
+            return Some(chars.into_iter().collect());
+        }
+    }
+    None
+}
+
 /// Up to `limit` contacts matching `search`, in key order.
 pub async fn search_contacts(
     connection: &mut PgConnection,
@@ -173,15 +192,32 @@ pub async fn search_contacts(
     limit: u32,
 ) -> Result<Vec<Contact>, ContactSearchError> {
     let rows: Vec<ContactRow> = match search {
-        ContactSearch::KeyPrefix(prefix) => sqlx::query_as(sqlx::AssertSqlSafe(format!(
-            "{SELECT} AND starts_with(s.record_key, $2) ORDER BY s.record_key LIMIT $3"
-        )))
-        .bind(workspace.as_uuid())
-        .bind(prefix)
-        .bind(i64::from(limit))
-        .fetch_all(connection)
-        .await
-        .map_err(StoreError::query)?,
+        ContactSearch::KeyPrefix(prefix) => {
+            // Under `COLLATE "C"` a prefix is a byte range, which
+            // `source_records_native_contact_key_idx` (0099) serves in order; `starts_with` stays
+            // as the exact guard. The matches come in byte order, not in the database collation
+            // `list_contacts` pages in.
+            let upper = prefix_upper_bound(prefix);
+            let (bound, limit_at) = match upper {
+                Some(_) => (" AND s.record_key COLLATE \"C\" < $3", "$4"),
+                None => ("", "$3"),
+            };
+            let mut query = sqlx::query_as::<_, ContactRow>(sqlx::AssertSqlSafe(format!(
+                "{SELECT} AND s.record_key COLLATE \"C\" >= $2{bound} \
+                 AND starts_with(s.record_key, $2) \
+                 ORDER BY s.record_key COLLATE \"C\" LIMIT {limit_at}"
+            )))
+            .bind(workspace.as_uuid())
+            .bind(prefix);
+            if let Some(upper) = upper {
+                query = query.bind(upper);
+            }
+            query
+                .bind(i64::from(limit))
+                .fetch_all(connection)
+                .await
+                .map_err(StoreError::query)?
+        }
         ContactSearch::Identifier { kind, value } => {
             let identifier = Identifier::parse(kind, value)
                 .map_err(|error| ContactSearchError::InvalidIdentifier(error.reason()))?;
@@ -308,5 +344,81 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(keys(&theirs.contacts), ["a1", "a2", "b"]);
+    }
+
+    #[test]
+    fn a_prefix_is_bounded_by_its_last_character_incremented() {
+        assert_eq!(prefix_upper_bound("ab").as_deref(), Some("ac"));
+        assert_eq!(prefix_upper_bound("zz").as_deref(), Some("z{"));
+        assert_eq!(prefix_upper_bound("a\u{10FFFF}").as_deref(), Some("b"));
+        assert_eq!(
+            prefix_upper_bound("a\u{D7FF}").as_deref(),
+            Some("a\u{E000}")
+        );
+        assert_eq!(prefix_upper_bound("\u{10FFFF}"), None);
+        assert_eq!(prefix_upper_bound(""), None);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_prefix_search_returns_the_matches_in_byte_order_and_only_the_matches(pool: PgPool) {
+        let ws = defined(&pool, "one").await;
+        for (n, key) in ["ab", "aB", "a1", "b1", "\u{10FFFF}x", "a\u{10FFFF}", "A1"]
+            .into_iter()
+            .enumerate()
+        {
+            write(
+                &pool,
+                ws,
+                key,
+                ContactChange::Create(object(json!({"email": format!("c{n}@example.com")}))),
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        let mut connection = pool.acquire().await.unwrap();
+        let keys = |contacts: Vec<Contact>| -> Vec<String> {
+            contacts.into_iter().map(|contact| contact.key).collect()
+        };
+
+        let a = search_contacts(
+            &mut connection,
+            ws,
+            &ContactSearch::KeyPrefix("a".into()),
+            10,
+        )
+        .await
+        .unwrap();
+        let none = search_contacts(
+            &mut connection,
+            ws,
+            &ContactSearch::KeyPrefix("zz".into()),
+            10,
+        )
+        .await
+        .unwrap();
+        let top = search_contacts(
+            &mut connection,
+            ws,
+            &ContactSearch::KeyPrefix("\u{10FFFF}".into()),
+            10,
+        )
+        .await
+        .unwrap();
+        let all = search_contacts(
+            &mut connection,
+            ws,
+            &ContactSearch::KeyPrefix(String::new()),
+            10,
+        )
+        .await
+        .unwrap();
+
+        // Byte order: digits, then upper case, then lower case, then the longer key.
+        assert_eq!(keys(a), ["a1", "aB", "ab", "a\u{10FFFF}"]);
+        assert!(none.is_empty());
+        assert_eq!(keys(top), ["\u{10FFFF}x"]);
+        assert_eq!(keys(all).len(), 7);
     }
 }

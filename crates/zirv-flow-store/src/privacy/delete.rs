@@ -6,7 +6,6 @@ use uuid::Uuid;
 use zirv_flow_core::decision_actions;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
-use crate::decisions::ID_SUBJECTS;
 use crate::{NewDecision, StoreError, append_decision};
 
 /// Why a person is being deleted; recorded as the reason of the `person.deleted` decision.
@@ -81,15 +80,21 @@ pub async fn delete_person(
             .await
             .map_err(StoreError::query)?;
     }
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        "DELETE FROM decision_records d WHERE d.workspace_id = $1 AND EXISTS \
-            (SELECT 1 FROM {ID_SUBJECTS} AND s.value = ANY($2::text[]))"
-    )))
-    .bind(workspace.as_uuid())
-    .bind(people.iter().map(Uuid::to_string).collect::<Vec<_>>())
-    .execute(&mut *connection)
-    .await
-    .map_err(StoreError::query)?;
+    // One indexed probe per subject name that holds a person id (see `PERSON_SUBJECTS`), so a
+    // call reads the people's decisions and not every decision of the workspace.
+    let person_ids: Vec<String> = people.iter().map(Uuid::to_string).collect();
+    for subject in PERSON_SUBJECTS {
+        // The name is one of the constants above, never input.
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DELETE FROM decision_records d WHERE d.workspace_id = $1 \
+                AND d.subject_ids ? '{subject}' AND d.subject_ids ->> '{subject}' = ANY($2)"
+        )))
+        .bind(workspace.as_uuid())
+        .bind(&person_ids)
+        .execute(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
+    }
     // The merged people point at the survivor and the survivor is deleted with them, so one
     // statement removes the whole group.
     sqlx::query("DELETE FROM people WHERE workspace_id = $1 AND id = ANY($2)")
@@ -120,6 +125,19 @@ pub async fn delete_person(
     .await?;
     Ok(true)
 }
+
+/// The `subject_ids` names of a decision that hold a person id. `person` is served by
+/// `decision_records_person_idx` (0012) and the others by the partial indexes of 0097. The
+/// erasure scan stays an any-key scan over `ID_SUBJECTS`, so a new person-valued name this list
+/// misses fails the erasure scan test, and the classification test in this file makes a new name
+/// in `decision_actions::ALL` pick a side.
+const PERSON_SUBJECTS: &[&str] = &[
+    "person",
+    "other_person",
+    "previous_person",
+    "survivor",
+    "merged",
+];
 
 /// Every statement binds `$1` the workspace and `$2` the people to delete, and runs in this
 /// order: a row goes before the rows it refers to.
@@ -153,22 +171,44 @@ const DELETIONS: &[&str] = &[
     "DELETE FROM identities WHERE workspace_id = $1 AND person_id = ANY($2)",
 ];
 
-/// The jobs that name an erased person: `$1` is the workspace, `$2` the people and `$3` their
-/// enrollment ids as text. It is the one
-/// predicate for deleting a pending job and for marking a running one, so the two cannot drift.
+/// The jobs that name an erased person: `$1` is the workspace, `$2` the people as text and `$3`
+/// their enrollment ids as text. It is the one predicate for deleting a pending job and for
+/// marking a running one, so the two cannot drift.
+///
+/// It is a union of probes, each served by an index, so it reads the matches and the live backlog
+/// of the kinds it names, not the table. A single `OR` over the kinds would not let the planner
+/// use them.
+/// - Dead jobs (kept for inspection) by `jobs_person_idx` and `jobs_enrollment_idx` of 0098,
+///   which hold dead rows only: no ready or running row pays for them at enqueue or claim.
+/// - Ready jobs by kind through `jobs_ready_kind_idx`, and running jobs through the running set
+///   (`jobs_workspace_running_idx`, `jobs_lease_idx`), filtering the payload on the heap. A queued
+///   `delivery.send` has no `messages` row until its handler runs, so the person's messages
+///   cannot name it: it is found by the kind scan like the others.
+/// - A `person.merge.rewrite` job by `jobs_merged_person_idx`, in any state.
 macro_rules! names_erased_person {
     () => {
-        "( \
-            (kind = 'flow.step' AND payload ->> 'enrollment_id' = ANY($3)) \
-            OR (kind = 'webhook.call' AND payload ->> 'person_id' IN \
-                (SELECT p::text FROM unnest($2::uuid[]) AS p)) \
-            OR (kind = 'delivery.send' AND payload ->> 'person_id' IN \
-                (SELECT p::text FROM unnest($2::uuid[]) AS p)) \
-            OR (kind = 'delivery.sync' AND payload ->> 'person_id' IN \
-                (SELECT p::text FROM unnest($2::uuid[]) AS p)) \n            OR (kind = 'template.test_send' AND payload ->> 'person_id' IN \
-                (SELECT p::text FROM unnest($2::uuid[]) AS p)) \
-            OR (kind = 'person.merge.rewrite' AND payload ->> 'merged_person_id' IN \
-                (SELECT p::text FROM unnest($2::uuid[]) AS p)))"
+        "id IN ( \
+            SELECT id FROM jobs WHERE workspace_id = $1 AND state = 'dead' \
+                AND kind IN ('webhook.call', 'delivery.send', 'delivery.sync', 'template.test_send') \
+                AND payload ->> 'person_id' = ANY($2) \
+            UNION ALL \
+            SELECT id FROM jobs WHERE workspace_id = $1 AND state = 'dead' AND kind = 'flow.step' \
+                AND payload ->> 'enrollment_id' = ANY($3) \
+            UNION ALL \
+            SELECT id FROM jobs WHERE workspace_id = $1 AND state = 'ready' \
+                AND kind IN ('webhook.call', 'delivery.send', 'delivery.sync', 'template.test_send') \
+                AND payload ->> 'person_id' = ANY($2) \
+            UNION ALL \
+            SELECT id FROM jobs WHERE workspace_id = $1 AND state = 'ready' AND kind = 'flow.step' \
+                AND payload ->> 'enrollment_id' = ANY($3) \
+            UNION ALL \
+            SELECT id FROM jobs WHERE workspace_id = $1 AND state = 'running' \
+                AND ((kind IN ('webhook.call', 'delivery.send', 'delivery.sync', 'template.test_send') \
+                      AND payload ->> 'person_id' = ANY($2)) \
+                  OR (kind = 'flow.step' AND payload ->> 'enrollment_id' = ANY($3))) \
+            UNION ALL \
+            SELECT id FROM jobs WHERE workspace_id = $1 AND kind = 'person.merge.rewrite' \
+                AND payload ->> 'merged_person_id' = ANY($2))"
     };
 }
 
@@ -193,6 +233,7 @@ pub(super) async fn purge_jobs(
     people: &[Uuid],
     enrollments: &[String],
 ) -> Result<(), StoreError> {
+    let people: Vec<String> = people.iter().map(Uuid::to_string).collect();
     sqlx::query(concat!(
         "UPDATE jobs SET purge_on_release = true WHERE id IN ( \
              SELECT id FROM jobs WHERE workspace_id = $1 AND ",
@@ -200,7 +241,7 @@ pub(super) async fn purge_jobs(
         " ORDER BY id FOR NO KEY UPDATE)"
     ))
     .bind(workspace.as_uuid())
-    .bind(people)
+    .bind(&people)
     .bind(enrollments)
     .execute(&mut *connection)
     .await
@@ -210,7 +251,7 @@ pub(super) async fn purge_jobs(
         names_erased_person!()
     ))
     .bind(workspace.as_uuid())
-    .bind(people)
+    .bind(&people)
     .bind(enrollments)
     .execute(&mut *connection)
     .await
@@ -436,6 +477,50 @@ mod tests {
     use crate::people::erasure::rows_referencing_person;
     use crate::privacy::testing::{Seeded, seed_everything, trace};
     use crate::{begin, commit};
+
+    /// Names in `decision_actions::ALL` that hold a durable id other than a person's. A new
+    /// name fails the test below until it is put here or in `PERSON_SUBJECTS`.
+    const NON_PERSON_SUBJECTS: &[&str] = &[
+        "change",
+        "conflict",
+        "consent_change",
+        "consent_policy",
+        "destination",
+        "enrollment",
+        "event",
+        "flow",
+        "ingest_reject",
+        "list",
+        "merge",
+        "message",
+        "outbox",
+        "reject",
+        "rule",
+        "segment",
+        "sending_domain",
+        "source_record",
+        "step_execution",
+        "template",
+    ];
+
+    #[test]
+    fn every_decision_subject_is_classified_as_person_valued_or_not() {
+        let mut unclassified: Vec<String> = decision_actions::ALL
+            .iter()
+            .flat_map(|spec| spec.subjects())
+            .filter(|subject| {
+                PERSON_SUBJECTS.contains(subject) == NON_PERSON_SUBJECTS.contains(subject)
+            })
+            .map(|subject| (*subject).to_owned())
+            .collect();
+        unclassified.sort();
+        unclassified.dedup();
+        assert!(
+            unclassified.is_empty(),
+            "decision subjects that are in both or neither of PERSON_SUBJECTS and \
+             NON_PERSON_SUBJECTS: {unclassified:?}"
+        );
+    }
 
     #[test]
     fn a_reason_has_a_stable_name() {
@@ -1328,6 +1413,102 @@ mod tests {
         running_template_test_send: "template.test_send",
         running_merge_rewrite: "person.merge.rewrite",
         running_flow_enroll: "flow.enroll",
+    }
+    /// The purge finds a person's jobs of every kind in every state. The indexes of 0098 do not
+    /// cover the same states for every kind (the person and enrollment ones hold dead rows only),
+    /// so each kind is checked ready, running and dead, with a bystander's job of the same kind and
+    /// state beside it. A running job cannot be deleted under its handler: it is marked instead.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_erasure_purges_every_person_carrying_kind_in_every_state_and_no_bystanders(
+        pool: PgPool,
+    ) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let Seeded {
+                ws,
+                person,
+                merged,
+                bystander,
+                ..
+            } = seed_everything(&pool).await;
+            let enrollment = enrollment_of(&pool, person).await;
+            let other_enrollment = Uuid::now_v7();
+            sqlx::query("DELETE FROM jobs")
+                .execute(&pool)
+                .await
+                .unwrap();
+            let payload = |kind: &str, person: Uuid, enrollment: Uuid| match kind {
+                "flow.step" => serde_json::json!({ "enrollment_id": enrollment }),
+                "person.merge.rewrite" => serde_json::json!({ "merged_person_id": person }),
+                "flow.enroll" => serde_json::json!({ "people": [[person, 1]] }),
+                _ => serde_json::json!({ "person_id": person }),
+            };
+            let kinds = [
+                "webhook.call",
+                "delivery.send",
+                "delivery.sync",
+                "template.test_send",
+                "flow.step",
+                "person.merge.rewrite",
+                "flow.enroll",
+            ];
+            let mut rows: Vec<(Uuid, &str, &str, bool)> = Vec::new();
+            for kind in kinds {
+                for state in ["ready", "running", "dead"] {
+                    for (own, who, of) in [
+                        (
+                            true,
+                            if kind == "person.merge.rewrite" {
+                                merged
+                            } else {
+                                person
+                            },
+                            enrollment,
+                        ),
+                        (false, bystander, other_enrollment),
+                    ] {
+                        let id = Uuid::now_v7();
+                        sqlx::query(
+                            "INSERT INTO jobs (id, workspace_id, kind, payload, state, \
+                                lease_token, lease_expires_at, attempts, dead_at, cause_kind, \
+                                cause_id, trace_id) \
+                             VALUES ($1, $2, $3, $4, $5, \
+                                CASE WHEN $5 = 'running' THEN gen_random_uuid() END, \
+                                CASE WHEN $5 = 'running' THEN now() + interval '1 hour' END, \
+                                CASE WHEN $5 = 'running' THEN 1 ELSE 0 END, \
+                                CASE WHEN $5 = 'dead' THEN now() END, 'api', 't', \
+                                gen_random_uuid())",
+                        )
+                        .bind(id)
+                        .bind(ws.as_uuid())
+                        .bind(kind)
+                        .bind(payload(kind, who, of))
+                        .bind(state)
+                        .execute(&pool)
+                        .await
+                        .unwrap();
+                        rows.push((id, kind, state, own));
+                    }
+                }
+            }
+
+            erase(&pool, ws, person).await;
+
+            for (id, kind, state, own) in rows {
+                let left: Option<bool> =
+                    sqlx::query_scalar("SELECT purge_on_release FROM jobs WHERE id = $1")
+                        .bind(id)
+                        .fetch_optional(&pool)
+                        .await
+                        .unwrap();
+                match (own, state, left) {
+                    (true, "running", Some(true)) | (true, _, None) => {}
+                    (false, _, Some(false)) => {}
+                    other => panic!("{kind} {state} own={own}: left {:?}", other.2),
+                }
+            }
+        })
+        .await;
     }
 
     #[sqlx::test]

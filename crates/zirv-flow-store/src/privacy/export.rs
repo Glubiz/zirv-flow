@@ -10,7 +10,8 @@ use flate2::Compression;
 use flate2::write::GzEncoder;
 use futures_util::{Stream, TryStreamExt};
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::json;
+use serde_json::value::RawValue;
 use sqlx::PgConnection;
 use sqlx::prelude::FromRow;
 use time::OffsetDateTime;
@@ -393,13 +394,14 @@ pub async fn expire_exports(pool: &PgPool) -> Result<u64, StoreError> {
     Ok(done.rows_affected())
 }
 
-fn gzip(document: &Value) -> Result<Vec<u8>, StoreError> {
-    let bytes = serde_json::to_vec(document)
-        .map_err(|error| StoreError::query(sqlx::Error::Encode(error.into())))?;
+/// The compressed JSON of `document`, written through the encoder as it is serialized, so the
+/// uncompressed text is never held whole.
+fn gzip(document: &impl Serialize) -> Result<Vec<u8>, StoreError> {
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    serde_json::to_writer(&mut encoder, document)
+        .map_err(|error| StoreError::query(sqlx::Error::Encode(error.into())))?;
     encoder
-        .write_all(&bytes)
-        .and_then(|()| encoder.finish())
+        .finish()
         .map_err(|error| StoreError::query(sqlx::Error::Io(error)))
 }
 
@@ -434,11 +436,22 @@ impl Budget {
         Self { max, used: 0 }
     }
 
-    fn take(&mut self, row: &Value) -> Result<(), Abort> {
+    fn take(&mut self, row: &impl Serialize) -> Result<(), Abort> {
         let mut counter = Counter(0);
         // Counting cannot fail.
         let _ = serde_json::to_writer(&mut counter, row);
-        self.used = self.used.saturating_add(counter.0).saturating_add(1);
+        self.charge(counter.0)
+    }
+
+    /// Charges a row already held as JSON text. The text is the database's (`to_jsonb(..)::text`),
+    /// which puts a space after every `:` and `,`, so it counts a little more than the compact
+    /// document it ends up in: the cap stays a bound, on the conservative side.
+    fn take_text(&mut self, row: &str) -> Result<(), Abort> {
+        self.charge(row.len() as u64)
+    }
+
+    fn charge(&mut self, bytes: u64) -> Result<(), Abort> {
+        self.used = self.used.saturating_add(bytes).saturating_add(1);
         if self.used > self.max {
             return Err(Abort::TooLarge);
         }
@@ -466,7 +479,7 @@ async fn person_document(
     workspace: WorkspaceId,
     person: Uuid,
     max_bytes: u64,
-) -> Result<Option<Value>, Abort> {
+) -> Result<Option<ExportDocument>, Abort> {
     let Some(current) = current_person(&mut *connection, workspace, person).await? else {
         return Ok(None);
     };
@@ -479,7 +492,7 @@ async fn person_document(
     .fetch_all(&mut *connection)
     .await
     .map_err(StoreError::query)?;
-    let merged: Vec<&Uuid> = people.iter().filter(|id| **id != current).collect();
+    let merged: Vec<Uuid> = people.iter().copied().filter(|id| *id != current).collect();
 
     let generated_at = OffsetDateTime::now_utc()
         .format(&Rfc3339)
@@ -487,11 +500,8 @@ async fn person_document(
     let mut budget = Budget::new(max_bytes);
     // The empty document carries every key, delimiter and the envelope; the rows and the merged
     // ids are charged on top of it.
-    budget.take(&serde_json::to_value(ExportDocument::empty(
-        &generated_at,
-        current,
-    ))?)?;
-    budget.take(&json!(merged))?;
+    budget.take(&ExportDocument::empty(generated_at.clone(), current))?;
+    budget.take(&merged)?;
     let mut section = Section {
         connection,
         workspace,
@@ -505,8 +515,7 @@ async fn person_document(
         )
         .await?
         .into_iter()
-        .next()
-        .unwrap_or(Value::Null);
+        .next();
     let identities = section
         .rows(
             "SELECT id, kind, value, created_at FROM identities \
@@ -682,7 +691,7 @@ async fn person_document(
 
     let document = ExportDocument {
         format: EXPORT_FORMAT,
-        generated_at: &generated_at,
+        generated_at,
         person: ExportPerson {
             id: current,
             merged_ids: merged,
@@ -712,60 +721,61 @@ async fn person_document(
             },
         },
     };
-    Ok(Some(serde_json::to_value(document)?))
+    Ok(Some(document))
 }
 
 /// The shape of the document. The budget charges the empty one, so a key can never go uncounted.
 #[derive(Serialize)]
-struct ExportDocument<'a> {
+struct ExportDocument {
     format: &'static str,
-    generated_at: &'a str,
-    person: ExportPerson<'a>,
+    generated_at: String,
+    person: ExportPerson,
 }
 
 #[derive(Serialize)]
-struct ExportPerson<'a> {
+struct ExportPerson {
     id: Uuid,
-    merged_ids: Vec<&'a Uuid>,
-    profile: Value,
+    merged_ids: Vec<Uuid>,
+    /// The people row as JSON text; none when the person has no row.
+    profile: Option<Box<RawValue>>,
     #[serde(flatten)]
     sections: Sections,
 }
 
 #[derive(Default, Serialize)]
 struct Sections {
-    identities: Vec<Value>,
-    source_records: Vec<Value>,
-    events: Vec<Value>,
-    consent: Vec<Value>,
-    consent_history: Vec<Value>,
-    lists: Vec<Value>,
-    segments: Vec<Value>,
-    list_history: Vec<Value>,
-    merges: Vec<Value>,
-    identity_conflicts: Vec<Value>,
-    enrollments: Vec<Value>,
-    step_executions: Vec<Value>,
-    enrollment_waits: Vec<Value>,
-    flow_entries: Vec<Value>,
-    messages: Vec<Value>,
-    message_links: Vec<Value>,
-    forwarding_outbox: Vec<Value>,
-    erasure_handled_markers: Vec<Value>,
-    ingest_rejects: Vec<Value>,
-    decision_records: Vec<Value>,
-    template_preview_people: Vec<Value>,
+    identities: Vec<Box<RawValue>>,
+    source_records: Vec<Box<RawValue>>,
+    events: Vec<Box<RawValue>>,
+    consent: Vec<Box<RawValue>>,
+    consent_history: Vec<Box<RawValue>>,
+    lists: Vec<Box<RawValue>>,
+    segments: Vec<Box<RawValue>>,
+    list_history: Vec<Box<RawValue>>,
+    merges: Vec<Box<RawValue>>,
+    identity_conflicts: Vec<Box<RawValue>>,
+    enrollments: Vec<Box<RawValue>>,
+    step_executions: Vec<Box<RawValue>>,
+    enrollment_waits: Vec<Box<RawValue>>,
+    flow_entries: Vec<Box<RawValue>>,
+    messages: Vec<Box<RawValue>>,
+    message_links: Vec<Box<RawValue>>,
+    forwarding_outbox: Vec<Box<RawValue>>,
+    erasure_handled_markers: Vec<Box<RawValue>>,
+    ingest_rejects: Vec<Box<RawValue>>,
+    decision_records: Vec<Box<RawValue>>,
+    template_preview_people: Vec<Box<RawValue>>,
 }
 
-impl<'a> ExportDocument<'a> {
-    fn empty(generated_at: &'a str, person: Uuid) -> Self {
+impl ExportDocument {
+    fn empty(generated_at: String, person: Uuid) -> Self {
         Self {
             format: EXPORT_FORMAT,
             generated_at,
             person: ExportPerson {
                 id: person,
                 merged_ids: Vec::new(),
-                profile: Value::Null,
+                profile: None,
                 sections: Sections::default(),
             },
         }
@@ -783,29 +793,29 @@ struct Section<'a> {
 impl Section<'_> {
     /// Each row of `select` (which binds `$1` the workspace and `$2` the people) as JSON. Rows
     /// are counted as they arrive, so a section past the cap stops being read.
-    async fn rows(&mut self, select: &str) -> Result<Vec<Value>, Abort> {
+    async fn rows(&mut self, select: &str) -> Result<Vec<Box<RawValue>>, Abort> {
         // The statements are constants of this module, never built from input.
-        let sql = format!("SELECT to_jsonb(t) FROM ({select}) t");
-        let mut stream = sqlx::query_scalar::<_, Value>(sqlx::AssertSqlSafe(sql))
+        let sql = format!("SELECT to_jsonb(t)::text FROM ({select}) t");
+        let mut stream = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(sql))
             .bind(self.workspace.as_uuid())
             .bind(self.people)
             .fetch(&mut *self.connection);
         let mut rows = Vec::new();
         while let Some(row) = stream.try_next().await.map_err(StoreError::query)? {
-            self.budget.take(&row)?;
-            rows.push(row);
+            self.budget.take_text(&row)?;
+            rows.push(RawValue::from_string(row)?);
         }
         Ok(rows)
     }
 
     /// Every event of every partition, oldest first, read in keyset batches. Each row is charged
     /// as it arrives, so a person past the cap is never read in full.
-    async fn events(&mut self) -> Result<Vec<Value>, Abort> {
+    async fn events(&mut self) -> Result<Vec<Box<RawValue>>, Abort> {
         let mut events = Vec::new();
         let mut after: Option<(OffsetDateTime, Uuid)> = None;
         loop {
             let mut stream = sqlx::query_as::<_, EventRow>(
-                "SELECT occurred_at, id, to_jsonb(t) FROM ( \
+                "SELECT occurred_at, id, to_jsonb(t)::text FROM ( \
                     SELECT id, name, schema_version, occurred_at, received_at, properties, \
                            source, message_id, trace_id, validation_state, validation_reasons, \
                            flags \
@@ -829,14 +839,14 @@ impl Section<'_> {
     }
 }
 
-type EventRow = (OffsetDateTime, Uuid, Value);
+type EventRow = (OffsetDateTime, Uuid, String);
 
 /// Charges and collects events from `stream` until it ends or the budget is spent. Stops polling
 /// at the first row past the cap. Returns how many events it took.
 async fn consume_events<S>(
     stream: &mut S,
     budget: &mut Budget,
-    events: &mut Vec<Value>,
+    events: &mut Vec<Box<RawValue>>,
     after: &mut Option<(OffsetDateTime, Uuid)>,
 ) -> Result<i64, Abort>
 where
@@ -844,8 +854,8 @@ where
 {
     let mut taken = 0;
     while let Some((at, id, event)) = stream.try_next().await.map_err(StoreError::query)? {
-        budget.take(&event)?;
-        events.push(event);
+        budget.take_text(&event)?;
+        events.push(RawValue::from_string(event)?);
         *after = Some((at, id));
         taken += 1;
     }
@@ -857,6 +867,7 @@ mod tests {
     use std::io::Read;
 
     use flate2::read::GzDecoder;
+    use serde_json::Value;
 
     use futures_util::StreamExt;
 
@@ -1202,7 +1213,7 @@ mod tests {
         let at = OffsetDateTime::UNIX_EPOCH;
         let mut stream = futures_util::stream::iter(0..1000).map(|n| {
             polled.set(polled.get() + 1);
-            Ok::<_, sqlx::Error>((at, Uuid::nil(), json!({"n": n})))
+            Ok::<_, sqlx::Error>((at, Uuid::nil(), json!({"n": n}).to_string()))
         });
         // Each row charges 8 to 9 bytes, so a cap of 100 is passed by the 13th.
         let mut budget = Budget::new(100);
@@ -1221,8 +1232,8 @@ mod tests {
         let at = OffsetDateTime::UNIX_EPOCH;
         let last = Uuid::from_u128(7);
         let mut stream = futures_util::stream::iter(vec![
-            Ok::<_, sqlx::Error>((at, Uuid::nil(), json!({"n": 1}))),
-            Ok((at, last, json!({"n": 2}))),
+            Ok::<_, sqlx::Error>((at, Uuid::nil(), json!({"n": 1}).to_string())),
+            Ok((at, last, json!({"n": 2}).to_string())),
         ]);
         let mut budget = Budget::new(1000);
         let mut events = Vec::new();
@@ -1257,9 +1268,11 @@ mod tests {
 
     #[test]
     fn the_empty_document_names_every_section() {
-        let document =
-            serde_json::to_value(ExportDocument::empty("2026-01-01T00:00:00Z", Uuid::nil()))
-                .unwrap();
+        let document = serde_json::to_value(ExportDocument::empty(
+            "2026-01-01T00:00:00Z".to_owned(),
+            Uuid::nil(),
+        ))
+        .unwrap();
 
         let person = document["person"].as_object().unwrap();
         for (name, _) in EXPORT_SECTIONS {
@@ -1445,5 +1458,35 @@ mod tests {
             assert!(none.is_none());
         })
         .await;
+    }
+
+    #[test]
+    fn a_row_held_as_text_is_charged_by_its_length_and_stops_at_the_cap() {
+        let mut budget = Budget::new(20);
+
+        let first = budget.take_text(r#"{"a": 1}"#);
+        let long = r#"{"a": "a longer value than the cap allows"}"#;
+        let second = budget.take_text(long);
+
+        assert!(first.is_ok());
+        assert_eq!(budget.used, 8 + 1 + long.len() as u64 + 1);
+        assert!(matches!(second, Err(Abort::TooLarge)));
+    }
+
+    #[test]
+    fn a_document_of_raw_sections_compresses_to_the_json_it_holds() {
+        let mut document = ExportDocument::empty("2026-01-01T00:00:00Z".to_owned(), Uuid::nil());
+        document.person.profile = Some(RawValue::from_string(r#"{"plan": "pro"}"#.into()).unwrap());
+        document
+            .person
+            .sections
+            .events
+            .push(RawValue::from_string(r#"{"name": "seen", "n": 1}"#.into()).unwrap());
+
+        let back = unzip(&gzip(&document).unwrap());
+
+        assert_eq!(back["person"]["profile"], json!({"plan": "pro"}));
+        assert_eq!(back["person"]["events"], json!([{"name": "seen", "n": 1}]));
+        assert_eq!(back["person"]["identities"], json!([]));
     }
 }

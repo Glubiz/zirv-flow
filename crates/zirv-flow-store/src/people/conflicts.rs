@@ -584,4 +584,55 @@ mod tests {
         expected.sort();
         assert_eq!(marks, expected);
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_kept_separate_conflict_is_not_raised_again_when_its_record_changes(pool: PgPool) {
+        let ws = workspace(&pool).await;
+        let (_one, _two, conflict) = blocked(&pool, ws).await;
+        resolve(&pool, ws, conflict.id, ConflictResolution::KeepSeparate)
+            .await
+            .unwrap();
+
+        // The same record again, with another trait: it passes the content-hash short-circuit
+        // and collides on the same identifier.
+        let mut again = record("3", &[("external:crm", "2"), ("email", "x@example.com")]);
+        again.traits = json!({"plan": "gold"}).as_object().cloned().unwrap();
+        apply_profile_batch(&pool, ws, &[again]).await.unwrap();
+
+        let (open, _) = list_conflicts(&pool, ws, false, 10, None).await.unwrap();
+        assert_eq!(open.len(), 0, "a new open conflict was raised: {open:?}");
+        let decisions: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM decision_records WHERE action = 'identity.conflict' AND outcome = 'recorded'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(decisions, 1, "only the first conflict was recorded");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_kept_separate_conflict_does_not_hide_another_record_that_collides(pool: PgPool) {
+        let ws = workspace(&pool).await;
+        let (_one, _two, conflict) = blocked(&pool, ws).await;
+        resolve(&pool, ws, conflict.id, ConflictResolution::KeepSeparate)
+            .await
+            .unwrap();
+
+        // A different source record is new evidence about the same pair of people.
+        apply_profile_batch(
+            &pool,
+            ws,
+            &[record(
+                "4",
+                &[("external:crm", "2"), ("email", "x@example.com")],
+            )],
+        )
+        .await
+        .unwrap();
+
+        let (open, _) = list_conflicts(&pool, ws, false, 10, None).await.unwrap();
+        assert_eq!(open.len(), 1, "{open:?}");
+    }
 }
