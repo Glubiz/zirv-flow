@@ -15,3 +15,19 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v1.0.2 (2026-11-15)
+
+### Fixes
+
+- harden people, events and contacts ingest (#618-#627)
+
+### Documentation
+
+- point the lock review anchor at the 0096 heading
+- a contact definition change enqueues no recompute
+
+### Chores
+
+- a backfilling slot falls back to jsonb; note the batch definition window
+- return the batch contact definition by reference
+
