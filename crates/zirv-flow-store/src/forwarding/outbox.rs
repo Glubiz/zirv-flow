@@ -528,7 +528,9 @@ pub async fn purge_forwarding_outbox(
                     (SELECT o.days FROM unnest($3::uuid[], $4::int[]) AS o(workspace_id, days) \
                       WHERE o.workspace_id = x.workspace_id), $6)) \
             ORDER BY x.updated_at LIMIT $2) \
-           AND state = 'dead' AND updated_at < $1 - make_interval(days => $5) \
+           AND state = 'dead' AND updated_at < $1 - make_interval(days => COALESCE( \
+                 (SELECT o.days FROM unnest($3::uuid[], $4::int[]) AS o(workspace_id, days) \
+                   WHERE o.workspace_id = forwarding_outbox.workspace_id), $6)) \
          RETURNING workspace_id, person_id, destination_id::text AS destination, \
                    updated_at AS handled_at",
     );
@@ -1831,19 +1833,24 @@ mod tests {
             });
             // The purge has chosen the row (it is still dead and old in its snapshot) once a lock
             // wait shows up.
-            loop {
-                let waiting: i64 = sqlx::query_scalar(
-                    "SELECT count(*) FROM pg_locks WHERE NOT granted AND locktype = 'transactionid'",
-                )
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-                if waiting > 0 {
-                    break;
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    let waiting: i64 = sqlx::query_scalar(
+                        "SELECT count(*) FROM pg_locks WHERE NOT granted \
+                         AND locktype = 'transactionid'",
+                    )
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                    if waiting > 0 {
+                        break;
+                    }
+                    assert!(!purge.is_finished(), "the purge did not wait on the row");
+                    tokio::task::yield_now().await;
                 }
-                assert!(!purge.is_finished(), "the purge did not wait on the row");
-                tokio::task::yield_now().await;
-            }
+            })
+            .await
+            .expect("the purge never waited on the row");
             redriving.commit().await.unwrap();
 
             let purged = purge.await.unwrap().unwrap();
