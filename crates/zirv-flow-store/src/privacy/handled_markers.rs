@@ -32,8 +32,14 @@ const WRITE_MARKERS: &str = "INSERT INTO erasure_handled_markers \
 /// is one statement that deletes and writes the markers, and returns the number of rows deleted
 /// as a single `bigint`.
 pub(crate) fn delete_and_mark(gone: &str) -> String {
+    delete_and_mark_with(gone, "")
+}
+
+/// [`delete_and_mark`] with more data-modifying CTEs after `marked`, each written as
+/// `, name AS (...)`, that read `gone` too and so commit or fail with the delete.
+pub(crate) fn delete_and_mark_with(gone: &str, extra_ctes: &str) -> String {
     format!(
-        "WITH gone AS ({gone}), marked AS ({WRITE_MARKERS} RETURNING 1) \
+        "WITH gone AS ({gone}), marked AS ({WRITE_MARKERS} RETURNING 1){extra_ctes} \
          SELECT count(*) FROM gone"
     )
 }
@@ -63,6 +69,15 @@ mod tests {
         assert!(sql.starts_with("WITH gone AS (DELETE FROM t RETURNING a), marked AS ("));
         assert!(sql.ends_with("SELECT count(*) FROM gone"));
         assert!(sql.contains("first_handled_at = LEAST("));
+    }
+
+    #[test]
+    fn extra_ctes_follow_the_markers_and_the_plain_form_is_unchanged() {
+        let plain = delete_and_mark("DELETE FROM t RETURNING a");
+        let extra = delete_and_mark_with("DELETE FROM t RETURNING a", ", more AS (SELECT 1)");
+
+        assert_eq!(plain, delete_and_mark_with("DELETE FROM t RETURNING a", ""));
+        assert!(extra.contains("RETURNING 1), more AS (SELECT 1) SELECT count(*) FROM gone"));
     }
 
     #[test]

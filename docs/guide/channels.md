@@ -237,7 +237,8 @@ All of these are for workspace admins and are audited:
 - `GET /api/v1/workspaces/{ws}/forwarding/dead-letters?destination_id=&limit=&cursor=` lists dead
   rows newest first with the error code, attempts and times; never the payload.
 - `GET /api/v1/workspaces/{ws}/forwarding/status` gives each destination's queue `depth`, the
-  `oldest_lag_seconds` of its oldest waiting row and its `dead` count.
+  `oldest_lag_seconds` of its oldest waiting row and its `dead` count. `depth` and `dead` stop
+  counting at 10,000: a value of 10,001 means more than 10,000.
 - `POST /api/v1/workspaces/{ws}/forwarding/re-drive` with `{"id": ...}` (one row), `{"destination_id":
   ...}` or `{}` (every dead row) puts rows back in the queue with fresh attempts. It writes no
   event and starts no flow.

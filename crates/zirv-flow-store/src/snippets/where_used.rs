@@ -84,6 +84,31 @@ macro_rules! named_snippets {
     };
 }
 
+/// Holds, until the transaction ends, a share lock on every snippet row a block document names, in
+/// id order. A snippet archive holds its row while it checks the drafts, so a draft save that
+/// names the snippet runs before that check or after the archive, never in between. Nothing is
+/// locked, and no statement runs, for a document without blocks.
+pub(crate) async fn lock_snippets_named_by(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    document: &serde_json::Value,
+) -> Result<(), StoreError> {
+    if document.get("blocks").is_none() {
+        return Ok(());
+    }
+    sqlx::query(concat!(
+        "SELECT id FROM snippets WHERE workspace_id = $1 AND id::text IN (SELECT ",
+        named_snippets!("$2::jsonb"),
+        ") ORDER BY id FOR SHARE"
+    ))
+    .bind(workspace.as_uuid())
+    .bind(document)
+    .fetch_all(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(())
+}
+
 /// The snippets the workspace default theme names as its footer, in its draft or current version
 /// (the rule of [`themes_using`] with drafts counted). At most two.
 async fn default_footer_snippets(

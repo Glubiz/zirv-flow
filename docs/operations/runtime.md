@@ -118,7 +118,7 @@ does not exist.
 | `zirv_flow_destination_attempts_total` | counter | `workspace`, `destination` | Delivery attempts |
 | `zirv_flow_destination_outcomes_total` | counter | `workspace`, `destination`, `outcome` | Delivery attempts by outcome |
 | `zirv_flow_delivery_attempt_record_failures_total` | counter | `workspace` | Attempts whose record could not be written |
-| `zirv_flow_destination_forwarding_depth` | gauge | `workspace`, `destination` | Forwarding outbox rows waiting |
+| `zirv_flow_destination_forwarding_depth` | gauge | `workspace`, `destination` | Forwarding outbox rows waiting (counted up to 10,000; 10,001 means more) |
 | `zirv_flow_destination_forwarding_lag_seconds` | gauge | `workspace`, `destination` | How long the oldest outbox row has been past due |
 | `zirv_flow_destination_forwarding_dead_total` | counter | none | Outbox rows settled as dead letters |
 | `zirv_flow_provider_feedback_total` | counter | `outcome` | Provider feedback received |

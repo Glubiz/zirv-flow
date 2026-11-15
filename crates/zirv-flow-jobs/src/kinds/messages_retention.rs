@@ -5,8 +5,8 @@
 use serde_json::Value;
 use tracing::info;
 use zirv_flow_store::{
-    MessageRetentionReport, apply_message_retention_progress, record_retention_run,
-    workspace_windows,
+    MessageRetentionReport, RETENTION_BATCH, apply_message_retention_progress,
+    purge_forwarding_outbox, record_retention_run, workspace_windows,
 };
 
 use crate::{JobContext, JobError, JobKind, metrics};
@@ -47,9 +47,19 @@ impl JobKind for MessagesRetention {
             now.unix_timestamp() as f64,
         );
         outcome?;
+        // Dead forwarding rows, and delivered ones of archived destinations, leave at the same
+        // window; no job of a destination would ever look at them again.
+        let forwarding_deleted = purge_forwarding_outbox(
+            &pool,
+            &windows.messages,
+            settings.days,
+            now,
+            RETENTION_BATCH,
+        )
+        .await?;
         info!(
             messages_deleted = report.messages_deleted,
-            "message retention ran"
+            forwarding_deleted, "message retention ran"
         );
         ctx.audit_retention(
             Self::KIND,

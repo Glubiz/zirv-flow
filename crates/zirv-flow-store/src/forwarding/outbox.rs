@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use hashbrown::HashSet;
+use hashbrown::{HashMap, HashSet};
 use serde_json::Value;
 use sqlx::prelude::FromRow;
 use sqlx::{PgConnection, PgPool};
@@ -371,33 +371,50 @@ pub async fn list_dead_letters(
     .map_err(StoreError::query)
 }
 
+/// The most rows a queue count reads: a `depth` or `dead` of `FORWARDING_COUNT_CAP + 1` means more than
+/// `FORWARDING_COUNT_CAP`. A count over a backlog is linear in it, and the status page and the gauges only
+/// need to tell a small queue from a large one.
+pub const FORWARDING_COUNT_CAP: i64 = 10_000;
+
 /// The state of one destination's forwarding queue.
 #[derive(Clone, Debug, Eq, FromRow, PartialEq)]
 pub struct QueueStatus {
     pub destination_id: Uuid,
-    /// Rows waiting for delivery, a backed-off row included.
+    /// Rows waiting for delivery, a backed-off row included. Capped: [`FORWARDING_COUNT_CAP`] + 1 (10,001)
+    /// means more than 10,000.
     pub depth: i64,
     /// Seconds the oldest waiting row has been past due; 0 when none is.
     pub oldest_lag_seconds: i64,
+    /// Rows that ran out of attempts. Capped like `depth`.
     pub dead: i64,
 }
 
 /// A queue status per live destination of the workspace that has a rule or any forwarding row.
+/// The counts stop at [`FORWARDING_COUNT_CAP`] + 1; the lag is exact.
 pub async fn forwarding_status(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
 ) -> Result<Vec<QueueStatus>, StoreError> {
+    forwarding_status_capped(connection, workspace, FORWARDING_COUNT_CAP).await
+}
+
+async fn forwarding_status_capped(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    cap: i64,
+) -> Result<Vec<QueueStatus>, StoreError> {
     sqlx::query_as(
         "SELECT d.id AS destination_id, \
-                (SELECT count(*) FROM forwarding_outbox o WHERE o.destination_id = d.id \
-                   AND o.state = 'pending') AS depth, \
+                (SELECT count(*) FROM (SELECT 1 FROM forwarding_outbox o \
+                   WHERE o.destination_id = d.id AND o.state = 'pending' LIMIT $2 + 1) c) AS depth, \
                 COALESCE((SELECT GREATEST(0, EXTRACT(EPOCH FROM clock_timestamp() - \
                                                      min(o.next_attempt_at)))::bigint \
                           FROM forwarding_outbox o \
                           WHERE o.destination_id = d.id AND o.state = 'pending'), 0) \
                     AS oldest_lag_seconds, \
-                (SELECT count(*) FROM forwarding_outbox o WHERE o.destination_id = d.id \
-                   AND o.workspace_id = d.workspace_id AND o.state = 'dead') AS dead \
+                (SELECT count(*) FROM (SELECT 1 FROM forwarding_outbox o \
+                   WHERE o.destination_id = d.id AND o.workspace_id = d.workspace_id \
+                     AND o.state = 'dead' LIMIT $2 + 1) c) AS dead \
          FROM destinations d \
          WHERE d.workspace_id = $1 AND d.archived_at IS NULL \
            AND (EXISTS (SELECT 1 FROM forwarding_rules r WHERE r.destination_id = d.id) \
@@ -405,6 +422,7 @@ pub async fn forwarding_status(
          ORDER BY lower(d.name), d.id",
     )
     .bind(workspace.as_uuid())
+    .bind(cap)
     .fetch_all(connection)
     .await
     .map_err(StoreError::query)
@@ -415,15 +433,24 @@ pub async fn forwarding_status(
 pub struct ForwardingStat {
     pub workspace_id: Uuid,
     pub destination_id: Uuid,
+    /// Capped: [`FORWARDING_COUNT_CAP`] + 1 (10,001) means more than 10,000.
     pub depth: i64,
     pub oldest_lag_seconds: i64,
     /// Whether an `event.forward` job of the destination is ready or running.
     pub has_job: bool,
 }
 
-/// One row per destination that has pending rows, across workspaces.
+/// One row per destination that has pending rows, across workspaces. The depth stops at
+/// [`FORWARDING_COUNT_CAP`] + 1; the lag is exact.
 pub async fn forwarding_report(
     connection: &mut PgConnection,
+) -> Result<Vec<ForwardingStat>, StoreError> {
+    forwarding_report_capped(connection, FORWARDING_COUNT_CAP).await
+}
+
+async fn forwarding_report_capped(
+    connection: &mut PgConnection,
+    cap: i64,
 ) -> Result<Vec<ForwardingStat>, StoreError> {
     sqlx::query_as(
         "SELECT d.workspace_id, d.id AS destination_id, p.depth, \
@@ -432,11 +459,17 @@ pub async fn forwarding_report(
                 EXISTS (SELECT 1 FROM jobs j WHERE j.kind = 'event.forward' \
                           AND j.state IN ('ready', 'running') \
                           AND j.payload ->> 'destination_id' = d.id::text) AS has_job \
-         FROM (SELECT destination_id, count(*) AS depth, min(next_attempt_at) AS oldest \
-               FROM forwarding_outbox WHERE state = 'pending' GROUP BY destination_id) p \
-         JOIN destinations d ON d.id = p.destination_id AND d.archived_at IS NULL \
+         FROM destinations d \
+         CROSS JOIN LATERAL ( \
+            SELECT (SELECT count(*) FROM (SELECT 1 FROM forwarding_outbox o \
+                      WHERE o.destination_id = d.id AND o.state = 'pending' LIMIT $1 + 1) c) \
+                       AS depth, \
+                   (SELECT min(o.next_attempt_at) FROM forwarding_outbox o \
+                      WHERE o.destination_id = d.id AND o.state = 'pending') AS oldest) p \
+         WHERE d.archived_at IS NULL AND p.depth > 0 \
          ORDER BY d.id",
     )
+    .bind(cap)
     .fetch_all(connection)
     .await
     .map_err(StoreError::query)
@@ -462,6 +495,79 @@ pub async fn purge_delivered(
         .await
         .map_err(StoreError::query)?;
     Ok(u64::try_from(deleted).unwrap_or(0))
+}
+
+/// Deletes, in batches of `batch`, the forwarding rows no job will look at again, and writes the
+/// handled markers of each (person, destination) pair they leave, in the same statement:
+///
+/// - `dead` rows older than their workspace's message window (`workspace_days`, else
+///   `default_days`). A dead row is kept that long for a re-drive; its payload is never blanked,
+///   because a re-drive would then send `{}`.
+/// - `delivered` rows older than [`DELIVERED_RETENTION`], whatever the destination. The
+///   per-destination job purges the live ones as it runs; this covers an archived destination.
+///
+/// Returns the number of rows deleted.
+pub async fn purge_forwarding_outbox(
+    pool: &PgPool,
+    workspace_days: &HashMap<WorkspaceId, u32>,
+    default_days: u32,
+    now: OffsetDateTime,
+    batch: i64,
+) -> Result<u64, StoreError> {
+    let days = |value: u32| i32::try_from(value).unwrap_or(i32::MAX);
+    let (workspaces, windows): (Vec<Uuid>, Vec<i32>) = workspace_days
+        .iter()
+        .map(|(workspace, value)| (workspace.as_uuid(), days(*value)))
+        .unzip();
+    let shortest = windows.iter().copied().fold(days(default_days), i32::min);
+    let dead = crate::privacy::delete_and_mark(
+        "DELETE FROM forwarding_outbox WHERE id IN ( \
+            SELECT x.id FROM forwarding_outbox x WHERE x.state = 'dead' \
+              AND x.updated_at < $1 - make_interval(days => $5) \
+              AND x.updated_at < $1 - make_interval(days => COALESCE( \
+                    (SELECT o.days FROM unnest($3::uuid[], $4::int[]) AS o(workspace_id, days) \
+                      WHERE o.workspace_id = x.workspace_id), $6)) \
+            ORDER BY x.updated_at LIMIT $2) \
+         RETURNING workspace_id, person_id, destination_id::text AS destination, \
+                   updated_at AS handled_at",
+    );
+    let delivered = crate::privacy::delete_and_mark(
+        "DELETE FROM forwarding_outbox WHERE id IN ( \
+            SELECT id FROM forwarding_outbox WHERE state = 'delivered' \
+              AND updated_at < $1 - make_interval(secs => $2) LIMIT $3) \
+         RETURNING workspace_id, person_id, destination_id::text AS destination, \
+                   updated_at AS handled_at",
+    );
+    let mut total = 0;
+    loop {
+        let deleted: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(dead.clone()))
+            .bind(now)
+            .bind(batch)
+            .bind(&workspaces)
+            .bind(&windows)
+            .bind(shortest)
+            .bind(days(default_days))
+            .fetch_one(pool)
+            .await
+            .map_err(StoreError::query)?;
+        total += u64::try_from(deleted).unwrap_or(0);
+        if deleted < batch {
+            break;
+        }
+    }
+    loop {
+        let deleted: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(delivered.clone()))
+            .bind(now)
+            .bind(DELIVERED_RETENTION.as_secs_f64())
+            .bind(batch)
+            .fetch_one(pool)
+            .await
+            .map_err(StoreError::query)?;
+        total += u64::try_from(deleted).unwrap_or(0);
+        if deleted < batch {
+            return Ok(total);
+        }
+    }
 }
 
 /// The earliest time a pending row of `destination` is due, if any.
@@ -1517,6 +1623,171 @@ mod tests {
                 .unwrap();
             assert_eq!(purged, 2);
             assert_eq!(rows(&pool, ws).await, 1, "the dead letter stays");
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_counts_stop_past_the_cap_and_the_lag_stays_exact(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let (ws, destination) = fixture(&pool, "capped").await;
+            add_rule(
+                &pool,
+                ws,
+                destination,
+                "order",
+                json!([]),
+                json!({"id": {"from": "event.id"}}),
+            )
+            .await;
+            apply_event_batch(
+                &pool,
+                ws,
+                &redaction_key(),
+                &[record("order", json!({}), "m-1")],
+            )
+            .await
+            .unwrap();
+            // The one row becomes 9 pending and 8 dead ones, the oldest pending 90 s overdue.
+            sqlx::query(
+                "INSERT INTO forwarding_outbox (id, workspace_id, destination_id, rule_id, \
+                    event_id, person_id, idempotency_key, payload, state) \
+                 SELECT gen_random_uuid(), workspace_id, destination_id, rule_id, \
+                    gen_random_uuid(), person_id, gen_random_uuid()::text, payload, s.state \
+                 FROM forwarding_outbox, (VALUES ('pending'), ('dead')) s(state), \
+                    generate_series(1, 8) WHERE forwarding_outbox.state = 'pending'",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "UPDATE forwarding_outbox SET next_attempt_at = now() - interval '90 seconds' \
+                 WHERE id = (SELECT id FROM forwarding_outbox WHERE state = 'pending' \
+                             ORDER BY id LIMIT 1)",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            let mut connection = pool.acquire().await.unwrap();
+
+            let exact = forwarding_status_capped(&mut connection, ws, 100)
+                .await
+                .unwrap();
+            let capped = forwarding_status_capped(&mut connection, ws, 5)
+                .await
+                .unwrap();
+            let report = forwarding_report_capped(&mut connection, 5).await.unwrap();
+            let public = forwarding_status(&mut connection, ws).await.unwrap();
+
+            assert_eq!((exact[0].depth, exact[0].dead), (9, 8));
+            assert_eq!((capped[0].depth, capped[0].dead), (6, 6));
+            assert_eq!(report[0].depth, 6);
+            for lag in [
+                exact[0].oldest_lag_seconds,
+                capped[0].oldest_lag_seconds,
+                report[0].oldest_lag_seconds,
+            ] {
+                assert!((90..=95).contains(&lag), "{lag}");
+            }
+            assert_eq!((public[0].depth, public[0].dead), (9, 8));
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn old_dead_rows_and_delivered_rows_of_an_archived_destination_are_purged_with_markers(
+        pool: PgPool,
+    ) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let (ws, destination) = fixture(&pool, "dead").await;
+            add_rule(
+                &pool,
+                ws,
+                destination,
+                "order",
+                json!([]),
+                json!({"id": {"from": "event.id"}}),
+            )
+            .await;
+            apply_event_batch(
+                &pool,
+                ws,
+                &redaction_key(),
+                &[record("order", json!({}), "m-1")],
+            )
+            .await
+            .unwrap();
+            // Four more rows of the person: dead 400 and 10 days old, delivered 8 days old, and
+            // a pending one 400 days old that must stay.
+            sqlx::query(
+                "INSERT INTO forwarding_outbox (id, workspace_id, destination_id, rule_id, \
+                    event_id, person_id, idempotency_key, payload, state, updated_at) \
+                 SELECT gen_random_uuid(), workspace_id, destination_id, rule_id, \
+                    gen_random_uuid(), person_id, gen_random_uuid()::text, payload, s.state, \
+                    now() - s.age * interval '1 day' \
+                 FROM forwarding_outbox, \
+                    (VALUES ('dead', 400), ('dead', 10), ('delivered', 8), ('pending', 400)) \
+                    s(state, age) WHERE forwarding_outbox.updated_at > now() - interval '1 day'",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query("UPDATE destinations SET archived_at = now() WHERE id = $1")
+                .bind(destination)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("DELETE FROM erasure_handled_markers")
+                .execute(&pool)
+                .await
+                .unwrap();
+            let kept: Value = sqlx::query_scalar(
+                "SELECT payload FROM forwarding_outbox WHERE state = 'dead' \
+                 ORDER BY updated_at DESC LIMIT 1",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+            let purged =
+                purge_forwarding_outbox(&pool, &HashMap::new(), 395, OffsetDateTime::now_utc(), 1)
+                    .await
+                    .unwrap();
+
+            assert_eq!(purged, 2, "the 400-day dead row and the delivered one");
+            let left: Vec<(String, i64)> = sqlx::query_as(
+                "SELECT state, count(*) FROM forwarding_outbox GROUP BY state ORDER BY state",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                left,
+                [("dead".to_owned(), 1), ("pending".to_owned(), 2)],
+                "the young dead row and the pending rows stay"
+            );
+            let payload: Value =
+                sqlx::query_scalar("SELECT payload FROM forwarding_outbox WHERE state = 'dead'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                payload, kept,
+                "a row that stays keeps its payload for a re-drive"
+            );
+            let markers: i64 = sqlx::query_scalar("SELECT count(*) FROM erasure_handled_markers")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(markers, 1, "the pair the purge left is marked");
+            // A workspace with a 5-day window loses its 10-day dead row too.
+            let own = HashMap::from([(ws, 5)]);
+            let more = purge_forwarding_outbox(&pool, &own, 395, OffsetDateTime::now_utc(), 10)
+                .await
+                .unwrap();
+            assert_eq!(more, 1);
         })
         .await;
     }

@@ -536,7 +536,7 @@ gzip-compressed JSON document, `zirv-flow.person-export/v1`: `person` holds `pro
 with their sources), `identities`, `source_records`, `events` (every partition, oldest first),
 `consent`, `consent_history`, `lists`, `segments`, `list_history`, `merges` and
 `identity_conflicts`, then the flow and send side: `enrollments`, `step_executions`,
-`enrollment_waits`, `flow_entries`, `messages` and `message_links` (never the recipient hash or a
+`enrollment_waits`, `flow_entries`, `messages`, `message_links` and `message_tombstones` (never the recipient hash or a
 rendered body), `forwarding_outbox`, `erasure_handled_markers`, `ingest_rejects` (the redacted
 payload; rows with no person are not reachable), `decision_records` and
 `template_preview_people`, with the data of merged people under the survivor. Left out on

@@ -2625,7 +2625,8 @@ before and after on the same input.
   rows or every dead row of the workspace to `pending`, due now, with the cycle's attempts moved
   into `attempt_offset`, and ensures a job. It starts no flow.
 - **API and metrics.** Rule CRUD, the dead-letter list (ids, code, attempts and times; no payload),
-  the status (per destination `depth`, `oldest_lag_seconds`, `dead`) and re-drive are Admin,
+  the status (per destination `depth`, `oldest_lag_seconds`, `dead`; `depth` and `dead` count
+  up to 10,000, so 10,001 means more than 10,000, #661) and re-drive are Admin,
   workspace-level and audited (`forwarding.rule_created`, `rule_updated`, `rule_deleted`,
   `redriven`). The leader publishes `zirv_flow_destination_forwarding_depth` and
   `zirv_flow_destination_forwarding_lag_seconds`, and the attempts and outcomes are the
@@ -3460,7 +3461,7 @@ behind an expiring link: `profile`, `identities`, `source_records`, `events`,
 `consent`, `consent_history`, `lists`, `segments`, `list_history`, `merges`,
 `identity_conflicts`, `enrollments`, `step_executions`, `enrollment_waits`,
 `flow_entries`, `messages` (without the recipient hash), `message_links`,
-`forwarding_outbox`, `erasure_handled_markers`, `ingest_rejects` (the redacted
+`message_tombstones`, `forwarding_outbox`, `erasure_handled_markers`, `ingest_rejects` (the redacted
 payload and reason; rows with no person are out of reach), `decision_records`
 (ids and codes) and `template_preview_people`, with merged people folded under the
 survivor. Deliberately left out, in a constant list that a catalog test checks
@@ -3561,9 +3562,18 @@ bounded by `retention.messages_min_days` 30 and `retention.messages_max_days` 10
 messages in a terminal status (`sent`, `skipped`, `failed`) older than the window, oldest first by
 `(created_at, id)` on the index `messages_created_idx`, in batches of `RETENTION_BATCH`; `pending`
 and `sending` rows belong to a live job and stay, and `message_links` follow by cascade. Each batch
-is one committed statement built with `privacy::delete_and_mark`, so it writes the handled marker
+is one committed statement built with `privacy::delete_and_mark_with`, so it writes the handled marker
 of every purged row (earliest `created_at` per person and destination) and a failure rolls the
-batch back whole while earlier batches stay. The purge takes an optional map of workspace to days
+batch back whole while earlier batches stay. The same statement writes a tombstone
+(`message_tombstones`, #657: person, enrollment, template, topic, dimensions, status and
+completion time, no address or link) for each purged `sent` message, so the unsubscribe and
+preference links of old mail keep working; `find_tracked_message` falls back to it. Open and click
+record nothing against a purged message, and click links answer 404 because `message_links` are
+not kept. A tombstone is removed with its person (erasure) and re-pointed by a merge; messages
+purged before this release have none. The job also deletes `dead` forwarding rows older than
+the workspace's message window and `delivered` rows of archived destinations
+(`purge_forwarding_outbox`, #659), with their handled markers; a dead row's payload is never
+blanked, because a re-drive would send it. The purge takes an optional map of workspace to days
 (empty until the per-workspace window exists). The run adds the count to
 `zirv_flow_retention_deleted_total{table="messages"}`, sets
 `zirv_flow_retention_last_run_timestamp_seconds{table="messages"}` and logs the count only.
@@ -3974,7 +3984,7 @@ they were ruled as their capabilities were added to the plan.
   stays in `jsonb`. `string_list` traits stay in `jsonb`. The promotion is built in the
   segment milestone (M4); until the slots exist the `jsonb_path_ops` index stays, and it is reconsidered once promoted
   traits cover the equality searches. The slots are live (#125): states `backfilling`, `ready` and `retiring`; writers take the shared slot lock before they read the assignments and assignment changes take the exclusive one, so a backfill never leaves a stale value (`people/slots.rs`); the routes are `POST` and `DELETE /traits/{key}/index`.
-  Known limitation and upgrade decision: keep released migration 0033 and its checksum. Its initial `ALTER TABLE` holds ACCESS EXCLUSIVE on `people` through all 30 partial index builds, blocking reads and writes. Populated upgrades stop all roles and budget the full build when upgrading from before 0033; `v0.187.0` already contains it. No populated build timing is recorded. Rehearse at the installation's row counts before setting the downtime window; see the [lock review](operations/upgrade.md#lock-review-through-0100). This supports stopped upgrades only; online and mixed-version upgrades remain OQ-17.
+  Known limitation and upgrade decision: keep released migration 0033 and its checksum. Its initial `ALTER TABLE` holds ACCESS EXCLUSIVE on `people` through all 30 partial index builds, blocking reads and writes. Populated upgrades stop all roles and budget the full build when upgrading from before 0033; `v0.187.0` already contains it. No populated build timing is recorded. Rehearse at the installation's row counts before setting the downtime window; see the [lock review](operations/upgrade.md#lock-review-through-0106). This supports stopped upgrades only; online and mixed-version upgrades remain OQ-17.
   Details in [docs/benchmarks/m2-ingestion.md](benchmarks/m2-ingestion.md).
 
 - **OQ-8:** A per-workspace running cap in the claim query

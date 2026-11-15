@@ -19,10 +19,11 @@ pub(crate) use rules::tests as support;
 
 pub(crate) use outbox::enqueue_forwarding_of;
 pub use outbox::{
-    ClaimedRow, DELIVERED_RETENTION, DeadLetter, FORWARD_JOB_KIND, ForwardRef, ForwardingStat,
-    QueueStatus, Redrive, Settled, claim_due, defer_row, enqueue_forwarding,
-    enqueue_segment_forwarding, ensure_forward_job, extend_lease, forwarding_report,
-    forwarding_status, list_dead_letters, next_due, purge_delivered, redrive, settle_row,
+    ClaimedRow, DELIVERED_RETENTION, DeadLetter, FORWARD_JOB_KIND, FORWARDING_COUNT_CAP,
+    ForwardRef, ForwardingStat, QueueStatus, Redrive, Settled, claim_due, defer_row,
+    enqueue_forwarding, enqueue_segment_forwarding, ensure_forward_job, extend_lease,
+    forwarding_report, forwarding_status, list_dead_letters, next_due, purge_delivered,
+    purge_forwarding_outbox, redrive, settle_row,
 };
 pub use rules::{
     ForwardingRule, NewRule, RuleUpdate, RuleWrite, create_rule, delete_rule, find_rule,

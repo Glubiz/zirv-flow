@@ -12,6 +12,7 @@ use uuid::Uuid;
 use zirv_flow_core::{UserId, WorkspaceId};
 
 use crate::StoreError;
+use crate::snippets::lock_snippets_named_by;
 
 /// A template: its settings and which version is current. The content is in its draft and its
 /// versions.
@@ -283,6 +284,8 @@ pub async fn save_template_draft(
     updated_by: Option<UserId>,
 ) -> Result<TemplateDraft, TemplateError> {
     lock_live_template(connection, workspace, id).await?;
+    // A snippet archive checks the drafts while it holds the snippet row.
+    lock_snippets_named_by(connection, workspace, document).await?;
     let draft = sqlx::query_as(concat!(
         "UPDATE template_drafts SET document = $3, revision = revision + 1, updated_by = $4, \
             updated_at = now(), checks = NULL WHERE workspace_id = $1 AND template_id = $2 RETURNING ",

@@ -48,6 +48,22 @@ pub async fn check_frequency_caps(
     channel: &str,
     now: OffsetDateTime,
 ) -> Result<CapVerdict, StoreError> {
+    // Most workspaces set no cap on the channel. Then there is nothing to count, so nothing to
+    // serialise: the slot is one write with no transaction and no lock. A cap saved right after
+    // this read lets this one message through uncounted, and its slot is recorded, so the
+    // messages after it count it.
+    let capped: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM frequency_caps WHERE workspace_id = $1 AND channel = $2)",
+    )
+    .bind(workspace.as_uuid())
+    .bind(channel)
+    .fetch_one(pool)
+    .await
+    .map_err(StoreError::query)?;
+    if !capped {
+        reserve_slot(pool, workspace, message, now).await?;
+        return Ok(CapVerdict::Reserved);
+    }
     let mut tx = begin(pool).await?;
     sqlx::query("SELECT pg_advisory_xact_lock($1, hashtext($2::text))")
         .bind(CAP_LOCK_CLASS)
@@ -112,16 +128,27 @@ pub async fn check_frequency_caps(
         CapVerdict::Reserved
     };
     if verdict == CapVerdict::Reserved {
-        sqlx::query("UPDATE messages SET cap_slot_at = $3 WHERE workspace_id = $1 AND id = $2")
-            .bind(workspace.as_uuid())
-            .bind(message)
-            .bind(now)
-            .execute(&mut *tx)
-            .await
-            .map_err(StoreError::query)?;
+        reserve_slot(&mut *tx, workspace, message, now).await?;
     }
     commit(tx).await?;
     Ok(verdict)
+}
+
+/// Records the slot a message holds from `now`.
+async fn reserve_slot<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+    workspace: WorkspaceId,
+    message: Uuid,
+    now: OffsetDateTime,
+) -> Result<(), StoreError> {
+    sqlx::query("UPDATE messages SET cap_slot_at = $3 WHERE workspace_id = $1 AND id = $2")
+        .bind(workspace.as_uuid())
+        .bind(message)
+        .bind(now)
+        .execute(executor)
+        .await
+        .map_err(StoreError::query)?;
+    Ok(())
 }
 
 const SLOTS_IN_WINDOW_COUNT: &str = "SELECT count(*) FROM messages
@@ -279,6 +306,27 @@ mod tests {
                 .await
                 .unwrap()
         }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn without_caps_the_slot_is_one_write_with_no_transaction_and_no_lock(pool: PgPool) {
+        let world = world(pool, &[]).await;
+        let message = world.message(MessageStatus::Pending).await;
+        // A second dispatch keeps the statement capture from being lost to a cached callsite.
+        let _keep = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+
+        let (verdict, statements) = crate::people::statements_of(world.check(message, T0)).await;
+
+        assert_eq!(verdict, CapVerdict::Reserved);
+        assert_eq!(world.slot(message).await, Some(T0));
+        assert_eq!(statements.len(), 2, "{statements:?}");
+        assert!(
+            statements
+                .iter()
+                .all(|sql| !sql.contains("advisory") && !sql.starts_with("BEGIN")),
+            "{statements:?}"
+        );
     }
 
     #[sqlx::test]

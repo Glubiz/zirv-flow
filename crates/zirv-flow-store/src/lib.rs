@@ -78,8 +78,8 @@ pub use api_keys::{
 pub use assets::{
     Asset, AssetError, AssetListing, AssetOwner, AssetOwnerKind, AssetReferenceError,
     DeleteAssetError, NewAsset, ServedAsset, StoredAsset, asset_owners, asset_url, delete_asset,
-    find_asset, find_served_asset, list_assets, parse_sha256_hex, record_references, sha256_hex,
-    store_asset, workspace_asset_bytes,
+    find_asset, find_served_asset, list_assets, parse_sha256_hex, record_references,
+    served_asset_type, sha256_hex, store_asset, workspace_asset_bytes,
 };
 pub use audit::{
     AUDIT_BATCH, Actor, ActorKind, AuditEntry, AuditFilter, AuditPage, NewAuditEntry, append_audit,
@@ -181,12 +181,12 @@ pub use flows::{
     update_flow_draft, version_node_counts, wait_filters, warmup_counts,
 };
 pub use forwarding::{
-    ClaimedRow, DELIVERED_RETENTION, DeadLetter, FORWARD_JOB_KIND, ForwardRef, ForwardingRule,
-    ForwardingStat, NewRule, QueueStatus, Redrive, RuleUpdate, RuleWrite, Settled, claim_due,
-    create_rule, defer_row, delete_rule, enqueue_forwarding, enqueue_segment_forwarding,
-    ensure_forward_job, extend_lease, find_rule, forwarding_report, forwarding_status,
-    list_dead_letters, list_rules, lock_rule, next_due, purge_delivered, redrive, settle_row,
-    update_rule,
+    ClaimedRow, DELIVERED_RETENTION, DeadLetter, FORWARD_JOB_KIND, FORWARDING_COUNT_CAP,
+    ForwardRef, ForwardingRule, ForwardingStat, NewRule, QueueStatus, Redrive, RuleUpdate,
+    RuleWrite, Settled, claim_due, create_rule, defer_row, delete_rule, enqueue_forwarding,
+    enqueue_segment_forwarding, ensure_forward_job, extend_lease, find_rule, forwarding_report,
+    forwarding_status, list_dead_letters, list_rules, lock_rule, next_due, purge_delivered,
+    purge_forwarding_outbox, redrive, settle_row, update_rule,
 };
 pub use identities::{
     OidcLogin, create_oidc_login, delete_expired_oidc_logins, find_identity_user, link_identity,
@@ -297,7 +297,8 @@ pub use segments::{
 };
 pub use send_limits::{
     CAP_LOCK_CLASS, CapMode, CapVerdict, FrequencyCap, NewFrequencyCap, QuietHours, SendLimits,
-    check_frequency_caps, read_send_limits, record_message_deferral, replace_send_limits,
+    check_frequency_caps, read_quiet_hours, read_send_limits, record_message_deferral,
+    replace_send_limits,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use sending::fixtures as sending_fixtures;

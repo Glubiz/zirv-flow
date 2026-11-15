@@ -473,6 +473,20 @@ pub(crate) async fn seed_everything(pool: &PgPool) -> Seeded {
     .await
     .unwrap();
 
+    // The tombstone retention left for a purged sent message of the survivor and the bystander.
+    for holder in [person, bystander] {
+        sqlx::query(
+            "INSERT INTO message_tombstones (message_id, workspace_id, person_id, enrollment_id, \
+                template_id, status, completed_at) \
+             VALUES (gen_random_uuid(), $1, $2, gen_random_uuid(), gen_random_uuid(), 'sent', now())",
+        )
+        .bind(ws.as_uuid())
+        .bind(holder)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     // Undrained inbox rows: the person's, spelled differently, and the bystander's.
     let item = |email: &str, message_id: &str| IngestItem {
         identifiers: vec![("email".into(), email.into())],

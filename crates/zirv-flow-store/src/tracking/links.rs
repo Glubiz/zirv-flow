@@ -23,6 +23,9 @@ pub struct TrackedMessage {
     /// The consent coordinates besides the topic: dimension key to value key.
     pub dimensions: Value,
     pub completed_at: Option<OffsetDateTime>,
+    /// Whether the message was purged by retention and this is its tombstone. Enough to
+    /// unsubscribe or save preferences; not a message that was opened or clicked.
+    pub purged: bool,
 }
 
 impl TrackedMessage {
@@ -31,16 +34,22 @@ impl TrackedMessage {
     }
 }
 
-/// The message with this id, in whichever workspace it is. A token is signed, so the id is
-/// trusted; nothing else is read from the request.
+/// The message with this id, in whichever workspace it is, or its tombstone when retention has
+/// purged it (`purged`). A token is signed, so the id is trusted; nothing else is read from the
+/// request.
 pub async fn find_tracked_message<'e>(
     executor: impl PgExecutor<'e>,
     id: Uuid,
 ) -> Result<Option<TrackedMessage>, StoreError> {
     sqlx::query_as(
         "SELECT id, workspace_id, person_id, enrollment_id, template_id, status, topic_id, \
-                dimensions, completed_at \
-         FROM messages WHERE id = $1",
+                dimensions, completed_at, false AS purged \
+         FROM messages WHERE id = $1 \
+         UNION ALL \
+         SELECT message_id, workspace_id, person_id, enrollment_id, template_id, status, \
+                topic_id, dimensions, completed_at, true \
+         FROM message_tombstones WHERE message_id = $1 \
+         LIMIT 1",
     )
     .bind(id)
     .fetch_optional(executor)
