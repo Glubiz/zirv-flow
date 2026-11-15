@@ -15,3 +15,10 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v1.0.5 (2026-11-15)
+
+### Fixes
+
+- share a failed counts load with its waiters and cap the counts cache (#650)
+- queue depths, orphan reaper, source purge, first sync, inspector counts and run mode (#646-#651)
+
