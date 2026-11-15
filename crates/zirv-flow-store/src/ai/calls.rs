@@ -112,6 +112,12 @@ pub struct ReservationLimits {
     pub stale_after_secs: f64,
 }
 
+/// Gives up on the pending calls of a workspace older than a number of seconds. It reads
+/// `ai_calls_pending_idx` (migration 0100), which lists only the pending rows.
+const ABANDON_STALE: &str = "UPDATE ai_calls SET outcome = 'abandoned' \
+     WHERE workspace_id = $1 AND outcome = 'pending' \
+       AND created_at < now() - make_interval(secs => $2)";
+
 /// Checks the rate limit and the budget and, when both admit the call, records it as `pending` at
 /// `call.estimated_cost_micros` (its worst-case cost), all under a lock on the workspace that is
 /// held until the transaction ends. Counting pending rows too is what makes the limits hold
@@ -130,14 +136,12 @@ pub async fn reserve_ai_call(
         .map_err(StoreError::query)?;
     // A call still pending after the client's whole timeout is not in flight any more: its process
     // died. It is given up on but keeps its cost, since the provider may have billed it.
-    sqlx::query(
-        "UPDATE ai_calls SET outcome = 'abandoned' WHERE workspace_id = $1 AND outcome = 'pending' \n           AND created_at < now() - make_interval(secs => $2)",
-    )
-    .bind(call.workspace_id.as_uuid())
-    .bind(limits.stale_after_secs)
-    .execute(&mut *connection)
-    .await
-    .map_err(StoreError::query)?;
+    sqlx::query(ABANDON_STALE)
+        .bind(call.workspace_id.as_uuid())
+        .bind(limits.stale_after_secs)
+        .execute(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
     if calls_in_last_minute(&mut *connection, call.workspace_id, call.user_id).await?
         >= limits.rate_limit
     {
@@ -796,5 +800,31 @@ mod tests {
             spent_this_month(&pool, ws, abandoned_at).await.unwrap(),
             1_100
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_abandon_update_reads_the_index_of_pending_calls(pool: PgPool) {
+        let ws = workspace(&pool, "abandon-plan").await;
+        let mut tx = crate::begin(&pool).await.unwrap();
+        // The planner is made to prefer an index, so the plan names the one it can use whatever
+        // the size of the table.
+        sqlx::query("SET LOCAL enable_seqscan = off")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let statement = ABANDON_STALE
+            .replace("$1", &format!("'{}'", ws.as_uuid()))
+            .replace("$2", "60");
+
+        let plan: Vec<(String,)> =
+            sqlx::query_as(sqlx::AssertSqlSafe(format!("EXPLAIN {statement}")))
+                .fetch_all(&mut *tx)
+                .await
+                .unwrap();
+
+        let plan: Vec<String> = plan.into_iter().map(|(line,)| line).collect();
+        let plan = plan.join("\n");
+        assert!(plan.contains("ai_calls_pending_idx"), "{plan}");
     }
 }

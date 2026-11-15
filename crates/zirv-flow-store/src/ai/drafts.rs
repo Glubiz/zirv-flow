@@ -288,9 +288,12 @@ pub async fn erase_ai_drafts(
     if needles.is_empty() {
         return Ok(0);
     }
-    let done = sqlx::query(
-        "DELETE FROM ai_drafts d WHERE d.workspace_id = $1 AND d.content IS NOT NULL AND EXISTS (             SELECT 1 FROM unnest($2::text[]) AS needle             WHERE position(lower(needle) IN lower(d.content::text)) > 0)",
-    )
+    let done = sqlx::query(concat!(
+        "DELETE FROM ai_drafts d WHERE d.workspace_id = $1 AND d.content IS NOT NULL AND EXISTS ( \
+            SELECT 1 FROM unnest($2::text[]) AS needle WHERE ",
+        content_holds_needle!("d.content"),
+        ")"
+    ))
     .bind(workspace.as_uuid())
     .bind(&needles)
     .execute(connection)
@@ -1023,5 +1026,28 @@ mod tests {
                 .await
                 .unwrap();
         assert!(!stored.contains("person"), "{stored}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn erasure_finds_an_identifier_with_a_backslash_a_quote_or_a_newline(pool: PgPool) {
+        let ws = workspace(&pool, "escaped").await;
+        let ada = user(&pool, "ada@example.com").await;
+        let source = source(&pool, ws).await;
+        let now = datetime!(2026-05-15 12:00 UTC);
+        let values = ["DOMAIN\\jdoe", "o\"brien", "line one\nline two"];
+        for value in values {
+            let content = json!({"mapping": {"sample": value}});
+            let draft = mapping(ws, ada, source, Some(&content), now + Duration::days(1));
+            insert(&pool, &draft).await;
+        }
+        let mut connection = pool.acquire().await.unwrap();
+
+        let needles = values.map(str::to_owned);
+        let deleted = erase_ai_drafts(&mut connection, ws, &needles)
+            .await
+            .unwrap();
+
+        assert_eq!(deleted, 3);
     }
 }

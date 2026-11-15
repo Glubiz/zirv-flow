@@ -13,7 +13,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
 
-use zirv_flow_core::flow::{FlowGraph, FlowSettings, NodeKind, Trigger};
+use zirv_flow_core::flow::{FlowGraph, FlowSettings, NodeKind, Trigger, segment_uses_lenient};
 use zirv_flow_store::{Flow, FlowAction, FlowVersion};
 
 use super::crud::{
@@ -211,6 +211,13 @@ async fn publish_now(
     zirv_flow_store::lock_templates_shared(&mut tx, workspace, &named_templates(&graph)).await?;
     zirv_flow_store::lock_destinations_shared(&mut tx, workspace, &named_destinations(&graph))
         .await?;
+    // The same for the segments the draft names: an archive of one waits for this publish, and
+    // sees the flow, instead of freezing the membership the flow runs on.
+    let segments: Vec<Uuid> =
+        segment_uses_lenient(&locked.flow().draft_graph, &locked.flow().draft_settings)
+            .into_keys()
+            .collect();
+    zirv_flow_store::lock_segments_shared(&mut tx, workspace, &segments).await?;
     let (checked, _) = check_flow(state, &mut tx, workspace, locked.flow()).await?;
     if !checked.issues.is_empty() {
         // Dropping the transaction writes nothing.

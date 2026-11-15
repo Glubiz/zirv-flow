@@ -663,8 +663,9 @@ pub(crate) async fn update(
     Ok(Json(SegmentDetailBody::new(&segment, &version)))
 }
 
-/// Archives a segment; refused while a current version of another live segment references it.
-/// Versions stay readable. Audited as `segment.archived`.
+/// Archives a segment; refused while a current version of another live segment references it or a
+/// published or paused flow's running version uses it. Versions stay readable. Audited as
+/// `segment.archived`.
 #[utoipa::path(
     post,
     operation_id = "archive_segment",
@@ -679,7 +680,7 @@ pub(crate) async fn update(
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the write scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or segment, or no access", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "Another segment references it (`code` is `segment_referenced`), or it is already archived (`segment_archived`)", body = Problem, content_type = "application/problem+json")
+        (status = 409, description = "Another segment references it (`code` is `segment_referenced`), a published or paused flow uses it (`segment_in_use`, with the flows in `flows`), or it is already archived (`segment_archived`)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]

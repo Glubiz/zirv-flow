@@ -303,7 +303,9 @@ pub struct SegmentMembershipChanges {
 }
 
 /// The row a diff statement returns: the counts and, when the statement was built to capture
-/// them, the changes as parallel arrays.
+/// them, the changes as parallel arrays. A segment diff returns only the event and the person of
+/// each change: every change of one has the refresh's own trace and cause. A batch diff returns
+/// the trace and cause of each change too, as its people come from different traces.
 #[derive(Debug, Default, FromRow)]
 pub(super) struct Captured {
     pub(super) counts: Vec<i64>,
@@ -337,15 +339,29 @@ impl Captured {
         }
     }
 
-    /// The captured changes. A change whose cause kind is not one we know is left out.
-    pub(super) fn changes(self) -> SegmentMembershipChanges {
+    /// The captured changes. `shared` is the trace and cause every change of a segment diff was
+    /// recorded under; a batch diff passes none and reads them from its rows. A change whose
+    /// cause kind is not one we know is left out.
+    pub(super) fn changes(self, shared: Option<&TraceContext>) -> SegmentMembershipChanges {
         fn zip(
             ids: Vec<Uuid>,
             people: Vec<Uuid>,
             traces: Vec<Uuid>,
             kinds: Vec<String>,
             causes: Vec<String>,
+            shared: Option<&TraceContext>,
         ) -> Vec<SegmentMembershipChange> {
+            if let Some(trace) = shared {
+                return ids
+                    .into_iter()
+                    .zip(people)
+                    .map(|(event, person)| SegmentMembershipChange {
+                        event,
+                        person,
+                        trace: trace.clone(),
+                    })
+                    .collect();
+            }
             ids.into_iter()
                 .zip(people)
                 .zip(traces)
@@ -370,6 +386,7 @@ impl Captured {
                 self.entered_traces,
                 self.entered_kinds,
                 self.entered_causes,
+                shared,
             ),
             exited: zip(
                 self.exited_ids,
@@ -377,6 +394,7 @@ impl Captured {
                 self.exited_traces,
                 self.exited_kinds,
                 self.exited_causes,
+                shared,
             ),
         }
     }
@@ -511,12 +529,17 @@ pub(super) fn refresh_statement(members: &SqlQuery, scope: Scope, capture: bool)
                 " JOIN batch r ON r.person_id = ev.person_id",
             ),
         };
-        let flow_rows = |kind: &str| {
-            format!(
+        // A segment diff leaves out the trace and cause: they are the refresh's own for every
+        // change, and the caller has them.
+        let flow_rows = |kind: &str| match scope {
+            Scope::Segment => {
+                format!("{kind}_flow AS (SELECT ev.id, ev.person_id FROM {kind}_events ev), ")
+            }
+            Scope::Batch => format!(
                 "{kind}_flow AS (SELECT ev.id, ev.person_id, ev.trace_id, \
                      {kind_expr} AS cause_kind, {id_expr} AS cause_id \
                      FROM {kind}_events ev{join}), "
-            )
+            ),
         };
         let arrays = |kind: &str| {
             let column = |name: &str, alias: &str, empty: &str| {
@@ -525,14 +548,18 @@ pub(super) fn refresh_statement(members: &SqlQuery, scope: Scope, capture: bool)
                          FROM {kind}_flow f), '{{}}'::{empty}[]) AS {kind}_{alias}"
                 )
             };
-            [
+            let mut columns = vec![
                 column("id", "ids", "uuid"),
                 column("person_id", "people", "uuid"),
-                column("trace_id", "traces", "uuid"),
-                column("cause_kind", "kinds", "text"),
-                column("cause_id", "causes", "text"),
-            ]
-            .concat()
+            ];
+            if scope == Scope::Batch {
+                columns.extend([
+                    column("trace_id", "traces", "uuid"),
+                    column("cause_kind", "kinds", "text"),
+                    column("cause_id", "causes", "text"),
+                ]);
+            }
+            columns.concat()
         };
         (
             format!("{}{}", flow_rows("entered"), flow_rows("exited")),
@@ -610,11 +637,20 @@ pub async fn apply_refresh(
     connection: &mut PgConnection,
     apply: &RefreshApply<'_>,
 ) -> Result<RefreshOutcome, StoreError> {
+    // The first refresh and a definition change record their changes under the `definition_change`
+    // cause, and neither a flow trigger nor an exit or goal settle acts on those (ruling
+    // 336b80fa), so nothing is read or handed back for them.
+    let definition_driven = apply.trace.cause.kind == CauseKind::DefinitionChange;
     // The flows this segment triggers decide whether the statement hands back its changes.
-    let triggered = segment_trigger_flows(connection, apply.workspace, apply.segment).await?;
+    let triggered = if definition_driven {
+        Vec::new()
+    } else {
+        segment_trigger_flows(connection, apply.workspace, apply.segment).await?
+    };
     // A segment that is a flow's goal, or the trigger segment of a `leaves_segment` exit criterion,
     // hands back its changes too: the enrollments in flight settle on them.
-    let watched = segment_is_watched(connection, apply.workspace, apply.segment).await?;
+    let watched = !definition_driven
+        && segment_is_watched(connection, apply.workspace, apply.segment).await?;
     let capture = !triggered.is_empty() || watched;
     let statement = refresh_statement(apply.members, Scope::Segment, capture);
     // A segment of a hundred thousand people is diffed in one statement, and the plan has to be
@@ -671,7 +707,7 @@ pub async fn apply_refresh(
             .await?;
     }
     if capture {
-        let changes = captured.changes();
+        let changes = captured.changes(Some(apply.trace));
         if !triggered.is_empty() {
             enqueue_segment_enrolls(connection, apply.workspace, &triggered, &changes).await?;
         }
@@ -875,6 +911,84 @@ mod tests {
         assert!(none.contains("$10::int4"));
         assert!(!none.contains("$11"));
         assert!(one.starts_with("WITH target AS (SELECT p.id FROM people p"));
+    }
+
+    #[test]
+    fn a_segment_diff_returns_the_event_and_person_of_each_change_and_a_batch_diff_more() {
+        let segment = refresh_statement(&plan_query("pro"), Scope::Segment, true);
+        let batch = refresh_statement(&plan_query("pro"), Scope::Batch, true);
+
+        for column in [
+            "entered_ids",
+            "entered_people",
+            "exited_ids",
+            "exited_people",
+        ] {
+            assert!(segment.contains(column), "{column}");
+        }
+        for column in ["traces", "kinds", "causes"] {
+            assert!(!segment.contains(column), "{column}");
+            assert!(batch.contains(&format!("entered_{column}")), "{column}");
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_first_refresh_triggers_nothing_and_a_live_one_runs_under_its_own_trace(
+        pool: PgPool,
+    ) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "triggers").await;
+            let seg = segment(&pool, ws, "S", 60).await;
+            let flow = crate::flows::tests_support::create(&pool, ws, "F").await;
+            let mut connection = pool.acquire().await.unwrap();
+            crate::update_flow_draft(
+                &mut connection,
+                ws,
+                flow.id,
+                &crate::FlowPatch {
+                    settings: Some(serde_json::json!({
+                    "trigger": {"type": "segment", "segment_id": seg.id, "on": "entered"},
+                    "reentry": {"mode": "once"}})),
+                    ..crate::FlowPatch::default()
+                },
+            )
+            .await
+            .unwrap();
+            crate::flows::tests_support::publish(&pool, ws, flow.id)
+                .await
+                .unwrap();
+            person(&pool, ws, "ada@example.com", "pro").await;
+            let jobs = |pool: &PgPool| {
+                let pool = pool.clone();
+                async move {
+                    sqlx::query_as::<_, (Value, Uuid, String, String)>(
+                        "SELECT payload, trace_id, cause_kind, cause_id FROM jobs \
+                     WHERE kind = 'flow.enroll'",
+                    )
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap()
+                }
+            };
+
+            refresh(&pool, ws, seg.id, "pro", MembershipCause::Initial, NOW).await;
+            let first = jobs(&pool).await;
+            let bob = person(&pool, ws, "bob@example.com", "pro").await;
+            let (outcome, trace) =
+                refresh(&pool, ws, seg.id, "pro", MembershipCause::Time, NOW).await;
+            let live = jobs(&pool).await;
+
+            assert!(first.is_empty(), "an initial refresh triggers nothing");
+            assert_eq!(outcome.entered, 1);
+            assert_eq!(live.len(), 1);
+            let (payload, trace_id, kind, cause) = &live[0];
+            assert_eq!(payload["people"][0][0], bob.to_string());
+            assert_eq!(*trace_id, trace.trace_id.as_uuid());
+            assert_eq!(kind, trace.cause.kind.as_str());
+            assert_eq!(cause, trace.cause.id.as_str());
+        })
+        .await;
     }
 
     async fn refresh(

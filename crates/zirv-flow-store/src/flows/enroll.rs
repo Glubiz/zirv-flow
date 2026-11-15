@@ -417,13 +417,15 @@ fn refusal(
     entries: Option<OffsetDateTime>,
     now: OffsetDateTime,
 ) -> Option<&'static str> {
+    // First, so that an erased person gets the one reason that writes no decision naming them,
+    // whatever the state of the flow.
+    if !exists {
+        return Some(NO_SUCH_PERSON);
+    }
     match state {
         FlowState::Published => {}
         FlowState::Paused => return Some("flow_paused"),
         FlowState::Draft | FlowState::Archived => return Some("flow_not_live"),
-    }
-    if !exists {
-        return Some(NO_SUCH_PERSON);
     }
     if in_flight {
         return Some("already_active");
@@ -1354,5 +1356,31 @@ mod tests {
                 .collect::<Vec<_>>(),
             [stays]
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_paused_flow_never_writes_an_erased_persons_id_into_a_decision(pool: PgPool) {
+        let ws = workspace(&pool, "erased-paused").await;
+        let flow = flow(&pool, ws, json!({"mode": "once"})).await;
+        let gone = person(&pool, ws).await;
+        crate::flows::tests_support::lifecycle(&pool, ws, flow, crate::FlowAction::Pause)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM people WHERE id = $1")
+            .bind(gone)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let outcome = run(&pool, ws, flow, &[gone], Uuid::now_v7(), NOW).await;
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM decision_records WHERE subject_ids ->> 'person' = $1",
+        )
+        .bind(gone.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows, 0, "a decision names the erased person");
+        assert_eq!(outcome.skipped, [(gone, NO_SUCH_PERSON)]);
     }
 }

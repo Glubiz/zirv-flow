@@ -18836,7 +18836,7 @@
         "tags": [
           "segments"
         ],
-        "summary": "Archives a segment; refused while a current version of another live segment references it.\nVersions stay readable. Audited as `segment.archived`.",
+        "summary": "Archives a segment; refused while a current version of another live segment references it or a\npublished or paused flow's running version uses it. Versions stay readable. Audited as\n`segment.archived`.",
         "operationId": "archive_segment",
         "parameters": [
           {
@@ -18902,7 +18902,7 @@
             }
           },
           "409": {
-            "description": "Another segment references it (`code` is `segment_referenced`), or it is already archived (`segment_archived`)",
+            "description": "Another segment references it (`code` is `segment_referenced`), a published or paused flow uses it (`segment_in_use`, with the flows in `flows`), or it is already archived (`segment_archived`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -40279,7 +40279,7 @@
             "items": {
               "$ref": "#/components/schemas/FlowRefProblem"
             },
-            "description": "The active flows whose running version sends a template (`template_in_use`) or uses a\ndestination (`destination_in_use`)."
+            "description": "The active flows whose running version sends a template (`template_in_use`), uses a\ndestination (`destination_in_use`) or uses a segment (`segment_in_use`)."
           },
           "forwarding_rules": {
             "type": [
