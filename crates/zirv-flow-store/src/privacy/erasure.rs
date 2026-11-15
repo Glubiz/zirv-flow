@@ -2027,6 +2027,10 @@ mod tests {
             // A concurrent ingest has attached a new address and not committed yet: its insert
             // holds a key-share lock on the person.
             let mut ingest = begin(&pool).await.unwrap();
+            let ingest_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *ingest)
+                .await
+                .unwrap();
             sqlx::query(
                 "INSERT INTO identities (id, workspace_id, person_id, kind, value) \
              VALUES ($1, $2, $3, 'email', 'b@example.com')",
@@ -2047,7 +2051,23 @@ mod tests {
                     commit(tx).await.unwrap();
                 }
             });
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            // The erasure reads the inbox lock-free before it takes any lock the ingest holds, so a
+            // backend blocked behind the ingest proves the first scan already ran.
+            let mut waiting = false;
+            for _ in 0..500 {
+                waiting = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity                      WHERE datname = current_database() AND wait_event_type = 'Lock'                        AND $1 = ANY (pg_blocking_pids(pid)))",
+                )
+                .bind(ingest_pid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                if waiting {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            assert!(waiting, "no backend ever waited on the ingest's lock");
             assert!(
                 !erasure.is_finished(),
                 "the erasure did not wait for the person"

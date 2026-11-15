@@ -627,8 +627,12 @@ mod tests {
         assert_eq!(closed.resolution.as_deref(), Some("identifier_moved"));
 
         // The email goes back to P1, so the same record collides again on the same identity.
-        sqlx::query("UPDATE identities SET person_id = $1 WHERE kind = 'email'")
+        let identity = conflict
+            .identity_id
+            .expect("the conflict names its identity");
+        sqlx::query("UPDATE identities SET person_id = $1 WHERE id = $2")
             .bind(one)
+            .bind(identity)
             .execute(&pool)
             .await
             .unwrap();
@@ -639,6 +643,7 @@ mod tests {
         let (open, _) = list_conflicts(&pool, ws, false, 10, None).await.unwrap();
         assert_eq!(open.len(), 1, "{open:?}");
         assert_ne!(open[0].id, conflict.id);
+        assert_eq!(open[0].identity_id, conflict.identity_id);
         assert_eq!(
             (open[0].person_id, open[0].other_person_id),
             (conflict.person_id, conflict.other_person_id)
