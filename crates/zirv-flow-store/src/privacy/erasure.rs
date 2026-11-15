@@ -2021,6 +2021,9 @@ mod tests {
         crate::decision_testing::checked(pool, |pool| async move {
             let Seeded { ws, person, .. } = seed_everything(&pool).await;
             let request = request(&pool, ws, person).await;
+            // A pending row names the address the lock-free scan does not know yet; only the
+            // rescan after the retry can remove it.
+            insert_inbox_rows(&pool, &["b@example.com".to_owned()]).await;
             // A concurrent ingest has attached a new address and not committed yet: its insert
             // holds a key-share lock on the person.
             let mut ingest = begin(&pool).await.unwrap();
@@ -2064,6 +2067,15 @@ mod tests {
                     .await
                     .unwrap();
             assert_eq!(gone, 0);
+            let left = inbox_messages(&pool).await;
+            assert!(
+                !left.contains(&"row-b@example.com".to_owned()),
+                "the row naming the attached identity is removed after the retry: {left:?}"
+            );
+            assert!(
+                left.contains(&"i-2".to_owned()),
+                "the bystander's row stays: {left:?}"
+            );
         })
         .await;
     }

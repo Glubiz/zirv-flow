@@ -613,6 +613,48 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_moved_identifier_conflict_is_raised_again_when_the_collision_recurs(pool: PgPool) {
+        let ws = workspace(&pool).await;
+        let (one, two, conflict) = blocked(&pool, ws).await;
+        let closed = resolve(
+            &pool,
+            ws,
+            conflict.id,
+            ConflictResolution::MoveIdentifier { to_person_id: two },
+        )
+        .await
+        .unwrap();
+        assert_eq!(closed.resolution.as_deref(), Some("identifier_moved"));
+
+        // The email goes back to P1, so the same record collides again on the same identity.
+        sqlx::query("UPDATE identities SET person_id = $1 WHERE kind = 'email'")
+            .bind(one)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut again = record("3", &[("external:crm", "2"), ("email", "x@example.com")]);
+        again.traits = json!({"plan": "gold"}).as_object().cloned().unwrap();
+        apply_profile_batch(&pool, ws, &[again]).await.unwrap();
+
+        let (open, _) = list_conflicts(&pool, ws, false, 10, None).await.unwrap();
+        assert_eq!(open.len(), 1, "{open:?}");
+        assert_ne!(open[0].id, conflict.id);
+        assert_eq!(
+            (open[0].person_id, open[0].other_person_id),
+            (conflict.person_id, conflict.other_person_id)
+        );
+        assert_eq!(open[0].source_record_id, conflict.source_record_id);
+        let decisions: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM decision_records WHERE action = 'identity.conflict' AND outcome = 'recorded'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(decisions, 2, "the first conflict and the new one");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_kept_separate_conflict_does_not_hide_another_record_that_collides(pool: PgPool) {
         let ws = workspace(&pool).await;
         let (_one, _two, conflict) = blocked(&pool, ws).await;
