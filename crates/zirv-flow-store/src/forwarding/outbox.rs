@@ -485,7 +485,7 @@ pub async fn purge_delivered(
     limit: i64,
 ) -> Result<u64, StoreError> {
     let statement = crate::privacy::delete_and_mark(
-        "DELETE FROM forwarding_outbox WHERE id IN (              SELECT id FROM forwarding_outbox              WHERE destination_id = $1 AND state = 'delivered'                AND updated_at < now() - make_interval(secs => $2)              LIMIT $3)          RETURNING workspace_id, person_id, destination_id::text AS destination,                    updated_at AS handled_at",
+        "DELETE FROM forwarding_outbox WHERE id IN (              SELECT id FROM forwarding_outbox              WHERE destination_id = $1 AND state = 'delivered'                AND updated_at < now() - make_interval(secs => $2)              LIMIT $3)            AND state = 'delivered' AND updated_at < now() - make_interval(secs => $2)          RETURNING workspace_id, person_id, destination_id::text AS destination,                    updated_at AS handled_at",
     );
     let deleted: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(statement))
         .bind(destination)
@@ -528,6 +528,7 @@ pub async fn purge_forwarding_outbox(
                     (SELECT o.days FROM unnest($3::uuid[], $4::int[]) AS o(workspace_id, days) \
                       WHERE o.workspace_id = x.workspace_id), $6)) \
             ORDER BY x.updated_at LIMIT $2) \
+           AND state = 'dead' AND updated_at < $1 - make_interval(days => $5) \
          RETURNING workspace_id, person_id, destination_id::text AS destination, \
                    updated_at AS handled_at",
     );
@@ -535,6 +536,7 @@ pub async fn purge_forwarding_outbox(
         "DELETE FROM forwarding_outbox WHERE id IN ( \
             SELECT id FROM forwarding_outbox WHERE state = 'delivered' \
               AND updated_at < $1 - make_interval(secs => $2) LIMIT $3) \
+           AND state = 'delivered' AND updated_at < $1 - make_interval(secs => $2) \
          RETURNING workspace_id, person_id, destination_id::text AS destination, \
                    updated_at AS handled_at",
     );
@@ -1788,6 +1790,77 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(more, 1);
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_dead_row_redriven_while_the_purge_waits_on_it_is_not_deleted(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let (ws, _destination) = one_pending_row(&pool, "purge-race").await;
+            let (id, kept): (Uuid, Value) = sqlx::query_as(
+                "UPDATE forwarding_outbox SET state = 'dead', updated_at = now() - interval '400 days' \
+                 WHERE workspace_id = $1 RETURNING id, payload",
+            )
+            .bind(ws.as_uuid())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            sqlx::query("DELETE FROM erasure_handled_markers")
+                .execute(&pool)
+                .await
+                .unwrap();
+
+            // The re-drive holds the row's lock and has not committed.
+            let mut redriving = pool.begin().await.unwrap();
+            let redriven = redrive(&mut redriving, ws, Redrive::Row(id)).await.unwrap();
+            assert_eq!(redriven, 1);
+            let purge = tokio::spawn({
+                let pool = pool.clone();
+                async move {
+                    purge_forwarding_outbox(
+                        &pool,
+                        &HashMap::new(),
+                        395,
+                        OffsetDateTime::now_utc(),
+                        10,
+                    )
+                    .await
+                }
+            });
+            // The purge has chosen the row (it is still dead and old in its snapshot) once a lock
+            // wait shows up.
+            loop {
+                let waiting: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM pg_locks WHERE NOT granted AND locktype = 'transactionid'",
+                )
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                if waiting > 0 {
+                    break;
+                }
+                assert!(!purge.is_finished(), "the purge did not wait on the row");
+                tokio::task::yield_now().await;
+            }
+            redriving.commit().await.unwrap();
+
+            let purged = purge.await.unwrap().unwrap();
+
+            assert_eq!(purged, 0, "a re-driven row is not purged");
+            let (state, payload): (String, Value) =
+                sqlx::query_as("SELECT state, payload FROM forwarding_outbox WHERE id = $1")
+                    .bind(id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!((state.as_str(), payload), ("pending", kept));
+            let markers: i64 = sqlx::query_scalar("SELECT count(*) FROM erasure_handled_markers")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(markers, 0, "nothing was deleted, so nothing is marked");
         })
         .await;
     }
