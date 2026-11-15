@@ -257,24 +257,11 @@ fn check(html: &str, merge: impl Fn(&str) -> bool) -> Vec<String> {
 /// scan, not by tokens: a fragment with an unmatched closing tag is not readable on its own, and
 /// is exactly what must not pass. A comment that mentions a tag is refused too.
 pub(crate) fn has_mjml_tag(html: &str) -> bool {
-    let bytes = html.as_bytes();
-    bytes
-        .iter()
-        .enumerate()
-        .filter(|(_, byte)| **byte == b'<')
-        .any(|(at, _)| {
-            let rest = &bytes[at + 1..];
-            let rest = rest.strip_prefix(b"/").unwrap_or(rest);
-            let end = rest
-                .iter()
-                .position(|b| b.is_ascii_whitespace() || matches!(b, b'/' | b'>'))
-                .unwrap_or(rest.len());
-            let name = &rest[..end];
-            let local = name.rsplit(|b| *b == b':').next().unwrap_or(name);
-            local.len() >= 3
-                && local[..3].eq_ignore_ascii_case(b"mj-")
-                && !local.eq_ignore_ascii_case(b"mj-include")
-        })
+    crate::content::scan::local_names(html.as_bytes(), true).any(|local| {
+        local.len() >= 3
+            && local[..3].eq_ignore_ascii_case(b"mj-")
+            && !local.eq_ignore_ascii_case(b"mj-include")
+    })
 }
 
 /// Whether a URL has a scheme a link may use.
@@ -300,7 +287,11 @@ pub(crate) fn html_to_text(html: &str) -> String {
             match token {
                 Token::ElementStart { local, .. } => {
                     element = local.as_str().to_ascii_lowercase();
-                    href = None;
+                    // Only a new `<a>` starts a link: `<b>` or `<br>` in the label must not
+                    // drop the `href` the link is waiting on.
+                    if element == "a" {
+                        href = None;
+                    }
                 }
                 Token::Attribute { local, value, .. } => {
                     if element == "a" && local.as_str().eq_ignore_ascii_case("href") {
@@ -429,6 +420,90 @@ mod tests {
 
     fn html(source: &str) -> String {
         sanitize_source(source).html
+    }
+
+    /// The scan as it was before the run walker.
+    fn has_mjml_tag_oracle(html: &str) -> bool {
+        let bytes = html.as_bytes();
+        (0..bytes.len()).filter(|at| bytes[*at] == b'<').any(|at| {
+            let rest = &bytes[at + 1..];
+            let rest = rest.strip_prefix(b"/").unwrap_or(rest);
+            let end = rest
+                .iter()
+                .position(|b| b.is_ascii_whitespace() || matches!(b, b'/' | b'>'))
+                .unwrap_or(rest.len());
+            let name = &rest[..end];
+            let local = name.rsplit(|b| *b == b':').next().unwrap_or(name);
+            local.len() >= 3
+                && local[..3].eq_ignore_ascii_case(b"mj-")
+                && !local.eq_ignore_ascii_case(b"mj-include")
+        })
+    }
+
+    #[test]
+    fn a_run_of_open_brackets_is_scanned_in_linear_time() {
+        for source in ["<".repeat(256 * 1024), "<a".repeat(128 * 1024)] {
+            let started = std::time::Instant::now();
+            assert!(!has_mjml_tag(&source));
+            assert!(
+                started.elapsed() < std::time::Duration::from_millis(100),
+                "has_mjml_tag took {:?}",
+                started.elapsed()
+            );
+        }
+    }
+
+    #[test]
+    fn the_tag_scan_keeps_every_match_of_the_quadratic_one() {
+        let long = format!("<{}:mj-text>", "a".repeat(300));
+        let corpus = [
+            "<mj-text>",
+            "</MJ-Section>",
+            "<x:y:mj-column/>",
+            long.as_str(),
+            "<a:>",
+            "<a<mj-text>",
+            "<a:b</mj-text>",
+            "<//mj-text>",
+            "</<mj-text>",
+            "<<<mj-",
+            "<mj-include>",
+            "<x:mj-include/>",
+            "<mj",
+            "<",
+            "</",
+            "",
+            "text < mj-text",
+        ];
+        for source in corpus {
+            assert_eq!(
+                has_mjml_tag(source),
+                has_mjml_tag_oracle(source),
+                "{source}"
+            );
+        }
+        assert!(has_mjml_tag(&long));
+    }
+
+    #[test]
+    fn a_link_label_with_inline_markup_keeps_its_url() {
+        assert_eq!(
+            html_to_text(r#"<p><a href="https://a.example">go <b>now</b></a></p>"#),
+            "go now: https://a.example"
+        );
+        assert_eq!(
+            html_to_text(r#"<p><a href="https://a.example">go<br>now</a></p>"#),
+            "go
+now: https://a.example"
+        );
+        assert_eq!(
+            html_to_text(r#"<p><a href="https://a.example"><i>go</i> <u>now</u></a></p>"#),
+            "go now: https://a.example"
+        );
+        assert_eq!(
+            html_to_text(r#"<p><a href="https://a.example"><b>https://a.example</b></a></p>"#),
+            "https://a.example"
+        );
     }
 
     #[test]

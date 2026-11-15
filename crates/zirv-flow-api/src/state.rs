@@ -220,7 +220,9 @@ impl AppState {
 
     /// The pool of render-host children that preview renders through (architecture 11.9).
     pub fn with_render_pool(mut self, pool: RenderPool) -> Self {
-        self.render_pool = Some(pool);
+        // The API's callers wait on a person: they take the pool's interactive handle, which
+        // gives up after a bound and leaves a child for sends.
+        self.render_pool = Some(pool.interactive());
         self
     }
 

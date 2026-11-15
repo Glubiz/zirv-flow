@@ -95,19 +95,22 @@ pub async fn probe(
     let (request, parameters) = probe_request()?;
     let response = match provider.complete(http, endpoint, key, &request).await {
         Ok(response) => response,
-        Err(AiError::Capability(name)) if name == Capability::Usage.as_str() => {
-            return Ok(vec![Missing::new(
-                Capability::Usage,
-                "the model did not report token usage",
-            )]);
-        }
-        Err(AiError::Capability(name)) if name == Capability::ToolCalls.as_str() => {
-            return Ok(vec![Missing::new(
-                Capability::ToolCalls,
-                "the model returned a tool call that was not valid JSON",
-            )]);
-        }
-        Err(error) => return Err(error),
+        // A billed answer that was unusable still names the capability its cause lacks.
+        Err(error) => match error.cause() {
+            AiError::Capability(name) if name == Capability::Usage.as_str() => {
+                return Ok(vec![Missing::new(
+                    Capability::Usage,
+                    "the model did not report token usage",
+                )]);
+            }
+            AiError::Capability(name) if name == Capability::ToolCalls.as_str() => {
+                return Ok(vec![Missing::new(
+                    Capability::ToolCalls,
+                    "the model returned a tool call that was not valid JSON",
+                )]);
+            }
+            _ => return Err(error),
+        },
     };
 
     let mut missing = Vec::new();
@@ -227,6 +230,26 @@ mod tests {
             fake.push(Err(AiError::Capability(name.to_owned())));
             assert_eq!(capabilities(&run(&fake).await.unwrap()), vec![expected]);
         }
+    }
+
+    #[tokio::test]
+    async fn a_billed_capability_error_and_a_truncated_probe_keep_their_meaning() {
+        let usage = crate::response::Usage {
+            input_tokens: 1,
+            output_tokens: 1,
+        };
+        let fake = FakeProvider::new();
+        fake.push(Err(AiError::Billed {
+            usage,
+            cause: Box::new(AiError::Capability("tool_calls".to_owned())),
+        }));
+        assert_eq!(
+            capabilities(&run(&fake).await.unwrap()),
+            vec![Capability::ToolCalls]
+        );
+        // A probe cut off at its cap says nothing about a capability: it is an error.
+        fake.push(Err(AiError::Truncated(usage)));
+        assert_eq!(run(&fake).await.unwrap_err(), AiError::Truncated(usage));
     }
 
     #[tokio::test]
