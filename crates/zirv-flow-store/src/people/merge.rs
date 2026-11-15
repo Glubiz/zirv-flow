@@ -44,6 +44,7 @@ const REWRITE_TARGETS: &[(&str, &str, &[&str])] = &[
     ("event_dedupe", "person_id", &["message_id"]),
     ("ingest_rejects", "person_id", &["id"]),
     ("forwarding_outbox", "person_id", &["id"]),
+    ("message_tombstones", "person_id", &["message_id"]),
 ];
 
 /// The person that currently stands for `person`: the survivor when it was merged, else

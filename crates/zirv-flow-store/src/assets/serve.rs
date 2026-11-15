@@ -32,6 +32,23 @@ pub async fn find_served_asset<'e>(
     }))
 }
 
+/// The content type of a live asset with this hash and extension, from any workspace, without
+/// reading its bytes: what a revalidation (`If-None-Match`) needs to answer 304 or 404.
+pub async fn served_asset_type<'e>(
+    executor: impl PgExecutor<'e>,
+    sha256: &[u8],
+    ext: &str,
+) -> Result<Option<String>, StoreError> {
+    sqlx::query_scalar(
+        "SELECT content_type FROM assets          WHERE sha256 = $1 AND ext = $2 AND deleted_at IS NULL LIMIT 1",
+    )
+    .bind(sha256)
+    .bind(ext)
+    .fetch_optional(executor)
+    .await
+    .map_err(StoreError::query)
+}
+
 #[cfg(test)]
 mod tests {
     use sqlx::PgPool;
@@ -69,6 +86,34 @@ mod tests {
         delete_asset(&mut connection, two, second.id).await.unwrap();
         assert!(
             find_served_asset(&pool, &first.sha256, "png")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_type_lookup_follows_the_live_asset_and_reads_no_bytes(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let asset = upload(&pool, ws, "a", b"shared").await.asset;
+
+        assert_eq!(
+            served_asset_type(&pool, &asset.sha256, "png")
+                .await
+                .unwrap(),
+            Some("image/png".to_owned())
+        );
+        assert!(
+            served_asset_type(&pool, &asset.sha256, "gif")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let mut connection = pool.acquire().await.unwrap();
+        delete_asset(&mut connection, ws, asset.id).await.unwrap();
+        assert!(
+            served_asset_type(&pool, &asset.sha256, "png")
                 .await
                 .unwrap()
                 .is_none()

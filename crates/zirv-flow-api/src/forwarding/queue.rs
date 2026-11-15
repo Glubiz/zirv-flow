@@ -67,6 +67,8 @@ pub(crate) struct DeadLettersBody {
 #[derive(Serialize, ToSchema)]
 pub(crate) struct QueueStatusBody {
     destination_id: Uuid,
+    // `depth` and `dead` are counted up to 10,000: 10,001 means more than 10,000. Said here and
+    // in docs/operations, not in the schema text, so the committed openapi.json stays as it is.
     /// Rows waiting for delivery, a row backed off for a retry included.
     depth: i64,
     /// Seconds the oldest waiting row has been past its due time; 0 when none is.

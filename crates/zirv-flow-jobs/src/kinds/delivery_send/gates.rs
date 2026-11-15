@@ -16,7 +16,7 @@ use zirv_flow_core::consent::Channel;
 use zirv_flow_core::people::{Identifier, identifier_hash};
 use zirv_flow_store::{
     CapVerdict, Clock, GateRecord, PgPool, ReadOutcome, SenderError, SuppressionScope,
-    VerifiedSender, begin, check_frequency_caps, consent_read, read_send_address, read_send_limits,
+    VerifiedSender, begin, check_frequency_caps, consent_read, read_quiet_hours, read_send_address,
     require_verified_sender, step_zones, suppressing_scope,
 };
 
@@ -298,8 +298,7 @@ pub(super) async fn quiet_hours(
     job: &SendJob,
     now: OffsetDateTime,
 ) -> Result<Result<GateRecord, Stop>, JobError> {
-    let limits = read_send_limits(connection, job.workspace).await?;
-    let Some(quiet) = limits.quiet_hours else {
+    let Some(quiet) = read_quiet_hours(connection, job.workspace).await? else {
         return Ok(Ok(GateRecord::passed("quiet_hours")));
     };
     let (workspace_zone, person_zone) = step_zones(connection, job.workspace, job.person).await?;

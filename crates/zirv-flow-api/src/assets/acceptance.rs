@@ -157,6 +157,15 @@ mod tests {
             reply(&self.router, request.body(Body::empty()).unwrap()).await
         }
 
+        async fn get_if_none_match(&self, uri: &str, tags: &str) -> Reply {
+            let request = Request::builder()
+                .uri(uri)
+                .header(header::IF_NONE_MATCH, tags)
+                .body(Body::empty())
+                .unwrap();
+            reply(&self.router, request).await
+        }
+
         async fn count(&self, sql: &str) -> i64 {
             sqlx::query_scalar(sqlx::AssertSqlSafe(sql.to_owned()))
                 .fetch_one(&self.pool)
@@ -470,6 +479,45 @@ mod tests {
         assert_eq!(gone.status, StatusCode::NO_CONTENT);
         assert_eq!(
             f.call("GET", &url, None).await.status,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_revalidation_with_the_etag_is_a_304_without_the_bytes_and_a_deleted_asset_is_404(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let uploaded = f.upload_png("pic", 4, 4).await;
+        let url = uploaded["url"].as_str().unwrap().to_owned();
+        let first = f.call("GET", &url, None).await;
+        let etag = first.headers[header::ETAG].to_str().unwrap().to_owned();
+        let hash = url.trim_start_matches("/a/").trim_end_matches(".png");
+        let revalidated = f
+            .get_if_none_match(&url, &format!("\"other\", W/{etag}"))
+            .await;
+        let stale = f.get_if_none_match(&url, "\"stale\"").await;
+
+        assert_eq!(first.status, StatusCode::OK);
+        assert_eq!(etag, format!("\"{hash}\""));
+        assert!(!first.bytes.is_empty());
+        assert_eq!(revalidated.status, StatusCode::NOT_MODIFIED);
+        assert!(revalidated.bytes.is_empty());
+        assert_eq!(revalidated.headers[header::ETAG].to_str().unwrap(), etag);
+        for name in [header::CACHE_CONTROL, header::CONTENT_TYPE] {
+            assert_eq!(revalidated.headers[&name], first.headers[&name]);
+        }
+        assert_eq!((stale.status, stale.bytes), (StatusCode::OK, first.bytes));
+
+        f.call(
+            "DELETE",
+            &f.assets(f.ws, &format!("/{}", id_of(&uploaded))),
+            Some(&f.admin),
+        )
+        .await;
+        assert_eq!(
+            f.get_if_none_match(&url, &etag).await.status,
             StatusCode::NOT_FOUND
         );
     }

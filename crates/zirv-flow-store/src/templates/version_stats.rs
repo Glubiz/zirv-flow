@@ -48,7 +48,9 @@ struct Group {
 }
 
 /// The stats of one version of a template. One grouped read over the
-/// `(workspace_id, template_id, created_at)` index. The caller checks that the version exists.
+/// `(workspace_id, template_id, template_version)` index of the non-test messages
+/// (`messages_template_version_idx`), so it visits the rows of the version and not every message
+/// of the template. The caller checks that the version exists.
 pub async fn template_version_stats<'e>(
     executor: impl PgExecutor<'e>,
     workspace: WorkspaceId,
@@ -225,12 +227,17 @@ mod tests {
             ..sent(template, 1)
         };
         send(&pool, ws, person, skipped, 7).await;
+        // Another version of the template is not counted in this one.
+        send(&pool, ws, person, sent(template, 2), 9).await;
 
         let stats = template_version_stats(&pool, ws, template, 1)
             .await
             .unwrap();
+        let second = template_version_stats(&pool, ws, template, 2)
+            .await
+            .unwrap();
 
-        assert_eq!(stats.messages, 15);
+        assert_eq!((stats.messages, second.messages), (15, 9));
         assert!(!stats.more);
         let seen: Vec<(Option<i32>, i64)> = stats
             .renders
@@ -270,7 +277,7 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn the_stats_read_uses_the_template_index(pool: PgPool) {
+    async fn the_stats_read_uses_the_template_version_index(pool: PgPool) {
         let ws = workspace(&pool, "one").await;
         let person = person(&pool, ws).await;
         // Many templates, so the planner has a template to be selective about.
@@ -311,7 +318,7 @@ mod tests {
         let plan: Vec<String> = plan.into_iter().map(|(line,)| line).collect();
         assert!(
             plan.iter()
-                .any(|line| line.contains("messages_template_idx")),
+                .any(|line| line.contains("messages_template_version_idx")),
             "{plan:?}"
         );
     }

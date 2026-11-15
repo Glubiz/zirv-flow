@@ -124,11 +124,25 @@ pub async fn read_send_limits(
     .into_iter()
     .map(FrequencyCap::try_from)
     .collect::<Result<Vec<_>, _>>()?;
+    let quiet_hours = read_quiet_hours(connection, workspace).await?;
+    Ok(SendLimits {
+        caps,
+        quiet_hours,
+        revision,
+    })
+}
+
+/// The workspace's quiet hours, if it set any, without the caps or the revision: the one read the
+/// send path needs per message.
+pub async fn read_quiet_hours(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+) -> Result<Option<QuietHours>, StoreError> {
     let quiet_hours = sqlx::query_as::<_, QuietRow>(
         "SELECT start_time, end_time, days FROM quiet_hours WHERE workspace_id = $1",
     )
     .bind(workspace.as_uuid())
-    .fetch_optional(&mut *connection)
+    .fetch_optional(connection)
     .await
     .map_err(StoreError::query)?
     .map(|row| QuietHours {
@@ -136,11 +150,7 @@ pub async fn read_send_limits(
         end: row.end_time,
         days: row.days,
     });
-    Ok(SendLimits {
-        caps,
-        quiet_hours,
-        revision,
-    })
+    Ok(quiet_hours)
 }
 
 async fn read_revision(
@@ -311,6 +321,24 @@ mod tests {
                 ..SendLimits::default()
             }
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_quiet_hours_read_returns_the_window_without_the_caps(pool: sqlx::PgPool) {
+        let ws = workspace(&pool).await;
+        let mut conn = pool.acquire().await.unwrap();
+        assert_eq!(read_quiet_hours(&mut conn, ws).await.unwrap(), None);
+        let quiet = QuietHours {
+            start: time!(21:00),
+            end: time!(08:00),
+            days: vec!["mon".to_owned()],
+        };
+        replace_send_limits(&mut conn, ws, 0, &[cap(3, CapMode::Skip)], Some(&quiet))
+            .await
+            .unwrap();
+
+        assert_eq!(read_quiet_hours(&mut conn, ws).await.unwrap(), Some(quiet));
     }
 
     #[sqlx::test]

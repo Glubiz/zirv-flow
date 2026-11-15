@@ -1,0 +1,13 @@
+-- Dead forwarding rows keep their payload until someone re-drives them, and nothing deleted them
+-- (`settle_row` blanks only delivered rows, and `purge_delivered` never looks at `dead`). The
+-- message-retention job now deletes them by age (`forwarding::purge_forwarding_outbox`), at the
+-- workspace's message window, with the handled markers of the rows it removes.
+--
+-- The existing dead index leads with `(workspace_id, destination_id)`, so an age-ordered purge
+-- across workspaces would walk all of it. This one is by age alone, like the delivered index
+-- beside it, and holds only dead rows, which are few.
+--
+-- UPGRADE COST: the build takes SHARE on `forwarding_outbox` until the migration commits, which
+-- blocks enqueues and settles for the build; it scans the table once and writes only the dead
+-- rows. Reads go on.
+CREATE INDEX forwarding_outbox_dead_age_idx ON forwarding_outbox (updated_at) WHERE state = 'dead';

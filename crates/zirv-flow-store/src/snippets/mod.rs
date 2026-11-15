@@ -21,6 +21,7 @@ pub use publish::{
     LockedSnippet, SnippetVersion, SnippetVersionSummary, find_snippet_version,
     list_snippet_versions, lock_snippet, publish_snippet,
 };
+pub(crate) use where_used::lock_snippets_named_by;
 pub use where_used::{
     SnippetThemeUse, SnippetUse, snippet_live_templates, snippet_template_counts,
     snippet_where_used,

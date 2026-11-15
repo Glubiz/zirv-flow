@@ -24,7 +24,7 @@ use zirv_flow_core::WorkspaceId;
 use crate::StoreError;
 
 pub use refs::{AssetReferenceError, record_references};
-pub use serve::{ServedAsset, find_served_asset};
+pub use serve::{ServedAsset, find_served_asset, served_asset_type};
 pub use upload::{AssetError, NewAsset, StoredAsset, store_asset};
 
 /// The owners that may reference an asset.
