@@ -12,10 +12,11 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::people::{
-    Identifier, IdentifierKind, TraitType, TraitValue, coerce, validate_key,
+    Identifier, IdentifierKind, SlotColumn, SlotKind, TraitType, TraitValue, coerce, validate_key,
 };
 
 use super::registry::find_trait_definition;
+use super::slots::{hold_trait_slots, ready_trait_slots};
 use crate::StoreError;
 use crate::bounded::begin_bounded;
 
@@ -241,6 +242,52 @@ const fn ordered_as(kind: TraitType) -> (&'static str, &'static str) {
     }
 }
 
+/// Whether `op` can read a slot column: the range operators and presence.
+const fn slot_serves(op: TraitOp) -> bool {
+    matches!(
+        op,
+        TraitOp::Gt | TraitOp::Gte | TraitOp::Lt | TraitOp::Lte | TraitOp::Exists
+    )
+}
+
+/// The condition over `slot`, with the slot writers' conversions: a number slot is `float8` (a
+/// magnitude past `1e300` is NULL), a timestamp slot `timestamptz` and a date slot the UTC
+/// midnight of the date. `None` where the `jsonb` path must answer: a slot of another kind than
+/// the trait, a needle `float8` cannot hold, and `exists` on a number, which a slot cannot tell
+/// from a present value of the wrong type or past `1e300`. `$2` is named in each condition so the
+/// bind exists.
+fn slot_condition(
+    slot: SlotColumn,
+    trait_type: TraitType,
+    op: TraitOp,
+    needle: &Needle,
+) -> Option<String> {
+    if SlotKind::of(trait_type) != Some(slot.kind()) {
+        return None;
+    }
+    let column = slot.as_str();
+    match (op, needle) {
+        (TraitOp::Exists, Needle::None) if trait_type != TraitType::Number => Some(format!(
+            "{column} IS NOT NULL AND $2::text IS NOT NULL AND $3::text IS NULL"
+        )),
+        (TraitOp::Gt | TraitOp::Gte | TraitOp::Lt | TraitOp::Lte, Needle::Text(text)) => {
+            let bound = match slot.kind() {
+                SlotKind::Number if text.parse::<f64>().is_ok_and(f64::is_finite) => {
+                    "$3::float8".to_owned()
+                }
+                SlotKind::Timestamp => "$3::timestamptz".to_owned(),
+                SlotKind::Date => "(($3::date)::timestamp AT TIME ZONE 'UTC')".to_owned(),
+                _ => return None,
+            };
+            Some(format!(
+                "{column} {} {bound} AND $2::text IS NOT NULL",
+                op.comparison()
+            ))
+        }
+        _ => None,
+    }
+}
+
 /// Searches `workspace` for people. At most `limit` hits, ordered by person id and after
 /// `after`; an identifier search finds at most one person. A caller who may not see values can
 /// compare a PII-flagged trait only with `eq` and `exists`: the other operators would let them
@@ -283,20 +330,41 @@ pub async fn search_people(
                 return Err(SearchError::PiiTraitNotSearchable);
             }
             let needle = needle(*op, definition.trait_type, value.as_ref())?;
-            let condition = match op {
-                TraitOp::Exists => "traits ? $2 AND $3::text IS NULL".to_owned(),
-                TraitOp::Eq => "traits @> jsonb_build_object($2::text, $3::jsonb)".to_owned(),
-                TraitOp::Prefix => "jsonb_typeof(traits -> $2) = 'string' \
-                     AND starts_with(traits ->> $2, $3::text)"
-                    .to_owned(),
-                op => {
-                    let (cast, json) = ordered_as(definition.trait_type);
-                    format!(
-                        "(CASE WHEN jsonb_typeof(traits -> $2) = '{json}' \
-                              THEN (traits ->> $2)::{cast} END) {} $3::{cast}",
-                        op.comparison(),
-                    )
-                }
+            let mut tx = begin_bounded(pool).await?;
+            // A promoted trait is compared on its typed slot column, whose partial index serves
+            // the range and presence operators the `jsonb` GIN index cannot. The writer lock is
+            // taken before the slot is read, as the segment compiler does, so a retire cannot
+            // commit while the query runs. `eq` stays on the GIN index. `prefix` stays a `jsonb`
+            // scan: no slot index serves it. A trait that is not promoted is scanned too, and
+            // promoting it is the way to make its search fast.
+            let slot = if slot_serves(*op) {
+                hold_trait_slots(&mut tx, workspace).await?;
+                ready_trait_slots(&mut tx, workspace)
+                    .await?
+                    .into_iter()
+                    .find_map(|(held, slot)| (held == *key).then_some(slot))
+            } else {
+                None
+            };
+            let condition = match slot
+                .and_then(|slot| slot_condition(slot, definition.trait_type, *op, &needle))
+            {
+                Some(condition) => condition,
+                None => match op {
+                    TraitOp::Exists => "traits ? $2 AND $3::text IS NULL".to_owned(),
+                    TraitOp::Eq => "traits @> jsonb_build_object($2::text, $3::jsonb)".to_owned(),
+                    TraitOp::Prefix => "jsonb_typeof(traits -> $2) = 'string' \
+                         AND starts_with(traits ->> $2, $3::text)"
+                        .to_owned(),
+                    op => {
+                        let (cast, json) = ordered_as(definition.trait_type);
+                        format!(
+                            "(CASE WHEN jsonb_typeof(traits -> $2) = '{json}' \
+                                  THEN (traits ->> $2)::{cast} END) {} $3::{cast}",
+                            op.comparison(),
+                        )
+                    }
+                },
             };
             // The condition is built from this module's constants; every value is bound.
             let sql = format!(
@@ -310,7 +378,6 @@ pub async fn search_people(
                 Needle::Json(json) => (Some(json), None),
                 Needle::Text(text) => (None, Some(text)),
             };
-            let mut tx = begin_bounded(pool).await?;
             let rows: Vec<(Uuid, OffsetDateTime)> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
                 .bind(workspace.as_uuid())
                 .bind(key)
@@ -904,5 +971,191 @@ mod tests {
         }
         assert_eq!("gte".parse::<TraitOp>(), Ok(TraitOp::Gte));
         assert!("like".parse::<TraitOp>().is_err());
+    }
+    /// Promotes `key` to a slot and waits for it to be ready.
+    async fn promote(pool: &PgPool, ws: WorkspaceId, key: &str) {
+        use crate::people::slots::{
+            Assigned, SlotStep, assign_trait_slot, backfill_slot_batch, finish_backfill,
+        };
+        use crate::{begin, commit};
+        let mut tx = begin(pool).await.unwrap();
+        let Assigned::New(slot, generation) = assign_trait_slot(&mut tx, ws, key).await.unwrap()
+        else {
+            panic!("not assigned");
+        };
+        commit(tx).await.unwrap();
+        let mut after = None;
+        loop {
+            let mut tx = begin(pool).await.unwrap();
+            let step = backfill_slot_batch(&mut tx, ws, key, slot, generation, after)
+                .await
+                .unwrap();
+            commit(tx).await.unwrap();
+            match step {
+                SlotStep::More(cursor) => after = cursor,
+                _ => break,
+            }
+        }
+        let mut tx = begin(pool).await.unwrap();
+        assert!(
+            finish_backfill(&mut tx, ws, key, slot, generation)
+                .await
+                .unwrap()
+        );
+        commit(tx).await.unwrap();
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_ready_slot_answers_range_and_presence_searches_like_jsonb_does(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        for (key, kind) in [
+            ("age", TraitType::Number),
+            ("nick", TraitType::String),
+            ("seen", TraitType::Timestamp),
+            ("born", TraitType::Date),
+            ("vip", TraitType::Boolean),
+        ] {
+            define(&pool, ws, key, kind).await;
+        }
+        let ann = person(
+            &pool,
+            ws,
+            "1",
+            &[("email", "ann@example.com")],
+            json!({"age": 10, "nick": "ann", "seen": "2026-01-01T00:00:00Z", "born": "1990-05-01", "vip": true}),
+        )
+        .await;
+        let bob = person(
+            &pool,
+            ws,
+            "2",
+            &[("email", "bob@example.com")],
+            json!({"age": 95.5, "seen": "2026-03-01T00:00:00Z", "born": "2000-01-01"}),
+        )
+        .await;
+        let cy = person(
+            &pool,
+            ws,
+            "3",
+            &[("email", "cy@example.com")],
+            json!({"age": 100, "nick": "cy", "seen": "2026-02-01T12:00:00+02:00"}),
+        )
+        .await;
+        let searches = || {
+            vec![
+                (by_trait("age", TraitOp::Gt, Some(json!(90))), vec![bob, cy]),
+                (
+                    by_trait("age", TraitOp::Gte, Some(json!(95.5))),
+                    vec![bob, cy],
+                ),
+                (by_trait("age", TraitOp::Lt, Some(json!(95.5))), vec![ann]),
+                (by_trait("age", TraitOp::Lte, Some(json!(10))), vec![ann]),
+                (by_trait("nick", TraitOp::Exists, None), vec![ann, cy]),
+                (by_trait("vip", TraitOp::Exists, None), vec![ann]),
+                (
+                    by_trait("seen", TraitOp::Gt, Some(json!("2026-01-15T00:00:00Z"))),
+                    vec![bob, cy],
+                ),
+                (
+                    by_trait("seen", TraitOp::Lte, Some(json!("2026-02-01T10:00:00Z"))),
+                    vec![ann, cy],
+                ),
+                (
+                    by_trait("born", TraitOp::Lt, Some(json!("1995-01-01"))),
+                    vec![ann],
+                ),
+                (
+                    by_trait("born", TraitOp::Gte, Some(json!("1990-05-01"))),
+                    vec![ann, bob],
+                ),
+                (by_trait("born", TraitOp::Exists, None), vec![ann, bob]),
+            ]
+        };
+        for (i, (search, expected)) in searches().into_iter().enumerate() {
+            assert_eq!(ids(&pool, ws, search).await, sorted(expected), "search {i}");
+        }
+
+        for key in ["age", "nick", "seen", "born", "vip"] {
+            promote(&pool, ws, key).await;
+        }
+        for (i, (search, expected)) in searches().into_iter().enumerate() {
+            assert_eq!(
+                ids(&pool, ws, search).await,
+                sorted(expected),
+                "promoted: search {i}"
+            );
+        }
+
+        // The promoted searches read the slot columns: with the `jsonb` emptied they still
+        // answer, while the operators that stay on `jsonb` (eq, prefix, and exists on a number)
+        // find nothing.
+        sqlx::query("UPDATE people SET traits = '{}'::jsonb")
+            .execute(&pool)
+            .await
+            .unwrap();
+        for (i, (search, expected)) in searches().into_iter().enumerate() {
+            assert_eq!(
+                ids(&pool, ws, search).await,
+                sorted(expected),
+                "from the slot: search {i}"
+            );
+        }
+        let eq = by_trait("age", TraitOp::Eq, Some(json!(10)));
+        let prefix = by_trait("nick", TraitOp::Prefix, Some(json!("a")));
+        assert!(ids(&pool, ws, eq).await.is_empty(), "eq reads jsonb");
+        assert!(
+            ids(&pool, ws, prefix).await.is_empty(),
+            "prefix reads jsonb"
+        );
+        let present = by_trait("age", TraitOp::Exists, None);
+        assert!(
+            ids(&pool, ws, present).await.is_empty(),
+            "exists on a number reads jsonb"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_slot_that_is_still_backfilling_falls_back_to_the_jsonb_answer(pool: PgPool) {
+        use crate::begin;
+        use crate::commit;
+        use crate::people::slots::{Assigned, assign_trait_slot};
+        let ws = workspace(&pool, "one").await;
+        define(&pool, ws, "age", TraitType::Number).await;
+        let mut ids_by_age = Vec::new();
+        for (n, age) in [10, 95, 100].into_iter().enumerate() {
+            let id = person(
+                &pool,
+                ws,
+                &n.to_string(),
+                &[("email", &format!("p{n}@example.com"))],
+                json!({ "age": age }),
+            )
+            .await;
+            ids_by_age.push(id);
+        }
+        let (ann, bob, cy) = (ids_by_age[0], ids_by_age[1], ids_by_age[2]);
+
+        // Assigned but never finished: the slot stays in its backfilling state.
+        let mut tx = begin(&pool).await.unwrap();
+        let Assigned::New(slot, _) = assign_trait_slot(&mut tx, ws, "age").await.unwrap() else {
+            panic!("not assigned");
+        };
+        commit(tx).await.unwrap();
+        // The slot column holds a value for one person only; the others are still NULL.
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE people SET {} = 95::float8 WHERE id = $1",
+            slot.as_str()
+        )))
+        .bind(bob)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let gt = by_trait("age", TraitOp::Gt, Some(json!(90)));
+        assert_eq!(ids(&pool, ws, gt).await, sorted(vec![bob, cy]), "gt");
+        let lte = by_trait("age", TraitOp::Lte, Some(json!(95)));
+        assert_eq!(ids(&pool, ws, lte).await, sorted(vec![ann, bob]), "lte");
     }
 }

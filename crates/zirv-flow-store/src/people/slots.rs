@@ -463,14 +463,22 @@ pub async fn analyze_slot_column(
     savepoint.commit().await.map_err(StoreError::query)
 }
 
-/// NULLs the slot column of up to [`SLOT_BATCH`] people of a `retiring` slot. A cleared row
-/// leaves the predicate, so no cursor is needed.
+/// NULLs the slot column of up to [`SLOT_BATCH`] people of a `retiring` slot, in id order after
+/// `after`. The cursor keeps a batch from walking the rows earlier batches cleared: those are
+/// live rows with a NULL slot that the id order would visit again. It is safe because a retiring
+/// slot is written by no writer (they fill only `backfilling` and `ready` slots, and the retire
+/// took the exclusive lock), so no value appears behind the cursor.
+///
+/// A short batch ends the pass only when an uncursored probe finds no value left. A row the pass
+/// skipped (a `FOR UPDATE` that found it gone or changed) is still behind the cursor, so a probe
+/// that finds one restarts the pass from the start: `More(None)`.
 pub async fn clear_slot_batch(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     key: &str,
     slot: SlotColumn,
     generation: i64,
+    after: Option<Uuid>,
 ) -> Result<SlotStep, StoreError> {
     lock_slots_shared(connection, workspace).await?;
     let state = SlotState::Retiring;
@@ -478,16 +486,24 @@ pub async fn clear_slot_batch(
         return Ok(SlotStep::Stale);
     }
     let sql = format!(
-        "WITH batch AS MATERIALIZED ( \n             SELECT id FROM people WHERE workspace_id = $1 AND {column} IS NOT NULL \n             ORDER BY id LIMIT $2 FOR UPDATE) \n         UPDATE people p SET {column} = NULL FROM batch \n         WHERE p.workspace_id = $1 AND p.id = batch.id RETURNING p.id",
+        "WITH batch AS MATERIALIZED ( \n             SELECT id FROM people WHERE workspace_id = $1 AND ($3::uuid IS NULL OR id > $3) \n             AND {column} IS NOT NULL ORDER BY id LIMIT $2 FOR UPDATE) \n         UPDATE people p SET {column} = NULL FROM batch \n         WHERE p.workspace_id = $1 AND p.id = batch.id RETURNING p.id",
         column = slot.as_str(),
     );
     let ids: Vec<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
         .bind(workspace.as_uuid())
         .bind(SLOT_BATCH)
+        .bind(after)
         .fetch_all(&mut *connection)
         .await
         .map_err(StoreError::query)?;
-    batch_step(connection, &clear_probe(slot), workspace, ids.len(), None).await
+    // The cursor moves past every row the batch returned.
+    let cursor = ids.iter().max().copied().or(after);
+    let full = i64::try_from(ids.len()).is_ok_and(|n| n == SLOT_BATCH);
+    let step = batch_step(connection, &clear_probe(slot), workspace, ids.len(), None).await?;
+    Ok(match step {
+        SlotStep::More(_) if full => SlotStep::More(cursor),
+        other => other,
+    })
 }
 
 /// Frees a cleared slot under the exclusive lock, so another trait of the type can take it. A
@@ -820,14 +836,16 @@ mod db_tests {
         ));
         drop(tx);
 
+        let mut after = None;
         loop {
             let mut tx = begin(&pool).await.unwrap();
-            let step = clear_slot_batch(&mut tx, ws, "plan", slot, generation)
+            let step = clear_slot_batch(&mut tx, ws, "plan", slot, generation, after)
                 .await
                 .unwrap();
             commit(tx).await.unwrap();
-            if step == SlotStep::Finish {
-                break;
+            match step {
+                SlotStep::More(cursor) => after = cursor,
+                _ => break,
             }
         }
         let mut tx = begin(&pool).await.unwrap();
@@ -1113,7 +1131,7 @@ mod db_tests {
         retire(&pool, ws, "plan").await;
         let mut tx = begin(&pool).await.unwrap();
         assert_eq!(
-            clear_slot_batch(&mut tx, ws, "plan", slot, first)
+            clear_slot_batch(&mut tx, ws, "plan", slot, first, None)
                 .await
                 .unwrap(),
             SlotStep::Stale
@@ -1278,7 +1296,7 @@ mod db_tests {
             let pool = pool.clone();
             tokio::spawn(async move {
                 let mut tx = begin(&pool).await.unwrap();
-                let step = clear_slot_batch(&mut tx, ws, "plan", slot, generation)
+                let step = clear_slot_batch(&mut tx, ws, "plan", slot, generation, None)
                     .await
                     .unwrap();
                 commit(tx).await.unwrap();
@@ -1289,16 +1307,86 @@ mod db_tests {
         commit(other).await.unwrap();
         let step = batch.await.unwrap();
         assert!(matches!(step, SlotStep::More(_)), "{step:?}");
+        let mut after = None;
         loop {
             let mut tx = begin(&pool).await.unwrap();
-            let step = clear_slot_batch(&mut tx, ws, "plan", slot, generation)
+            let step = clear_slot_batch(&mut tx, ws, "plan", slot, generation, after)
                 .await
                 .unwrap();
             commit(tx).await.unwrap();
-            if step == SlotStep::Finish {
-                break;
+            match step {
+                SlotStep::More(cursor) => after = cursor,
+                _ => break,
             }
         }
+        let left: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM people WHERE trait_s1 IS NOT NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(left, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_clear_pass_moves_a_cursor_forward_and_restarts_for_a_value_left_behind_it(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool).await;
+        define(&pool, ws, "plan", TraitType::String).await;
+        let Assigned::New(slot, generation) = assign(&pool, ws, "plan").await else {
+            panic!("not assigned");
+        };
+        sqlx::query(
+            "INSERT INTO people (id, workspace_id, trait_s1) \
+             SELECT gen_random_uuid(), $1, 'x' FROM generate_series(1, 1200)",
+        )
+        .bind(ws.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+        retire(&pool, ws, "plan").await;
+        let ids: Vec<Uuid> =
+            sqlx::query_scalar("SELECT id FROM people WHERE workspace_id = $1 ORDER BY id")
+                .bind(ws.as_uuid())
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let clear = |after: Option<Uuid>| {
+            let pool = pool.clone();
+            async move {
+                let mut tx = begin(&pool).await.unwrap();
+                let step = clear_slot_batch(&mut tx, ws, "plan", slot, generation, after)
+                    .await
+                    .unwrap();
+                commit(tx).await.unwrap();
+                step
+            }
+        };
+
+        // Full batches hand on the largest id they cleared, and the next starts after it.
+        let first = clear(None).await;
+        assert_eq!(first, SlotStep::More(Some(ids[499])));
+        let second = clear(Some(ids[499])).await;
+        assert_eq!(second, SlotStep::More(Some(ids[999])));
+        let cleared: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM people WHERE trait_s1 IS NOT NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(cleared, 200, "two batches cleared 1000 rows");
+
+        // A value behind the cursor (a row the pass skipped) is found by the probe: the pass
+        // restarts from the start instead of finishing.
+        sqlx::query("UPDATE people SET trait_s1 = 'late' WHERE id = $1")
+            .bind(ids[3])
+            .execute(&pool)
+            .await
+            .unwrap();
+        let third = clear(Some(ids[999])).await;
+        assert_eq!(third, SlotStep::More(None));
+        let restarted = clear(None).await;
+        assert_eq!(restarted, SlotStep::Finish);
         let left: i64 =
             sqlx::query_scalar("SELECT count(*) FROM people WHERE trait_s1 IS NOT NULL")
                 .fetch_one(&pool)
