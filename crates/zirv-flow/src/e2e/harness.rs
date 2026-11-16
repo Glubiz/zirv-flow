@@ -268,14 +268,13 @@ impl World {
         let provider = FakeProvider::start(FakeProviderOptions::default()).await;
         let dns = FixtureResolver::new();
 
-        let mut config = WorkerConfig::new(1);
+        let mut config = WorkerConfig::new(1).with_egress(loopback);
         config.poll_interval = Duration::from_millis(50);
         config.clock = clock;
         config.render_pool = Some(render.clone());
         config.dns = Some(Arc::new(dns.clone()));
         config.public_url = Some(public_url.to_owned());
         config.keyring = Some(keyring);
-        config.egress = loopback;
         config.ledger_dir = ledger_dir.map(|dir| Arc::new(dir.to_path_buf()));
         config.redaction_key = Some(Arc::new(root.hmac_key(HmacPurpose::Redaction)));
         config.identifier_key = Some(Arc::new(root.hmac_key(HmacPurpose::Identifier)));

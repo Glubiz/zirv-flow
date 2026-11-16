@@ -502,7 +502,13 @@ async fn post_token(ctx: &SourceContext, token: &TokenRequest<'_>) -> Result<Val
     if token.client_auth == ClientAuth::Basic {
         let empty = SecretString::new(String::new());
         let secret = token.client_secret.unwrap_or(&empty);
-        headers.insert(AUTHORIZATION, basic_value(token.client_id, secret)?);
+        // RFC 6749 section 2.3.1: the id and secret are form-urlencoded before they are joined.
+        let id =
+            url::form_urlencoded::byte_serialize(token.client_id.as_bytes()).collect::<String>();
+        let secret = SecretString::new(
+            url::form_urlencoded::byte_serialize(secret.expose().as_bytes()).collect(),
+        );
+        headers.insert(AUTHORIZATION, basic_value(&id, &secret)?);
     }
     *request.body_mut() = Some(Bytes::copy_from_slice(body.as_bytes()).into());
 
@@ -953,6 +959,48 @@ mod tests {
             "{basic_body}"
         );
         assert!(!basic_body.contains("client_secret"), "{basic_body}");
+    }
+
+    #[tokio::test]
+    async fn basic_client_credentials_are_form_urlencoded_first() {
+        let valid = Arc::default();
+        let idp = idp(Arc::clone(&valid), 3600, StatusCode::OK).await;
+        let api = api(valid, false).await;
+        let secret = SecretString::new("a+b%c".into());
+        let scopes = vec!["read".to_owned()];
+        let auth = Auth::OAuth2ClientCredentials {
+            token_url: idp.mock.url("/token"),
+            client_id: "i:d",
+            client_secret: &secret,
+            scopes: &scopes,
+            client_auth: ClientAuth::Basic,
+        };
+
+        call(&context("oauth", "z"), &api, &auth).await.unwrap();
+
+        let requests = idp.requests.lock().unwrap();
+        // base64("i%3Ad:a%2Bb%25c"), RFC 6749 section 2.3.1
+        assert_eq!(requests[0].0.as_deref(), Some("Basic aSUzQWQ6YSUyQmIlMjVj"));
+    }
+
+    #[test]
+    fn api_basic_credentials_stay_raw() {
+        let mut request = Request::new(Method::GET, "http://h/".parse().unwrap());
+        let password = SecretString::new("a+b%c".into());
+        apply(
+            &Auth::Basic {
+                username: "i:d",
+                password: &password,
+            },
+            None,
+            &mut request,
+        )
+        .unwrap();
+        // base64("i:d:a+b%c")
+        assert_eq!(
+            request.headers().get(AUTHORIZATION).unwrap(),
+            "Basic aTpkOmErYiVj"
+        );
     }
 
     #[tokio::test]

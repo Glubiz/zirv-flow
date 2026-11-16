@@ -28,9 +28,7 @@ use serde_json::{Map, Value, json};
 use time::OffsetDateTime;
 use tracing::warn;
 use uuid::Uuid;
-use zirv_flow_connectors::destinations::{
-    DestinationContext, ErasedDestination, Outbound, Registry,
-};
+use zirv_flow_connectors::destinations::{ErasedDestination, Outbound, Registry};
 use zirv_flow_connectors::http::HttpLimits;
 use zirv_flow_connectors::sources::Credential;
 use zirv_flow_core::decision_actions;
@@ -321,13 +319,9 @@ async fn call(
         max_redirects: 0,
         ..HttpLimits::default()
     };
-    let context = DestinationContext::new(
-        ctx.egress().clone(),
-        limits,
-        driver.spec().kind,
-        destination.id.to_string(),
-    )
-    .map_err(|_| JobError::new("the outbound client could not be built"))?;
+    let context = ctx
+        .destination_context(limits, driver.spec().kind, destination.id.to_string())
+        .map_err(|_| JobError::new("the outbound client could not be built"))?;
     let body = serde_json::to_string(&row.payload)
         .map_err(|_| JobError::new("the payload is not text"))?;
     let envelope = json!({

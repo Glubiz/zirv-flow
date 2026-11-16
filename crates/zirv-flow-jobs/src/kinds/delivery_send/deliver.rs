@@ -9,9 +9,7 @@ use std::time::Duration;
 use serde_json::Value;
 use time::OffsetDateTime;
 use uuid::Uuid;
-use zirv_flow_connectors::destinations::{
-    DestinationContext, DkimSigner, ErasedDestination, Outbound,
-};
+use zirv_flow_connectors::destinations::{DkimSigner, ErasedDestination, Outbound};
 use zirv_flow_connectors::http::HttpLimits;
 use zirv_flow_core::{SecretId, SecretPurpose, WorkspaceId};
 use zirv_flow_store::secrets::OpenError;
@@ -73,13 +71,13 @@ pub(crate) async fn deliver(
         max_redirects: 0,
         ..HttpLimits::default()
     };
-    let context = DestinationContext::new(
-        ctx.egress().clone(),
-        limits,
-        call.driver.spec().kind,
-        call.destination.id.to_string(),
-    )
-    .map_err(|_| JobError::new("the outbound client could not be built"))?;
+    let context = ctx
+        .destination_context(
+            limits,
+            call.driver.spec().kind,
+            call.destination.id.to_string(),
+        )
+        .map_err(|_| JobError::new("the outbound client could not be built"))?;
     let key = call.message.to_string();
     let outbound = Outbound {
         idempotency_key: &key,

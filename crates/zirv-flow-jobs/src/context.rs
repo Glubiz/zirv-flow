@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use uuid::Uuid;
+use zirv_flow_connectors::destinations::DestinationContext;
 use zirv_flow_connectors::dns::DnsResolver;
+use zirv_flow_connectors::http::{HttpError, HttpLimits, OutboundClients};
 use zirv_flow_connectors::runtime::RateLimits;
 use zirv_flow_core::decision_actions::DecisionSpec;
 use zirv_flow_core::egress::EgressPolicy;
@@ -78,7 +80,7 @@ pub struct JobContext<'a> {
     identifier_key: Option<Arc<HmacKey>>,
     ledger_dir: Option<Arc<PathBuf>>,
     keyring: Option<Arc<Keyring>>,
-    egress: Arc<EgressPolicy>,
+    clients: Arc<OutboundClients>,
     rate_limits: Arc<RateLimits>,
     rate_gates: Arc<RateGates>,
     clock: Clock,
@@ -106,7 +108,7 @@ impl<'a> JobContext<'a> {
             identifier_key: None,
             ledger_dir: None,
             keyring: None,
-            egress: Arc::default(),
+            clients: Arc::default(),
             rate_limits: Arc::default(),
             rate_gates: Arc::default(),
             clock: Clock::default(),
@@ -285,15 +287,26 @@ impl<'a> JobContext<'a> {
     }
 
     /// Gives the handler the master keys that open stored secrets and the egress policy that
-    /// outbound calls follow.
+    /// outbound calls follow, with clients of its own.
+    #[cfg(test)]
     pub(crate) fn with_outbound(
-        mut self,
+        self,
         keyring: Option<Arc<Keyring>>,
         egress: Arc<EgressPolicy>,
         rate_limits: Arc<RateLimits>,
     ) -> Self {
+        self.with_outbound_clients(keyring, Arc::new(OutboundClients::new(egress)), rate_limits)
+    }
+
+    /// As [`JobContext::with_outbound`], with the pool's shared clients, which carry the policy.
+    pub(crate) fn with_outbound_clients(
+        mut self,
+        keyring: Option<Arc<Keyring>>,
+        clients: Arc<OutboundClients>,
+        rate_limits: Arc<RateLimits>,
+    ) -> Self {
         self.keyring = keyring;
-        self.egress = egress;
+        self.clients = clients;
         self.rate_limits = rate_limits;
         self
     }
@@ -320,7 +333,28 @@ impl<'a> JobContext<'a> {
     }
 
     pub(crate) fn egress(&self) -> &Arc<EgressPolicy> {
-        &self.egress
+        self.clients.policy()
+    }
+
+    /// The outbound HTTP clients of this pool, which keep their connections between jobs.
+    pub(crate) fn clients(&self) -> &Arc<OutboundClients> {
+        &self.clients
+    }
+
+    /// The handle a destination call gets: the pool's client for `limits`, over the pool's
+    /// egress policy.
+    pub(crate) fn destination_context(
+        &self,
+        limits: HttpLimits,
+        kind: &'static str,
+        destination_id: impl Into<String>,
+    ) -> Result<DestinationContext, HttpError> {
+        Ok(DestinationContext::with_client(
+            self.clients().get(limits)?,
+            Arc::clone(self.clients().policy()),
+            kind,
+            destination_id,
+        ))
     }
 
     /// The token of the lease this attempt holds. Writes that must not happen after the lease

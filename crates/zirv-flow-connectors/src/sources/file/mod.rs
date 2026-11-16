@@ -381,6 +381,7 @@ fn read<'a>(
             expect: Expect {
                 validator: from.validator,
                 size: from.size,
+                known_end: None,
             },
             header: from.header,
             delimiter: from
@@ -431,8 +432,10 @@ impl Read<'_> {
                 self.expect = Expect {
                     validator: self.expect.validator.take().or(window.validator.clone()),
                     size: self.expect.size.or(window.total),
+                    known_end: None,
                 };
             }
+            self.expect.known_end = Some(window.end);
             let mut parser = self.parser(&window)?;
             let batches = self.parse(&window, &mut parser)?;
             let consumed = if window.ended {
@@ -670,6 +673,8 @@ mod tests {
         required_authorization: Option<String>,
         /// A `206` carries only this many bytes of the range its `Content-Range` names.
         short_range_body: Option<usize>,
+        /// A `206` names the range but not the size of the file: `bytes a-b/*`.
+        unknown_total: bool,
         /// The first requests answer 429 with `Retry-After: 0`.
         throttled: usize,
         hits: AtomicUsize,
@@ -689,6 +694,7 @@ mod tests {
                 required_authorization: None,
                 throttled: 0,
                 short_range_body: None,
+                unknown_total: false,
                 hits: AtomicUsize::new(0),
                 log: Mutex::new(Vec::new()),
             }
@@ -784,10 +790,16 @@ mod tests {
             Some(short) => first + short.min(last - first + 1),
             None => last + 1,
         };
-        with_etag(Response::builder().status(206).header(
-            "content-range",
-            format!("bytes {first}-{last}/{}", body.len()),
-        ))
+        let total = if fixture.unknown_total {
+            "*".to_owned()
+        } else {
+            body.len().to_string()
+        };
+        with_etag(
+            Response::builder()
+                .status(206)
+                .header("content-range", format!("bytes {first}-{last}/{total}")),
+        )
         .body(Body::from(body[first..sent].to_vec()))
         .unwrap()
     }
@@ -1286,6 +1298,70 @@ mod tests {
             .await,
         )
         .await;
+        assert_eq!(error, SourceError::Other("file_changed".into()));
+    }
+
+    #[tokio::test]
+    async fn an_unknown_total_with_a_file_of_exact_windows_completes() {
+        let text = format!(
+            "{{\"n\":\"{}\"}}
+{{\"n\":\"{}\"}}
+",
+            "a".repeat(21),
+            "b".repeat(21)
+        );
+        assert_eq!(text.len(), 60);
+        let mut fixture = Fixture::new(text);
+        fixture.unknown_total = true;
+        let (base, _) = serve(fixture).await;
+
+        let all = batches(
+            read_all(
+                &context(),
+                &config(&base, "ndjson"),
+                &Credential::new(),
+                &stream(&[]),
+                None,
+                30,
+                30,
+            )
+            .await,
+        );
+
+        assert_eq!(data(&all).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_total_with_a_file_that_shrank_below_the_last_window_is_file_changed() {
+        // Three records of 40 bytes read in windows of 50: the read stands at offset 80 with a
+        // window that reached 90 when the file is cut to its first record.
+        let record = format!(
+            "{{\"n\":\"{}\"}}
+",
+            "a".repeat(31)
+        );
+        assert_eq!(record.len(), 40);
+        let mut fixture = Fixture::new(record.repeat(3));
+        fixture.unknown_total = true;
+        fixture.etag = None;
+        fixture.change_after = 2;
+        fixture.changed_body = Some(record.clone().into_bytes());
+        let (base, _) = serve(fixture).await;
+
+        let (_, error) = collect_error(
+            read_all(
+                &context(),
+                &config(&base, "ndjson"),
+                &Credential::new(),
+                &stream(&[]),
+                None,
+                50,
+                1,
+            )
+            .await,
+        )
+        .await;
+
         assert_eq!(error, SourceError::Other("file_changed".into()));
     }
 

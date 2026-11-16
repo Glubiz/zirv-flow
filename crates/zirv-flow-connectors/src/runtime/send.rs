@@ -259,13 +259,13 @@ pub(crate) async fn send(
         };
 
         failed += 1;
-        let delay = policy.delay(failed, reason, wait, rand::random())?;
         if failed >= policy.max_attempts {
             return Err(RuntimeError::RetriesExhausted {
                 last_status,
                 attempts: failed,
             });
         }
+        let delay = policy.delay(failed, reason, wait, rand::random())?;
         retrying(kind, reason, failed, delay);
         tokio::time::sleep(delay).await;
     }
@@ -891,5 +891,45 @@ mod tests {
             "unlimited",
         );
         assert!(waits.is_empty(), "{waits:?}");
+    }
+
+    #[tokio::test]
+    async fn over_cap_retry_after_on_final_attempt_is_retries_exhausted() {
+        let calls = counter();
+        let c = Arc::clone(&calls);
+        let mock = serve(Router::new().route(
+            "/r",
+            get(move || {
+                let attempt = c.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if attempt < 4 {
+                        StatusCode::SERVICE_UNAVAILABLE.into_response()
+                    } else {
+                        (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "900")], "x")
+                            .into_response()
+                    }
+                }
+            }),
+        ))
+        .await;
+        let error = get_r(&context("probe", "s"), &mock).await.unwrap_err();
+        assert_eq!(
+            error,
+            RuntimeError::RetriesExhausted {
+                last_status: Some(429),
+                attempts: 5
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn over_cap_retry_after_before_the_final_attempt_is_still_too_long() {
+        let mock = serve(Router::new().route(
+            "/r",
+            get(|| async { (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "900")], "x") }),
+        ))
+        .await;
+        let error = get_r(&context("probe", "s"), &mock).await.unwrap_err();
+        assert_eq!(error, RuntimeError::RetryAfterTooLong { seconds: 900 });
     }
 }

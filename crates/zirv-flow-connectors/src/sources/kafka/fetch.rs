@@ -31,6 +31,10 @@ const GAP_STREAK: u8 = 2;
 /// How many offsets after `next` one pass probes for the record that ends a gap.
 const PROBE_SPAN: i64 = 16;
 
+/// How many refusals in a row the broker may make for an offset inside the log before the read
+/// fails. Each costs three round trips, so a longer run is a hot loop against the broker.
+const REFUSED_LIMIT: u8 = 3;
+
 /// The calls a read makes on one partition.
 pub(super) trait PartitionFetch: Send + Sync {
     /// The earliest offset still in the log.
@@ -54,6 +58,8 @@ pub(super) struct Partition<F> {
     end: i64,
     /// Empty fetches in a row while the log reaches past `next`.
     streak: u8,
+    /// Offset-out-of-range answers in a row for an offset inside the log (recovery moved nothing).
+    refused: u8,
     /// Where the next probe starts when the last one stopped short of the gap's end; `None`
     /// starts it right after `next`.
     probe_from: Option<i64>,
@@ -101,6 +107,7 @@ impl<F: PartitionFetch> Partition<F> {
             next,
             end: latest,
             streak: 0,
+            refused: 0,
             probe_from: None,
             settled: false,
         })
@@ -120,13 +127,21 @@ impl<F: PartitionFetch> Partition<F> {
         let (mut records, high) = match fetched {
             Ok(fetched) => fetched,
             Err(FetchError::OffsetOutOfRange) => {
-                self.recover().await?;
                 self.settled = false;
+                if self.recover().await? {
+                    self.refused = 0;
+                } else {
+                    self.refused += 1;
+                    if self.refused >= REFUSED_LIMIT {
+                        return Err(code(OFFSET_OUT_OF_RANGE));
+                    }
+                }
                 return Ok(Vec::new());
             }
             Err(error) => return Err(error.into()),
         };
         self.end = high;
+        self.refused = 0;
         records.retain(|message| message.offset >= self.next);
         self.settled = false;
         if records.is_empty() {
@@ -187,7 +202,8 @@ impl<F: PartitionFetch> Partition<F> {
 
     /// The broker refused the offset: retention may have moved the start past it (jump to the
     /// earliest, counted), otherwise the offset is past the end and the run cannot continue.
-    async fn recover(&mut self) -> Result<(), SourceError> {
+    /// Returns whether the partition moved; an offset inside the log stays where it is.
+    async fn recover(&mut self) -> Result<bool, SourceError> {
         let earliest = self.fetcher.earliest().await?;
         let latest = self.fetcher.latest().await?;
         self.end = latest;
@@ -196,11 +212,11 @@ impl<F: PartitionFetch> Partition<F> {
             self.next = earliest;
             self.streak = 0;
             self.probe_from = None;
-            Ok(())
+            Ok(true)
         } else if self.next > latest {
             Err(code(OFFSET_OUT_OF_RANGE))
         } else {
-            Ok(())
+            Ok(false)
         }
     }
 }
@@ -601,6 +617,55 @@ mod tests {
         let error = beyond.pass().await.unwrap_err();
 
         assert_eq!(error, code(OFFSET_OUT_OF_RANGE));
+    }
+
+    #[tokio::test]
+    async fn in_range_offset_out_of_range_answers_do_not_hot_loop() {
+        let log = Log::new(0, 10);
+        {
+            let mut script = log.script.lock().unwrap();
+            for _ in 0..20_000 {
+                script.push_back(Err(FetchError::OffsetOutOfRange));
+            }
+        }
+        let calls = Arc::clone(&log.calls);
+        let partitions = vec![Partition::open(0, log, Some(5)).await.unwrap()];
+        let plan = ReadPlan {
+            budget: Some(Duration::from_secs(5)),
+            stop_when_caught_up: false,
+        };
+        let mut stream = read_partitions(partitions, plan, Duration::from_millis(5), Box::new(()));
+        let _announce = stream.next().await.unwrap().unwrap();
+
+        let refused = stream.next().await.unwrap().unwrap_err();
+
+        assert_eq!(refused, code(OFFSET_OUT_OF_RANGE));
+        let made = calls.lock().unwrap().len();
+        assert!(made < 100, "fetch calls before the error: {made}");
+    }
+
+    #[tokio::test]
+    async fn a_good_fetch_resets_the_count_of_refusals_that_moved_nothing() {
+        let log = Log::new(0, 10);
+        {
+            let mut script = log.script.lock().unwrap();
+            for _ in 0..2 {
+                script.push_back(Err(FetchError::OffsetOutOfRange));
+            }
+            script.push_back(Ok((vec![message(5)], 10)));
+            for _ in 0..2 {
+                script.push_back(Err(FetchError::OffsetOutOfRange));
+            }
+        }
+        let mut partition = Partition::open(0, log, Some(5)).await.unwrap();
+
+        assert!(partition.pass().await.unwrap().is_empty());
+        assert!(partition.pass().await.unwrap().is_empty());
+        assert_eq!(offsets(&partition.pass().await.unwrap()), [5]);
+        // Two more refusals stay under the limit because the good fetch started the count over.
+        assert!(partition.pass().await.unwrap().is_empty());
+        assert!(partition.pass().await.unwrap().is_empty());
+        assert_eq!(partition.pass().await.unwrap().len(), 4);
     }
 
     #[tokio::test]
