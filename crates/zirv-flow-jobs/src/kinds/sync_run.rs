@@ -1057,6 +1057,7 @@ pub(super) fn read_failure(error: &SourceError) -> ReadFailure {
             "record_too_large" => ReadFailure::Final("record_too_large"),
             "file_range_unsupported" => ReadFailure::Final("file_range_unsupported"),
             "checkpoint_invalid" => ReadFailure::Final("checkpoint_invalid"),
+            "null_primary_key" => ReadFailure::Final("null_primary_key"),
             "file_changed" => ReadFailure::Retry(coded("file_changed")),
             "file_range_invalid" => ReadFailure::Retry(coded("file_range_invalid")),
             _ => ReadFailure::Retry(source_failure("the source could not be read")),
@@ -2170,6 +2171,17 @@ mod tests {
     }
 
     #[test]
+    fn a_null_primary_key_ends_the_run_with_a_final_code() {
+        // The literal the database sources return for a NULL key value (`sql::error::NULL_KEY`).
+        let error = SourceError::Other("null_primary_key".to_owned());
+
+        assert!(
+            matches!(read_failure(&error), ReadFailure::Final("null_primary_key")),
+            "retried instead of final"
+        );
+    }
+
+    #[test]
     fn a_source_error_becomes_a_static_run_code_and_says_whether_to_retry() {
         let other = |code: &str| SourceError::Other(code.to_owned());
         let finals = [
@@ -2180,6 +2192,7 @@ mod tests {
             "record_too_large",
             "file_range_unsupported",
             "checkpoint_invalid",
+            "null_primary_key",
         ];
         for code in finals {
             assert!(

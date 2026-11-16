@@ -19,7 +19,7 @@ use super::sql::connect::{CONNECT_TIMEOUT, backstop, resolve, within};
 use super::sql::discover::{from_clause, query_stream, table_streams};
 use super::sql::error::{from_mysql, query};
 use super::sql::keyset::{
-    self, KeySpec, Paged, Pager, Row, batches, key_types as keys_of, parse_checkpoint,
+    self, Compare, KeySpec, Paged, Pager, Row, batches, key_types as keys_of, parse_checkpoint,
 };
 use super::sql::metrics::metered;
 use super::sql::settings::{Flavor, Login, Settings, TlsMode, check_config, config_error, fields};
@@ -44,6 +44,7 @@ impl Source for Mysql {
             fields::TLS,
             fields::CA_CERTIFICATE,
             fields::STATEMENT_TIMEOUT,
+            fields::CURSOR_LOOKBACK,
             fields::QUERIES,
         ],
         credential_fields: &[
@@ -233,6 +234,19 @@ impl KeyType {
         }
     }
 
+    /// The right-hand side that moves the checkpoint's cursor, bound as `?`, back by `lookback`,
+    /// and how many `?` it holds: seconds for a temporal type, units for a number. `None` for
+    /// text. An unsigned cursor stops at zero instead of wrapping.
+    fn lookback(self, lookback: u64) -> Option<(String, usize)> {
+        Some(match self {
+            Self::Signed => (format!("(? - {lookback})"), 1),
+            Self::Unsigned => (format!("IF(? > {lookback}, ? - {lookback}, 0)"), 2),
+            Self::Decimal(_) => (format!("({} - {lookback})", self.placeholder()), 1),
+            Self::Temporal => (format!("(? - INTERVAL {lookback} SECOND)"), 1),
+            Self::Text => return None,
+        })
+    }
+
     /// The parameter for the checkpoint text `text`. A value that is not what the column holds
     /// means the checkpoint was written for other settings.
     fn parameter(self, text: &str) -> Result<Value, SourceError> {
@@ -352,12 +366,33 @@ fn page_sql(
         cursor,
         after,
         quote,
-        |index, column, operator| {
-            bindings.push(index);
-            format!("{column} {operator} {}", keys[index].1.placeholder())
+        Compare {
+            term: |index: usize, column: &str, operator: &str| {
+                bindings.push(index);
+                format!("{column} {operator} {}", keys[index].1.placeholder())
+            },
+            // The optimizer merges the expanded `OR` into index ranges.
+            row: None,
         },
     );
     (keyset::limited(&sql, rows), bindings)
+}
+
+/// The first page of a run that re-reads `lookback` behind the checkpoint's cursor
+/// ([`keyset::window_sql`]), and how many `?` it binds, each to the cursor of the checkpoint.
+/// `None` when the cursor's type cannot be moved back (text): that stream ignores the lookback.
+fn window_sql(
+    from: &str,
+    columns: &[Column],
+    keys: &[(String, KeyType)],
+    lookback: u64,
+    rows: usize,
+) -> Option<(String, usize)> {
+    let (bound, count) = keys[0].1.lookback(lookback)?;
+    let sql = keyset::window_sql(&select_list(columns), from, keys, quote, |column| {
+        format!("{column} > {bound}")
+    });
+    Some((keyset::limited(&sql, rows), count))
 }
 
 /// What a stream reads from: a table of the configured database or a configured query.
@@ -395,21 +430,22 @@ struct MysqlPager {
     next: String,
     /// For each `?` of `next`, the key value to bind and the type to bind it as.
     bindings: Vec<(usize, KeyType)>,
+    /// The first page of a run with a lookback, and its bindings (all the cursor).
+    window: Option<(String, Vec<(usize, KeyType)>)>,
 }
 
 impl Pager for MysqlPager {
-    async fn page(&mut self, after: Option<&[String]>) -> Result<Vec<Row>, SourceError> {
-        let (sql, params) = match after {
-            None => (self.first.clone(), Params::Empty),
-            Some(key) => (
-                self.next.clone(),
-                Params::Positional(
-                    self.bindings
-                        .iter()
-                        .map(|(index, key_type)| key_type.parameter(&key[*index]))
-                        .collect::<Result<_, _>>()?,
-                ),
-            ),
+    async fn page(
+        &mut self,
+        after: Option<&[String]>,
+        window: bool,
+    ) -> Result<Vec<Row>, SourceError> {
+        let (sql, params) = match (after, &self.window) {
+            (None, _) => (self.first.clone(), Params::Empty),
+            (Some(key), Some((sql, bindings))) if window => {
+                (sql.clone(), positional(bindings, key)?)
+            }
+            (Some(key), _) => (self.next.clone(), positional(&self.bindings, key)?),
         };
         within(backstop(self.statement_timeout), async {
             let mut tx = begin_batch(&mut self.conn).await.map_err(failed)?;
@@ -421,6 +457,16 @@ impl Pager for MysqlPager {
         })
         .await
     }
+}
+
+/// The parameters of a page: for each `?`, the key value to bind and the type to bind it as.
+fn positional(bindings: &[(usize, KeyType)], key: &[String]) -> Result<Params, SourceError> {
+    Ok(Params::Positional(
+        bindings
+            .iter()
+            .map(|(index, key_type)| key_type.parameter(&key[*index]))
+            .collect::<Result<_, _>>()?,
+    ))
 }
 
 /// A value as text. Every selected column is cast to text on the server, so a value is `NULL` or
@@ -460,15 +506,24 @@ async fn open_paged(
         .into_iter()
         .map(|index| (index, keys[index].1))
         .collect();
+    // A text cursor has no window and reads strictly after its checkpoint.
+    let window = if cursor && settings.cursor_lookback > 0 {
+        window_sql(&from, &columns, &keys, settings.cursor_lookback, rows)
+            .map(|(sql, count)| (sql, vec![(0, keys[0].1); count]))
+    } else {
+        None
+    };
+    let lookback = window.is_some();
     let pager = MysqlPager {
         conn,
         statement_timeout: settings.statement_timeout,
         first,
         next,
         bindings,
+        window,
     };
     let names = columns.into_iter().map(|column| column.name).collect();
-    Paged::new(pager, names, &spec, after, rows)
+    Paged::new(pager, names, &spec, after, rows, lookback)
 }
 
 /// The key columns with the type each is paged on.
@@ -636,6 +691,37 @@ mod tests {
             )
         );
         assert!(bindings.is_empty());
+    }
+
+    #[test]
+    fn the_window_page_moves_the_cursor_back_by_the_lookback_and_binds_only_the_cursor() {
+        let window = |ty| {
+            window_sql(
+                "t",
+                &cols()[..2],
+                &keys_of(&[("updated_at", ty), ("id", KeyType::Signed)]),
+                300,
+                keyset::BATCH_ROWS,
+            )
+        };
+
+        let (sql, count) = window(KeyType::Temporal).unwrap();
+        assert_eq!(
+            sql,
+            "SELECT CAST(s.`id` AS CHAR) AS `id`, CAST(s.`updated_at` AS CHAR) AS `updated_at` FROM t AS s WHERE s.`updated_at` IS NOT NULL AND s.`updated_at` > (? - INTERVAL 300 SECOND) ORDER BY s.`updated_at`, s.`id` LIMIT 500"
+        );
+        assert_eq!(count, 1);
+        assert!(window(KeyType::Signed).unwrap().0.contains("> (? - 300)"));
+        let (unsigned, count) = window(KeyType::Unsigned).unwrap();
+        assert!(unsigned.contains("> IF(? > 300, ? - 300, 0)"), "{unsigned}");
+        assert_eq!(count, 2);
+        assert!(
+            window(KeyType::Decimal(2))
+                .unwrap()
+                .0
+                .contains("> (CAST(? AS DECIMAL(65,2)) - 300)")
+        );
+        assert_eq!(window(KeyType::Text), None);
     }
 
     #[test]
@@ -937,6 +1023,7 @@ mod tests {
                 "tls",
                 "ca_certificate",
                 "statement_timeout_seconds",
+                "cursor_lookback",
                 "queries"
             ]
         );

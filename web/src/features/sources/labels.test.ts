@@ -131,6 +131,7 @@ describe("source forms", () => {
       "json_not_an_array",
       "json_trailing_data",
       "checkpoint_invalid",
+      "null_primary_key",
       "list_missing",
       "stream_not_keyed",
       "event_key_unavailable",

@@ -22,7 +22,7 @@ use super::sql::connect::{CONNECT_TIMEOUT, backstop, resolve, within};
 use super::sql::discover::{from_clause, query_stream, table_streams};
 use super::sql::error::{from_postgres, query};
 use super::sql::keyset::{
-    self, KeySpec, Paged, Pager, Row, batches, key_types as keys_of, parse_checkpoint,
+    self, Compare, KeySpec, Paged, Pager, Row, batches, key_types as keys_of, parse_checkpoint,
 };
 use super::sql::metrics::metered;
 use super::sql::settings::{Flavor, Login, Settings, TlsMode, check_config, config_error, fields};
@@ -56,6 +56,7 @@ impl Source for Postgres {
             fields::TLS,
             fields::CA_CERTIFICATE,
             fields::STATEMENT_TIMEOUT,
+            fields::CURSOR_LOOKBACK,
             fields::QUERIES,
         ],
         credential_fields: &[
@@ -217,8 +218,9 @@ fn options(settings: &Settings, login: &Login<'_>, ips: &[IpAddr]) -> tokio_post
     options
 }
 
-/// Starts a transaction that can only read, with the statement timeout, an idle limit and UTC
-/// as the time zone (so a timestamp's text form, the checkpoint, is stable). Every statement the
+/// Starts a transaction that can only read, with the statement timeout, an idle limit, UTC as
+/// the time zone and the ISO date style (so a timestamp's text form, the checkpoint and the
+/// record value, is stable whatever the role or database sets). Every statement the
 /// source runs goes through one of these; the server refuses a write inside it (25006).
 async fn begin_batch(
     client: &mut Client,
@@ -233,7 +235,8 @@ async fn begin_batch(
     tx.batch_execute(&format!(
         "SET LOCAL statement_timeout = {}; \
          SET LOCAL idle_in_transaction_session_timeout = {IDLE_IN_TRANSACTION_MS}; \
-         SET LOCAL TimeZone = 'UTC'",
+         SET LOCAL TimeZone = 'UTC'; \
+         SET LOCAL DateStyle = 'ISO, YMD'",
         statement_timeout.as_millis()
     ))
     .await?;
@@ -278,6 +281,21 @@ impl KeyType {
             Type::TIMESTAMP => Self::Timestamp,
             Type::TIMESTAMPTZ => Self::Timestamptz,
             _ => return None,
+        })
+    }
+
+    /// The right-hand side that moves the checkpoint's cursor, `$1`, back by `lookback`: seconds
+    /// for a date or time type, units for a number. `None` for text and uuid. Integer cursors
+    /// compare as `int8`, which every integer column's index serves.
+    fn lookback(self, lookback: u64) -> Option<String> {
+        Some(match self {
+            Self::Int2 | Self::Int4 | Self::Int8 => format!("($1::text::int8 - {lookback})"),
+            Self::Numeric => format!("($1::text::numeric - {lookback})"),
+            Self::Date | Self::Timestamp | Self::Timestamptz => format!(
+                "($1::text::{} - interval '{lookback} seconds')",
+                self.cast()
+            ),
+            Self::Text | Self::Varchar | Self::Bpchar | Self::Uuid => return None,
         })
     }
 
@@ -340,15 +358,38 @@ fn page_sql(
         cursor,
         after,
         quote,
-        |index, column, operator| {
-            format!(
-                "{column} {operator} ${}::text::{}",
-                index + 1,
-                keys[index].1.cast()
-            )
+        Compare {
+            term: |index: usize, column: &str, operator: &str| {
+                format!(
+                    "{column} {operator} ${}::text::{}",
+                    index + 1,
+                    keys[index].1.cast()
+                )
+            },
+            // A row comparison is an index range on `(cursor, key)`; the expanded `OR` is a
+            // filter over every row after the start of the index.
+            row: Some(&|index| format!("${}::text::{}", index + 1, keys[index].1.cast())),
         },
     );
     keyset::limited(&sql, rows)
+}
+
+/// The first page of a run that re-reads `lookback` behind the checkpoint's cursor, bound as
+/// `$1` alone ([`keyset::window_sql`]). `None` when the cursor's type cannot be moved back (text,
+/// uuid): that stream ignores the lookback.
+fn window_sql(
+    from: &str,
+    columns: &[Column],
+    keys: &[(String, KeyType)],
+    lookback: u64,
+    rows: usize,
+) -> Option<String> {
+    let cursor = keys[0].1;
+    let bound = cursor.lookback(lookback)?;
+    let sql = keyset::window_sql(&select_list(columns), from, keys, quote, |column| {
+        format!("{column} > {bound}")
+    });
+    Some(keyset::limited(&sql, rows))
 }
 
 /// What a stream reads from: a table of the configured schema or a configured query.
@@ -385,13 +426,20 @@ struct PostgresPager {
     statement_timeout: Duration,
     first: String,
     next: String,
+    /// The first page of a run with a lookback; its only parameter is the checkpoint's cursor.
+    window: Option<String>,
 }
 
 impl Pager for PostgresPager {
-    async fn page(&mut self, after: Option<&[String]>) -> Result<Vec<Row>, SourceError> {
-        let (sql, parameters) = match after {
-            None => (&self.first, &[][..]),
-            Some(key) => (&self.next, key),
+    async fn page(
+        &mut self,
+        after: Option<&[String]>,
+        window: bool,
+    ) -> Result<Vec<Row>, SourceError> {
+        let (sql, parameters) = match (after, &self.window) {
+            (None, _) => (&self.first, &[][..]),
+            (Some(key), Some(window_sql)) if window => (window_sql, &key[..1]),
+            (Some(key), _) => (&self.next, key),
         };
         let parameters: Vec<&(dyn ToSql + Sync)> = parameters
             .iter()
@@ -437,14 +485,22 @@ async fn open_paged(
     let keys = key_types(&columns, &spec)?;
     let rows = keyset::page_rows(ctx);
     let cursor = spec.cursor.is_some();
+    // A text or uuid cursor has no window and reads strictly after its checkpoint.
+    let window = if cursor && settings.cursor_lookback > 0 {
+        window_sql(&from, &columns, &keys, settings.cursor_lookback, rows)
+    } else {
+        None
+    };
+    let lookback = window.is_some();
     let pager = PostgresPager {
         conn,
         statement_timeout: settings.statement_timeout,
         first: page_sql(&from, &columns, &keys, cursor, false, rows),
         next: page_sql(&from, &columns, &keys, cursor, true, rows),
+        window,
     };
     let names = columns.into_iter().map(|column| column.name).collect();
-    Paged::new(pager, names, &spec, after, rows)
+    Paged::new(pager, names, &spec, after, rows, lookback)
 }
 
 /// The key columns with the type each is paged on.
@@ -605,7 +661,7 @@ mod tests {
     }
 
     #[test]
-    fn an_incremental_page_after_a_checkpoint_compares_the_expanded_key() {
+    fn an_incremental_page_after_a_checkpoint_compares_the_key_as_a_row() {
         let sql = page_sql(
             r#""public"."contacts""#,
             &columns(),
@@ -618,13 +674,13 @@ mod tests {
         assert_eq!(
             sql,
             format!(
-                r#"{SELECT} FROM "public"."contacts" AS s WHERE s."updated_at" IS NOT NULL AND (s."updated_at" > $1::text::timestamptz OR (s."updated_at" = $1::text::timestamptz AND s."id" > $2::text::int8)) ORDER BY s."updated_at", s."id" LIMIT 500"#
+                r#"{SELECT} FROM "public"."contacts" AS s WHERE s."updated_at" IS NOT NULL AND (s."updated_at", s."id") > ($1::text::timestamptz, $2::text::int8) ORDER BY s."updated_at", s."id" LIMIT 500"#
             )
         );
     }
 
     #[test]
-    fn a_full_refresh_orders_by_the_key_alone_and_two_key_columns_expand_to_three_terms() {
+    fn a_full_refresh_orders_by_the_key_alone_and_two_key_columns_compare_as_a_row() {
         let first = page_sql(
             "t",
             &columns()[..1],
@@ -648,12 +704,12 @@ mod tests {
         );
         assert_eq!(
             composite,
-            r#"SELECT s."id"::text AS "id" FROM t AS s WHERE (s."a" > $1::text::int4 OR (s."a" = $1::text::int4 AND s."b" > $2::text::text)) ORDER BY s."a", s."b" LIMIT 500"#
+            r#"SELECT s."id"::text AS "id" FROM t AS s WHERE (s."a", s."b") > ($1::text::int4, $2::text::text) ORDER BY s."a", s."b" LIMIT 500"#
         );
     }
 
     #[test]
-    fn three_key_columns_expand_to_three_alternatives() {
+    fn three_key_columns_compare_as_one_row() {
         let sql = page_sql(
             "t",
             &columns()[..1],
@@ -669,10 +725,68 @@ mod tests {
 
         assert!(
             sql.contains(
-                r#"(s."c" > $1::text::date OR (s."c" = $1::text::date AND s."a" > $2::text::uuid) OR (s."c" = $1::text::date AND s."a" = $2::text::uuid AND s."b" > $3::text::numeric))"#
+                r#"(s."c", s."a", s."b") > ($1::text::date, $2::text::uuid, $3::text::numeric)"#
             ),
             "{sql}"
         );
+    }
+
+    #[test]
+    fn a_single_key_column_after_a_checkpoint_stays_one_comparison() {
+        let sql = page_sql(
+            "t",
+            &columns()[..1],
+            &key_list(&[("id", KeyType::Int8)]),
+            false,
+            true,
+            keyset::BATCH_ROWS,
+        );
+
+        assert!(
+            sql.contains(r#"WHERE (s."id" > $1::text::int8) ORDER BY"#),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn the_window_page_moves_the_cursor_back_by_the_lookback_and_ignores_the_key() {
+        let window = |ty, key| {
+            window_sql(
+                "t",
+                &columns()[..2],
+                &key_list(&[("updated_at", ty), ("id", key)]),
+                300,
+                keyset::BATCH_ROWS,
+            )
+        };
+
+        assert_eq!(
+            window(KeyType::Timestamptz, KeyType::Int8).unwrap(),
+            r#"SELECT s."id"::text AS "id", s."updated_at"::text AS "updated_at" FROM t AS s WHERE s."updated_at" IS NOT NULL AND s."updated_at" > ($1::text::timestamptz - interval '300 seconds') ORDER BY s."updated_at", s."id" LIMIT 500"#
+        );
+        assert!(
+            window(KeyType::Date, KeyType::Int8)
+                .unwrap()
+                .contains("> ($1::text::date - interval '300 seconds')")
+        );
+        assert!(
+            window(KeyType::Int4, KeyType::Int8)
+                .unwrap()
+                .contains("> ($1::text::int8 - 300)")
+        );
+        assert!(
+            window(KeyType::Numeric, KeyType::Int8)
+                .unwrap()
+                .contains("> ($1::text::numeric - 300)")
+        );
+        for ty in [
+            KeyType::Text,
+            KeyType::Varchar,
+            KeyType::Bpchar,
+            KeyType::Uuid,
+        ] {
+            assert_eq!(window(ty, KeyType::Int8), None, "{ty:?}");
+        }
     }
 
     #[test]
@@ -836,6 +950,7 @@ mod tests {
                 "tls",
                 "ca_certificate",
                 "statement_timeout_seconds",
+                "cursor_lookback",
                 "queries"
             ]
         );
@@ -1737,6 +1852,128 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_row_comparison_returns_the_same_pages_as_the_expanded_one_across_equal_cursors() {
+        let fixture = Fixture::new().await;
+        let config = fixture.config(serde_json::json!({}));
+        let batches = fixture
+            .read(&config, &contacts_incremental(), None)
+            .await
+            .unwrap();
+        let (client, connection) = tokio_postgres::connect(&required_env("DATABASE_URL"), NoTls)
+            .await
+            .unwrap();
+        tokio::spawn(connection);
+        let columns = vec![
+            column("id", Type::INT8),
+            column("updated_at", Type::TIMESTAMPTZ),
+        ];
+        let keys = key_list(&[("updated_at", KeyType::Timestamptz), ("id", KeyType::Int8)]);
+        let from = format!("{}.contacts", fixture.schema);
+        let row_form = page_sql(&from, &columns, &keys, true, true, 50);
+        let expanded = keyset::limited(
+            &keyset::page_sql(
+                &select_list(&columns),
+                &from,
+                &keys,
+                true,
+                true,
+                quote,
+                Compare {
+                    term: |index: usize, column: &str, operator: &str| {
+                        format!(
+                            "{column} {operator} ${}::text::{}",
+                            index + 1,
+                            keys[index].1.cast()
+                        )
+                    },
+                    row: None,
+                },
+            ),
+            50,
+        );
+
+        // A checkpoint inside the 16 equal cursor values, one at their first and one past them.
+        for key in [
+            ["2024-01-01 08:13:00+00", "500"],
+            ["2024-01-01 08:13:00+00", "493"],
+            ["2024-01-01 08:13:00+00", "508"],
+            ["2024-01-01 00:01:00+00", "1"],
+        ] {
+            let params: Vec<&(dyn ToSql + Sync)> = key
+                .iter()
+                .map(|value| value as &(dyn ToSql + Sync))
+                .collect();
+            let row_rows = client.query(row_form.as_str(), &params).await.unwrap();
+            let expanded_rows = client.query(expanded.as_str(), &params).await.unwrap();
+            let ids = |rows: &[tokio_postgres::Row]| -> Vec<String> {
+                rows.iter().map(|row| row.get::<_, String>(0)).collect()
+            };
+            assert_eq!(ids(&row_rows), ids(&expanded_rows), "{key:?}");
+            assert!(!row_rows.is_empty(), "{key:?}");
+        }
+        assert!(!batches.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_row_committed_late_with_an_older_cursor_is_read_only_under_a_lookback() {
+        let fixture = Fixture::new().await;
+        let plain = fixture.config(serde_json::json!({}));
+        let batches = fixture
+            .read(&plain, &contacts_incremental(), None)
+            .await
+            .unwrap();
+        let checkpoint = batches[0].checkpoint.clone();
+        // Committed after the checkpoint, with a cursor 3 hours before the checkpoint's.
+        admin_exec(
+            &fixture.admin,
+            &format!(
+                "INSERT INTO {}.contacts (id, email, updated_at)                  VALUES (9999, 'late@example.com', timestamptz '2024-01-01 05:13:00+00')",
+                fixture.schema
+            ),
+        )
+        .await;
+
+        let strict = fixture
+            .read(&plain, &contacts_incremental(), Some(checkpoint.clone()))
+            .await
+            .unwrap();
+        let widened = fixture
+            .read(
+                &fixture.config(serde_json::json!({"cursor_lookback": 4 * 3600})),
+                &contacts_incremental(),
+                Some(checkpoint.clone()),
+            )
+            .await
+            .unwrap();
+
+        assert!(!keys(&strict).contains(&"9999".to_owned()));
+        assert!(keys(&widened).contains(&"9999".to_owned()));
+        // The saved checkpoint of the first widened page is not behind where the run started.
+        for batch in &widened {
+            let cursor = batch.checkpoint.0["key"][0].as_str().unwrap();
+            assert!(cursor >= "2024-01-01 08:13:00+00", "{cursor}");
+        }
+        // A text cursor ignores the lookback and reads strictly after its checkpoint, exactly
+        // as without one; the timestamp stream of the same source above still got its window.
+        let text_cursor = stream("contacts", SyncMode::Incremental, Some("email"), &["id"]);
+        let first = fixture.read(&plain, &text_cursor, None).await.unwrap();
+        let resume = Some(first[0].checkpoint.clone());
+        let ignored = fixture
+            .read(
+                &fixture.config(serde_json::json!({"cursor_lookback": 60})),
+                &text_cursor,
+                resume.clone(),
+            )
+            .await
+            .unwrap();
+        let strict = fixture.read(&plain, &text_cursor, resume).await.unwrap();
+        assert_eq!(keys(&ignored), keys(&strict));
+        assert!(!keys(&ignored).is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_connection_test_passes_for_the_read_only_role() {
         let fixture = Fixture::new().await;
 
@@ -1749,6 +1986,40 @@ mod tests {
             .await;
 
         assert_eq!(result, Ok(()));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_timestamp_reads_as_iso_text_even_under_a_non_iso_datestyle() {
+        let url = std::env::var("DATABASE_URL").unwrap();
+        let (mut client, connection) = tokio_postgres::connect(&url, NoTls).await.unwrap();
+        tokio::spawn(connection);
+        client
+            .batch_execute("SET datestyle = 'German, DMY'")
+            .await
+            .unwrap();
+        let tx = begin_batch(&mut client, Duration::from_secs(5))
+            .await
+            .unwrap();
+        let select = select_list(&[column("updated_at", Type::TIMESTAMPTZ)]);
+
+        let row = tx
+            .query_one(
+                &format!(
+                    "SELECT {select}, current_setting('DateStyle') FROM (SELECT '2024-02-01 10:00:00.5+00'::timestamptz AS updated_at) AS s"
+                ),
+                &[],
+            )
+            .await
+            .unwrap();
+
+        let text: String = row.get(0);
+        assert!(
+            text.len() > 10 && text.as_bytes()[4] == b'-',
+            "not ISO text: {text}"
+        );
+        let style: String = row.get(1);
+        assert!(style.starts_with("ISO"), "{style}");
     }
 
     #[test]

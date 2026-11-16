@@ -170,16 +170,14 @@ impl GuardedClient {
                     self.lookup.lookup(host),
                 )
                 .await
-                .map_err(|_| HttpError::Timeout)?
-                .map_err(|_| {
-                    HttpError::Transport("the redirect target could not be resolved".to_owned())
-                })?;
-                if ips.is_empty() {
-                    return Err(HttpError::Transport(
-                        "the redirect target could not be resolved".to_owned(),
-                    ));
+                .map_err(|_| HttpError::Timeout)?;
+                // A name that does not resolve is no egress risk: nothing is requested from it,
+                // so the destination's 3xx stands as its answer.
+                if let Ok(ips) = ips
+                    && !ips.is_empty()
+                {
+                    check_all(&self.policy, host, &ips)?;
                 }
-                check_all(&self.policy, host, &ips)?;
             }
         }
         Ok(GuardedResponse {
@@ -819,6 +817,23 @@ mod tests {
 
         assert_eq!(response.status(), 307);
         assert_eq!(other_hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_redirect_to_an_unresolvable_host_is_returned_as_the_answer() {
+        let router = Router::new().route(
+            "/sso",
+            get(|| async { Redirect::temporary("https://login.internal-sso.test/x") }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let guarded = client(&["127.0.0.1/32"], HttpLimits::default());
+
+        let result = get_url(&guarded, &format!("http://127.0.0.1:{port}/sso")).await;
+
+        let response = result.expect("the 3xx answer is not a transport failure");
+        assert_eq!(response.status(), 307);
     }
 
     #[tokio::test]
