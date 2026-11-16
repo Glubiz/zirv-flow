@@ -170,16 +170,14 @@ impl GuardedClient {
                     self.lookup.lookup(host),
                 )
                 .await
-                .map_err(|_| HttpError::Timeout)?
-                .map_err(|_| {
-                    HttpError::Transport("the redirect target could not be resolved".to_owned())
-                })?;
-                if ips.is_empty() {
-                    return Err(HttpError::Transport(
-                        "the redirect target could not be resolved".to_owned(),
-                    ));
+                .map_err(|_| HttpError::Timeout)?;
+                // A name that does not resolve is no egress risk: nothing is requested from it,
+                // so the destination's 3xx stands as its answer.
+                if let Ok(ips) = ips
+                    && !ips.is_empty()
+                {
+                    check_all(&self.policy, host, &ips)?;
                 }
-                check_all(&self.policy, host, &ips)?;
             }
         }
         Ok(GuardedResponse {
@@ -819,6 +817,99 @@ mod tests {
 
         assert_eq!(response.status(), 307);
         assert_eq!(other_hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_redirect_to_an_unresolvable_host_is_returned_as_the_answer() {
+        let router = Router::new().route(
+            "/sso",
+            get(|| async { Redirect::temporary("https://login.internal-sso.test/x") }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let guarded = client(&["127.0.0.1/32"], HttpLimits::default());
+
+        let result = get_url(&guarded, &format!("http://127.0.0.1:{port}/sso")).await;
+
+        let response = result.expect("the 3xx answer is not a transport failure");
+        assert_eq!(response.status(), 307);
+    }
+
+    /// How [`Stub`] answers any name.
+    enum Answer {
+        Empty,
+        Never,
+    }
+
+    /// Answers any name as `answer` says and records the names it was asked for.
+    struct Stub {
+        answer: Answer,
+        asked: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl Lookup for Stub {
+        fn lookup<'a>(
+            &'a self,
+            host: &'a str,
+        ) -> Pin<Box<dyn Future<Output = io::Result<Vec<IpAddr>>> + Send + 'a>> {
+            self.asked.lock().unwrap().push(host.to_owned());
+            Box::pin(async move {
+                match self.answer {
+                    Answer::Empty => Ok(Vec::new()),
+                    Answer::Never => std::future::pending().await,
+                }
+            })
+        }
+    }
+
+    /// The URL of a server on the loopback whose `/hop` answers a 307 to `https://hop.test/x`.
+    async fn redirect_to_a_name() -> String {
+        let router = Router::new().route(
+            "/hop",
+            get(|| async { Redirect::temporary("https://hop.test/x") }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        format!("http://127.0.0.1:{port}/hop")
+    }
+
+    fn stubbed(answer: Answer, limits: HttpLimits) -> (GuardedClient, Arc<Stub>) {
+        let policy = Arc::new(EgressPolicy::parse(&["127.0.0.1/32".to_owned()]).unwrap());
+        let stub = Arc::new(Stub {
+            answer,
+            asked: std::sync::Mutex::new(Vec::new()),
+        });
+        let guarded = GuardedClient::with_lookup(policy, limits, stub.clone()).unwrap();
+        (guarded, stub)
+    }
+
+    #[tokio::test]
+    async fn a_redirect_to_a_name_that_resolves_to_nothing_is_returned_as_the_answer() {
+        let url = redirect_to_a_name().await;
+        let (guarded, stub) = stubbed(Answer::Empty, HttpLimits::default());
+
+        let response = get_url(&guarded, &url)
+            .await
+            .expect("an empty answer is no egress risk");
+
+        assert_eq!(response.status(), 307);
+        assert_eq!(*stub.asked.lock().unwrap(), ["hop.test"]);
+    }
+
+    #[tokio::test]
+    async fn a_lookup_of_a_redirect_target_that_never_completes_times_out() {
+        let url = redirect_to_a_name().await;
+        let limits = HttpLimits {
+            connect_timeout: Duration::from_millis(100),
+            ..HttpLimits::default()
+        };
+        let (guarded, _) = stubbed(Answer::Never, limits);
+
+        let result = get_url(&guarded, &url).await;
+
+        assert_eq!(result.unwrap_err(), HttpError::Timeout);
     }
 
     #[tokio::test]
