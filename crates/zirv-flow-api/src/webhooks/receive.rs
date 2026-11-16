@@ -154,15 +154,18 @@ async fn accept(state: &AppState, id: &str, request: Request) -> Result<(), Refu
         .filter(|hook| hook.receiving)
         .ok_or_else(not_found)?;
 
+    // The URL id only locates the hook, so a request with no signature header is refused at once,
+    // before its body is read, a keyring open or a secret read, and it spends nothing.
+    if !request
+        .headers()
+        .contains_key(hook.signature_header.as_str())
+    {
+        return Err(invalid_signature(SignatureError::MissingSignature));
+    }
     let headers = request.headers().clone();
     let body = read_body(request, max)
         .await
         .map_err(|error| Refusal::new(error, "too_large"))?;
-    // The URL id only locates the hook, so a request with no signature header is refused before
-    // it costs a keyring open or a secret read, and it spends nothing.
-    if !headers.contains_key(hook.signature_header.as_str()) {
-        return Err(invalid_signature(SignatureError::MissingSignature));
-    }
     let verified = {
         let secret = open_secret(state, &hook).await?;
         verify_signature(

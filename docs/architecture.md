@@ -624,9 +624,10 @@ and the id of the sealed shared secret (`encrypted_secrets`, purpose `webhook_se
 source, stream, secret and row are created and removed together, and only through
 `/api/v1/workspaces/{ws}/webhooks`. `POST /hooks/{id}` is public and ordered cheapest first: a
 declared length over `ingest.max_webhook_bytes`, the id, one query for the hook (it must be
-receiving), the per-hook token bucket (charged only for ids that resolved, so the limiter holds
-at most one bucket per stored hook), the body read with the same cap, the secret opened into a
-zeroizing buffer, the signature and timestamp verified with a constant-time compare, then the JSON
+receiving), the signature header (a request without it is a 401 at once, before its body is
+read), the body read with the same cap, the secret opened into a zeroizing buffer, the signature
+and timestamp verified with a constant-time compare, the per-hook token bucket (charged only for a
+request that verified, so the limiter holds at most one bucket per stored hook), then the JSON
 object and its dedupe value. Only then does one transaction append an `ingest_inbox` row of kind
 `webhook` (`webhook_id` set, `api_key_id` NULL, `ON DELETE CASCADE` from the hook; the row's
 `item` is `{"payload", "signed_at"}`; `affinity` is the bucket of the record key the drain will

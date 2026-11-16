@@ -133,6 +133,10 @@ pub async fn append_audit<'e>(
 /// last `window`: the lock-free probe of [`append_audit_once_in`]. A caller that finds one has
 /// nothing to write and skips that function's transaction and advisory lock; a caller that finds
 /// none still goes through it, whose own check keeps the result exact.
+///
+/// The window is measured from the clock, not from `now()`: a caller may probe on a transaction
+/// that began long ago, and `now()` would count a row written after that start as recent for as
+/// long as the transaction lives.
 pub async fn audit_recent<'e>(
     executor: impl PgExecutor<'e>,
     entry: &NewAuditEntry,
@@ -142,7 +146,7 @@ pub async fn audit_recent<'e>(
         "SELECT EXISTS (SELECT 1 FROM audit_log 
              WHERE workspace_id IS NOT DISTINCT FROM $1::uuid AND action = $2 
                AND object_id IS NOT DISTINCT FROM $3::uuid AND summary = $4::jsonb 
-               AND occurred_at > now() - make_interval(secs => $5))",
+               AND occurred_at > clock_timestamp() - make_interval(secs => $5))",
     )
     .bind(entry.workspace_id.map(|id| id.as_uuid()))
     .bind(entry.action)
@@ -556,6 +560,32 @@ mod tests {
             ..entry
         };
         assert!(!audit_recent(&pool, &other, hour).await.unwrap());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_recent_probe_measures_its_window_from_the_clock_not_the_transaction_start(
+        pool: PgPool,
+    ) {
+        let entry = NewAuditEntry {
+            object_kind: Some("credential"),
+            object_id: Some(Uuid::new_v4()),
+            summary: json!({"use": "send"}),
+            ..entry(None, "credential.used")
+        };
+        let window = std::time::Duration::from_secs(2);
+        // The caller's own, older transaction: `now()` is frozen at its start.
+        let mut old = pool.begin().await.unwrap();
+        sqlx::query("SELECT now()")
+            .execute(&mut *old)
+            .await
+            .unwrap();
+        assert!(append_audit_once_in(&pool, &entry, window).await.unwrap());
+        tokio::time::sleep(std::time::Duration::from_millis(2300)).await;
+
+        // The row is now older than the window, so the writer would write again.
+        assert!(!audit_recent(&mut *old, &entry, window).await.unwrap());
+        old.rollback().await.unwrap();
     }
 
     #[sqlx::test]

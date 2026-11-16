@@ -14,7 +14,15 @@
 -- instead of the last 30 x 24 hours, and it lags the messages by the job's period (five minutes).
 -- Until the backfill has walked the 30 days after an upgrade, older days read as 0 uses.
 --
--- UPGRADE COST: a new table, no lock on an existing one. The job's per-day count reads
+-- An existing install's `summary_state` is already caught up, so the job would skip the backfill
+-- and the new table would only ever hold the days from the upgrade on. The `UPDATE` at the end
+-- clears every workspace's rollup marks: the next run takes the first-run path (recount today,
+-- then backfill the last 30 days newest first, a few days per run). `summary_daily` is recounted
+-- along with it, a one-time cost; its older rows stay until each day is recounted, so the Home
+-- summary shows no gap.
+--
+-- UPGRADE COST: a new table, no lock on an existing one, and one pass over the small
+-- `summary_state` table (a row per workspace). The job's per-day count reads
 -- `messages_template_idx`, which exists.
 CREATE TABLE template_use_daily (
     workspace_id uuid   NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
@@ -23,3 +31,5 @@ CREATE TABLE template_use_daily (
     uses         bigint NOT NULL CHECK (uses > 0),
     PRIMARY KEY (workspace_id, template_id, day)
 );
+
+UPDATE summary_state SET counted_to = NULL, closed_through = NULL, backfilled_from = NULL;

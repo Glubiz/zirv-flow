@@ -1196,4 +1196,64 @@ mod tests {
             .collect();
         assert_eq!(names, ["Busy", "Quiet"]);
     }
+
+    #[sqlx::test(migrations = false)]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_template_use_migration_backfills_an_install_whose_rollup_was_caught_up(
+        pool: PgPool,
+    ) {
+        use crate::templates::tests_support::create as create_template;
+
+        crate::reset_database(&pool).await;
+        let mut before = sqlx::migrate!("./migrations");
+        before.migrations = before
+            .migrations
+            .iter()
+            .filter(|migration| migration.version < 109)
+            .cloned()
+            .collect();
+        before.run(&pool).await.unwrap();
+        let ws = workspace(&pool, "one").await;
+        let busy = create_template(&pool, ws, "Busy").await;
+        let someone = person(&pool, ws, datetime!(2030-01-15 11:00 UTC)).await;
+        let now = OffsetDateTime::now_utc();
+        let today = now.date();
+        for age in [0, 3, 10, 20, 28] {
+            let at = now - Span::hours(1) - Span::days(age);
+            template_message(&pool, ws, someone, busy.id, ("sent", false), at).await;
+        }
+        // Caught up, as an install that has run the job for months: nothing left to count or
+        // backfill, so only the migration can make the new table see the older days.
+        sqlx::query(
+            "INSERT INTO summary_state (workspace_id, counted_to, closed_through, backfilled_from) \n             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(ws.as_uuid())
+        .bind(now)
+        .bind(today - Span::days(1))
+        .bind(today - Span::days(KEPT_DAYS - 1))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        crate::migrate(&pool).await.unwrap();
+        for _ in 0..15 {
+            refresh_workspace_summary(&pool, ws, now).await.unwrap();
+        }
+
+        let live: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM messages WHERE template_id = $1 AND NOT test \n               AND created_at >= now() - interval '30 days'",
+        )
+        .bind(busy.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let rolled: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(sum(uses), 0)::bigint FROM template_use_daily \n             WHERE template_id = $1 AND day > (now() AT TIME ZONE 'UTC')::date - 30",
+        )
+        .bind(busy.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((live, rolled), (5, 5), "the older days are backfilled");
+    }
 }
