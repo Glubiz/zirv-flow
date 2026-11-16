@@ -23,7 +23,7 @@ pub use outbox::{
     ForwardRef, ForwardingStat, QueueStatus, Redrive, Settled, claim_due, defer_row,
     enqueue_forwarding, enqueue_segment_forwarding, ensure_forward_job, extend_lease,
     forwarding_report, forwarding_status, list_dead_letters, next_due, purge_delivered,
-    purge_forwarding_outbox, redrive, settle_row,
+    purge_forwarding_outbox, redrive, release_rows, settle_row,
 };
 pub use rules::{
     ForwardingRule, NewRule, RuleUpdate, RuleWrite, create_rule, delete_rule, find_rule,

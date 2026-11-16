@@ -6,7 +6,7 @@ use serde_json::Value;
 use tracing::info;
 use zirv_flow_store::{
     MessageRetentionReport, RETENTION_BATCH, apply_message_retention_progress, purge_attempts,
-    purge_forwarding_outbox, record_retention_run, workspace_windows,
+    purge_forwarding_outbox, workspace_windows,
 };
 
 use crate::{JobContext, JobError, JobKind, metrics};
@@ -40,7 +40,14 @@ impl JobKind for MessagesRetention {
         let outcome =
             apply_message_retention_progress(&pool, &settings, &windows.messages, now, &mut report)
                 .await;
-        record_retention_run(&pool, "messages", now, report.messages_deleted).await?;
+        super::record_run(
+            &pool,
+            "messages",
+            now,
+            report.messages_deleted,
+            outcome.is_err(),
+        )
+        .await?;
         metrics::record_retention(
             "messages",
             report.messages_deleted,

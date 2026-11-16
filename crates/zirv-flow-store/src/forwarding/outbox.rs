@@ -186,6 +186,8 @@ pub struct ClaimedRow {
     pub attempt_offset: i32,
     /// Names this claim; a settle, defer or lease extension must present it.
     pub claim_token: Uuid,
+    /// When the row was due before this claim leased it.
+    pub due: OffsetDateTime,
 }
 
 impl ClaimedRow {
@@ -206,7 +208,7 @@ pub async fn claim_due(
     limit: i64,
     lease: Duration,
 ) -> Result<Vec<ClaimedRow>, StoreError> {
-    let mut rows: Vec<(OffsetDateTime, ClaimedRow)> = sqlx::query_as::<_, ClaimedWithDue>(
+    let mut rows: Vec<ClaimedRow> = sqlx::query_as(
         "UPDATE forwarding_outbox o SET attempts = o.attempts + 1, claim_token = gen_random_uuid(), \
              next_attempt_at = clock_timestamp() + make_interval(secs => $4), updated_at = now() \
          FROM (SELECT id, next_attempt_at AS due FROM forwarding_outbox \
@@ -223,19 +225,9 @@ pub async fn claim_due(
     .bind(lease.as_secs_f64())
     .fetch_all(connection)
     .await
-    .map_err(StoreError::query)?
-    .into_iter()
-    .map(|row| (row.due, row.row))
-    .collect();
-    rows.sort_by_key(|(due, row)| (*due, row.id));
-    Ok(rows.into_iter().map(|(_, row)| row).collect())
-}
-
-#[derive(FromRow)]
-struct ClaimedWithDue {
-    due: OffsetDateTime,
-    #[sqlx(flatten)]
-    row: ClaimedRow,
+    .map_err(StoreError::query)?;
+    rows.sort_by_key(|row| (row.due, row.id));
+    Ok(rows)
 }
 
 /// How a claimed attempt ended.
@@ -677,6 +669,29 @@ pub async fn defer_row(
     .map_err(StoreError::query)?
     .rows_affected()
         > 0)
+}
+
+/// Gives claimed rows back untouched, in one statement: the attempt is not counted and each row is
+/// due again when it was before the claim, so the order of the queue is kept. For rows a job
+/// claimed and then did not reach (the destination's bucket ran empty). Fenced like [`settle_row`];
+/// returns the number of rows given back.
+pub async fn release_rows(
+    connection: &mut PgConnection,
+    rows: &[ClaimedRow],
+) -> Result<u64, StoreError> {
+    let ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
+    let tokens: Vec<Uuid> = rows.iter().map(|row| row.claim_token).collect();
+    let dues: Vec<OffsetDateTime> = rows.iter().map(|row| row.due).collect();
+    Ok(sqlx::query(
+        "UPDATE forwarding_outbox o SET attempts = o.attempts - 1, next_attempt_at = r.due,              claim_token = NULL, updated_at = now()          FROM unnest($1::uuid[], $2::uuid[], $3::timestamptz[]) AS r(id, token, due)          WHERE o.id = r.id AND o.state = 'pending' AND o.claim_token = r.token",
+    )
+    .bind(&ids)
+    .bind(&tokens)
+    .bind(&dues)
+    .execute(connection)
+    .await
+    .map_err(StoreError::query)?
+    .rows_affected())
 }
 
 #[cfg(test)]

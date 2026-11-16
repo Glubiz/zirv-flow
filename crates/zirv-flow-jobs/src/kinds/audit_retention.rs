@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use time::Duration;
 use time::format_description::well_known::Rfc3339;
 use tracing::info;
-use zirv_flow_store::{Actor, NewAuditEntry, append_audit, purge_audit, record_retention_run};
+use zirv_flow_store::{Actor, NewAuditEntry, append_audit, purge_audit};
 
 use crate::{JobContext, JobError, JobKind, metrics};
 
@@ -47,7 +47,7 @@ impl JobKind for AuditRetention {
             }
         };
         metrics::record_retention("audit_log", deleted, now.unix_timestamp() as f64);
-        record_retention_run(&pool, "audit", now, deleted).await?;
+        super::record_run(&pool, "audit", now, deleted, outcome.is_err()).await?;
         // What was purged is recorded even when a later batch failed.
         if deleted > 0 {
             let cutoff_text = cutoff
@@ -251,6 +251,34 @@ mod tests {
             .unwrap();
         let cutoff = OffsetDateTime::now_utc() - time::Duration::days(730);
         assert_eq!(purge_audit(&pool, cutoff, 5000).await.unwrap(), 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_purge_that_fails_on_its_first_batch_does_not_stamp_a_fresh_run(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        insert_rows(&pool, "old", 800, 3).await;
+        sqlx::query(
+            "CREATE FUNCTION refuse_all() RETURNS trigger LANGUAGE plpgsql AS              $$ BEGIN RAISE EXCEPTION 'refused'; END $$",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER aaa_refuse_all BEFORE DELETE ON audit_log              FOR EACH ROW EXECUTE FUNCTION refuse_all()",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let (result, _) = run_scheduled(&pool, OffsetDateTime::now_utc()).await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            super::super::recorded_run(&pool, "audit").await,
+            None,
+            "a window that never ran has no last-run stamp"
+        );
     }
 
     #[sqlx::test]

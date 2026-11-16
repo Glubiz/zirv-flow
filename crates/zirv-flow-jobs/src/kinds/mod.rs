@@ -47,6 +47,22 @@ mod simulation;
 
 pub(crate) use flow_step::{WakeBatch, plan_wakes};
 
+/// Stamps the run of retention `window` unless it failed having deleted nothing: a purge that
+/// never got going must not look fresh to the status the API reads from `retention_runs`. A
+/// failure after some batches committed still stamps, as those rows are gone.
+pub(crate) async fn record_run(
+    pool: &zirv_flow_store::PgPool,
+    window: &str,
+    now: time::OffsetDateTime,
+    deleted: u64,
+    failed: bool,
+) -> Result<(), zirv_flow_store::StoreError> {
+    if failed && deleted == 0 {
+        return Ok(());
+    }
+    zirv_flow_store::record_retention_run(pool, window, now, deleted).await
+}
+
 /// The rows removed by the last recorded run of `window`; none before its first run.
 #[cfg(test)]
 pub(crate) async fn recorded_run(pool: &zirv_flow_store::PgPool, window: &str) -> Option<i64> {
@@ -146,5 +162,29 @@ pub(crate) mod slot_order {
         .fetch_one(pool)
         .await
         .unwrap()
+    }
+}
+
+#[cfg(test)]
+mod run_stamp_tests {
+    use sqlx::PgPool;
+    use time::OffsetDateTime;
+
+    use super::{record_run, recorded_run};
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_failed_run_stamps_only_when_it_deleted_something(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let now = OffsetDateTime::now_utc();
+
+        record_run(&pool, "w", now, 0, true).await.unwrap();
+        assert_eq!(recorded_run(&pool, "w").await, None);
+
+        record_run(&pool, "w", now, 5, true).await.unwrap();
+        assert_eq!(recorded_run(&pool, "w").await, Some(5));
+
+        record_run(&pool, "x", now, 0, false).await.unwrap();
+        assert_eq!(recorded_run(&pool, "x").await, Some(0));
     }
 }

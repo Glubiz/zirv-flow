@@ -5,9 +5,7 @@
 
 use serde_json::Value;
 use tracing::{info, warn};
-use zirv_flow_store::{
-    RetentionReport, apply_event_retention_progress, database_now, record_retention_run,
-};
+use zirv_flow_store::{RetentionReport, apply_event_retention_progress, database_now};
 
 use crate::{JobContext, JobError, JobKind};
 
@@ -34,8 +32,9 @@ impl JobKind for EventsRetention {
         let mut report = RetentionReport::default();
         let outcome =
             apply_event_retention_progress(pool, &settings, &windows, now, &mut report).await;
-        record_retention_run(pool, "events", now, report.events_deleted).await?;
-        record_retention_run(pool, "ingest_rejects", now, report.rejects_deleted).await?;
+        let failed = outcome.is_err();
+        super::record_run(pool, "events", now, report.events_deleted, failed).await?;
+        super::record_run(pool, "ingest_rejects", now, report.rejects_deleted, failed).await?;
         for partition in &report.skipped_partitions {
             warn!(partition = %partition, "event partition drop skipped: the table is locked");
         }

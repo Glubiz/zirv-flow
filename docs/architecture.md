@@ -1644,7 +1644,9 @@ envelope stays. Raw-URL webhooks have no rate bucket.
   the person gates and delivers again under the same idempotency key. When it cannot (the sender,
   address or enrollment is gone, the template, the destination or its type is unavailable, the
   render fails, or the six-hour rate wait ran out) the message ends
-  `failed: delivery_unconfirmed`, because the first call may have been accepted; what really went
+  `failed: delivery_unconfirmed`, because the first call may have been accepted (a `sending` row
+  with neither the in-flight nor the unconfirmed mark, left by a 429 or 5xx, was never accepted: a
+  paused flow or ended enrollment skips it like a `pending` one); what really went
   wrong is a code in the gate record's `note`, never an address. The scheduler
   leader ends, at most once a minute, a `pending` or `sending` message whose `delivery.send` job
   is no longer `ready` or `running` (it went dead), whoever holds the person or the enrollment now.
@@ -1666,6 +1668,11 @@ envelope stays. Raw-URL webhooks have no rate bucket.
   the job ends and a copy runs at the instant the bucket will hold one, under the key
   `<effect key>:defer:<n>`, with its attempt budget carried over; six hours after its first wait
   the message fails as `rate_limited` (`delivery_unconfirmed` for a message marked `sending`). A
+  take that finds the bucket empty also leaves an in-process hold on the destination until the
+  instant the bucket will hold a token (`RateGates::hold`, by the job clock); a send that already
+  waited and wakes inside the hold is queued again at once, before any gate, cap reservation or
+  render, so a herd of waiters costs one job insert and one `message.send` / `deferred` decision
+  each and no more. The bucket stays authoritative: a hold never grants. A
   429 halves the bucket's rate until its `Retry-After`
   (`throttle_bucket`). The leader's queue-depth and oldest-item-lag gauges read the destination's
   ready `delivery.send` jobs.
@@ -1752,7 +1759,9 @@ envelope stays. Raw-URL webhooks have no rate bucket.
   non-test, non-skipped messages on the channel whose slot is inside each cap's window (excluding
   the message itself, which counts as itself), and either sets the slot or blocks without
   reserving. A job transaction would hold the lock across the destination call and roll the
-  reservation back on a retry. The first cap in `skip` mode that is full skips the message
+  reservation back on a retry. A message that fails before any destination call (a render, template,
+  destination or rate-wait failure) gives its slot back in the write that ends it, since nothing
+  was sent; one that ends after a call, `delivery_unconfirmed` or a hard bounce included, keeps it. The first cap in `skip` mode that is full skips the message
   (`frequency_cap`); otherwise caps in `defer` mode hold it until the latest of the instants enough
   slots leave their windows. A re-run after a rate-limit wait moves its one slot to the time it
   sends, so every window sees it from then. Quiet hours are judged first, so only a message that
@@ -1763,7 +1772,10 @@ envelope stays. Raw-URL webhooks have no rate bucket.
   (gate, `run_at`, note) to the message's gate results in a statement of its own, which the ending
   write keeps ahead of the run's own gates, and a `message.send` / `deferred` decision with the
   gate as reason; no event, and the row stays `pending`. A quiet-hours deferral releases the slot in
-  the same write, so the deferred run takes one when it really sends. Only a wait for a rate-limit
+  the same write, so the deferred run takes one when it really sends. The same holds for a `sending`
+  message that carries neither the in-flight nor the unconfirmed mark (a 429 or 5xx left it so: nothing
+  went out), which a retry meets in quiet hours; a message that may have been accepted is never deferred
+  by a gate. Only a wait for a rate-limit
   token starts the six-hour clock (`first_wait`); a gate's deferral stores it as null, restarting
   it after the hold, so a message held overnight is not failed as `rate_limited`. Each run of
   token waits is bounded, but a send whose token waits alternate with gate holds has no bound on
@@ -2617,8 +2629,11 @@ before and after on the same input.
   with cause `event` and the event id. A legacy row with NULL `trace_id` falls back to the
   destination job's trace and `schedule` cause; `job.attempt` records always use the job trace.
   A rate-limit wait gives the row
-  back without spending an attempt. When rows remain, the job leaves its successor, due at the
-  earliest `next_attempt_at`. It never calls `enqueue_arrivals` and never writes an event. The
+  back without spending an attempt, remembers the bucket as empty until it will hold a token, and
+  ends the run: the rows claimed after it go back in one statement, unspent and due as they were, so
+  the queue keeps its order, and no further batch is claimed. A run that starts inside such a hold
+  claims nothing. When rows remain, the job leaves its successor, due at the later of the earliest
+  `next_attempt_at` and the end of the wait. It never calls `enqueue_arrivals` and never writes an event. The
   leader gives a destination with waiting rows and no job a new one. Delivered rows are purged
   after seven days, with their handled markers committed on the worker's pool before delivery
   calls, independently of the job's transaction.
