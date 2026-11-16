@@ -1,0 +1,17 @@
+-- Deleting a person cascades to `messages` through `messages_person_id_fkey`, and every index
+-- of `messages` leads with `workspace_id`, so the foreign-key trigger had no index to find the
+-- person's rows and scanned the table: 145 ms for one person in 3,000,000 messages (10,000
+-- people), growing with the table, and paid once per person by an erasure or an orphan purge.
+-- The person-only index lets the trigger seek: under 1 ms and an index scan.
+--
+-- Write cost: `messages` is the hottest table. Every message adds one entry here at its insert.
+-- The completing upsert changes `status`, an indexed column, so the row is never updated
+-- heap-only and its entries are rewritten anyway; the person column does not change, so the
+-- new index adds one entry per version, not a separate pass. The before and after numbers of
+-- the insert-and-complete path are in `docs/operations/upgrade.md`.
+--
+-- UPGRADE COST: the build takes SHARE on `messages` until the migration commits, which blocks
+-- every message insert and update for the build (a stopped upgrade runs it with no writer); it
+-- scans the table once. Reads go on. Budget the build at the installation's message count and
+-- plan the upgrade for a quiet window.
+CREATE INDEX IF NOT EXISTS messages_person_id_idx ON messages (person_id);

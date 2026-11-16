@@ -55,7 +55,8 @@ pub enum TemplateSort {
     Edited,
     /// The name, ignoring case.
     Name,
-    /// Messages sent in the last 30 days, test sends excluded, most first.
+    /// Messages created in the last 30 UTC days (the daily rollup, so it trails by minutes), test
+    /// sends excluded, most first.
     MostUsed,
 }
 
@@ -186,9 +187,9 @@ pub async fn list_templates<'e>(
                 CASE WHEN mb.user_id IS NOT NULL THEN u.email END AS edited_by_email, \
                 d.updated_at AS edited_at, d.document AS document, \
                 CASE WHEN $8 = 'most_used' THEN ( \
-                    SELECT count(*) FROM messages m WHERE m.workspace_id = t.workspace_id \
-                        AND m.template_id = t.id AND NOT m.test \
-                        AND m.created_at >= now() - interval '30 days') ELSE 0 END AS uses \
+                    SELECT COALESCE(sum(u.uses), 0)::bigint FROM template_use_daily u \
+                    WHERE u.workspace_id = t.workspace_id AND u.template_id = t.id \
+                        AND u.day > (now() AT TIME ZONE 'UTC')::date - 30) ELSE 0 END AS uses \
             FROM templates t \
             JOIN template_drafts d ON d.template_id = t.id \
             LEFT JOIN themes th ON th.workspace_id = t.workspace_id \

@@ -334,8 +334,9 @@ where
     let secret = token_secret(&mut tx, workspace, source)
         .await?
         .ok_or(TokenError::NotConnected)?;
-    let stored = secrets::get_for_update(&mut tx, workspace, secret)
-        .await?
+    let stored = secrets::lock_for_refresh(&mut tx, &keyring.key_ids(), workspace, secret)
+        .await
+        .map_err(TokenError::from)?
         .ok_or(TokenError::NotConnected)?;
     let current = open_tokens(keyring, workspace, secret, &stored)?;
     if current.refresh_token.expose() != held.expose() {

@@ -624,9 +624,10 @@ and the id of the sealed shared secret (`encrypted_secrets`, purpose `webhook_se
 source, stream, secret and row are created and removed together, and only through
 `/api/v1/workspaces/{ws}/webhooks`. `POST /hooks/{id}` is public and ordered cheapest first: a
 declared length over `ingest.max_webhook_bytes`, the id, one query for the hook (it must be
-receiving), the per-hook token bucket (charged only for ids that resolved, so the limiter holds
-at most one bucket per stored hook), the body read with the same cap, the secret opened into a
-zeroizing buffer, the signature and timestamp verified with a constant-time compare, then the JSON
+receiving), the signature header (a request without it is a 401 at once, before its body is
+read), the body read with the same cap, the secret opened into a zeroizing buffer, the signature
+and timestamp verified with a constant-time compare, the per-hook token bucket (charged only for a
+request that verified, so the limiter holds at most one bucket per stored hook), then the JSON
 object and its dedupe value. Only then does one transaction append an `ingest_inbox` row of kind
 `webhook` (`webhook_id` set, `api_key_id` NULL, `ON DELETE CASCADE` from the hook; the row's
 `item` is `{"payload", "signed_at"}`; `affinity` is the bucket of the record key the drain will
@@ -3984,7 +3985,7 @@ they were ruled as their capabilities were added to the plan.
   stays in `jsonb`. `string_list` traits stay in `jsonb`. The promotion is built in the
   segment milestone (M4); until the slots exist the `jsonb_path_ops` index stays, and it is reconsidered once promoted
   traits cover the equality searches. The slots are live (#125): states `backfilling`, `ready` and `retiring`; writers take the shared slot lock before they read the assignments and assignment changes take the exclusive one, so a backfill never leaves a stale value (`people/slots.rs`); the routes are `POST` and `DELETE /traits/{key}/index`.
-  Known limitation and upgrade decision: keep released migration 0033 and its checksum. Its initial `ALTER TABLE` holds ACCESS EXCLUSIVE on `people` through all 30 partial index builds, blocking reads and writes. Populated upgrades stop all roles and budget the full build when upgrading from before 0033; `v0.187.0` already contains it. No populated build timing is recorded. Rehearse at the installation's row counts before setting the downtime window; see the [lock review](operations/upgrade.md#lock-review-through-0106). This supports stopped upgrades only; online and mixed-version upgrades remain OQ-17.
+  Known limitation and upgrade decision: keep released migration 0033 and its checksum. Its initial `ALTER TABLE` holds ACCESS EXCLUSIVE on `people` through all 30 partial index builds, blocking reads and writes. Populated upgrades stop all roles and budget the full build when upgrading from before 0033; `v0.187.0` already contains it. No populated build timing is recorded. Rehearse at the installation's row counts before setting the downtime window; see the [lock review](operations/upgrade.md#lock-review-through-0109). This supports stopped upgrades only; online and mixed-version upgrades remain OQ-17.
   Details in [docs/benchmarks/m2-ingestion.md](benchmarks/m2-ingestion.md).
 
 - **OQ-8:** A per-workspace running cap in the claim query

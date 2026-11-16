@@ -505,9 +505,13 @@ impl<'a> JobContext<'a> {
             trace_id: Some(self.job.trace.trace_id.as_uuid()),
             summary: serde_json::json!({"use": usage}),
         };
-        match (once_per, self.pool()) {
+        match (once_per, self.pool().cloned()) {
             (Some(window), Some(pool)) => {
-                zirv_flow_store::append_audit_once_in(pool, &entry, window).await?;
+                // Lock-free on the handler's own connection: inside the window there is nothing
+                // to write, so no second transaction and no per-credential lock.
+                if !zirv_flow_store::audit_recent(&mut *self.connection, &entry, window).await? {
+                    zirv_flow_store::append_audit_once_in(&pool, &entry, window).await?;
+                }
             }
             _ => zirv_flow_store::append_audit(&mut *self.connection, &entry).await?,
         }
