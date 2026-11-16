@@ -3189,6 +3189,7 @@ mod tests {
             RenderFailure::Protocol,
             RenderFailure::RequestTooLarge,
             RenderFailure::UnsupportedDocument,
+            RenderFailure::Saturated,
         ] {
             assert_eq!(render::failed(failure), "render_error", "{failure}");
         }

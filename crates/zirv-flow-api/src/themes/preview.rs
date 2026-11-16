@@ -211,7 +211,7 @@ fn render_extras(
         (status = 404, description = "No such workspace, theme or version, or no access", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "The renderer refused the sample (`template_render_failed`), or it used too much memory or time (`render_memory_limit`, `render_deadline`)", body = Problem, content_type = "application/problem+json"),
         (status = 502, description = "The render host answered unusably (`render_protocol`)", body = Problem, content_type = "application/problem+json"),
-        (status = 503, description = "The render host stopped (`render_child_exited`), or rendering is not available (`render_unavailable`)", body = Problem, content_type = "application/problem+json")
+        (status = 503, description = "The render host stopped (`render_child_exited`), is saturated (`render_saturated`), or rendering is not available (`render_unavailable`)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]

@@ -100,21 +100,8 @@ pub(crate) fn parser_call_count() -> usize {
 /// prefix: `mrml` picks an element by its local name and ignores the prefix. A comment that
 /// mentions one is refused too: the check is a plain scan, not a parse.
 pub(crate) fn has_include(source: &str) -> bool {
-    let bytes = source.as_bytes();
-    bytes
-        .iter()
-        .enumerate()
-        .filter(|(_, byte)| **byte == b'<')
-        .any(|(at, _)| {
-            let rest = &bytes[at + 1..];
-            let end = rest
-                .iter()
-                .position(|b| b.is_ascii_whitespace() || matches!(b, b'/' | b'>'))
-                .unwrap_or(rest.len());
-            let name = &rest[..end];
-            let local = name.rsplit(|b| *b == b':').next().unwrap_or(name);
-            local.eq_ignore_ascii_case(b"mj-include")
-        })
+    super::scan::local_names(source.as_bytes(), false)
+        .any(|local| local.eq_ignore_ascii_case(b"mj-include"))
 }
 
 /// `mrml` 6.0.1's `is_void_element` (private there), mirrored exactly: the names are matched
@@ -380,6 +367,60 @@ mod tests {
             assert_eq!(compile(source), Err(MjmlError::Include), "{source}");
         }
         assert!(!has_include(MINIMAL));
+    }
+
+    /// The scan as it was before the run walker: the comparison corpus below must keep its results.
+    fn has_include_oracle(source: &str) -> bool {
+        let bytes = source.as_bytes();
+        (0..bytes.len()).filter(|at| bytes[*at] == b'<').any(|at| {
+            let rest = &bytes[at + 1..];
+            let end = rest
+                .iter()
+                .position(|b| b.is_ascii_whitespace() || matches!(b, b'/' | b'>'))
+                .unwrap_or(rest.len());
+            let name = &rest[..end];
+            let local = name.rsplit(|b| *b == b':').next().unwrap_or(name);
+            local.eq_ignore_ascii_case(b"mj-include")
+        })
+    }
+
+    #[test]
+    fn a_run_of_open_brackets_is_scanned_in_linear_time() {
+        for source in ["<".repeat(256 * 1024), "<a".repeat(128 * 1024)] {
+            let started = std::time::Instant::now();
+            assert!(!has_include(&source));
+            assert!(
+                started.elapsed() < std::time::Duration::from_millis(100),
+                "has_include took {:?}",
+                started.elapsed()
+            );
+        }
+    }
+
+    #[test]
+    fn the_include_scan_keeps_every_match_of_the_quadratic_one() {
+        let long = format!("<{}:mj-include>", "a".repeat(300));
+        let corpus = [
+            "<mj-include>",
+            "</MJ-Include>",
+            "<x:y:mj-include/>",
+            long.as_str(),
+            "<a:>",
+            "<a<mj-include>",
+            "<a:b<mj-include>",
+            "<a<b:mj-include>",
+            "<<<mj-include",
+            "<a b:mj-include>",
+            "<mj-includex/>",
+            "<x:mj-includes />",
+            "<",
+            "",
+            "text < mj-include",
+        ];
+        for source in corpus {
+            assert_eq!(has_include(source), has_include_oracle(source), "{source}");
+        }
+        assert!(has_include(&long));
     }
 
     #[test]

@@ -9,6 +9,7 @@
 pub(crate) mod blocks;
 mod html;
 pub(crate) mod mjml;
+mod scan;
 mod webhook;
 
 use std::fmt;

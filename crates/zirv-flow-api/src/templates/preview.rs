@@ -188,7 +188,7 @@ pub(crate) async fn render(
         (status = 404, description = "No such workspace, template, version or person, or no access", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "The renderer refused the template (`template_render_failed`), it used too much memory or time (`render_memory_limit`, `render_deadline`), or no registered content type handles it", body = Problem, content_type = "application/problem+json"),
         (status = 502, description = "The render host answered unusably (`render_protocol`)", body = Problem, content_type = "application/problem+json"),
-        (status = 503, description = "The render host stopped (`render_child_exited`), or rendering is not available (`render_unavailable`)", body = Problem, content_type = "application/problem+json")
+        (status = 503, description = "The render host stopped (`render_child_exited`), is saturated (`render_saturated`), or rendering is not available (`render_unavailable`)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]
@@ -408,6 +408,11 @@ mod tests {
             (
                 RenderFailure::ChildExited,
                 "render_child_exited",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                RenderFailure::Saturated,
+                "render_saturated",
                 StatusCode::SERVICE_UNAVAILABLE,
             ),
             (

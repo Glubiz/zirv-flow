@@ -12123,6 +12123,60 @@ a@example.com
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_billed_answer_that_fails_is_booked_at_its_tokens_and_an_unknown_one_at_the_worst_case(
+        pool: PgPool,
+    ) {
+        let fake = Arc::new(zirv_flow_ai::fake::FakeProvider::new());
+        let (state, _router, _owner, ws) =
+            enabled_workspace(&pool, &fake, ai_config(None, 20), json!({})).await;
+        let workspace: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
+        let billed = zirv_flow_ai::AiError::Billed {
+            usage: zirv_flow_ai::Usage {
+                input_tokens: 1_000,
+                output_tokens: 500,
+            },
+            cause: Box::new(zirv_flow_ai::AiError::Capability("tool_calls".into())),
+        };
+        let truncated = zirv_flow_ai::AiError::Truncated(zirv_flow_ai::Usage {
+            input_tokens: 1_000,
+            output_tokens: 700,
+        });
+        for error in [
+            billed,
+            truncated,
+            zirv_flow_ai::AiError::Timeout,
+            zirv_flow_ai::AiError::Http(503),
+        ] {
+            fake.push(Err(error));
+            let failed = crate::dispatch(&state, None, workspace, "mapping", |privacy| {
+                mapping_request(privacy, false)
+            })
+            .await;
+            assert!(failed.is_err());
+        }
+
+        let rows: Vec<(String, i32, i32, i64)> = sqlx::query_as(
+            "SELECT outcome, input_tokens, output_tokens, estimated_cost_micros              FROM ai_calls ORDER BY created_at",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let worst_case_floor = 15
+            * i64::from(
+                mapping_request(zirv_flow_ai::Privacy::SchemaOnly, false)
+                    .unwrap()
+                    .max_output_tokens(),
+            );
+        // 1000 in at 3 and 500 out at 15 per million tokens, then 1000 in and 700 out.
+        assert_eq!(rows[0], ("capability".to_owned(), 1_000, 500, 10_500));
+        assert_eq!(rows[1], ("malformed".to_owned(), 1_000, 700, 13_500));
+        assert_eq!(rows[2].0, "timeout");
+        assert!(rows[2].3 >= worst_case_floor, "{rows:?}");
+        assert_eq!(rows[3], ("http_error".to_owned(), 0, 0, 0));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn crossing_the_budget_stops_the_call_before_dispatch_and_records_nothing(pool: PgPool) {
         let fake = Arc::new(zirv_flow_ai::fake::FakeProvider::new());
         let (state, router, owner, ws) = enabled_workspace(

@@ -97,10 +97,65 @@ fn assistant_message(parts: &[Part]) -> Value {
 
 fn parse_response(reply: &[u8], requested_model: &str) -> Result<ChatResponse, AiError> {
     let value: Value = serde_json::from_slice(reply).map_err(|_| AiError::Malformed)?;
+    // The usage is read first: an answer that fails below was still billed, and the error
+    // carries what it used.
+    let usage = usage_of(&value);
+    let parts = match parse_parts(&value, usage) {
+        Ok(parts) => parts,
+        Err(error) => {
+            return Err(match usage {
+                Some(usage) => AiError::billed(usage, error),
+                None => error,
+            });
+        }
+    };
+    let usage = usage.ok_or_else(|| AiError::Capability("usage".to_owned()))?;
+    Ok(ChatResponse::new(
+        parts,
+        usage,
+        value
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or(requested_model)
+            .to_owned(),
+    ))
+}
+
+fn usage_of(value: &Value) -> Option<Usage> {
+    let count = |field: &str| {
+        value
+            .pointer(&format!("/usage/{field}"))
+            .and_then(Value::as_u64)
+            .map(|tokens| u32::try_from(tokens).unwrap_or(u32::MAX))
+    };
+    Some(Usage {
+        input_tokens: count("prompt_tokens")?,
+        output_tokens: count("completion_tokens")?,
+    })
+}
+
+fn parse_parts(value: &Value, usage: Option<Usage>) -> Result<Vec<Part>, AiError> {
     let message = value
         .pointer("/choices/0/message")
         .filter(|message| message.is_object())
         .ok_or(AiError::Malformed)?;
+    let calls = message
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    // A tool call cut off at the output cap has partial arguments, and a repeat at the same cap
+    // would be cut off again: it is its own error, not a capability the model lacks.
+    if !calls.is_empty()
+        && value
+            .pointer("/choices/0/finish_reason")
+            .and_then(Value::as_str)
+            == Some("length")
+    {
+        return Err(match usage {
+            Some(usage) => AiError::Truncated(usage),
+            None => AiError::Capability("usage".to_owned()),
+        });
+    }
 
     let mut parts = Vec::new();
     if let Some(text) = message.get("content").and_then(Value::as_str)
@@ -110,12 +165,7 @@ fn parse_response(reply: &[u8], requested_model: &str) -> Result<ChatResponse, A
             text: text.to_owned(),
         });
     }
-    for call in message
-        .get("tool_calls")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
+    for call in calls {
         let name = call.pointer("/function/name").and_then(Value::as_str);
         let (Some(id), Some(name)) = (call.get("id").and_then(Value::as_str), name) else {
             return Err(AiError::Malformed);
@@ -131,29 +181,7 @@ fn parse_response(reply: &[u8], requested_model: &str) -> Result<ChatResponse, A
         });
     }
 
-    let count = |field: &str| {
-        value
-            .pointer(&format!("/usage/{field}"))
-            .and_then(Value::as_u64)
-            .map(|tokens| u32::try_from(tokens).unwrap_or(u32::MAX))
-    };
-    let (Some(input_tokens), Some(output_tokens)) =
-        (count("prompt_tokens"), count("completion_tokens"))
-    else {
-        return Err(AiError::Capability("usage".to_owned()));
-    };
-    Ok(ChatResponse::new(
-        parts,
-        Usage {
-            input_tokens,
-            output_tokens,
-        },
-        value
-            .get("model")
-            .and_then(Value::as_str)
-            .unwrap_or(requested_model)
-            .to_owned(),
-    ))
+    Ok(parts)
 }
 
 #[cfg(test)]
@@ -208,6 +236,59 @@ mod tests {
         OpenAiCompatibleProvider
             .complete(&loopback_http(), &endpoint(base), &key, &request())
             .await
+    }
+
+    const TRUNCATED: &str = r#"{"id":"c3","model":"gpt-test-2025","choices":[{"index":0,
+        "message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_9","type":"function",
+        "function":{"name":"map_columns","arguments":"{\"a\":"}}]},"finish_reason":"length"}],
+        "usage":{"prompt_tokens":40,"completion_tokens":1024,"total_tokens":1064}}"#;
+
+    const BAD_ARGUMENTS: &str = r#"{"id":"c4","model":"gpt-test-2025","choices":[{"index":0,
+        "message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_9","type":"function",
+        "function":{"name":"map_columns","arguments":"{not json"}}]},"finish_reason":"tool_calls"}],
+        "usage":{"prompt_tokens":40,"completion_tokens":7,"total_tokens":47}}"#;
+
+    const TRUNCATED_TEXT: &str = r#"{"id":"c5","model":"gpt-test-2025","choices":[{"index":0,
+        "message":{"role":"assistant","content":"Half an ans"},"finish_reason":"length"}],
+        "usage":{"prompt_tokens":40,"completion_tokens":1024,"total_tokens":1064}}"#;
+
+    #[tokio::test]
+    async fn billed_bad_tool_arguments_error_exposes_usage() {
+        let (base, _) = serve(200, BAD_ARGUMENTS).await;
+        let error = call(&base).await.unwrap_err();
+
+        assert_eq!(
+            error.usage(),
+            Some(Usage {
+                input_tokens: 40,
+                output_tokens: 7
+            })
+        );
+        assert_eq!(error.cause(), &AiError::Capability("tool_calls".into()));
+        assert!(format!("{error:?}").contains('7'), "{error:?}");
+    }
+
+    #[tokio::test]
+    async fn truncated_tool_call_is_not_a_capability_error() {
+        let (base, _) = serve(200, TRUNCATED).await;
+        let error = call(&base).await.unwrap_err();
+
+        assert_eq!(
+            error,
+            AiError::Truncated(Usage {
+                input_tokens: 40,
+                output_tokens: 1024
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_truncated_text_answer_is_still_an_answer() {
+        let (base, _) = serve(200, TRUNCATED_TEXT).await;
+        let response = call(&base).await.unwrap();
+
+        assert_eq!(response.text(), "Half an ans");
+        assert_eq!(response.usage().output_tokens, 1024);
     }
 
     #[tokio::test]
@@ -334,8 +415,8 @@ mod tests {
         let (base, _) = serve(200, reply).await;
 
         assert_eq!(
-            call(&base).await.unwrap_err(),
-            AiError::Capability("tool_calls".into())
+            call(&base).await.unwrap_err().cause(),
+            &AiError::Capability("tool_calls".into())
         );
     }
 

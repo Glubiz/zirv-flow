@@ -86,12 +86,12 @@ fn refused(reason: &'static str) {
 
 /// What the call log records for a failed call.
 fn outcome_of(error: &AiError) -> CallOutcome {
-    match error {
+    match error.cause() {
         AiError::Http(_) => CallOutcome::HttpError,
         AiError::Timeout => CallOutcome::Timeout,
         AiError::Egress { .. } => CallOutcome::EgressDenied,
         AiError::Capability(_) => CallOutcome::Capability,
-        AiError::Malformed => CallOutcome::Malformed,
+        AiError::Malformed | AiError::Truncated(_) => CallOutcome::Malformed,
         _ => CallOutcome::Transport,
     }
 }
@@ -389,11 +389,18 @@ impl Flight {
             return Err(interrupted());
         };
         let latency_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
+        // A failed answer is booked at the tokens it reported. When the request was sent and the
+        // error holds none (a timeout, an unreadable body), whether the provider billed it is
+        // unknown, so the row keeps its worst-case cost, as an abandoned call does.
+        let mut unknown_billing = false;
         let (result, outcome, usage) = match sent {
             Ok(result) => {
                 let (outcome, usage) = match &result {
                     Ok(response) => (CallOutcome::Ok, Some(response.usage())),
-                    Err(error) => (outcome_of(error), None),
+                    Err(error) => {
+                        unknown_billing = error.usage().is_none() && error.may_have_billed();
+                        (outcome_of(error), error.usage())
+                    }
                 };
                 (result.map_err(DispatchError::from), outcome, usage)
             }
@@ -426,7 +433,11 @@ impl Flight {
             outcome,
             input_tokens,
             output_tokens,
-            estimated_cost_micros: self.model.cost_micros(input_tokens, output_tokens),
+            estimated_cost_micros: if unknown_billing {
+                worst_case
+            } else {
+                self.model.cost_micros(input_tokens, output_tokens)
+            },
             latency_ms,
         };
         finish(&self.state.pool, call, &finished, transcript.as_ref()).await?;

@@ -2,11 +2,16 @@
 //! and a capped output (architecture 11.4).
 //!
 //! The environment loads no templates from anywhere: every template is a string passed in, with
-//! no loader, so `include`, `extends` and `import` find nothing (the `multi_template`
-//! feature is on only because the `fuel` feature does not compile without it in 2.24). The
+//! no loader, and every name `include`, `extends` or `import` asks for is turned into one no
+//! template has, so they find nothing, not even a template the per-thread cache registered (the
+//! `multi_template` feature is on only because the `fuel` feature does not compile without it in
+//! 2.24). The
 //! only globals are `range`, `dict` and `namespace`; `debug` is removed because it prints the
 //! whole context. The builtin filters read no clock and draw no random numbers.
 
+use hashbrown::HashMap;
+use std::borrow::Cow;
+use std::cell::RefCell;
 use std::io::{self, Write};
 
 use minijinja::{AutoEscape, Environment, Error, ErrorKind, UndefinedBehavior, Value};
@@ -53,6 +58,8 @@ pub(crate) fn environment() -> Environment<'static> {
     env.set_recursion_limit(RECURSION_LIMIT);
     env.set_keep_trailing_newline(true);
     env.remove_global("debug");
+    // Only a lookup from inside a template is joined; the cache's own lookup is not.
+    env.set_path_join_callback(|_, _| Cow::Borrowed(""));
     env.set_auto_escape_callback(|name| {
         if name.ends_with(".html") {
             AutoEscape::Html
@@ -163,6 +170,99 @@ pub(crate) fn render_string(
         .ok_or(RenderError::Template { field })
 }
 
+/// The most compiled templates a thread keeps.
+const CACHE_MAX_ENTRIES: usize = 64;
+/// The most template source bytes a thread keeps compiled, in all entries together.
+const CACHE_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// The compiled templates of one thread, with the one sandboxed environment they live in. A
+/// campaign renders one template version for every recipient, so the compile (most of a render)
+/// is paid once. The key is the full source, never a hash: a collision would render another
+/// tenant's template. HTML and text templates are apart because the name decides escaping.
+struct TemplateCache {
+    env: Environment<'static>,
+    html: HashMap<String, String>,
+    text: HashMap<String, String>,
+    bytes: usize,
+    next: usize,
+}
+
+impl TemplateCache {
+    fn new() -> Self {
+        Self {
+            env: environment(),
+            html: HashMap::new(),
+            text: HashMap::new(),
+            bytes: 0,
+            next: 0,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.html.len() + self.text.len()
+    }
+}
+
+thread_local! {
+    static TEMPLATES: RefCell<TemplateCache> = RefCell::new(TemplateCache::new());
+}
+
+/// How many compiled templates this thread holds, for a test of the cache.
+#[cfg(test)]
+fn cached_templates() -> usize {
+    TEMPLATES.with_borrow(TemplateCache::len)
+}
+
+/// [`render_string`] with the compiled template cached on this thread, for the fields a message
+/// renders in code mode. `html` makes the field autoescaped. A template that does not compile is
+/// not cached. Fuel and the output cap are per render, so the sandbox is the same as uncached.
+pub(crate) fn render_cached(
+    html: bool,
+    field: &'static str,
+    source: &str,
+    context: &Value,
+    limit: usize,
+) -> Result<String, RenderError> {
+    if source.len() > MAX_SOURCE_BYTES {
+        return Err(RenderError::SourceTooLarge { field });
+    }
+    TEMPLATES.with_borrow_mut(|cache| {
+        let known = if html { &cache.html } else { &cache.text };
+        let name = match known.get(source) {
+            Some(name) => name.clone(),
+            None => {
+                if cache.len() >= CACHE_MAX_ENTRIES || cache.bytes + source.len() > CACHE_MAX_BYTES
+                {
+                    *cache = TemplateCache::new();
+                }
+                let name = format!("t{}.{}", cache.next, if html { "html" } else { "txt" });
+                cache
+                    .env
+                    .add_template_owned(name.clone(), source.to_owned())
+                    .map_err(|error| map_error(&error, field, false))?;
+                cache.next += 1;
+                cache.bytes += source.len();
+                let known = if html {
+                    &mut cache.html
+                } else {
+                    &mut cache.text
+                };
+                known.insert(source.to_owned(), name.clone());
+                name
+            }
+        };
+        let template = cache
+            .env
+            .get_template(&name)
+            .map_err(|_| RenderError::Template { field })?;
+        let mut writer = CappedWriter::new(limit);
+        match template.render_captured_to(context, &mut writer) {
+            Ok(_) => writer.into_string().ok_or(RenderError::Template { field }),
+            Err(error) => Err(map_error(&error, field, writer.exceeded())),
+        }
+    })
+}
+
 /// Render one template string straight into a [`CappedWriter`], so the output never holds more
 /// than `limit` bytes: the render stops at the first byte past it. On failure returns the
 /// MiniJinja error and whether the cap was the cause. `Ok(None)` is output that is not UTF-8.
@@ -193,6 +293,127 @@ mod tests {
             "person": { "name": "<b>Ann</b>", "tags": ["a", "b"] }
         }));
         render_string(&environment(), name, "html", source, &context, limit)
+    }
+
+    fn context() -> Value {
+        Value::from_serialize(serde_json::json!({
+            "person": { "name": "<b>Ann</b>", "tags": ["a", "b"] }
+        }))
+    }
+
+    #[test]
+    fn a_repeat_render_reuses_the_compiled_template() {
+        // Each test runs in its own process, but start from an empty cache to be exact.
+        TEMPLATES.with_borrow_mut(|cache| *cache = TemplateCache::new());
+        let source = "Hi {{ person.name }}, {{ person.tags | length }} tags";
+        let first = render_cached(true, "html", source, &context(), MAX_HTML_BYTES).unwrap();
+        assert_eq!(cached_templates(), 1);
+        let second = render_cached(true, "html", source, &context(), MAX_HTML_BYTES).unwrap();
+        assert_eq!(cached_templates(), 1);
+        assert_eq!(first, second);
+        assert_eq!(first, "Hi &lt;b&gt;Ann&lt;&#x2f;b&gt;, 2 tags");
+        let uncached = render_string(
+            &environment(),
+            "html.html",
+            "html",
+            source,
+            &context(),
+            MAX_HTML_BYTES,
+        )
+        .unwrap();
+        assert_eq!(first, uncached);
+    }
+
+    #[test]
+    fn the_same_text_as_html_and_as_text_escapes_differently_and_never_shares() {
+        TEMPLATES.with_borrow_mut(|cache| *cache = TemplateCache::new());
+        let source = "{{ person.name }}";
+        let html = render_cached(true, "html", source, &context(), MAX_HTML_BYTES).unwrap();
+        let text = render_cached(false, "subject", source, &context(), MAX_SUBJECT_BYTES).unwrap();
+        assert_eq!(html, "&lt;b&gt;Ann&lt;&#x2f;b&gt;");
+        assert_eq!(text, "<b>Ann</b>");
+        assert_eq!(cached_templates(), 2);
+    }
+
+    #[test]
+    fn a_different_source_misses_and_renders_its_own_output() {
+        TEMPLATES.with_borrow_mut(|cache| *cache = TemplateCache::new());
+        let one = render_cached(
+            false,
+            "text",
+            "one {{ person.tags | length }}",
+            &context(),
+            100,
+        );
+        let two = render_cached(
+            false,
+            "text",
+            "two {{ person.tags | length }}",
+            &context(),
+            100,
+        );
+        assert_eq!(one.unwrap(), "one 2");
+        assert_eq!(two.unwrap(), "two 2");
+        assert_eq!(cached_templates(), 2);
+    }
+
+    #[test]
+    fn the_cache_is_bounded_by_entries_and_by_bytes_and_still_renders() {
+        TEMPLATES.with_borrow_mut(|cache| *cache = TemplateCache::new());
+        for n in 0..(CACHE_MAX_ENTRIES * 2 + 3) {
+            let out = render_cached(false, "text", &format!("n{n}"), &context(), 100).unwrap();
+            assert_eq!(out, format!("n{n}"));
+            assert!(cached_templates() <= CACHE_MAX_ENTRIES);
+        }
+        TEMPLATES.with_borrow_mut(|cache| *cache = TemplateCache::new());
+        let big = |n: usize| {
+            format!(
+                "{n:04}{}{{{{ person.name }}}}",
+                "a".repeat(MAX_SOURCE_BYTES - 24)
+            )
+        };
+        let sources = CACHE_MAX_BYTES / (MAX_SOURCE_BYTES - 20) + 2;
+        let mut evicted = false;
+        for n in 0..sources {
+            let before = cached_templates();
+            let out = render_cached(false, "text", &big(n), &context(), MAX_TEXT_BYTES).unwrap();
+            assert!(out.ends_with("<b>Ann</b>"));
+            assert!(TEMPLATES.with_borrow(|cache| cache.bytes) <= CACHE_MAX_BYTES);
+            evicted |= cached_templates() <= before;
+        }
+        assert!(evicted, "the byte bound never evicted");
+    }
+
+    #[test]
+    fn a_template_cannot_include_a_cached_template_by_its_name() {
+        TEMPLATES.with_borrow_mut(|cache| *cache = TemplateCache::new());
+        render_cached(false, "text", "secret text", &context(), 100).unwrap();
+        render_cached(true, "html", "secret html", &context(), 100).unwrap();
+        let macros = "{% macro f() %}secret macro{% endmacro %}";
+        render_cached(false, "text", macros, &context(), 100).unwrap();
+        for name in ["t0.txt", "t1.html", "t2.txt"] {
+            for source in [
+                format!("{{% include '{name}' ignore missing %}}"),
+                format!("{{% import '{name}' as other %}}{{{{ other.f() }}}}"),
+                format!("{{% from '{name}' import f %}}{{{{ f() }}}}"),
+                format!("{{% extends '{name}' %}}"),
+            ] {
+                let out = render_cached(false, "text", &source, &context(), 100);
+                assert!(
+                    out.as_deref().is_ok_and(str::is_empty)
+                        || out == Err(RenderError::Template { field: "text" }),
+                    "{source}: {out:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_template_that_does_not_compile_is_not_cached() {
+        TEMPLATES.with_borrow_mut(|cache| *cache = TemplateCache::new());
+        let result = render_cached(false, "text", "{{ person.name", &context(), 100);
+        assert_eq!(result, Err(RenderError::Syntax { field: "text" }));
+        assert_eq!(cached_templates(), 0);
     }
 
     #[test]

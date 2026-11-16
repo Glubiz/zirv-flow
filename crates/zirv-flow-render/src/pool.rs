@@ -380,11 +380,18 @@ async fn start_host(command: &ChildCommand, deadline: Duration) -> Result<Host, 
     }
 }
 
+/// How long an interactive caller waits for a free child before it gives up with
+/// [`RenderFailure::Saturated`].
+const INTERACTIVE_WAIT: Duration = Duration::from_secs(2);
+
 struct Inner {
     command: ChildCommand,
     deadline: Duration,
     idle: Mutex<Vec<Host>>,
     slots: Semaphore,
+    /// The children interactive callers may hold at once: all but one, so that sends always have
+    /// a child to wait for.
+    interactive: Semaphore,
 }
 
 /// A pool of render-host children. Cloning shares the pool.
@@ -395,6 +402,8 @@ struct Inner {
 #[derive(Clone)]
 pub struct RenderPool {
     inner: Arc<Inner>,
+    /// Whether this handle is for an interactive caller (see [`RenderPool::interactive`]).
+    interactive: bool,
 }
 
 impl fmt::Debug for RenderPool {
@@ -403,6 +412,7 @@ impl fmt::Debug for RenderPool {
             .debug_struct("RenderPool")
             .field("deadline", &self.inner.deadline)
             .field("free", &self.inner.slots.available_permits())
+            .field("interactive", &self.interactive)
             .finish_non_exhaustive()
     }
 }
@@ -439,8 +449,22 @@ impl RenderPool {
                 deadline: config.deadline,
                 idle: Mutex::new(hosts),
                 slots: Semaphore::new(size),
+                interactive: Semaphore::new(size.saturating_sub(1).max(1)),
             }),
+            interactive: false,
         })
+    }
+
+    /// A handle to the same pool for interactive callers, such as an API request that a person
+    /// waits on. It holds at most `size - 1` children at once (one when the pool has one), and
+    /// waits at most two seconds for a free one before it fails with
+    /// [`RenderFailure::Saturated`]. The plain handle, which sends and webhooks use, waits
+    /// without a bound: a send that gave up would fail its message for good.
+    pub fn interactive(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            interactive: true,
+        }
     }
 
     fn take_idle(&self) -> Option<Host> {
@@ -474,8 +498,22 @@ impl RenderPool {
         request: &[u8],
     ) -> Result<RenderResponse, RenderFailure> {
         let waiting = Instant::now();
-        let Ok(_slot) = self.inner.slots.acquire().await else {
-            return Err(RenderFailure::ChildExited);
+        let _held = if self.interactive {
+            let both = async {
+                let gate = self.inner.interactive.acquire().await?;
+                let slot = self.inner.slots.acquire().await?;
+                Ok::<_, tokio::sync::AcquireError>((Some(gate), slot))
+            };
+            match timeout(INTERACTIVE_WAIT, both).await {
+                Err(_) => return Err(RenderFailure::Saturated),
+                Ok(Err(_)) => return Err(RenderFailure::ChildExited),
+                Ok(Ok(held)) => held,
+            }
+        } else {
+            match self.inner.slots.acquire().await {
+                Ok(slot) => (None, slot),
+                Err(_) => return Err(RenderFailure::ChildExited),
+            }
         };
         metrics::histogram!("zirv_flow_render_wait_seconds").record(waiting.elapsed());
 
@@ -974,6 +1012,95 @@ mod tests {
     }
 
     // ----- deadline, death and recovery ----------------------------------------------------
+
+    /// Hold the only child of a one-child pool with a render that hangs for `deadline_ms`.
+    async fn pool_with_a_hung_holder(
+        name: &str,
+        deadline_ms: u64,
+    ) -> (
+        RenderPool,
+        tokio::task::JoinHandle<Result<Rendered, RenderFailure>>,
+        PathBuf,
+    ) {
+        let marker =
+            std::env::temp_dir().join(format!("zirv-render-{name}-{}", std::process::id()));
+        let _ = fs::remove_file(&marker);
+        let command = child_with(
+            "hang_first",
+            [("ZIRV_RENDER_TEST_MARKER", marker.as_os_str())],
+        );
+        let pool = RenderPool::start(command, config(1, deadline_ms))
+            .await
+            .unwrap();
+        let holder = {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                pool.render_email(&doc("x"), &context(), &Hooks::untracked())
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        (pool, holder, marker)
+    }
+
+    #[tokio::test]
+    async fn an_interactive_render_queued_behind_a_hung_child_is_saturated_after_the_bound() {
+        let (pool, holder, marker) = pool_with_a_hung_holder("sat", 3000).await;
+
+        let started = Instant::now();
+        let failure = pool
+            .interactive()
+            .render_email(&doc("x"), &context(), &Hooks::untracked())
+            .await
+            .unwrap_err();
+
+        assert_eq!(failure, RenderFailure::Saturated);
+        assert!(
+            started.elapsed() >= INTERACTIVE_WAIT,
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(2900),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(holder.await.unwrap().unwrap_err(), RenderFailure::Deadline);
+        let _ = fs::remove_file(&marker);
+    }
+
+    #[tokio::test]
+    async fn a_plain_render_queued_behind_a_hung_child_waits_for_it_and_is_not_rejected() {
+        let (pool, holder, marker) = pool_with_a_hung_holder("wait", 3000).await;
+
+        let started = Instant::now();
+        ok_render(&pool).await;
+
+        assert!(
+            started.elapsed() > INTERACTIVE_WAIT,
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(holder.await.unwrap().unwrap_err(), RenderFailure::Deadline);
+        let _ = fs::remove_file(&marker);
+    }
+
+    #[tokio::test]
+    async fn interactive_callers_never_hold_the_last_child() {
+        let pool = RenderPool::start(child("serve"), config(2, 20_000))
+            .await
+            .unwrap();
+        assert_eq!(pool.inner.interactive.available_permits(), 1);
+        let interactive = pool.interactive();
+        let _held = interactive.inner.interactive.acquire().await.unwrap();
+        // A second interactive call finds the gate shut, while a send still has both children.
+        let failure = interactive
+            .render_email(&doc("x"), &context(), &Hooks::untracked())
+            .await
+            .unwrap_err();
+        assert_eq!(failure, RenderFailure::Saturated);
+        ok_render(&pool).await;
+    }
 
     #[tokio::test]
     async fn a_deadline_overrun_fails_that_render_and_a_respawned_child_serves_the_next() {

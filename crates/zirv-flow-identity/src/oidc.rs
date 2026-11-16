@@ -7,19 +7,23 @@ use std::fmt;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use openidconnect::core::CoreIdToken;
 use openidconnect::core::{
     CoreAuthenticationFlow, CoreClient, CoreJwsSigningAlgorithm, CoreProviderMetadata,
 };
 use openidconnect::{
-    AccessTokenHash, AuthorizationCode, ClientId, ClientSecret, CsrfToken, EndpointMaybeSet,
-    EndpointNotSet, EndpointSet, IssuerUrl, Nonce, OAuth2TokenResponse, PkceCodeChallenge,
-    PkceCodeVerifier, RedirectUrl, Scope, TokenResponse, reqwest,
+    AccessTokenHash, AuthorizationCode, ClaimsVerificationError, ClientId, ClientSecret, CsrfToken,
+    EndpointMaybeSet, EndpointNotSet, EndpointSet, IssuerUrl, Nonce, OAuth2TokenResponse,
+    PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope, TokenResponse, reqwest,
 };
 
 use crate::IdentityError;
 
 /// How long discovered metadata and the key set are reused.
 const METADATA_TTL: Duration = Duration::from_secs(15 * 60);
+/// The least time between two refetches of the metadata that a failed signature check forces, so
+/// forged tokens cannot make us hit the provider on every sign-in.
+const FORCED_REFRESH_GAP: Duration = Duration::from_secs(60);
 /// The longest any one call to the provider may take.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -106,6 +110,14 @@ pub struct Provider {
     redirect: RedirectUrl,
     http: reqwest::Client,
     cache: Mutex<Option<(Instant, CoreProviderMetadata)>>,
+    /// When a failed signature check last forced a refetch.
+    last_forced: Mutex<Option<Instant>>,
+}
+
+/// Why an ID token was refused. A signature that no cached key verifies may be a rotation.
+enum Refusal {
+    Signature,
+    Other,
 }
 
 impl fmt::Debug for Provider {
@@ -136,6 +148,7 @@ impl Provider {
             redirect,
             http,
             cache: Mutex::new(None),
+            last_forced: Mutex::new(None),
         })
     }
 
@@ -184,34 +197,22 @@ impl Provider {
             .map_err(|_| IdentityError::Exchange)?;
 
         let id_token = response.id_token().ok_or(IdentityError::InvalidToken)?;
-        let mut verifier = client.id_token_verifier();
-        if !verifier_algs.is_empty() {
-            verifier = verifier.set_allowed_algs(verifier_algs);
-        }
-        let claims = id_token
-            .claims(&verifier, &Nonce::new(nonce.to_owned()))
-            .map_err(|_| IdentityError::InvalidToken)?;
-
-        if let Some(expected) = claims.access_token_hash() {
-            let algorithm = id_token
-                .signing_alg()
-                .map_err(|_| IdentityError::InvalidToken)?;
-            let key = id_token
-                .signing_key(&verifier)
-                .map_err(|_| IdentityError::InvalidToken)?;
-            let actual = AccessTokenHash::from_token(response.access_token(), algorithm, key)
-                .map_err(|_| IdentityError::InvalidToken)?;
-            if actual != *expected {
-                return Err(IdentityError::InvalidToken);
+        let access_token = response.access_token();
+        match verify(&client, verifier_algs, id_token, access_token, nonce) {
+            Ok(identity) => Ok(identity),
+            Err(Refusal::Other) => Err(IdentityError::InvalidToken),
+            // The key may have rotated since the key set was cached. The code is spent, so the
+            // token already received is checked again against a fresh key set, once.
+            Err(Refusal::Signature) => {
+                let metadata = self
+                    .refreshed_metadata()
+                    .await
+                    .ok_or(IdentityError::InvalidToken)?;
+                let (client, verifier_algs) = self.client_from(metadata);
+                verify(&client, verifier_algs, id_token, access_token, nonce)
+                    .map_err(|_| IdentityError::InvalidToken)
             }
         }
-
-        Ok(VerifiedIdentity {
-            issuer: claims.issuer().as_str().to_owned(),
-            subject: claims.subject().as_str().to_owned(),
-            email: claims.email().map(|email| email.as_str().to_owned()),
-            email_verified: claims.email_verified().unwrap_or(false),
-        })
     }
 
     async fn client(&self) -> Result<Client, IdentityError> {
@@ -224,6 +225,13 @@ impl Provider {
         &self,
     ) -> Result<(Client, Vec<CoreJwsSigningAlgorithm>), IdentityError> {
         let metadata = self.metadata().await?;
+        Ok(self.client_from(metadata))
+    }
+
+    fn client_from(
+        &self,
+        metadata: CoreProviderMetadata,
+    ) -> (Client, Vec<CoreJwsSigningAlgorithm>) {
         let algorithms = metadata
             .id_token_signing_alg_values_supported()
             .iter()
@@ -238,7 +246,7 @@ impl Provider {
             )),
         )
         .set_redirect_uri(self.redirect.clone());
-        Ok((client, algorithms))
+        (client, algorithms)
     }
 
     /// Discovered metadata, including the key set. A failed discovery is not cached, so the
@@ -256,10 +264,71 @@ impl Provider {
         Ok(metadata)
     }
 
+    /// The metadata fetched again now, whatever the cache holds, at most once per
+    /// [`FORCED_REFRESH_GAP`]. `None` when it is too soon or the provider cannot be reached: the
+    /// token stays refused, and a forged one never turns into a server error.
+    async fn refreshed_metadata(&self) -> Option<CoreProviderMetadata> {
+        {
+            let mut last = self
+                .last_forced
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if last.is_some_and(|at| at.elapsed() < FORCED_REFRESH_GAP) {
+                return None;
+            }
+            // Taken before the fetch, so a failing provider is not asked again at once either.
+            *last = Some(Instant::now());
+        }
+        let metadata = CoreProviderMetadata::discover_async(self.issuer.clone(), &self.http)
+            .await
+            .ok()?;
+        *self.lock() = Some((Instant::now(), metadata.clone()));
+        Some(metadata)
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<(Instant, CoreProviderMetadata)>> {
         // The guard is never held across an await, and a poisoned cache is still a cache.
         self.cache.lock().unwrap_or_else(|error| error.into_inner())
     }
+}
+
+/// Verifies an ID token: signature, issuer, audience, expiry, `nonce` and the access-token hash.
+fn verify(
+    client: &Client,
+    algorithms: Vec<CoreJwsSigningAlgorithm>,
+    id_token: &CoreIdToken,
+    access_token: &openidconnect::AccessToken,
+    nonce: &str,
+) -> Result<VerifiedIdentity, Refusal> {
+    let mut verifier = client.id_token_verifier();
+    if !algorithms.is_empty() {
+        verifier = verifier.set_allowed_algs(algorithms);
+    }
+    let claims = id_token
+        .claims(&verifier, &Nonce::new(nonce.to_owned()))
+        .map_err(|error| match error {
+            ClaimsVerificationError::SignatureVerification(_) => Refusal::Signature,
+            _ => Refusal::Other,
+        })?;
+
+    if let Some(expected) = claims.access_token_hash() {
+        let algorithm = id_token.signing_alg().map_err(|_| Refusal::Other)?;
+        let key = id_token
+            .signing_key(&verifier)
+            .map_err(|_| Refusal::Signature)?;
+        let actual = AccessTokenHash::from_token(access_token, algorithm, key)
+            .map_err(|_| Refusal::Other)?;
+        if actual != *expected {
+            return Err(Refusal::Other);
+        }
+    }
+
+    Ok(VerifiedIdentity {
+        issuer: claims.issuer().as_str().to_owned(),
+        subject: claims.subject().as_str().to_owned(),
+        email: claims.email().map(|email| email.as_str().to_owned()),
+        email_verified: claims.email_verified().unwrap_or(false),
+    })
 }
 
 #[cfg(test)]
@@ -369,6 +438,68 @@ mod tests {
         let error = refused_with(|token| token.signed_with_unknown_key = true).await;
 
         assert_eq!(error, IdentityError::InvalidToken);
+    }
+
+    #[tokio::test]
+    async fn a_key_rotation_under_the_same_key_id_is_followed_with_one_refetch() {
+        let (mock, provider) = provider().await;
+        provider.finish(CODE, VERIFIER, NONCE).await.unwrap();
+        assert_eq!(mock.discoveries(), 1);
+
+        mock.rotate_keys();
+        let identity = provider.finish(CODE, VERIFIER, NONCE).await.unwrap();
+
+        assert_eq!(identity.subject, "subject-1");
+        assert_eq!(mock.discoveries(), 2);
+        // The refreshed key set is cached: the next sign-in needs no discovery.
+        provider.finish(CODE, VERIFIER, NONCE).await.unwrap();
+        assert_eq!(mock.discoveries(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_key_rotation_to_a_new_key_id_is_followed_with_one_refetch() {
+        let (mock, provider) = provider().await;
+        provider.finish(CODE, VERIFIER, NONCE).await.unwrap();
+
+        mock.rotate_keys_with_a_new_id();
+        provider.finish(CODE, VERIFIER, NONCE).await.unwrap();
+
+        assert_eq!(mock.discoveries(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_forged_key_cannot_force_more_than_one_refetch_a_minute() {
+        let (mock, provider) = provider().await;
+        let mut token = Token::valid(NONCE);
+        token.signed_with_unknown_key = true;
+        mock.set_token(token);
+
+        let first = provider.finish(CODE, VERIFIER, NONCE).await.unwrap_err();
+        let second = provider.finish(CODE, VERIFIER, NONCE).await.unwrap_err();
+
+        assert_eq!(first, IdentityError::InvalidToken);
+        assert_eq!(second, IdentityError::InvalidToken);
+        // The first discovery, and one forced refresh for both attempts.
+        assert_eq!(mock.discoveries(), 2);
+    }
+
+    #[tokio::test]
+    async fn other_claim_failures_trigger_no_refetch() {
+        for change in [
+            (|token: &mut Token| token.audience = "someone-else".into()) as fn(&mut Token),
+            |token| token.expires_in_seconds = -60,
+            |token| token.nonce = "another-nonce".into(),
+        ] {
+            let (mock, provider) = provider().await;
+            let mut token = Token::valid(NONCE);
+            change(&mut token);
+            mock.set_token(token);
+
+            let error = provider.finish(CODE, VERIFIER, NONCE).await.unwrap_err();
+
+            assert_eq!(error, IdentityError::InvalidToken);
+            assert_eq!(mock.discoveries(), 1);
+        }
     }
 
     #[tokio::test]
