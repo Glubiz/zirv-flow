@@ -669,6 +669,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_refusal_that_moves_the_offset_resets_the_count_of_refusals_that_moved_nothing() {
+        let log = Log::new(0, 10);
+        {
+            let mut script = log.script.lock().unwrap();
+            for _ in 0..5 {
+                script.push_back(Err(FetchError::OffsetOutOfRange));
+            }
+        }
+        let mut partition = Partition::open(0, log, Some(5)).await.unwrap();
+
+        assert!(partition.pass().await.unwrap().is_empty());
+        assert!(partition.pass().await.unwrap().is_empty());
+        // Retention moves the start of the log past the offset, so this refusal moves the read.
+        partition.fetcher.earliest = 7;
+        assert!(partition.pass().await.unwrap().is_empty());
+        assert_eq!(partition.next, 7);
+        // Two more refusals stay under the limit because the move started the count over.
+        assert!(partition.pass().await.unwrap().is_empty());
+        assert!(partition.pass().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn a_fetch_failure_is_reported_as_its_code() {
         let log = Log::new(0, 9);
         log.script

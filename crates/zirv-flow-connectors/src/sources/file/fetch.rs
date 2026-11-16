@@ -71,8 +71,15 @@ pub(super) async fn fetch_window(
             });
         }
         // The window before this one was the last: the server never gave the size, so only the
-        // request for the bytes after it said so. A read short of that end is a file that shrank.
-        Err(RuntimeError::Status(416)) if expect.known_end.is_some_and(|end| offset >= end) => {
+        // request for the bytes after it said so. That holds only under the `If-Range` sent with
+        // the first window's validator, which a changed file answers with 200, not 416. Without
+        // a validator, a file cut at this offset answers the same, so it stays a changed file, as
+        // does a read short of that end or a 416 for a file whose size the server gave.
+        Err(RuntimeError::Status(416))
+            if expect.size.is_none()
+                && expect.validator.is_some()
+                && expect.known_end.is_some_and(|end| offset >= end) =>
+        {
             return Ok(Window {
                 bytes: Bytes::new(),
                 total: Some(offset),

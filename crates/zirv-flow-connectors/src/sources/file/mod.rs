@@ -1365,6 +1365,55 @@ mod tests {
         assert_eq!(error, SourceError::Other("file_changed".into()));
     }
 
+    /// Four records of 25 bytes read in windows of 50, the file cut to its first window after that
+    /// window was read: the next request is a 416 at the window's end.
+    async fn cut_at_the_first_window_boundary(
+        unknown_total: bool,
+        etag: Option<&'static str>,
+    ) -> SourceError {
+        let record = format!(
+            "{{\"n\":\"{}\"}}
+",
+            "a".repeat(16)
+        );
+        assert_eq!(record.len(), 25);
+        let mut fixture = Fixture::new(record.repeat(4));
+        fixture.unknown_total = unknown_total;
+        fixture.etag = etag;
+        fixture.change_after = 1;
+        fixture.changed_body = Some(record.repeat(2).into_bytes());
+        let (base, _) = serve(fixture).await;
+
+        let (_, error) = collect_error(
+            read_all(
+                &context(),
+                &config(&base, "ndjson"),
+                &Credential::new(),
+                &stream(&[]),
+                None,
+                50,
+                1,
+            )
+            .await,
+        )
+        .await;
+        error
+    }
+
+    #[tokio::test]
+    async fn a_known_total_with_a_file_cut_to_a_window_boundary_is_file_changed() {
+        // The validator did not change (a Last-Modified within the same second), so only the
+        // size the server gave says the read is short.
+        let error = cut_at_the_first_window_boundary(false, Some("\"v1\"")).await;
+        assert_eq!(error, SourceError::Other("file_changed".into()));
+    }
+
+    #[tokio::test]
+    async fn an_unknown_total_without_a_validator_cut_to_a_window_boundary_is_file_changed() {
+        let error = cut_at_the_first_window_boundary(true, None).await;
+        assert_eq!(error, SourceError::Other("file_changed".into()));
+    }
+
     #[tokio::test]
     async fn a_206_whose_body_is_shorter_than_its_content_range_fails_instead_of_ending_the_file() {
         let body: String = (0..30).map(|n| format!("{n}\n")).collect();
