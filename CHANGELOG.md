@@ -15,3 +15,11 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v1.0.10 (2026-11-16)
+
+### Fixes
+
+- read the integer lookback window from the type minimum (#692, #695)
+- keep keyless file keys stable and clamp the integer lookback (#690, #692, #695)
+- injective keyless file keys, ISO dates under any DateStyle, an opt-in cursor lookback, a final code for null keys, row-value keyset pages, redirects to unresolvable hosts (#690-#695)
+
