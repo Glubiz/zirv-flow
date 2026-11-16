@@ -509,7 +509,9 @@ pub(super) async fn open_credential(
     };
     match once_per {
         Some(window) => {
-            zirv_flow_store::append_audit_once_in(pool, &entry, window).await?;
+            if !zirv_flow_store::audit_recent(pool, &entry, window).await? {
+                zirv_flow_store::append_audit_once_in(pool, &entry, window).await?;
+            }
         }
         None => zirv_flow_store::append_audit(pool, &entry).await?,
     }

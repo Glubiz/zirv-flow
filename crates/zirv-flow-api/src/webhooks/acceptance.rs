@@ -646,6 +646,45 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_request_with_no_signature_header_is_refused_before_its_body_is_read(pool: PgPool) {
+        let limits = IngestLimits {
+            max_webhook_bytes: 2048,
+            ..IngestLimits::default()
+        };
+        let fx = fixture_with(&pool, Some(keyring()), limits).await;
+        let hook = fx.hook("orders").await;
+
+        // An oversized body with no signature header: a 401 at once, not a 413.
+        let big = vec![b'x'; 4096];
+        let headerless = post_hook(&fx.router, &hook.id, &[], big).await;
+        assert_eq!(headerless.status, StatusCode::UNAUTHORIZED);
+        // Streamed with no declared length and no signature header: a 401 at once, not a 413
+        // after the body was buffered up to the cap.
+        let chunks = futures_util::stream::iter(vec![
+            Ok::<_, std::io::Error>(Bytes::from(vec![b'x'; 1500])),
+            Ok(Bytes::from(vec![b'x'; 1500])),
+        ]);
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/hooks/{}", hook.id))
+            .body(Body::from_stream(chunks))
+            .unwrap();
+        let oversized = reply(fx.router.clone().oneshot(request).await.unwrap()).await;
+        assert_eq!(oversized.status, StatusCode::UNAUTHORIZED);
+
+        let chunks =
+            futures_util::stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from_static(b"{}"))]);
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/hooks/{}", hook.id))
+            .body(Body::from_stream(chunks))
+            .unwrap();
+        let chunked = reply(fx.router.clone().oneshot(request).await.unwrap()).await;
+        assert_eq!(chunked.status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn limits_unknown_hooks_and_bad_payloads_answer_their_codes_and_write_nothing(
         pool: PgPool,
     ) {
@@ -656,9 +695,11 @@ mod tests {
         let fx = fixture_with(&pool, Some(keyring()), limits).await;
         let hook = fx.hook("orders").await;
 
-        // Declared too large, before any signature work: even an unsigned body is a 413.
+        // Too large, before any signature work: a request that carries a signature header, whatever
+        // its value, is a 413 (one without is a 401 before its body is read).
         let big = vec![b'x'; 4096];
-        let declared = post_hook(&fx.router, &hook.id, &[], big.clone()).await;
+        let marked = [("x-zirv-signature".to_string(), "sha256=00".to_string())];
+        let declared = post_hook(&fx.router, &hook.id, &marked, big.clone()).await;
         assert_eq!(declared.status, StatusCode::PAYLOAD_TOO_LARGE);
         // Streamed without a declared length.
         let chunks = futures_util::stream::iter(vec![
@@ -668,6 +709,7 @@ mod tests {
         let request = Request::builder()
             .method("POST")
             .uri(format!("/hooks/{}", hook.id))
+            .header("x-zirv-signature", "sha256=00")
             .body(Body::from_stream(chunks))
             .unwrap();
         let streamed = reply(fx.router.clone().oneshot(request).await.unwrap()).await;
@@ -801,6 +843,40 @@ mod tests {
         assert!(third.headers.contains_key(header::RETRY_AFTER));
         assert_eq!(other.status, StatusCode::ACCEPTED);
         assert_eq!(fx.count("SELECT count(*) FROM ingest_inbox").await, 3);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn unsigned_and_wrongly_signed_requests_never_spend_the_hooks_rate_bucket(pool: PgPool) {
+        let limits = IngestLimits {
+            rate_per_hook: 1,
+            burst_per_hook: 2,
+            ..IngestLimits::default()
+        };
+        let fx = fixture_with(&pool, Some(keyring()), limits).await;
+        let hook = fx.hook("orders").await;
+
+        let mut unsigned = Vec::new();
+        for n in 0..4 {
+            let reply = post_hook(&fx.router, &hook.id, &[], order(&n.to_string(), "a")).await;
+            unsigned.push(reply.status);
+        }
+        let body = order("9", "a");
+        let wrong = signed("not-the-secret", now(), &body);
+        for _ in 0..4 {
+            let reply = post_hook(&fx.router, &hook.id, &wrong, body.clone()).await;
+            unsigned.push(reply.status);
+        }
+        let genuine = deliver(&fx, &hook, order("1", "a")).await;
+
+        assert_eq!(unsigned, vec![StatusCode::UNAUTHORIZED; 8]);
+        assert_eq!(
+            genuine.status,
+            StatusCode::ACCEPTED,
+            "genuine signed delivery: {:?}",
+            genuine.body
+        );
+        assert_eq!(fx.count("SELECT count(*) FROM ingest_inbox").await, 1);
     }
 
     #[sqlx::test]

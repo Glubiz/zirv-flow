@@ -18,7 +18,7 @@ use uuid::Uuid;
 use zirv_flow_core::mapping::walk_path;
 use zirv_flow_core::no_nul::{CONTAINS_NUL, find_nul_in_members};
 use zirv_flow_core::readable::find_unreadable_in_members;
-use zirv_flow_core::signature::Scheme;
+use zirv_flow_core::signature::{Scheme, SignatureError};
 use zirv_flow_core::{SecretId, SecretPurpose};
 use zirv_flow_store::HookReceive;
 
@@ -153,13 +153,15 @@ async fn accept(state: &AppState, id: &str, request: Request) -> Result<(), Refu
         .map_err(|_| unavailable())?
         .filter(|hook| hook.receiving)
         .ok_or_else(not_found)?;
-    // Charged only now, for a hook that exists: an id that resolves to nothing never gets a
-    // bucket, so the limiter holds at most one entry per stored hook.
-    state
-        .ingest
-        .charge_hook(hook.id)
-        .map_err(|error| Refusal::new(error, "rate_limited"))?;
 
+    // The URL id only locates the hook, so a request with no signature header is refused at once,
+    // before its body is read, a keyring open or a secret read, and it spends nothing.
+    if !request
+        .headers()
+        .contains_key(hook.signature_header.as_str())
+    {
+        return Err(invalid_signature(SignatureError::MissingSignature));
+    }
     let headers = request.headers().clone();
     let body = read_body(request, max)
         .await
@@ -175,6 +177,12 @@ async fn accept(state: &AppState, id: &str, request: Request) -> Result<(), Refu
         )
         .map_err(invalid_signature)?
     };
+    // Charged only for a request that verified, so a holder of the hook URL cannot drain the
+    // bucket of genuine deliveries; an id that resolves to nothing never gets a bucket either.
+    state
+        .ingest
+        .charge_hook(hook.id)
+        .map_err(|error| Refusal::new(error, "rate_limited"))?;
 
     let invalid_payload = || {
         Refusal::new(

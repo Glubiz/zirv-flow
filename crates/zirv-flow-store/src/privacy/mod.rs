@@ -40,5 +40,5 @@ pub use ledger_files::{
 };
 
 pub(crate) use handled_markers::{
-    delete_and_mark, delete_and_mark_with, event_columns, mark_partition,
+    delete_and_mark, delete_and_mark_selecting, event_columns, mark_partition,
 };

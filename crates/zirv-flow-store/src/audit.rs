@@ -129,6 +129,35 @@ pub async fn append_audit<'e>(
     Ok(())
 }
 
+/// Whether a row with the same workspace, action, object and summary as `entry` was written in the
+/// last `window`: the lock-free probe of [`append_audit_once_in`]. A caller that finds one has
+/// nothing to write and skips that function's transaction and advisory lock; a caller that finds
+/// none still goes through it, whose own check keeps the result exact.
+///
+/// The window is measured from the clock, not from `now()`: a caller may probe on a transaction
+/// that began long ago, and `now()` would count a row written after that start as recent for as
+/// long as the transaction lives.
+pub async fn audit_recent<'e>(
+    executor: impl PgExecutor<'e>,
+    entry: &NewAuditEntry,
+    window: std::time::Duration,
+) -> Result<bool, StoreError> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM audit_log 
+             WHERE workspace_id IS NOT DISTINCT FROM $1::uuid AND action = $2 
+               AND object_id IS NOT DISTINCT FROM $3::uuid AND summary = $4::jsonb 
+               AND occurred_at > clock_timestamp() - make_interval(secs => $5))",
+    )
+    .bind(entry.workspace_id.map(|id| id.as_uuid()))
+    .bind(entry.action)
+    .bind(entry.object_id)
+    .bind(&entry.summary)
+    .bind(window.as_secs_f64())
+    .fetch_one(executor)
+    .await
+    .map_err(StoreError::query)
+}
+
 /// Appends `entry` unless a row with the same workspace, action, object and summary was written in
 /// the last `window`: for a use that repeats per message or slice, where one row per window says it
 /// as well. Whether a row was written.
@@ -475,6 +504,88 @@ mod tests {
                 .unwrap_err()
                 .is_audit_summary()
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_recent_probe_sees_the_window_and_never_waits_on_the_advisory_lock(pool: PgPool) {
+        let object = Uuid::new_v4();
+        let entry = NewAuditEntry {
+            object_kind: Some("credential"),
+            object_id: Some(object),
+            summary: json!({"use": "send"}),
+            ..entry(None, "credential.used")
+        };
+        let hour = std::time::Duration::from_secs(3600);
+        assert!(!audit_recent(&pool, &entry, hour).await.unwrap());
+        assert!(append_audit_once_in(&pool, &entry, hour).await.unwrap());
+
+        // A second transaction holds the key's advisory lock, as a writer in its short transaction.
+        let key = format!(
+            "audit_once|{}|{}|{}|{}",
+            uuid::Uuid::nil(),
+            entry.action,
+            object,
+            entry.summary
+        );
+        let mut holder = pool.begin().await.unwrap();
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(&key)
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+        let probe = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            audit_recent(&pool, &entry, hour),
+        )
+        .await
+        .expect("the probe took the advisory lock");
+        assert!(probe.unwrap());
+        // The locked writer, by contrast, waits behind the holder even with nothing to write.
+        let blocked = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            append_audit_once_in(&pool, &entry, hour),
+        )
+        .await;
+        assert!(blocked.is_err(), "the writer should wait on the lock");
+        holder.rollback().await.unwrap();
+
+        assert!(
+            !audit_recent(&pool, &entry, std::time::Duration::ZERO)
+                .await
+                .unwrap()
+        );
+        let other = NewAuditEntry {
+            summary: json!({"use": "sync"}),
+            ..entry
+        };
+        assert!(!audit_recent(&pool, &other, hour).await.unwrap());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_recent_probe_measures_its_window_from_the_clock_not_the_transaction_start(
+        pool: PgPool,
+    ) {
+        let entry = NewAuditEntry {
+            object_kind: Some("credential"),
+            object_id: Some(Uuid::new_v4()),
+            summary: json!({"use": "send"}),
+            ..entry(None, "credential.used")
+        };
+        let window = std::time::Duration::from_secs(2);
+        // The caller's own, older transaction: `now()` is frozen at its start.
+        let mut old = pool.begin().await.unwrap();
+        sqlx::query("SELECT now()")
+            .execute(&mut *old)
+            .await
+            .unwrap();
+        assert!(append_audit_once_in(&pool, &entry, window).await.unwrap());
+        tokio::time::sleep(std::time::Duration::from_millis(2300)).await;
+
+        // The row is now older than the window, so the writer would write again.
+        assert!(!audit_recent(&mut *old, &entry, window).await.unwrap());
+        old.rollback().await.unwrap();
     }
 
     #[sqlx::test]

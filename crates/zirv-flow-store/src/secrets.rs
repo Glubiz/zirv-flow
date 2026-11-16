@@ -39,7 +39,8 @@ impl From<StoreError> for SecretWriteError {
 }
 
 /// Locks the HMAC root row `FOR SHARE` for the rest of the transaction and checks that its
-/// wrapping key is one of `allowed_key_ids`. A rotation holds the row `FOR UPDATE`, so a write
+/// wrapping key is one of `allowed_key_ids`. Every writer takes this lock before any secret row,
+/// the locking reader [`lock_for_refresh`] included. A rotation holds the row `FOR UPDATE`, so a write
 /// waits for it and then sees the new key id, and a rotation waits for writes in flight and
 /// then re-wraps what they stored.
 async fn check_writer(
@@ -222,12 +223,17 @@ pub async fn get<'e>(
 }
 
 /// As [`get`], and locks the row until the transaction ends, so concurrent writers of one secret run
-/// one after the other.
-pub async fn get_for_update(
+/// one after the other. It takes the HMAC root `FOR SHARE` first, as every writer does, so a
+/// rotation (root, then rows) and a locked read that is followed by [`replace`] never wait on each
+/// other in a cycle; the locks are held to the end of the transaction. Fails as [`replace`] does
+/// when the root is missing or wrapped by a key outside `allowed_key_ids`.
+pub async fn lock_for_refresh(
     connection: &mut PgConnection,
+    allowed_key_ids: &[String],
     workspace: WorkspaceId,
     id: SecretId,
-) -> Result<Option<StoredSecret>, StoreError> {
+) -> Result<Option<StoredSecret>, SecretWriteError> {
+    check_writer(connection, allowed_key_ids).await?;
     let row: Option<SecretRow> = sqlx::query_as(
         "SELECT purpose, key_id, wrapped_key, nonce, ciphertext \n         FROM encrypted_secrets WHERE workspace_id = $1 AND id = $2 FOR UPDATE",
     )
@@ -237,13 +243,14 @@ pub async fn get_for_update(
     .await
     .map_err(StoreError::query)?;
     row.map(|row| {
-        Ok(StoredSecret {
+        Ok::<_, StoreError>(StoredSecret {
             purpose: SecretPurpose::parse(&row.purpose)
                 .ok_or_else(|| corrupt("unknown purpose"))?,
             sealed: row.sealed.into_sealed()?,
         })
     })
     .transpose()
+    .map_err(SecretWriteError::Store)
 }
 
 /// Why a stored secret could not be opened.
@@ -849,6 +856,116 @@ mod tests {
             b"secret"
         );
         assert_eq!(hmac_root(&pool).await.unwrap().unwrap().key_id, new_id);
+    }
+
+    /// Polls `pg_locks` until some backend waits for a lock.
+    async fn wait_for_a_lock_waiter(pool: &PgPool) {
+        for _ in 0..200 {
+            let waiting: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM pg_locks WHERE NOT granted")
+                    .fetch_one(pool)
+                    .await
+                    .unwrap();
+            if waiting > 0 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("no backend waited for a lock");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_rotation_and_a_locked_refresh_write_never_deadlock(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let old = Keyring::new(MasterKey::generate(), None).unwrap();
+        let id = SecretId::new();
+        let sealed = sealed_for(&old, ws, id, b"secret");
+        insert_unchecked(&pool, ws, SecretPurpose::ConnectorCredential, id, &sealed)
+            .await
+            .unwrap();
+        let root = seal(&old, b"root", &deployment_key_aad(HMAC_ROOT));
+        insert_hmac_root_if_absent(&pool, &root).await.unwrap();
+        let rotated = Keyring::new(
+            MasterKey::generate(),
+            Some(MasterKey::parse(&old.current().to_base64()).unwrap()),
+        )
+        .unwrap();
+        let new_id = rotated.current().key_id();
+        let held = vec![root.key_id.clone()];
+
+        // The refresher locks the secret the way `refresh_serialized` does, then a rotation starts.
+        let mut refresher = begin(&pool).await.unwrap();
+        lock_for_refresh(&mut refresher, &held, ws, id)
+            .await
+            .unwrap()
+            .unwrap();
+        let rotation = {
+            let pool = pool.clone();
+            let new_id = new_id.clone();
+            tokio::spawn(async move {
+                let mut tx = begin(&pool).await.unwrap();
+                let report = rotate(&mut tx, &new_id, |sealed| rewrap(&rotated, sealed))
+                    .await
+                    .map_err(|error| format!("{error:?}"))?;
+                commit(tx).await.unwrap();
+                Ok::<_, String>(report)
+            })
+        };
+        wait_for_a_lock_waiter(&pool).await;
+
+        // The provider call is over; the refresher stores what it got.
+        let written = replace(&mut refresher, &held, ws, id, &sealed).await;
+        commit(refresher).await.unwrap();
+
+        assert!(matches!(written, Ok(true)), "refresher write: {written:?}");
+        let report = rotation.await.unwrap();
+        assert!(report.is_ok(), "rotation: {report:?}");
+        assert_eq!(
+            get(&pool, ws, id).await.unwrap().unwrap().sealed.key_id,
+            new_id,
+            "the rotation re-wrapped what the refresher stored"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_refresh_lock_is_refused_when_the_root_is_wrapped_by_another_key(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let keys = keyring();
+        let id = SecretId::new();
+        let sealed = sealed_for(&keys, ws, id, b"secret");
+        insert_unchecked(&pool, ws, SecretPurpose::OAuthToken, id, &sealed)
+            .await
+            .unwrap();
+        let stale = vec!["not-the-roots-key".to_string()];
+        let mut tx = begin(&pool).await.unwrap();
+        let no_root = lock_for_refresh(&mut tx, &stale, ws, id).await;
+        assert!(
+            matches!(no_root, Err(SecretWriteError::NoRoot)),
+            "{no_root:?}"
+        );
+        commit(tx).await.unwrap();
+
+        let root = seal(&keys, b"root", &deployment_key_aad(HMAC_ROOT));
+        insert_hmac_root_if_absent(&pool, &root).await.unwrap();
+        let mut tx = begin(&pool).await.unwrap();
+        let outdated = lock_for_refresh(&mut tx, &stale, ws, id).await;
+        assert!(
+            matches!(&outdated, Err(SecretWriteError::Outdated { root_key_id }) if *root_key_id == root.key_id),
+            "{outdated:?}"
+        );
+        commit(tx).await.unwrap();
+
+        let held = vec![root.key_id.clone()];
+        let mut tx = begin(&pool).await.unwrap();
+        let found = lock_for_refresh(&mut tx, &held, ws, id).await.unwrap();
+        assert!(found.is_some());
+        let missing = lock_for_refresh(&mut tx, &held, ws, SecretId::new())
+            .await
+            .unwrap();
+        assert!(missing.is_none());
+        commit(tx).await.unwrap();
     }
 
     #[sqlx::test]

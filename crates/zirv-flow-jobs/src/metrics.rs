@@ -391,7 +391,8 @@ fn count_gauge(workspace: Uuid, state: Freshness, count: f64) {
 
 /// The destination gauges (architecture 10.1, 15), labelled `workspace` and `destination` ids
 /// only, never a name, a host or an address:
-/// - `zirv_flow_destination_queue_depth{workspace,destination}`, items waiting for delivery;
+/// - `zirv_flow_destination_queue_depth{workspace,destination}`, items waiting for delivery; it
+///   saturates at `QUEUE_DEPTH_CAP` (50,000) in the store, so a deeper queue reads as the cap;
 /// - `zirv_flow_destination_queue_oldest_seconds{workspace,destination}`, the age of the oldest.
 ///
 /// They are set to 0 for a destination that dropped out of the report (archived, deleted) or when
