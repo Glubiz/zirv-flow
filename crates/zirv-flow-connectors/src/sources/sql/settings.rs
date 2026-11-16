@@ -15,6 +15,9 @@ const MAX_HOST: usize = 253;
 const MAX_NAME: usize = 128;
 const DEFAULT_STATEMENT_TIMEOUT_SECONDS: u64 = 60;
 const MAX_STATEMENT_TIMEOUT_SECONDS: u64 = 600;
+/// The largest `cursor_lookback`: a number of seconds (a year) for a date or time cursor, the
+/// cursor's own unit for a numeric one.
+const MAX_CURSOR_LOOKBACK: u64 = 31_536_000;
 
 /// The prefix of a query stream's name.
 pub(crate) const QUERY_PREFIX: &str = "query:";
@@ -65,6 +68,16 @@ pub(crate) mod fields {
         "statement_timeout_seconds",
         "Statement timeout (seconds)",
         "The longest one query may run, 1 to 600. Defaults to 60.",
+        FieldKind::Number,
+    );
+    pub(crate) const CURSOR_LOOKBACK: FieldSpec = optional(
+        "cursor_lookback",
+        "Cursor lookback",
+        "How far behind its checkpoint an incremental stream re-reads at the start of each run, \
+         to pick up rows that were committed late with an older cursor: seconds for a date or \
+         time cursor, the cursor's own unit for a number. 0 (default) reads strictly after the \
+         checkpoint. A stream with a text or uuid cursor ignores it and reads strictly after its \
+         checkpoint.",
         FieldKind::Number,
     );
     pub(crate) const QUERIES: FieldSpec = optional(
@@ -132,6 +145,8 @@ pub(crate) struct Settings {
     pub(crate) tls: TlsMode,
     pub(crate) ca_certificate: Option<String>,
     pub(crate) statement_timeout: Duration,
+    /// Re-read this far behind the checkpoint's cursor on the first page of a run; 0 is off.
+    pub(crate) cursor_lookback: u64,
     pub(crate) queries: Vec<Query>,
 }
 
@@ -212,6 +227,18 @@ impl Settings {
                     )
                 })?,
         };
+        let cursor_lookback = match config.get("cursor_lookback") {
+            None | Some(Value::Null) => 0,
+            Some(value) => value
+                .as_u64()
+                .filter(|lookback| *lookback <= MAX_CURSOR_LOOKBACK)
+                .ok_or_else(|| {
+                    config_error(
+                        "cursor_lookback",
+                        "must be a whole number from 0 to 31536000",
+                    )
+                })?,
+        };
         let queries = match config.get("queries") {
             None | Some(Value::Null) => Vec::new(),
             Some(value) => {
@@ -226,6 +253,7 @@ impl Settings {
             tls,
             ca_certificate,
             statement_timeout: Duration::from_secs(seconds),
+            cursor_lookback,
             queries,
         })
     }
@@ -446,6 +474,23 @@ mod tests {
         }
         let settings = Settings::parse(&with("port", json!(65535)), Flavor::Postgres).unwrap();
         assert_eq!(settings.port, 65535);
+    }
+
+    #[test]
+    fn the_cursor_lookback_is_off_by_default_and_a_whole_number_up_to_a_year() {
+        let parse = |config| Settings::parse(&config, Flavor::Postgres);
+
+        assert_eq!(parse(base()).unwrap().cursor_lookback, 0);
+        assert_eq!(
+            parse(with("cursor_lookback", json!(300)))
+                .unwrap()
+                .cursor_lookback,
+            300
+        );
+        for bad in [json!(-1), json!(1.5), json!("5"), json!(31_536_001)] {
+            let error = field_of(parse(with("cursor_lookback", bad)));
+            assert!(error.starts_with("cursor_lookback "), "{error}");
+        }
     }
 
     #[test]

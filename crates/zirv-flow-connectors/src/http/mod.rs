@@ -7,7 +7,7 @@ mod resolver;
 
 pub use body::DEFAULT_MAX_BODY_BYTES;
 pub(crate) use client::parse_url;
-pub use client::{GuardedClient, GuardedResponse, HttpLimits};
+pub use client::{GuardedClient, GuardedResponse, HttpLimits, OutboundClients};
 pub use error::HttpError;
 pub use resolver::Lookup;
 

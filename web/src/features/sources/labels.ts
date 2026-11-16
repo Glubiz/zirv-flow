@@ -157,6 +157,8 @@ export function runErrorText(code: string, threshold: number): string {
     json_not_an_array: "The file is JSON, but not a list of records. Export it as a list, then run it again.",
     json_trailing_data: "The JSON list is followed by other text, so the file could not be read.",
     checkpoint_invalid: "The saved position does not fit this file. Run it as a full refresh.",
+    null_primary_key:
+      "A row has no value in the primary key column, so the run stopped. Choose a column that is never empty as the primary key, or leave such rows out of the query.",
     list_missing: "A list the mapping adds people to has been deleted. Map the stream again, then run it again.",
     stream_not_keyed: "The mapping has an event, but the stream has no primary key. Set one up, then run it again.",
     event_key_unavailable: "The server has no key to protect event properties with, so events cannot be kept.",

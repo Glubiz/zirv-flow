@@ -1,9 +1,10 @@
 //! The guarded client: the egress policy applied to every request and every redirect hop, and
 //! redirects followed only within the origin of the request.
 
+use hashbrown::HashMap;
 use std::fmt;
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -18,7 +19,7 @@ use super::error::{Denied, HttpError, TooManyRedirects};
 use super::resolver::{GuardedResolver, Lookup, SystemLookup, check_all, invalid_host};
 
 /// How long and how large an outbound exchange may be.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct HttpLimits {
     /// The most redirect hops followed; each is checked against the policy again. Zero follows
     /// none: the 3xx response itself is returned to the caller, not an error.
@@ -38,6 +39,53 @@ impl Default for HttpLimits {
             timeout: Duration::from_secs(30),
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
         }
+    }
+}
+
+/// The guarded clients of one egress policy, one per set of limits, so a worker's sends reuse the
+/// connections of the client before them instead of opening one per message. The policy is held
+/// here, never taken from the caller, so a client can only ever be built from the policy that
+/// the code reading [`OutboundClients::policy`] sees. Every connection still passes the
+/// [`GuardedResolver`], so sharing a client between destinations weakens no check.
+#[derive(Default)]
+pub struct OutboundClients {
+    policy: Arc<EgressPolicy>,
+    clients: Mutex<HashMap<HttpLimits, GuardedClient>>,
+}
+
+impl fmt::Debug for OutboundClients {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OutboundClients")
+            .field("policy", &self.policy)
+            .finish_non_exhaustive()
+    }
+}
+
+impl OutboundClients {
+    pub fn new(policy: Arc<EgressPolicy>) -> Self {
+        Self {
+            policy,
+            clients: Mutex::default(),
+        }
+    }
+
+    /// The policy every client of this set follows.
+    pub fn policy(&self) -> &Arc<EgressPolicy> {
+        &self.policy
+    }
+
+    /// The client for `limits`, built on first use. A clone shares the connection pool.
+    pub fn get(&self, limits: HttpLimits) -> Result<GuardedClient, HttpError> {
+        let mut clients = self
+            .clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(client) = clients.get(&limits) {
+            return Ok(client.clone());
+        }
+        let client = GuardedClient::new(Arc::clone(&self.policy), limits)?;
+        clients.insert(limits, client.clone());
+        Ok(client)
     }
 }
 
@@ -122,16 +170,14 @@ impl GuardedClient {
                     self.lookup.lookup(host),
                 )
                 .await
-                .map_err(|_| HttpError::Timeout)?
-                .map_err(|_| {
-                    HttpError::Transport("the redirect target could not be resolved".to_owned())
-                })?;
-                if ips.is_empty() {
-                    return Err(HttpError::Transport(
-                        "the redirect target could not be resolved".to_owned(),
-                    ));
+                .map_err(|_| HttpError::Timeout)?;
+                // A name that does not resolve is no egress risk: nothing is requested from it,
+                // so the destination's 3xx stands as its answer.
+                if let Ok(ips) = ips
+                    && !ips.is_empty()
+                {
+                    check_all(&self.policy, host, &ips)?;
                 }
-                check_all(&self.policy, host, &ips)?;
             }
         }
         Ok(GuardedResponse {
@@ -293,10 +339,79 @@ mod tests {
         ])))
     }
 
+    /// A raw TCP keep-alive server that counts the connections it accepts and answers every
+    /// request with `200 ok`.
+    async fn counting_server() -> (String, Arc<AtomicUsize>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&accepted);
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                count.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut buffer = vec![0; 4096];
+                    while let Ok(read) = socket.read(&mut buffer).await {
+                        if read == 0 {
+                            break;
+                        }
+                        let reply = b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok";
+                        if socket.write_all(reply).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        (url, accepted)
+    }
+
     fn client(allow: &[&str], limits: HttpLimits) -> GuardedClient {
         let allow: Vec<String> = allow.iter().map(|entry| (*entry).to_owned()).collect();
         let policy = Arc::new(EgressPolicy::parse(&allow).unwrap());
         GuardedClient::with_lookup(policy, limits, names()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn clients_for_the_same_limits_share_their_connections() {
+        let (url, accepted) = counting_server().await;
+        let clients = OutboundClients::new(Arc::new(
+            EgressPolicy::parse(&["127.0.0.1/32".to_owned()]).unwrap(),
+        ));
+
+        for _ in 0..20 {
+            let client = clients.get(HttpLimits::default()).unwrap();
+            get_url(&client, &url).await.unwrap().body().await.unwrap();
+        }
+
+        assert_eq!(accepted.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn different_limits_get_separate_clients_and_the_policy_still_applies() {
+        let (url, accepted) = counting_server().await;
+        let clients = OutboundClients::new(Arc::new(
+            EgressPolicy::parse(&["127.0.0.1/32".to_owned()]).unwrap(),
+        ));
+        let other = HttpLimits {
+            max_redirects: 0,
+            ..HttpLimits::default()
+        };
+
+        for limits in [HttpLimits::default(), other, HttpLimits::default(), other] {
+            let client = clients.get(limits).unwrap();
+            assert_eq!(client.limits(), limits);
+            get_url(&client, &url).await.unwrap().body().await.unwrap();
+        }
+        assert_eq!(accepted.load(Ordering::SeqCst), 2);
+
+        let denied_set = OutboundClients::default();
+        let client = denied_set.get(HttpLimits::default()).unwrap();
+        assert_eq!(
+            get_url(&client, &url).await.err(),
+            Some(denied("127.0.0.1", AddressClass::Loopback))
+        );
     }
 
     async fn get_url(client: &GuardedClient, url: &str) -> Result<GuardedResponse, HttpError> {
@@ -702,6 +817,99 @@ mod tests {
 
         assert_eq!(response.status(), 307);
         assert_eq!(other_hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_redirect_to_an_unresolvable_host_is_returned_as_the_answer() {
+        let router = Router::new().route(
+            "/sso",
+            get(|| async { Redirect::temporary("https://login.internal-sso.test/x") }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let guarded = client(&["127.0.0.1/32"], HttpLimits::default());
+
+        let result = get_url(&guarded, &format!("http://127.0.0.1:{port}/sso")).await;
+
+        let response = result.expect("the 3xx answer is not a transport failure");
+        assert_eq!(response.status(), 307);
+    }
+
+    /// How [`Stub`] answers any name.
+    enum Answer {
+        Empty,
+        Never,
+    }
+
+    /// Answers any name as `answer` says and records the names it was asked for.
+    struct Stub {
+        answer: Answer,
+        asked: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl Lookup for Stub {
+        fn lookup<'a>(
+            &'a self,
+            host: &'a str,
+        ) -> Pin<Box<dyn Future<Output = io::Result<Vec<IpAddr>>> + Send + 'a>> {
+            self.asked.lock().unwrap().push(host.to_owned());
+            Box::pin(async move {
+                match self.answer {
+                    Answer::Empty => Ok(Vec::new()),
+                    Answer::Never => std::future::pending().await,
+                }
+            })
+        }
+    }
+
+    /// The URL of a server on the loopback whose `/hop` answers a 307 to `https://hop.test/x`.
+    async fn redirect_to_a_name() -> String {
+        let router = Router::new().route(
+            "/hop",
+            get(|| async { Redirect::temporary("https://hop.test/x") }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        format!("http://127.0.0.1:{port}/hop")
+    }
+
+    fn stubbed(answer: Answer, limits: HttpLimits) -> (GuardedClient, Arc<Stub>) {
+        let policy = Arc::new(EgressPolicy::parse(&["127.0.0.1/32".to_owned()]).unwrap());
+        let stub = Arc::new(Stub {
+            answer,
+            asked: std::sync::Mutex::new(Vec::new()),
+        });
+        let guarded = GuardedClient::with_lookup(policy, limits, stub.clone()).unwrap();
+        (guarded, stub)
+    }
+
+    #[tokio::test]
+    async fn a_redirect_to_a_name_that_resolves_to_nothing_is_returned_as_the_answer() {
+        let url = redirect_to_a_name().await;
+        let (guarded, stub) = stubbed(Answer::Empty, HttpLimits::default());
+
+        let response = get_url(&guarded, &url)
+            .await
+            .expect("an empty answer is no egress risk");
+
+        assert_eq!(response.status(), 307);
+        assert_eq!(*stub.asked.lock().unwrap(), ["hop.test"]);
+    }
+
+    #[tokio::test]
+    async fn a_lookup_of_a_redirect_target_that_never_completes_times_out() {
+        let url = redirect_to_a_name().await;
+        let limits = HttpLimits {
+            connect_timeout: Duration::from_millis(100),
+            ..HttpLimits::default()
+        };
+        let (guarded, _) = stubbed(Answer::Never, limits);
+
+        let result = get_url(&guarded, &url).await;
+
+        assert_eq!(result.unwrap_err(), HttpError::Timeout);
     }
 
     #[tokio::test]

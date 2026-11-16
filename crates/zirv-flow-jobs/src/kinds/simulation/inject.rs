@@ -388,10 +388,9 @@ impl World {
 impl World {
     /// A worker's configuration for the batch transactions: the run's clock, keys and egress.
     fn batch_config(&self) -> WorkerConfig {
-        let mut config = WorkerConfig::new(1);
+        let mut config = WorkerConfig::new(1).with_egress(self.egress.clone());
         config.clock = Clock::Manual(self.env.clock.clone());
         config.keyring = Some(self.keyring.clone());
-        config.egress = self.egress.clone();
         config
     }
 

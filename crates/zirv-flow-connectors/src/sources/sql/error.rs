@@ -11,7 +11,8 @@ pub(crate) const TIMEOUT: &str = "the database did not answer in time";
 pub(crate) const TLS: &str = "the database connection could not be secured";
 pub(crate) const READ_ONLY: &str = "the database refused a write";
 pub(crate) const QUERY: &str = "the database query failed";
-pub(crate) const NULL_KEY: &str = "a primary key value is null";
+/// A stable code, not a sentence: the sync run matches it to end the run without a retry.
+pub(crate) const NULL_KEY: &str = "null_primary_key";
 
 pub(crate) fn timeout() -> SourceError {
     SourceError::Other(TIMEOUT.to_owned())
@@ -190,6 +191,11 @@ mod tests {
                 assert!(!text.contains(forbidden), "{text}");
             }
         }
+    }
+
+    #[test]
+    fn a_null_key_is_the_code_the_sync_run_ends_on() {
+        assert_eq!(NULL_KEY, "null_primary_key");
     }
 
     #[test]

@@ -6,6 +6,7 @@
 //! read, in the text form the database printed. Because the key is unique and totally ordered,
 //! rows that share a cursor value across a page boundary are neither skipped nor read twice.
 
+use std::cmp::Ordering;
 use std::future::Future;
 
 use futures_util::stream::BoxStream;
@@ -127,11 +128,22 @@ pub(crate) fn key_types<K>(
         .collect()
 }
 
+/// How [`page_sql`] renders the comparison with the checkpoint.
+pub(crate) struct Compare<'a, T> {
+    /// One comparison of a key: `term(index, column, operator)`.
+    pub(crate) term: T,
+    /// The right-hand side of key `index`, for a flavor that compares a row constructor.
+    pub(crate) row: Option<&'a dyn Fn(usize) -> String>,
+}
+
 /// The page query over a select list and a `from` clause aliased `s`, without its `LIMIT` (see
 /// [`limited`]). `keys` are the key columns in comparison order (the cursor first, when `cursor`
 /// is set) and `quote` quotes an identifier.
-/// With `after`, the key is compared expanded, not as a row constructor: `term(index, column,
-/// operator)` renders one comparison of key `index` (`column` is the qualified, quoted name).
+/// With `after`, the key is compared expanded: `term(index, column, operator)` renders one
+/// comparison of key `index` (`column` is the qualified, quoted name). A flavor whose optimizer
+/// cannot turn the expanded `OR` into an index range (PostgreSQL) passes `row`, which renders the
+/// right-hand side of key `index`, and a key of two or more columns is compared as the row
+/// constructor `(a, b) > (rhs, rhs)` instead, which is the same order.
 pub(crate) fn page_sql<K>(
     select: &str,
     from: &str,
@@ -139,14 +151,23 @@ pub(crate) fn page_sql<K>(
     cursor: bool,
     after: bool,
     quote: fn(&str) -> String,
-    mut term: impl FnMut(usize, &str, &str) -> String,
+    compare: Compare<'_, impl FnMut(usize, &str, &str) -> String>,
 ) -> String {
+    let Compare { mut term, row } = compare;
     let column = |index: usize| format!("s.{}", quote(&keys[index].0));
     let mut conditions = Vec::new();
     if cursor {
         conditions.push(format!("{} IS NOT NULL", column(0)));
     }
-    if after {
+    if after && let (Some(rhs), true) = (row, keys.len() > 1) {
+        let columns: Vec<String> = (0..keys.len()).map(column).collect();
+        let values: Vec<String> = (0..keys.len()).map(rhs).collect();
+        conditions.push(format!(
+            "({}) > ({})",
+            columns.join(", "),
+            values.join(", ")
+        ));
+    } else if after {
         let alternatives: Vec<String> = (0..keys.len())
             .map(|i| {
                 let mut terms: Vec<String> = (0..i).map(|j| term(j, &column(j), "=")).collect();
@@ -169,6 +190,27 @@ pub(crate) fn page_sql<K>(
     format!("SELECT {select} FROM {from} AS s{filter} ORDER BY {order}")
 }
 
+/// The first page of an incremental run that re-reads a window (the stream's `cursor_lookback`):
+/// every row whose cursor is above the checkpoint's cursor moved back by the lookback, ordered as
+/// [`page_sql`] orders. The primary key takes no part in the bound, so a row that committed late
+/// with a cursor at or before the checkpoint is read. `bound(column)` renders the whole
+/// comparison of the cursor column (`column` is the qualified, quoted name).
+pub(crate) fn window_sql<K>(
+    select: &str,
+    from: &str,
+    keys: &[(String, K)],
+    quote: fn(&str) -> String,
+    bound: impl FnOnce(&str) -> String,
+) -> String {
+    let column = |index: usize| format!("s.{}", quote(&keys[index].0));
+    let order = (0..keys.len()).map(column).collect::<Vec<_>>().join(", ");
+    format!(
+        "SELECT {select} FROM {from} AS s WHERE {} IS NOT NULL AND {} ORDER BY {order}",
+        column(0),
+        bound(&column(0))
+    )
+}
+
 /// `sql` limited to a page of `rows` rows.
 pub(crate) fn limited(sql: &str, rows: usize) -> String {
     format!("{sql} LIMIT {rows}")
@@ -182,13 +224,75 @@ pub(crate) fn record_key(values: &[String]) -> String {
     }
 }
 
+/// Whether the key `key` is after `floor`, comparing each value as a decimal number when both are
+/// one and as text otherwise. Only the saved checkpoint depends on it: a wrong answer re-reads
+/// rows (they are keyed) and never skips one.
+fn is_past(key: &[String], floor: &[String]) -> bool {
+    key.iter()
+        .zip(floor)
+        .map(|(a, b)| order(a, b))
+        .find(|ordering| ordering.is_ne())
+        .is_some_and(Ordering::is_gt)
+}
+
+fn order(a: &str, b: &str) -> Ordering {
+    let (Some(a), Some(b)) = (Decimal::parse(a), Decimal::parse(b)) else {
+        return a.cmp(b);
+    };
+    if a.negative != b.negative {
+        return if a.negative {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        };
+    }
+    // Longer integer digits are larger, then digit by digit; a negative number reverses it.
+    let magnitude = (a.whole.len(), a.whole, a.fraction).cmp(&(b.whole.len(), b.whole, b.fraction));
+    if a.negative {
+        magnitude.reverse()
+    } else {
+        magnitude
+    }
+}
+
+/// A plain decimal such as `-12.50`, without leading zeros of the integer part or trailing zeros
+/// of the fraction; zero is never negative.
+struct Decimal<'a> {
+    negative: bool,
+    whole: &'a str,
+    fraction: &'a str,
+}
+
+impl<'a> Decimal<'a> {
+    fn parse(text: &'a str) -> Option<Self> {
+        let (negative, digits) = text
+            .strip_prefix('-')
+            .map_or((false, text), |rest| (true, rest));
+        let (whole, fraction) = digits.split_once('.').unwrap_or((digits, ""));
+        let plain = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
+        if whole.is_empty() || !plain(whole) || !plain(fraction) {
+            return None;
+        }
+        let whole = whole.trim_start_matches('0');
+        let fraction = fraction.trim_end_matches('0');
+        Some(Self {
+            negative: negative && !(whole.is_empty() && fraction.is_empty()),
+            whole,
+            fraction,
+        })
+    }
+}
+
 /// Fetches pages of a stream, ordered as [`KeySpec`] says.
 pub(crate) trait Pager: Send {
     /// Up to the page's rows (given to [`Paged::new`]) after the key `after` (from the start
-    /// when `None`), every column in the order the stream's columns were given to it.
+    /// when `None`), every column in the order the stream's columns were given to it. With
+    /// `window`, the page starts instead at the cursor of `after` moved back by the stream's
+    /// lookback ([`window_sql`]); it is asked only for the first page of a run.
     fn page(
         &mut self,
         after: Option<&[String]>,
+        window: bool,
     ) -> impl Future<Output = Result<Vec<Row>, SourceError>> + Send;
 }
 
@@ -201,6 +305,12 @@ pub(crate) struct Paged<P> {
     /// How many of the key columns are the primary key (the last ones).
     primary_key_len: usize,
     after: Option<Vec<String>>,
+    /// The checkpoint the run started from while its first page is read as a window: a batch
+    /// never saves a checkpoint behind it, so a run that stops early does not read the window
+    /// again.
+    floor: Option<Vec<String>>,
+    /// Whether the next page is the window page.
+    window: bool,
     /// The rows a page asks for: a shorter page is the last.
     rows: usize,
     done: bool,
@@ -208,13 +318,15 @@ pub(crate) struct Paged<P> {
 
 impl<P: Pager> Paged<P> {
     /// `columns` are the columns a page row carries, in order. Every key column must be one.
-    /// `rows` is the `LIMIT` of the pager's query ([`page_rows`]).
+    /// `rows` is the `LIMIT` of the pager's query ([`page_rows`]). With `lookback` and a
+    /// checkpoint, the first page is a window ([`Pager::page`]).
     pub(crate) fn new(
         pager: P,
         columns: Vec<String>,
         spec: &KeySpec,
         after: Option<Vec<String>>,
         rows: usize,
+        lookback: bool,
     ) -> Result<Self, SourceError> {
         let position = |name: &str, setting: &str| {
             columns
@@ -234,6 +346,8 @@ impl<P: Pager> Paged<P> {
             columns,
             key_positions,
             primary_key_len: spec.primary_key.len(),
+            window: lookback && after.is_some(),
+            floor: after.clone().filter(|_| lookback),
             after,
             rows,
             done: false,
@@ -247,7 +361,8 @@ impl<P: Pager> Paged<P> {
         if self.done {
             return Ok(None);
         }
-        let rows = self.pager.page(self.after.as_deref()).await?;
+        let rows = self.pager.page(self.after.as_deref(), self.window).await?;
+        self.window = false;
         if rows.len() < self.rows {
             self.done = true;
         }
@@ -273,7 +388,14 @@ impl<P: Pager> Paged<P> {
                 occurrence: None,
             });
         }
-        let checkpoint = checkpoint_of(&key);
+        let saved = match self.floor.take() {
+            Some(floor) if !is_past(&key, &floor) => {
+                self.floor = Some(floor.clone());
+                floor
+            }
+            _ => key.clone(),
+        };
+        let checkpoint = checkpoint_of(&saved);
         self.after = Some(key);
         Ok(Some(Batch {
             records,
@@ -448,11 +570,19 @@ mod tests {
         rows: Vec<(String, String)>,
         pages: usize,
         incremental: bool,
+        /// How far a window page reaches back from the checkpoint's cursor.
+        lookback: u64,
+        windows: usize,
     }
 
     impl Pager for Table {
-        async fn page(&mut self, after: Option<&[String]>) -> Result<Vec<Row>, SourceError> {
+        async fn page(
+            &mut self,
+            after: Option<&[String]>,
+            window: bool,
+        ) -> Result<Vec<Row>, SourceError> {
             self.pages += 1;
+            self.windows += usize::from(window);
             let mut rows = self.rows.clone();
             if self.incremental {
                 rows.sort_by(|a, b| (&a.0, number(&a.1)).cmp(&(&b.0, number(&b.1))));
@@ -460,6 +590,9 @@ mod tests {
                 rows.sort_by_key(|row| number(&row.1));
             }
             let page = rows.into_iter().filter(|(updated, id)| match after {
+                Some([cursor, _]) if window => {
+                    number(updated) > number(cursor).saturating_sub(self.lookback)
+                }
                 None => true,
                 Some([cursor, key]) => (updated, number(id)) > (cursor, number(key)),
                 Some([key]) => number(id) > number(key),
@@ -488,6 +621,8 @@ mod tests {
             rows,
             pages: 0,
             incremental,
+            lookback: 0,
+            windows: 0,
         }
     }
 
@@ -507,7 +642,7 @@ mod tests {
     #[tokio::test]
     async fn an_incremental_read_returns_every_row_once_across_a_shared_cursor_value() {
         let spec = spec(Some("updated_at"), &["id"]);
-        let paged = Paged::new(table(true), columns(), &spec, None, BATCH_ROWS).unwrap();
+        let paged = Paged::new(table(true), columns(), &spec, None, BATCH_ROWS, false).unwrap();
 
         let batches = drain(paged).await;
 
@@ -531,7 +666,9 @@ mod tests {
     #[tokio::test]
     async fn resuming_from_the_checkpoint_of_any_batch_returns_exactly_the_rest() {
         let spec = spec(Some("updated_at"), &["id"]);
-        let all = drain(Paged::new(table(true), columns(), &spec, None, BATCH_ROWS).unwrap()).await;
+        let all =
+            drain(Paged::new(table(true), columns(), &spec, None, BATCH_ROWS, false).unwrap())
+                .await;
         let all_keys: Vec<String> = all
             .iter()
             .flat_map(|b| &b.records)
@@ -543,7 +680,8 @@ mod tests {
             seen += batch.records.len();
             let after = parse_checkpoint(Some(&batch.checkpoint), &spec).unwrap();
             let rest =
-                drain(Paged::new(table(true), columns(), &spec, after, BATCH_ROWS).unwrap()).await;
+                drain(Paged::new(table(true), columns(), &spec, after, BATCH_ROWS, false).unwrap())
+                    .await;
             let rest_keys: Vec<String> = rest
                 .iter()
                 .flat_map(|b| &b.records)
@@ -553,14 +691,114 @@ mod tests {
         }
     }
 
+    /// The rows a resumed read returns after the checkpoint of the first batch, with `late`
+    /// committed after it with a cursor before it.
+    async fn resumed(lookback: u64) -> (Vec<Batch>, Vec<String>, usize) {
+        let spec = spec(Some("updated_at"), &["id"]);
+        let first =
+            drain(Paged::new(table(true), columns(), &spec, None, BATCH_ROWS, false).unwrap())
+                .await;
+        let after = parse_checkpoint(Some(&first[0].checkpoint), &spec).unwrap();
+        let mut later = table(true);
+        later.rows.push(("00010".to_owned(), "9999".to_owned()));
+        later.lookback = lookback;
+        let mut paged =
+            Paged::new(later, columns(), &spec, after, BATCH_ROWS, lookback > 0).unwrap();
+        let mut batches = Vec::new();
+        while let Some(batch) = paged.next_batch().await.unwrap() {
+            batches.push(batch);
+        }
+        let keys = batches
+            .iter()
+            .flat_map(|b| &b.records)
+            .map(|r| r.key.clone())
+            .collect();
+        (batches, keys, paged.pager.windows)
+    }
+
+    #[tokio::test]
+    async fn a_row_committed_late_with_a_cursor_before_the_checkpoint_is_read_on_resume() {
+        let (_, keys, windows) = resumed(500).await;
+
+        assert!(
+            keys.contains(&"9999".to_owned()),
+            "late row 9999 never returned"
+        );
+        assert_eq!(windows, 1, "only the first page of a run is a window");
+    }
+
+    #[tokio::test]
+    async fn without_a_lookback_the_resume_is_strictly_after_the_checkpoint() {
+        let (_, keys, windows) = resumed(0).await;
+
+        assert!(!keys.contains(&"9999".to_owned()));
+        assert_eq!(windows, 0);
+    }
+
+    #[tokio::test]
+    async fn a_window_never_moves_the_saved_checkpoint_behind_where_the_run_started() {
+        let spec = spec(Some("updated_at"), &["id"]);
+        let start = vec!["00493".to_owned(), "500".to_owned()];
+
+        let (batches, _, _) = resumed(500).await;
+
+        for batch in &batches {
+            let saved = parse_checkpoint(Some(&batch.checkpoint), &spec)
+                .unwrap()
+                .unwrap();
+            assert!(saved == start || is_past(&saved, &start), "{saved:?}");
+        }
+        assert_eq!(
+            batches.last().unwrap().checkpoint.0["key"],
+            json!(["01200", "1200"])
+        );
+    }
+
+    #[test]
+    fn keys_are_ordered_as_numbers_when_they_are_numbers_and_as_text_otherwise() {
+        let key = |values: &[&str]| values.iter().map(|v| (*v).to_owned()).collect::<Vec<_>>();
+
+        assert!(is_past(&key(&["10000", "1"]), &key(&["9999", "1"])));
+        assert!(is_past(&key(&["5", "2"]), &key(&["5", "1"])));
+        assert!(is_past(&key(&["-1", "1"]), &key(&["-2", "1"])));
+        assert!(is_past(&key(&["2.5"]), &key(&["2.45"])));
+        assert!(!is_past(&key(&["007"]), &key(&["7"])));
+        assert!(!is_past(&key(&["-0"]), &key(&["0"])));
+        assert!(is_past(
+            &key(&["2024-02-01 10:00:00.5+00"]),
+            &key(&["2024-02-01 10:00:00+00"])
+        ));
+        assert!(!is_past(&key(&["b"]), &key(&["b"])));
+    }
+
+    #[test]
+    fn a_window_bounds_the_cursor_alone_and_still_orders_by_the_whole_key() {
+        let keys = [("updated_at".to_owned(), ()), ("id".to_owned(), ())];
+
+        let sql = window_sql(
+            "*",
+            "t",
+            &keys,
+            |name| format!("\"{name}\""),
+            |column| format!("{column} > $1"),
+        );
+
+        assert_eq!(
+            sql,
+            r#"SELECT * FROM t AS s WHERE s."updated_at" IS NOT NULL AND s."updated_at" > $1 ORDER BY s."updated_at", s."id""#
+        );
+    }
+
     #[tokio::test]
     async fn a_full_refresh_pages_by_primary_key_and_an_empty_stream_yields_no_batch() {
         let spec = spec(None, &["id"]);
         let batches =
-            drain(Paged::new(table(false), columns(), &spec, None, BATCH_ROWS).unwrap()).await;
+            drain(Paged::new(table(false), columns(), &spec, None, BATCH_ROWS, false).unwrap())
+                .await;
         let mut empty = table(false);
         empty.rows.clear();
-        let none = drain(Paged::new(empty, columns(), &spec, None, BATCH_ROWS).unwrap()).await;
+        let none =
+            drain(Paged::new(empty, columns(), &spec, None, BATCH_ROWS, false).unwrap()).await;
 
         assert_eq!(batches.len(), 3);
         assert_eq!(batches[2].checkpoint.0, json!({"v": 1, "key": ["1200"]}));
@@ -572,7 +810,7 @@ mod tests {
         let spec = spec(None, &["id"]);
         let mut thousand = table(false);
         thousand.rows.truncate(1000);
-        let mut paged = Paged::new(thousand, columns(), &spec, None, BATCH_ROWS).unwrap();
+        let mut paged = Paged::new(thousand, columns(), &spec, None, BATCH_ROWS, false).unwrap();
 
         let mut batches = 0;
         while paged.next_batch().await.unwrap().is_some() {
@@ -587,12 +825,16 @@ mod tests {
     async fn a_null_primary_key_fails_the_read_without_a_value() {
         struct NullKey;
         impl Pager for NullKey {
-            async fn page(&mut self, _: Option<&[String]>) -> Result<Vec<Row>, SourceError> {
+            async fn page(
+                &mut self,
+                _: Option<&[String]>,
+                _: bool,
+            ) -> Result<Vec<Row>, SourceError> {
                 Ok(vec![vec![None, Some("secret-value".into())]])
             }
         }
         let spec = spec(None, &["id"]);
-        let mut paged = Paged::new(NullKey, columns(), &spec, None, BATCH_ROWS).unwrap();
+        let mut paged = Paged::new(NullKey, columns(), &spec, None, BATCH_ROWS, false).unwrap();
 
         let error = paged.next_batch().await.unwrap_err();
 
@@ -608,6 +850,7 @@ mod tests {
             &spec(None, &["nope"]),
             None,
             BATCH_ROWS,
+            false,
         );
         let missing_cursor = Paged::new(
             table(true),
@@ -615,6 +858,7 @@ mod tests {
             &spec(Some("nope"), &["id"]),
             None,
             BATCH_ROWS,
+            false,
         );
 
         assert_eq!(
@@ -637,12 +881,16 @@ mod tests {
     async fn a_row_becomes_a_json_object_of_strings_and_nulls() {
         struct One;
         impl Pager for One {
-            async fn page(&mut self, _: Option<&[String]>) -> Result<Vec<Row>, SourceError> {
+            async fn page(
+                &mut self,
+                _: Option<&[String]>,
+                _: bool,
+            ) -> Result<Vec<Row>, SourceError> {
                 Ok(vec![vec![Some("1".into()), None]])
             }
         }
         let spec = spec(None, &["id"]);
-        let mut paged = Paged::new(One, columns(), &spec, None, BATCH_ROWS).unwrap();
+        let mut paged = Paged::new(One, columns(), &spec, None, BATCH_ROWS, false).unwrap();
 
         let batch = paged.next_batch().await.unwrap().unwrap();
 

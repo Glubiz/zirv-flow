@@ -186,6 +186,16 @@ mod tests {
     }
 
     #[test]
+    fn a_redirect_answer_is_terminal() {
+        let answered = DestinationError::Answered {
+            status: 302,
+            retry_after: None,
+        };
+
+        assert_eq!(answered.disposition(), Disposition::Terminal);
+    }
+
+    #[test]
     fn a_408_retries_and_an_unexpected_status_is_terminal_and_the_header_does_not_change_it() {
         for status in [408, 500, 503, 599] {
             assert_eq!(

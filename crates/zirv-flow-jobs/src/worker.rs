@@ -14,6 +14,7 @@ use tokio::task::{JoinHandle, JoinSet};
 use tracing::{Instrument, Span, info, info_span, warn};
 use uuid::Uuid;
 use zirv_flow_connectors::dns::DnsResolver;
+use zirv_flow_connectors::http::OutboundClients;
 use zirv_flow_connectors::runtime::RateLimits;
 use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::egress::EgressPolicy;
@@ -102,8 +103,10 @@ pub struct WorkerConfig {
     pub kafka_unit_messages: usize,
     /// Records a `sync.run` unit holds before it commits.
     pub sync_unit_records: usize,
-    /// Which non-public destinations outbound connections may reach.
-    pub egress: Arc<EgressPolicy>,
+    /// The outbound HTTP clients, built from the egress policy (which non-public destinations
+    /// outbound connections may reach) and shared by every job of this pool so sends reuse
+    /// connections. Set the policy with [`WorkerConfig::with_egress`], so the two never disagree.
+    pub clients: Arc<OutboundClients>,
     /// The rate-limit buckets of outbound source calls, shared by every run in this process.
     pub rate_limits: Arc<RateLimits>,
     /// The rate gates of the destinations this process sends to, shared by every send job. Give
@@ -149,7 +152,7 @@ impl WorkerConfig {
             ingest_drain_shards: 8,
             kafka_unit_messages: crate::context::DEFAULT_UNIT_SIZE,
             sync_unit_records: crate::context::DEFAULT_UNIT_SIZE,
-            egress: Arc::default(),
+            clients: Arc::default(),
             rate_limits: Arc::default(),
             rate_gates: Arc::default(),
             clock: Clock::default(),
@@ -158,6 +161,13 @@ impl WorkerConfig {
             public_url: None,
             tracking_key: None,
         }
+    }
+
+    /// Which non-public destinations outbound connections may reach. Builds the pool's clients
+    /// from `policy`.
+    pub fn with_egress(mut self, policy: Arc<EgressPolicy>) -> Self {
+        self.clients = Arc::new(OutboundClients::new(policy));
+        self
     }
 }
 
@@ -866,9 +876,9 @@ fn configured<'a>(shared: &Shared, ctx: JobContext<'a>) -> JobContext<'a> {
         .with_render_pool(config.render_pool.clone())
         .with_dns(config.dns.clone())
         .with_tracking(config.public_url.clone(), config.tracking_key.clone())
-        .with_outbound(
+        .with_outbound_clients(
             config.keyring.clone(),
-            Arc::clone(&config.egress),
+            Arc::clone(&config.clients),
             Arc::clone(&config.rate_limits),
         )
         .with_ingest(IngestSettings {
@@ -1641,7 +1651,7 @@ mod tests {
             ingest_drain_shards: 4,
             kafka_unit_messages: 100,
             sync_unit_records: 100,
-            egress: Arc::default(),
+            clients: Arc::default(),
             rate_limits: Arc::default(),
             rate_gates: Arc::default(),
             clock: Clock::default(),

@@ -98,8 +98,8 @@ fails with `file_changed`, keeping the units already committed. A record over 1 
 `json_invalid`. A byte-range answer whose `Content-Range`, length or total contradicts itself or the
 request fails with `file_range_invalid`, so a short body is never taken for the end of the file.
 A run with `csv_invalid`, `json_invalid`, `json_not_an_array`, `json_trailing_data`,
-`record_too_large`, `file_range_unsupported` or `checkpoint_invalid` ends at once, because another
-attempt would read the same bytes; `file_changed` and `file_range_invalid` are tried again, up to
+`record_too_large`, `file_range_unsupported`, `checkpoint_invalid` or `null_primary_key` ends at
+once, because another attempt would read the same bytes; `file_changed` and `file_range_invalid` are tried again, up to
 the last attempt, and the run then ends with that code. Any other read failure ends as `source_error`
 after the last attempt. The run keeps the units already committed. These codes never quote the file
 or its address.
@@ -109,7 +109,11 @@ refused), all text. For JSON they are the top-level keys of the first 100 record
 the first value that is not null; nested values are reached with a dotted path in the mapping
 (see the Mapping reference). Choose the stream's **primary key** in **Set up**: a record's key
 is its value, or several values joined as a JSON array. Without a primary key the key is the
-record's position in the file (`row:<n>`), which holds only while the file is not reordered.
+record's position in the file, `row:<n>`, which holds only while the file is not reordered. A real
+id that looks like that (`row:3`, or one that starts with U+001F before `row:3`) is stored with one
+more U+001F, so it never equals a position. A file whose real ids look like `row:<n>` has those
+keys changed once after an upgrade, so its first full refresh re-creates those records and may
+trip the sweep limit.
 
 **Full refresh only.** A file has no cursor, so every run reads it from the start; the content
 hashes make an unchanged row cost nothing, and a row removed from the file is removed, with its
@@ -493,11 +497,20 @@ the key of the last row. Consequences to plan for:
   `timestamptz`. MySQL: integer types (signed and unsigned), `decimal`, `char`, `varchar`, `text`,
   `date`, `datetime`, `timestamp`. Other types (floats, booleans, binary, JSON) are refused.
 - Choose a cursor that only moves forward and is assigned when the row is committed, such as an
-  `updated_at` maintained by a trigger, and index it together with the primary key. A transaction
-  that commits a row with an older cursor value after the stream has passed it is picked up by the
-  next full refresh, not before: that is inherent to reading by cursor.
+  `updated_at` maintained by a trigger, and index it together with the primary key, in that order
+  (`(updated_at, id)`): PostgreSQL then reads each page as one index range, so a page costs the same
+  at any position in the table. A transaction that commits a row with an older cursor value after
+  the stream has passed it is picked up by the next full refresh, not before: that is inherent to
+  reading by cursor. To pick such rows up sooner, set **Cursor lookback** in the source's settings
+  (`cursor_lookback`, default 0, off): the first page of each run then starts that far behind the
+  checkpoint's cursor, in seconds for a date or time cursor and in the cursor's own unit for a
+  number, and the rows it re-reads are recognised by their key and cost nothing if unchanged. The
+  checkpoint never moves back. It applies to every incremental stream of the source; a stream
+  with a text or uuid cursor ignores it and reads strictly after its checkpoint.
 - **Rows whose cursor is NULL are not read by an incremental stream**; a full refresh reads them.
-- A NULL primary key value fails the run (it cannot be a record key).
+- A NULL primary key value fails the run at once with `null_primary_key` (it cannot be a record
+  key); choose a column that is never NULL, or leave such rows out of the query.
+- PostgreSQL timestamps are read under `DateStyle` ISO, whatever the role or database sets.
 - Database connectors do not emit native delete records. Full-refresh sweeps, incremental
   reconciliation and mapping delete signals handle removals; see [Sync runs](#sync-runs).
 

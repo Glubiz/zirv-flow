@@ -46,7 +46,7 @@ use serde_json::{Map, Value, json};
 use time::OffsetDateTime;
 use tracing::warn;
 use uuid::Uuid;
-use zirv_flow_connectors::destinations::{DestinationContext, Outbound, Registry};
+use zirv_flow_connectors::destinations::{Outbound, Registry};
 use zirv_flow_connectors::http::HttpLimits;
 use zirv_flow_connectors::sources::Credential;
 use zirv_flow_core::flow::Envelope;
@@ -388,9 +388,9 @@ async fn deliver(
         max_redirects: 0,
         ..HttpLimits::default()
     };
-    let destination_context =
-        DestinationContext::new(ctx.egress().clone(), limits, DESTINATION, INLINE)
-            .map_err(|_| JobError::new("the outbound client could not be built"))?;
+    let destination_context = ctx
+        .destination_context(limits, DESTINATION, INLINE)
+        .map_err(|_| JobError::new("the outbound client could not be built"))?;
     let payload = json!({
         "body": body,
         "timestamp": now.unix_timestamp(),
@@ -1619,10 +1619,9 @@ mod tests {
             edge("e5", "by_timeout", "next", "end_timeout")
         ]});
         let enrolled = env.enroll(graph, person).await;
-        let mut config = WorkerConfig::new(2);
+        let mut config = WorkerConfig::new(2).with_egress(env.egress.clone());
         config.poll_interval = Duration::from_millis(20);
         config.keyring = Some(env.keyring.clone());
-        config.egress = env.egress.clone();
         let (stop, stopped) = watch::channel(false);
         let handle =
             tokio::spawn(Worker::new(env.pool.clone(), Registry::built_in(), config).run(stopped));

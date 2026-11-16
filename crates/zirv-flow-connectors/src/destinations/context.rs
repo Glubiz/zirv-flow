@@ -54,6 +54,24 @@ impl DestinationContext {
         })
     }
 
+    /// As [`DestinationContext::new`], over `http`, a client a worker already holds, so the
+    /// connections of the sends before this one are reused. `policy` must be the policy `http`
+    /// was built from.
+    pub fn with_client(
+        http: GuardedClient,
+        policy: Arc<EgressPolicy>,
+        kind: &'static str,
+        destination_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            http,
+            policy,
+            lookup: Arc::new(SystemLookup),
+            kind,
+            destination_id: destination_id.into(),
+        }
+    }
+
     /// Resolves names through `lookup` in [`DestinationContext::resolve_checked`] instead of the
     /// system resolver. For tests; the policy still applies to whatever `lookup` returns.
     pub fn with_lookup(mut self, lookup: Arc<dyn Lookup>) -> Self {
