@@ -15,3 +15,11 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v1.0.12 (2026-11-16)
+
+### Fixes
+
+- review round 2 findings for the condition walk and draft save (#714, #716)
+- review round 1 findings for the assistant and draft save (#710-#716)
+- AI provider faults as 500, admin-only manifest accepts, UUID-form segment cycles, a truncated trace count, one-key condition walks, base_url-bound secret restore, flow draft revisions (#710-#716)
+
