@@ -5,8 +5,8 @@
 //! item, by id), the attempt number, how it ended, the class of the answer's HTTP status and how
 //! long it took. It holds no person id and no address, so deleting a person leaves it as it is.
 
-use sqlx::PgExecutor;
 use sqlx::prelude::FromRow;
+use sqlx::{PgExecutor, PgPool};
 use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
@@ -253,13 +253,44 @@ pub async fn destination_attempt_stats<'e>(
     .map_err(StoreError::query)
 }
 
+/// Deletes the attempts recorded before `cutoff`, oldest first, `batch` rows to a statement that
+/// commits alone, until a batch comes back short. Returns the number of rows deleted.
+///
+/// An attempt names no person (see the module doc), so erasure leaves it alone and one global
+/// cutoff serves every workspace; the retention job passes the longest message window. Reads
+/// through `delivery_attempts_attempted_at_idx`.
+pub async fn purge_attempts(
+    pool: &PgPool,
+    cutoff: OffsetDateTime,
+    batch: i64,
+) -> Result<u64, StoreError> {
+    let mut total = 0_u64;
+    loop {
+        let deleted = sqlx::query(
+            "DELETE FROM delivery_attempts WHERE ctid IN ( \
+                SELECT ctid FROM delivery_attempts WHERE attempted_at < $1 \
+                ORDER BY attempted_at LIMIT $2)",
+        )
+        .bind(cutoff)
+        .bind(batch)
+        .execute(pool)
+        .await
+        .map_err(StoreError::query)?
+        .rows_affected();
+        total += deleted;
+        if i64::try_from(deleted).unwrap_or(i64::MAX) < batch {
+            return Ok(total);
+        }
+    }
+}
+
 /// What the leader publishes for one live destination: its queue gauges.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DestinationStat {
     pub workspace_id: Uuid,
     pub destination_id: Uuid,
     /// Items waiting for delivery: the destination's `delivery.send` jobs that are ready, a
-    /// deferred one (waiting for a rate-limit token) included.
+    /// deferred one (waiting for a rate-limit token) included. Saturates at [`QUEUE_DEPTH_CAP`].
     pub queue_depth: i64,
     /// Age in seconds of the oldest waiting item, counted from the moment it became runnable;
     /// 0 when none waits or the oldest is not yet due.
@@ -274,28 +305,40 @@ struct StatRow {
     oldest_age_seconds: i64,
 }
 
+/// The most ready sends the queue-depth gauge counts for one destination. A deeper queue reads
+/// as this many, so the leader's read costs O(destinations x cap), not O(queued sends).
+pub const QUEUE_DEPTH_CAP: i64 = 50_000;
+
 /// One row per live destination with its queue gauges. The attempt and outcome counters are not
 /// here: they are counted in-process where an attempt is recorded, so this never scans
 /// `delivery_attempts`.
 ///
 /// The gauges read the send queue: the ready `delivery.send` jobs by the destination in their
-/// payload, through the partial index `jobs_delivery_send_idx`.
+/// payload, through the partial index `jobs_delivery_send_idx`, one probe per destination. The
+/// depth saturates at [`QUEUE_DEPTH_CAP`]; the oldest age is exact.
 pub async fn destination_report<'e>(
     executor: impl PgExecutor<'e>,
 ) -> Result<Vec<DestinationStat>, StoreError> {
+    destination_report_capped(executor, QUEUE_DEPTH_CAP).await
+}
+
+async fn destination_report_capped<'e>(
+    executor: impl PgExecutor<'e>,
+    cap: i64,
+) -> Result<Vec<DestinationStat>, StoreError> {
     let rows: Vec<StatRow> = sqlx::query_as(
         "SELECT d.workspace_id, d.id AS destination_id, \
-                COALESCE(q.depth, 0) AS queue_depth, \
-                COALESCE(GREATEST(0, EXTRACT(EPOCH FROM (clock_timestamp() - q.oldest))), 0)::bigint \
-                    AS oldest_age_seconds \
-         FROM destinations d \
-         LEFT JOIN ( \
-             SELECT payload ->> 'destination_id' AS destination, count(*) AS depth, \
-                    min(run_at) AS oldest \
-             FROM jobs WHERE kind = 'delivery.send' AND state = 'ready' \
-             GROUP BY payload ->> 'destination_id') q ON q.destination = d.id::text \
-         WHERE d.archived_at IS NULL ORDER BY d.id",
+                (SELECT count(*) FROM (SELECT 1 FROM jobs j \
+                    WHERE j.kind = 'delivery.send' AND j.state = 'ready' \
+                      AND j.payload ->> 'destination_id' = d.id::text LIMIT $1) c) AS queue_depth, \
+                COALESCE(GREATEST(0, EXTRACT(EPOCH FROM (clock_timestamp() - \
+                    (SELECT j.run_at FROM jobs j \
+                      WHERE j.kind = 'delivery.send' AND j.state = 'ready' \
+                        AND j.payload ->> 'destination_id' = d.id::text \
+                      ORDER BY j.run_at LIMIT 1)))), 0)::bigint AS oldest_age_seconds \
+         FROM destinations d WHERE d.archived_at IS NULL ORDER BY d.id",
     )
+    .bind(cap)
     .fetch_all(executor)
     .await
     .map_err(StoreError::query)?;
@@ -447,6 +490,87 @@ mod tests {
         );
     }
 
+    async fn age(pool: &PgPool, subject: Uuid, days: i64) {
+        sqlx::query(
+            "UPDATE delivery_attempts SET attempted_at = now() - make_interval(days => $2::int) \
+             WHERE subject_id = $1",
+        )
+        .bind(subject)
+        .bind(days as i32)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn old_attempts_are_purged_in_batches_and_newer_ones_stay(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let id = destination(&pool, ws, "Mail").await;
+        let mut old = Vec::new();
+        for _ in 0..5 {
+            let subject = Uuid::now_v7();
+            record_delivery_attempt(
+                &pool,
+                ws,
+                &attempt(id, subject, 1, AttemptOutcome::Delivered),
+            )
+            .await
+            .unwrap();
+            age(&pool, subject, 1100).await;
+            old.push(subject);
+        }
+        let fresh = Uuid::now_v7();
+        record_delivery_attempt(&pool, ws, &attempt(id, fresh, 1, AttemptOutcome::Delivered))
+            .await
+            .unwrap();
+        let cutoff = OffsetDateTime::now_utc() - time::Duration::days(400);
+
+        // Batches of 2 over 5 rows: 2, 2, then a short batch of 1.
+        let deleted = purge_attempts(&pool, cutoff, 2).await.unwrap();
+
+        assert_eq!(deleted, 5);
+        let left = list_delivery_attempts(&pool, ws, id, 10).await.unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].subject_id, fresh);
+        assert_eq!(purge_attempts(&pool, cutoff, 2).await.unwrap(), 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_age_predicate_of_the_purge_uses_the_attempted_at_index(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let id = destination(&pool, ws, "Mail").await;
+        sqlx::query(
+            "INSERT INTO delivery_attempts (id, workspace_id, destination_id, subject_kind, \
+                subject_id, attempt, outcome, status_class, duration_ms, attempted_at) \
+             SELECT gen_random_uuid(), $1, $2, 'message', gen_random_uuid(), 1, 'delivered', \
+                '2xx', 5, now() - make_interval(secs => g) FROM generate_series(1, 30000) g",
+        )
+        .bind(ws.as_uuid())
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("ANALYZE delivery_attempts")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let plan: Vec<String> = sqlx::query_scalar(
+            "EXPLAIN SELECT ctid FROM delivery_attempts \
+             WHERE attempted_at < now() - interval '400 days' ORDER BY attempted_at LIMIT 5000",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+
+        let plan = plan.join("\n");
+        assert!(
+            plan.contains("delivery_attempts_attempted_at_idx"),
+            "the purge reads the age index: {plan}"
+        );
+    }
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_report_lists_live_destinations_with_zero_queue_gauges(pool: PgPool) {
@@ -525,6 +649,77 @@ mod tests {
         );
         assert_eq!(of(idle).queue_depth, 0);
         assert_eq!(of(idle).oldest_age_seconds, 0);
+    }
+
+    async fn ready_sends(pool: &PgPool, ws: WorkspaceId, destination: Uuid, count: i32) {
+        sqlx::query(
+            "INSERT INTO jobs (id, workspace_id, kind, payload, state, run_at, unique_key, \
+                cause_kind, cause_id, trace_id) \
+             SELECT gen_random_uuid(), $1, 'delivery.send', \
+                jsonb_build_object('destination_id', $2::text), 'ready', \
+                now() - make_interval(secs => g), gen_random_uuid()::text, 'api', 't', \
+                gen_random_uuid() FROM generate_series(1, $3) g",
+        )
+        .bind(ws.as_uuid())
+        .bind(destination)
+        .bind(count)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_depth_saturates_at_the_cap_and_the_oldest_stays_exact(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let deep = destination(&pool, ws, "Deep").await;
+        let shallow = destination(&pool, ws, "Shallow").await;
+        ready_sends(&pool, ws, deep, 40).await;
+        ready_sends(&pool, ws, shallow, 2).await;
+
+        let capped = destination_report_capped(&pool, 10).await.unwrap();
+        let exact = destination_report(&pool).await.unwrap();
+
+        let of = |report: &[DestinationStat], id: Uuid| {
+            report
+                .iter()
+                .find(|stat| stat.destination_id == id)
+                .cloned()
+                .unwrap()
+        };
+        assert_eq!(of(&capped, deep).queue_depth, 10);
+        assert_eq!(of(&capped, shallow).queue_depth, 2);
+        assert_eq!(of(&exact, deep).queue_depth, 40);
+        assert!((40..=45).contains(&of(&capped, deep).oldest_age_seconds));
+        assert!((2..=7).contains(&of(&capped, shallow).oldest_age_seconds));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_report_probes_the_send_index_per_destination_without_a_scan_of_the_queue(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let busy = destination(&pool, ws, "Busy").await;
+        let other = destination(&pool, ws, "Other").await;
+        ready_sends(&pool, ws, busy, 60_000).await;
+        ready_sends(&pool, ws, other, 20_000).await;
+        sqlx::query("ANALYZE jobs").execute(&pool).await.unwrap();
+
+        let plan: Vec<String> = sqlx::query_scalar(
+            "EXPLAIN (ANALYZE, BUFFERS) SELECT d.id, \
+                (SELECT count(*) FROM (SELECT 1 FROM jobs j \
+                    WHERE j.kind = 'delivery.send' AND j.state = 'ready' \
+                      AND j.payload ->> 'destination_id' = d.id::text LIMIT 5000) c) \
+             FROM destinations d WHERE d.archived_at IS NULL",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+
+        let plan = plan.join("\n");
+        assert!(plan.contains("jobs_delivery_send_idx"), "{plan}");
+        assert!(!plan.contains("Seq Scan on jobs"), "{plan}");
     }
 
     #[test]
@@ -633,6 +828,8 @@ mod tests {
     async fn every_index_of_the_new_tables_leads_with_the_workspace_except_the_primary_keys(
         pool: PgPool,
     ) {
+        // The one exception is the age index of the retention purge (0108): attempts name no
+        // person and the purge cuts them at one instance-wide age, so it cannot lead with a tenant.
         let leading: Vec<(String, String)> = sqlx::query_as(
             "SELECT t.relname::text, a.attname::text \
              FROM pg_index x \
@@ -641,6 +838,7 @@ mod tests {
              JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = x.indkey[0] \
              WHERE t.relname IN ('destinations', 'destination_rate_buckets', 'delivery_attempts') \
                AND NOT x.indisprimary \
+               AND x.indexrelid::regclass::text <> 'delivery_attempts_attempted_at_idx' \
              ORDER BY 1, 2",
         )
         .fetch_all(&pool)

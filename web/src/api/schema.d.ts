@@ -28688,7 +28688,7 @@ export interface operations {
                 status?: string;
                 /** @description A theme id, `default` or `none` */
                 theme?: string;
-                /** @description `edited` (the default), `name` or `most_used` (non-test messages in the last 30 days) */
+                /** @description `edited` (the default), `name` or `most_used` (non-test messages created in the last 30 UTC days, from the daily rollup) */
                 sort?: string;
             };
             header?: never;

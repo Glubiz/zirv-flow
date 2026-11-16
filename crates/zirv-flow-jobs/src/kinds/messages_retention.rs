@@ -5,7 +5,7 @@
 use serde_json::Value;
 use tracing::info;
 use zirv_flow_store::{
-    MessageRetentionReport, RETENTION_BATCH, apply_message_retention_progress,
+    MessageRetentionReport, RETENTION_BATCH, apply_message_retention_progress, purge_attempts,
     purge_forwarding_outbox, record_retention_run, workspace_windows,
 };
 
@@ -57,14 +57,30 @@ impl JobKind for MessagesRetention {
             RETENTION_BATCH,
         )
         .await?;
+        // Attempt rows name no person, so one cutoff at the longest window serves every
+        // workspace: a short-window workspace keeps its attempts a little longer than its messages.
+        let longest = windows
+            .messages
+            .values()
+            .copied()
+            .fold(settings.days, u32::max);
+        let attempts_deleted = purge_attempts(
+            &pool,
+            now - time::Duration::days(i64::from(longest)),
+            RETENTION_BATCH,
+        )
+        .await?;
         info!(
             messages_deleted = report.messages_deleted,
-            forwarding_deleted, "message retention ran"
+            forwarding_deleted, attempts_deleted, "message retention ran"
         );
         ctx.audit_retention(
             Self::KIND,
             now - time::Duration::days(i64::from(settings.days)),
-            &[("messages_deleted", report.messages_deleted)],
+            &[
+                ("messages_deleted", report.messages_deleted),
+                ("delivery_attempts_deleted", attempts_deleted),
+            ],
         )
         .await?;
         Ok(())
@@ -121,6 +137,39 @@ mod tests {
             .await
             .unwrap();
         }
+        // Attempts name no person; one older than every window goes, one inside it stays.
+        let destination = uuid::Uuid::now_v7();
+        zirv_flow_store::create_destination(
+            &pool,
+            ws,
+            &zirv_flow_store::NewDestination {
+                id: destination,
+                kind: "fake",
+                name: "mail",
+                config: &serde_json::json!({}),
+                credential_id: None,
+                rate: 10,
+                burst: 10,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+        for (days, attempt) in [(1_i64, 1), (1200, 2)] {
+            sqlx::query(
+                "INSERT INTO delivery_attempts (id, workspace_id, destination_id, subject_kind, \
+                    subject_id, attempt, outcome, status_class, duration_ms, attempted_at) \
+                 VALUES (gen_random_uuid(), $1, $2, 'message', gen_random_uuid(), $3, \
+                    'delivered', '2xx', 5, $4)",
+            )
+            .bind(ws.as_uuid())
+            .bind(destination)
+            .bind(attempt)
+            .bind(now - time::Duration::days(days))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
         // The migration's schedule fires on the leader's tick, as it would in a deployment.
         let mut leader = crate::Scheduler::new(pool.clone(), crate::SchedulerConfig::default());
         let fired = leader.tick_at(now + time::Duration::days(2)).await.unwrap();
@@ -161,6 +210,12 @@ mod tests {
         assert_eq!(audit[0].actor_kind, "system");
         assert_eq!(audit[0].summary["job"], "messages.retention");
         assert_eq!(audit[0].summary["counts"]["messages_deleted"], 1);
+        assert_eq!(audit[0].summary["counts"]["delivery_attempts_deleted"], 1);
+        let attempts_left: i64 = sqlx::query_scalar("SELECT count(*) FROM delivery_attempts")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(attempts_left, 1);
 
         let left: Vec<String> = sqlx::query_scalar("SELECT node_id FROM messages")
             .fetch_all(&pool)

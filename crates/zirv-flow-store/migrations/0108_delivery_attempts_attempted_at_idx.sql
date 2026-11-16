@@ -1,0 +1,16 @@
+-- `delivery_attempts` gets a row per delivery attempt of every message, forwarding item and sync
+-- item, and nothing removed them. The message-retention job now purges attempts older than the
+-- longest message window (`purge_attempts`), in batches by age. The table had no index that an
+-- age-only predicate can use (its indexes lead with `workspace_id`, `destination_id` or the
+-- subject), so the purge would read the whole table to find the oldest rows (a sequential scan
+-- of 300,000 rows for a predicate that matches none). This index serves the oldest-first batch.
+--
+-- Write cost: the table is write-heavy (an attempt per send). The new entry is appended at the
+-- newest end of the index, and the table is insert-only, so it adds one entry per insert. The
+-- before and after numbers of the insert path are in `docs/operations/upgrade.md`.
+--
+-- UPGRADE COST: the build takes SHARE on `delivery_attempts` until the migration commits, which
+-- blocks every attempt insert (every send waits to record its attempt) for the build; it scans
+-- the table once. Reads go on. Budget the build at the installation's attempt count and plan the
+-- upgrade for a quiet window.
+CREATE INDEX IF NOT EXISTS delivery_attempts_attempted_at_idx ON delivery_attempts (attempted_at);

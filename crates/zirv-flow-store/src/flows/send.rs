@@ -220,8 +220,9 @@ pub struct EndedOrphan {
     pub reason: &'static str,
 }
 
-/// How many open messages one sweep ends.
+/// How many open messages one sweep ends, and how many it examines.
 const SWEEP_BATCH: i64 = 100;
+const SWEEP_WINDOW: i64 = 20_000;
 
 /// A message the sweep found open.
 #[derive(sqlx::FromRow)]
@@ -256,17 +257,104 @@ pub async fn end_orphaned_messages(
     pool: &PgPool,
     now: OffsetDateTime,
 ) -> Result<Vec<EndedOrphan>, StoreError> {
-    let found: Vec<OpenMessage> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT m.id, m.workspace_id, m.person_id, m.enrollment_id FROM messages m \
-         WHERE {NO_LIVE_JOB} ORDER BY m.created_at, m.id LIMIT $1"
+    Ok(end_orphaned_messages_from(pool, now, None).await?.ended)
+}
+
+/// The place a sweep stopped: the creation time and id of the last open message it passed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OrphanCursor {
+    created_at: OffsetDateTime,
+    id: Uuid,
+}
+
+/// What one windowed sweep did.
+#[derive(Debug)]
+pub struct OrphanSweep {
+    /// The messages it ended.
+    pub ended: Vec<EndedOrphan>,
+    /// Where the next sweep starts; `None` when this one reached the newest open message, so the
+    /// next starts over from the oldest.
+    pub next: Option<OrphanCursor>,
+}
+
+/// [`end_orphaned_messages`] over a window: it examines at most [`SWEEP_WINDOW`] open messages
+/// after `cursor` (the oldest first; `None` starts at the oldest) and ends the orphans among
+/// them, at most [`SWEEP_BATCH`]. The job probe of an open message costs one index lookup, so a
+/// pass over a million open messages every minute was a steady load; the leader keeps the cursor
+/// and walks the open messages window by window. An orphan therefore waits up to `open / window`
+/// sweeps to be found, which is not time-critical: orphans come from jobs the reaper buried.
+pub async fn end_orphaned_messages_from(
+    pool: &PgPool,
+    now: OffsetDateTime,
+    cursor: Option<OrphanCursor>,
+) -> Result<OrphanSweep, StoreError> {
+    sweep_window(pool, now, cursor, SWEEP_WINDOW).await
+}
+
+async fn sweep_window(
+    pool: &PgPool,
+    now: OffsetDateTime,
+    cursor: Option<OrphanCursor>,
+    window: i64,
+) -> Result<OrphanSweep, StoreError> {
+    let (after_at, after_id) = cursor.map_or((OffsetDateTime::UNIX_EPOCH, Uuid::nil()), |c| {
+        (c.created_at, c.id)
+    });
+    let rows: Vec<WindowRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "WITH win AS MATERIALIZED ( \
+            SELECT m.id, m.workspace_id, m.person_id, m.enrollment_id, m.created_at, m.status \
+            FROM messages m WHERE m.status IN ('pending', 'sending') \
+              AND (m.created_at, m.id) > ($2, $3) \
+            ORDER BY m.created_at, m.id LIMIT $4), \
+         orphans AS ( \
+            SELECT m.id, m.workspace_id, m.person_id, m.enrollment_id, m.created_at FROM win m \
+            WHERE {NO_LIVE_JOB} ORDER BY m.created_at, m.id LIMIT $1) \
+         SELECT o.id, o.workspace_id, o.person_id, o.enrollment_id, o.created_at, \
+                (SELECT count(*) FROM win) AS window_rows, \
+                (SELECT w.created_at FROM win w ORDER BY w.created_at DESC, w.id DESC LIMIT 1) \
+                    AS last_created_at, \
+                (SELECT w.id FROM win w ORDER BY w.created_at DESC, w.id DESC LIMIT 1) AS last_id \
+         FROM (SELECT 1) one LEFT JOIN orphans o ON true ORDER BY o.created_at, o.id"
     )))
     .bind(SWEEP_BATCH)
+    .bind(after_at)
+    .bind(after_id)
+    .bind(window)
     .fetch_all(pool)
     .await
     .map_err(StoreError::query)?;
+    let window_rows = rows.first().map_or(0, |row| row.window_rows);
+    let window_end = rows
+        .first()
+        .and_then(|row| Some((row.last_created_at?, row.last_id?)));
+    let found: Vec<(OpenMessage, OffsetDateTime)> = rows
+        .iter()
+        .filter_map(|row| {
+            Some((
+                OpenMessage {
+                    id: row.id?,
+                    workspace_id: row.workspace_id?,
+                    person_id: row.person_id?,
+                    enrollment_id: row.enrollment_id?,
+                },
+                row.created_at?,
+            ))
+        })
+        .collect();
+    let next = if i64::try_from(found.len()).unwrap_or(i64::MAX) >= SWEEP_BATCH {
+        // The batch filled before the window ended: the rest of the window comes next.
+        found.last().map(|(open, created_at)| OrphanCursor {
+            created_at: *created_at,
+            id: open.id,
+        })
+    } else if window_rows >= window {
+        window_end.map(|(created_at, id)| OrphanCursor { created_at, id })
+    } else {
+        None
+    };
     let mut ended = Vec::new();
-    for open in found {
-        if let Some(reason) = end_orphan(pool, &open, now).await? {
+    for (open, _) in &found {
+        if let Some(reason) = end_orphan(pool, open, now).await? {
             ended.push(EndedOrphan {
                 message: open.id,
                 workspace: open.workspace_id,
@@ -274,7 +362,21 @@ pub async fn end_orphaned_messages(
             });
         }
     }
-    Ok(ended)
+    Ok(OrphanSweep { ended, next })
+}
+
+/// One row of the windowed sweep: an orphan (every column of it is NULL when the window held
+/// none) with the facts of the window.
+#[derive(sqlx::FromRow)]
+struct WindowRow {
+    id: Option<Uuid>,
+    workspace_id: Option<Uuid>,
+    person_id: Option<Uuid>,
+    enrollment_id: Option<Uuid>,
+    created_at: Option<OffsetDateTime>,
+    window_rows: i64,
+    last_created_at: Option<OffsetDateTime>,
+    last_id: Option<Uuid>,
 }
 
 /// Whether a stored `gate_results` carries a `delivery` mark of an attempt that may have been
@@ -868,5 +970,101 @@ mod tests {
             [serde_json::json!({"reason": "no_consent"})]
         );
         assert_eq!(forward_jobs(&pool).await, 1);
+    }
+
+    /// Open messages `minutes` apart, the oldest first, none with a job; returns their ids.
+    async fn open_messages(
+        pool: &PgPool,
+        (ws, person, enrollment): (WorkspaceId, Uuid, Uuid),
+        count: i32,
+    ) -> Vec<Uuid> {
+        let mut ids = Vec::new();
+        for n in 0..count {
+            let id = Uuid::now_v7();
+            sqlx::query(
+                "INSERT INTO messages (id, workspace_id, person_id, enrollment_id, node_id, \
+                    template_id, destination_id, status, created_at) \
+                 VALUES ($1, $2, $3, $4, 'mail', gen_random_uuid(), gen_random_uuid(), \
+                    'pending', now() - make_interval(mins => $5))",
+            )
+            .bind(id)
+            .bind(ws.as_uuid())
+            .bind(person)
+            .bind(enrollment)
+            .bind(count - n)
+            .execute(pool)
+            .await
+            .unwrap();
+            ids.push(id);
+        }
+        ids
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_sweep_examines_one_window_a_run_and_the_cursor_walks_on_then_wraps(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let seeded = seeded(&pool).await;
+            let ids = open_messages(&pool, seeded, 7).await;
+            let now = OffsetDateTime::now_utc();
+
+            // A window of 3 holds the three oldest: they are ended and the cursor stands after them.
+            let first = sweep_window(&pool, now, None, 3).await.unwrap();
+            let ended =
+                |sweep: &OrphanSweep| sweep.ended.iter().map(|e| e.message).collect::<Vec<_>>();
+            assert_eq!(ended(&first), ids[..3]);
+            assert!(first.next.is_some());
+            let open: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM messages WHERE status = 'pending'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(open, 4, "one run does not look past its window");
+
+            // An orphan beyond the first window is found by a later run.
+            let second = sweep_window(&pool, now, first.next, 3).await.unwrap();
+            assert_eq!(ended(&second), ids[3..6]);
+            let third = sweep_window(&pool, now, second.next, 3).await.unwrap();
+            assert_eq!(ended(&third), ids[6..]);
+            assert_eq!(third.next, None, "a short window means the walk is over");
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_message_with_a_live_job_is_passed_and_the_wrapper_sweeps_from_the_oldest(
+        pool: PgPool,
+    ) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let seeded = seeded(&pool).await;
+            let ws = seeded.0;
+            let ids = open_messages(&pool, seeded, 3).await;
+            sqlx::query(
+                "INSERT INTO jobs (id, workspace_id, kind, payload, state, run_at, unique_key, \
+                    cause_kind, cause_id, trace_id) \
+                 VALUES (gen_random_uuid(), $1, 'delivery.send', \
+                    jsonb_build_object('message_id', $2::text), 'ready', now(), \
+                    gen_random_uuid()::text, 'api', 't', gen_random_uuid())",
+            )
+            .bind(ws.as_uuid())
+            .bind(ids[1])
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            let sweep = sweep_window(&pool, OffsetDateTime::now_utc(), None, 4)
+                .await
+                .unwrap();
+            let rest = end_orphaned_messages(&pool, OffsetDateTime::now_utc())
+                .await
+                .unwrap();
+
+            let ended: Vec<Uuid> = sweep.ended.iter().map(|e| e.message).collect();
+            assert_eq!(ended, [ids[0], ids[2]]);
+            assert_eq!(sweep.next, None);
+            assert!(rest.is_empty(), "the live job's message is never ended");
+        })
+        .await;
     }
 }

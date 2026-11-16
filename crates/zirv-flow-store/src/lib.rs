@@ -83,7 +83,8 @@ pub use assets::{
 };
 pub use audit::{
     AUDIT_BATCH, Actor, ActorKind, AuditEntry, AuditFilter, AuditPage, NewAuditEntry, append_audit,
-    append_audit_once_in, count_audit, list_audit, list_audit_page, purge_audit, stream_audit,
+    append_audit_once_in, audit_recent, count_audit, list_audit, list_audit_page, purge_audit,
+    stream_audit,
 };
 pub use changes::{
     DirtyHead, DirtyPerson, REEVALUATE_JOB_KIND, cache_change_readers, claim_dirty, dirty_backlog,
@@ -125,8 +126,8 @@ pub use destinations::{
     archive_destination, bucket_state, count_delivery_attempt,
     count_delivery_attempt_record_failure, create_destination, destination_attempt_stats,
     destination_report, find_destination, find_destination_for_update, find_destination_workspace,
-    list_delivery_attempts, list_destinations, lock_destinations_shared, record_delivery_attempt,
-    throttle_bucket, update_destination,
+    list_delivery_attempts, list_destinations, lock_destinations_shared, purge_attempts,
+    record_delivery_attempt, throttle_bucket, update_destination,
 };
 pub use events::{
     BREAKDOWN_VALUES, Breakdown, Bucket, CountResult, DEBUGGER_CHANNEL, DebuggerListener,
@@ -159,16 +160,16 @@ pub use flows::{
     INTERNAL_ERROR, JOB_DEAD, LIFECYCLE_BATCH, LIFECYCLE_JOB_KIND, LifecycleAction, LifecycleBatch,
     LifecyclePayload, LockedFlow, MAX_ENROLL_PEOPLE, MAX_ENTRY_DAYS, MAX_PATH_DECISIONS,
     MAX_WARMUP_SECONDS, MIN_WARMUP_SECONDS, NewFlow, NewStepExecution, NewWait, NodeCount,
-    Occurrence, PathEventWait, PathStep, Rotation, SEND_JOB_KIND, SETTINGS_GOAL_NODE,
-    SETTLE_JOB_KIND, SOFT_BOUNCE, STEP_JOB_KIND, SYNC_JOB_KIND, SendOutcome, SettleItem,
-    SettlePayload, Signal, SigningKey, SigningKeys, StepEnrollment, StepJobInput, StepJobPayload,
-    StepOutcome, StepRecord, StoredEvent, SyncDetail, TriggerEvent, TriggerKind, TriggeredFlow,
-    UnhealthyInput, WEBHOOK_JOB_KIND, Warmup, WarmupCounts, WebhookOutcome, WebhookPerson,
-    WebhookResult, WebhookSubject, apply_flow_list, apply_flow_trait, archive_flow, audience_page,
-    clear_waits, count_in_flight_enrollments, create_flow, create_signing_key,
-    end_orphaned_messages, enqueue_lifecycle, enroll, enroll_entries, enroll_page_key, exit_batch,
-    find_enrollment, find_event_of_person, find_events, find_flow, find_flow_version,
-    find_trigger_event, flow_entries_per_day, flow_source, flow_state_for_step,
+    Occurrence, OrphanCursor, OrphanSweep, PathEventWait, PathStep, Rotation, SEND_JOB_KIND,
+    SETTINGS_GOAL_NODE, SETTLE_JOB_KIND, SOFT_BOUNCE, STEP_JOB_KIND, SYNC_JOB_KIND, SendOutcome,
+    SettleItem, SettlePayload, Signal, SigningKey, SigningKeys, StepEnrollment, StepJobInput,
+    StepJobPayload, StepOutcome, StepRecord, StoredEvent, SyncDetail, TriggerEvent, TriggerKind,
+    TriggeredFlow, UnhealthyInput, WEBHOOK_JOB_KIND, Warmup, WarmupCounts, WebhookOutcome,
+    WebhookPerson, WebhookResult, WebhookSubject, apply_flow_list, apply_flow_trait, archive_flow,
+    audience_page, clear_waits, count_in_flight_enrollments, create_flow, create_signing_key,
+    end_orphaned_messages, end_orphaned_messages_from, enqueue_lifecycle, enroll, enroll_entries,
+    enroll_page_key, exit_batch, find_enrollment, find_event_of_person, find_events, find_flow,
+    find_flow_version, find_trigger_event, flow_entries_per_day, flow_source, flow_state_for_step,
     flow_states_for_steps, hand_on_settle_rest, has_webhook_signing_secret, hold_enrollment,
     list_flow_enrollments, list_flow_versions, list_flows, live_signing_keys, load_enrollment_path,
     lock_audience_page, lock_enrollment, lock_flow, lock_read_enrollment, lock_sync_person,
