@@ -5,9 +5,7 @@
 
 use serde_json::Value;
 use tracing::{info, warn};
-use zirv_flow_store::{
-    RetentionReport, apply_event_retention_progress, database_now, record_retention_run,
-};
+use zirv_flow_store::{RetentionReport, apply_event_retention_progress, database_now};
 
 use crate::{JobContext, JobError, JobKind};
 
@@ -34,8 +32,20 @@ impl JobKind for EventsRetention {
         let mut report = RetentionReport::default();
         let outcome =
             apply_event_retention_progress(pool, &settings, &windows, now, &mut report).await;
-        record_retention_run(pool, "events", now, report.events_deleted).await?;
-        record_retention_run(pool, "ingest_rejects", now, report.rejects_deleted).await?;
+        // Each window is unstamped only when its own stage failed having deleted nothing: a stage
+        // that finished before a later one failed ran cleanly.
+        let failed = outcome.is_err();
+        let events_failed = failed && !report.events_finished;
+        let rejects_failed = failed && !report.rejects_finished;
+        super::record_run(pool, "events", now, report.events_deleted, events_failed).await?;
+        super::record_run(
+            pool,
+            "ingest_rejects",
+            now,
+            report.rejects_deleted,
+            rejects_failed,
+        )
+        .await?;
         for partition in &report.skipped_partitions {
             warn!(partition = %partition, "event partition drop skipped: the table is locked");
         }
@@ -246,6 +256,80 @@ mod tests {
                 .unwrap()
                 .is_empty(),
             "a failed run writes no audit row"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_reject_purge_that_fails_first_still_stamps_the_events_window_that_finished(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let ws = zirv_flow_store::create_workspace(
+            &pool,
+            &WorkspaceName::parse("ours").unwrap(),
+            &Slug::parse("ours").unwrap(),
+        )
+        .await
+        .unwrap()
+        .id;
+        // No event is old, so the events stage finishes with nothing to delete; the reject purge
+        // then fails on its first batch.
+        sqlx::query(
+            "INSERT INTO ingest_rejects (id, workspace_id, received_at, source, kind, reason, \
+                trace_id) \
+             VALUES (gen_random_uuid(), $1, now() - make_interval(days => 400), 'web', 'event', \
+                'bad', gen_random_uuid())",
+        )
+        .bind(ws.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::raw_sql(
+            "CREATE FUNCTION refuse_all() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN RAISE EXCEPTION 'refused'; END $$; \
+             CREATE TRIGGER refuse_all BEFORE DELETE ON ingest_rejects \
+             FOR EACH STATEMENT EXECUTE FUNCTION refuse_all();",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut new = NewJob::new(EventsRetention::KIND, TraceContext::root(Cause::api("req")));
+        new.payload = json!({});
+        zirv_flow_store::enqueue(&pool, &new).await.unwrap();
+        let claimed = zirv_flow_store::claim_job(
+            &pool,
+            "w",
+            &[EventsRetention::KIND],
+            Duration::from_secs(30),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+        let mut ctx = JobContext::new(&mut tx, &claimed)
+            .with_ingest(crate::context::IngestSettings {
+                pool: pool.clone(),
+                redaction_key: None,
+                batch_size: 1,
+                shards: 1,
+            })
+            .with_event_retention(EventRetention::default());
+
+        let result = EventsRetention.run(&mut ctx, claimed.payload.clone()).await;
+        tx.rollback().await.unwrap();
+
+        assert!(result.is_err());
+        assert_eq!(
+            super::super::recorded_run(&pool, "events").await,
+            Some(0),
+            "the events stage ran cleanly, so its window is stamped"
+        );
+        assert_eq!(
+            super::super::recorded_run(&pool, "ingest_rejects").await,
+            None,
+            "the reject purge never got going"
         );
     }
 

@@ -394,7 +394,8 @@ fn possibly_accepted(gate_results: &serde_json::Value) -> bool {
 /// The failure code the sweep ends an open message with. A `pending` message never reached the
 /// destination. A `sending` one ends `delivery_unconfirmed` while a mark says an attempt may have
 /// been accepted, and `internal_error` only when neither mark is left (every attempt was refused
-/// for good). Never "not delivered" when a call may have gone out.
+/// for good). Never "not delivered" when a call may have gone out. An `internal_error` ending
+/// gives the message's cap slot back (nothing went out); `delivery_unconfirmed` keeps it.
 ///
 /// | status    | in-flight | unconfirmed | ends                    |
 /// |-----------|-----------|-------------|-------------------------|
@@ -484,6 +485,11 @@ async fn end_orphan(
         .await?;
     } else {
         insert_message_keeping_gates(&mut *tx, &message).await?;
+    }
+    if reason == INTERNAL_ERROR {
+        // Nothing went out, so the cap slot gate 5 reserved goes back with the ending. A
+        // `delivery_unconfirmed` row keeps it: the message may have been delivered.
+        crate::release_message_slot(&mut *tx, workspace, stored.id).await?;
     }
     commit(tx).await?;
     Ok(Some(reason))
@@ -813,6 +819,90 @@ mod tests {
                  "note": "job_dead"},
             ]),
             "the passed gates stay, the transient in-flight mark goes, the job gate is noted"
+        );
+    }
+
+    /// Caps the workspace at one marketing-channel email per day, skipping past it.
+    async fn cap_at_one(pool: &PgPool, ws: WorkspaceId) {
+        let caps = [crate::NewFrequencyCap {
+            channel: "email".to_owned(),
+            window_hours: 24,
+            limit: 1,
+            mode: crate::CapMode::Skip,
+        }];
+        let mut conn = pool.acquire().await.unwrap();
+        crate::replace_send_limits(&mut conn, ws, 0, &caps, None)
+            .await
+            .unwrap();
+    }
+
+    async fn slot_of(pool: &PgPool, id: Uuid) -> Option<OffsetDateTime> {
+        sqlx::query_scalar("SELECT cap_slot_at FROM messages WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_orphan_ended_internal_error_gives_its_cap_slot_back(pool: PgPool) {
+        let (ws, person, enrollment) = seeded(&pool).await;
+        cap_at_one(&pool, ws).await;
+        let id = open_message(&pool, ws, person, enrollment, &[]).await;
+        let now = OffsetDateTime::now_utc();
+        assert_eq!(
+            crate::check_frequency_caps(&pool, ws, person, id, "email", now)
+                .await
+                .unwrap(),
+            crate::CapVerdict::Reserved
+        );
+        assert!(slot_of(&pool, id).await.is_some());
+
+        let ended = end_orphaned_messages(&pool, now).await.unwrap();
+
+        assert_eq!(ended.len(), 1);
+        let row = stored(&pool, ws, id).await;
+        assert_eq!(row.reason.as_deref(), Some("internal_error"));
+        assert_eq!(slot_of(&pool, id).await, None, "nothing went out: no slot");
+        let next = open_message(&pool, ws, person, enrollment, &[]).await;
+        assert_eq!(
+            crate::check_frequency_caps(&pool, ws, person, next, "email", now)
+                .await
+                .unwrap(),
+            crate::CapVerdict::Reserved,
+            "the person is not capped by a message that never went out"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_orphan_ended_delivery_unconfirmed_keeps_its_cap_slot(pool: PgPool) {
+        let (ws, person, enrollment) = seeded(&pool).await;
+        cap_at_one(&pool, ws).await;
+        let id = open_message(&pool, ws, person, enrollment, &[]).await;
+        let now = OffsetDateTime::now_utc();
+        assert_eq!(
+            crate::check_frequency_caps(&pool, ws, person, id, "email", now)
+                .await
+                .unwrap(),
+            crate::CapVerdict::Reserved
+        );
+        crate::mark_message_sending(&pool, ws, id, 1, None)
+            .await
+            .unwrap();
+
+        end_orphaned_messages(&pool, now).await.unwrap();
+
+        let row = stored(&pool, ws, id).await;
+        assert_eq!(row.reason.as_deref(), Some("delivery_unconfirmed"));
+        assert!(slot_of(&pool, id).await.is_some(), "it may have gone out");
+        let next = open_message(&pool, ws, person, enrollment, &[]).await;
+        assert_eq!(
+            crate::check_frequency_caps(&pool, ws, person, next, "email", now)
+                .await
+                .unwrap(),
+            crate::CapVerdict::Skip
         );
     }
 
