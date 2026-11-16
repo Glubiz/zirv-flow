@@ -211,7 +211,7 @@ pub(crate) async fn import(
     // A stable sort: one person's rows stay in file order.
     rows.sort_by_key(|(line, row, _)| (row.person, *line));
 
-    let attempt = write_rows(
+    let mut attempt = write_rows(
         pool,
         context,
         workspace,
@@ -221,21 +221,19 @@ pub(crate) async fn import(
         actor,
     )
     .await;
-    let written = match attempt {
-        Err(AdminError::Store(error)) if !dry_run && error.is_retryable() => {
-            write_rows(
-                pool,
-                context,
-                workspace,
-                &rows,
-                body.invalid.len(),
-                dry_run,
-                actor,
-            )
-            .await?
-        }
-        other => other?,
-    };
+    if !dry_run && matches!(&attempt, Err(AdminError::Store(error)) if error.is_retryable()) {
+        attempt = write_rows(
+            pool,
+            context,
+            workspace,
+            &rows,
+            body.invalid.len(),
+            dry_run,
+            actor,
+        )
+        .await;
+    }
+    let written = attempt?;
     body.changed = written.changed;
     body.unchanged = written.unchanged;
     body.invalid.extend(written.invalid);
