@@ -31,9 +31,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tracing::warn;
 use uuid::Uuid;
-use zirv_flow_connectors::destinations::{
-    DestinationContext, ProfileCall, Registry, provider_profile_key_source,
-};
+use zirv_flow_connectors::destinations::{ProfileCall, Registry, provider_profile_key_source};
 use zirv_flow_connectors::http::HttpLimits;
 use zirv_flow_connectors::manifest::KeySource;
 use zirv_flow_core::WorkspaceId;
@@ -379,13 +377,13 @@ async fn call(
         max_redirects: 0,
         ..HttpLimits::default()
     };
-    let context = DestinationContext::new(
-        ctx.egress().clone(),
-        limits,
-        plan.driver.spec().kind,
-        plan.destination.id.to_string(),
-    )
-    .map_err(|_| JobError::new("the outbound client could not be built"))?;
+    let context = ctx
+        .destination_context(
+            limits,
+            plan.driver.spec().kind,
+            plan.destination.id.to_string(),
+        )
+        .map_err(|_| JobError::new("the outbound client could not be built"))?;
     let profile = ProfileCall {
         operation: job.operation,
         key,

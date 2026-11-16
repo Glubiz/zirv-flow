@@ -540,8 +540,9 @@ async fn finish<S: AsyncRead + AsyncWrite + Unpin>(
         Some(envelope) => send(&mut session, extensions, envelope).await,
         None => Ok(()),
     };
-    // The goodbye is courtesy: its answer, or its absence, changes nothing.
-    let _ = session.command("QUIT", QUIT_TIMEOUT).await;
+    // The goodbye is courtesy: it is written and the result returns without waiting for the
+    // `221`; dropping the session closes the socket.
+    let _ = session.send_only("QUIT", QUIT_TIMEOUT).await;
     outcome.map(|()| Delivered::default())
 }
 
@@ -789,6 +790,68 @@ mod tests {
             header_of(data, "Content-Type")
                 .unwrap()
                 .starts_with("multipart/alternative;")
+        );
+    }
+
+    /// A TCP proxy in front of `port` that holds back the server's `221` for `delay`.
+    async fn quit_delaying_proxy(port: u16, delay: Duration) -> u16 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let Ok((client, _)) = listener.accept().await else {
+                return;
+            };
+            let server = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
+            let (mut from_client, mut to_client) = client.into_split();
+            let (mut from_server, mut to_server) = server.into_split();
+            tokio::spawn(async move {
+                let _ = tokio::io::copy(&mut from_client, &mut to_server).await;
+            });
+            let mut chunk = vec![0; 4096];
+            while let Ok(read) = from_server.read(&mut chunk).await {
+                if read == 0 {
+                    break;
+                }
+                if chunk[..read].starts_with(b"221") {
+                    tokio::time::sleep(delay).await;
+                }
+                if to_client.write_all(&chunk[..read]).await.is_err() {
+                    break;
+                }
+            }
+        });
+        proxy
+    }
+
+    #[tokio::test]
+    async fn the_result_does_not_wait_for_the_answer_to_quit() {
+        let sink = SmtpSink::start(SinkOptions::default()).await;
+        let proxy = quit_delaying_proxy(sink.port(), Duration::from_secs(2)).await;
+        let mut credential = sink_login(&sink, "none");
+        credential.insert("port", SecretString::new(proxy.to_string()));
+        let started = std::time::Instant::now();
+
+        let signer = signer("example.com");
+
+        let delivered = send(
+            &sink,
+            &credential,
+            &payload(),
+            "msg-quit",
+            Some(&signer),
+            &context(true),
+        )
+        .await;
+
+        assert_eq!(delivered, Ok(Delivered::default()));
+        assert_eq!(sink.messages().len(), 1);
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "deliver took {:?}",
+            started.elapsed()
         );
     }
 

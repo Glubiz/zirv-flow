@@ -381,6 +381,7 @@ fn read<'a>(
             expect: Expect {
                 validator: from.validator,
                 size: from.size,
+                known_end: None,
             },
             header: from.header,
             delimiter: from
@@ -428,11 +429,11 @@ impl Read<'_> {
             if !self.seen {
                 // What the checkpoint did not carry is what this first window says.
                 self.seen = true;
-                self.expect = Expect {
-                    validator: self.expect.validator.take().or(window.validator.clone()),
-                    size: self.expect.size.or(window.total),
-                };
+                self.expect.validator = self.expect.validator.take().or(window.validator.clone());
             }
+            // A size the server names on any window holds for the rest of the read.
+            self.expect.size = self.expect.size.or(window.total);
+            self.expect.known_end = Some(window.end);
             let mut parser = self.parser(&window)?;
             let batches = self.parse(&window, &mut parser)?;
             let consumed = if window.ended {
@@ -660,6 +661,9 @@ mod tests {
     struct Fixture {
         body: Vec<u8>,
         etag: Option<&'static str>,
+        /// Sent as `Last-Modified`, which `If-Range` here never compares: a change within the
+        /// date's second.
+        last_modified: Option<&'static str>,
         ignore_range: bool,
         /// Requests from this one on (counting from 0) see the changed file.
         change_after: usize,
@@ -670,6 +674,10 @@ mod tests {
         required_authorization: Option<String>,
         /// A `206` carries only this many bytes of the range its `Content-Range` names.
         short_range_body: Option<usize>,
+        /// A `206` names the range but not the size of the file: `bytes a-b/*`.
+        unknown_total: bool,
+        /// Requests from this one on name the size even when `unknown_total`.
+        total_from: usize,
         /// The first requests answer 429 with `Retry-After: 0`.
         throttled: usize,
         hits: AtomicUsize,
@@ -681,6 +689,7 @@ mod tests {
             Self {
                 body: body.into(),
                 etag: Some("\"v1\""),
+                last_modified: None,
                 ignore_range: false,
                 change_after: usize::MAX,
                 changed_body: None,
@@ -689,6 +698,8 @@ mod tests {
                 required_authorization: None,
                 throttled: 0,
                 short_range_body: None,
+                unknown_total: false,
+                total_from: usize::MAX,
                 hits: AtomicUsize::new(0),
                 log: Mutex::new(Vec::new()),
             }
@@ -750,6 +761,9 @@ mod tests {
             if let Some(etag) = etag {
                 builder = builder.header("etag", etag);
             }
+            if let Some(date) = fixture.last_modified {
+                builder = builder.header("last-modified", date);
+            }
             builder
         };
         let whole = |body: Vec<u8>| {
@@ -784,10 +798,16 @@ mod tests {
             Some(short) => first + short.min(last - first + 1),
             None => last + 1,
         };
-        with_etag(Response::builder().status(206).header(
-            "content-range",
-            format!("bytes {first}-{last}/{}", body.len()),
-        ))
+        let total = if fixture.unknown_total && n < fixture.total_from {
+            "*".to_owned()
+        } else {
+            body.len().to_string()
+        };
+        with_etag(
+            Response::builder()
+                .status(206)
+                .header("content-range", format!("bytes {first}-{last}/{total}")),
+        )
         .body(Body::from(body[first..sent].to_vec()))
         .unwrap()
     }
@@ -1285,6 +1305,165 @@ mod tests {
             )
             .await,
         )
+        .await;
+        assert_eq!(error, SourceError::Other("file_changed".into()));
+    }
+
+    #[tokio::test]
+    async fn an_unknown_total_with_a_file_of_exact_windows_completes() {
+        let text = format!(
+            "{{\"n\":\"{}\"}}
+{{\"n\":\"{}\"}}
+",
+            "a".repeat(21),
+            "b".repeat(21)
+        );
+        assert_eq!(text.len(), 60);
+        let mut fixture = Fixture::new(text);
+        fixture.unknown_total = true;
+        let (base, _) = serve(fixture).await;
+
+        let all = batches(
+            read_all(
+                &context(),
+                &config(&base, "ndjson"),
+                &Credential::new(),
+                &stream(&[]),
+                None,
+                30,
+                30,
+            )
+            .await,
+        );
+
+        assert_eq!(data(&all).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_total_with_a_file_that_shrank_below_the_last_window_is_file_changed() {
+        // Three records of 40 bytes read in windows of 50: the read stands at offset 80 with a
+        // window that reached 90 when the file is cut to its first record.
+        let record = format!(
+            "{{\"n\":\"{}\"}}
+",
+            "a".repeat(31)
+        );
+        assert_eq!(record.len(), 40);
+        let mut fixture = Fixture::new(record.repeat(3));
+        fixture.unknown_total = true;
+        fixture.etag = None;
+        fixture.change_after = 2;
+        fixture.changed_body = Some(record.clone().into_bytes());
+        let (base, _) = serve(fixture).await;
+
+        let (_, error) = collect_error(
+            read_all(
+                &context(),
+                &config(&base, "ndjson"),
+                &Credential::new(),
+                &stream(&[]),
+                None,
+                50,
+                1,
+            )
+            .await,
+        )
+        .await;
+
+        assert_eq!(error, SourceError::Other("file_changed".into()));
+    }
+
+    /// Four records of 25 bytes read in windows of 50, the file cut to its first window after that
+    /// window was read: the next request is a 416 at the window's end.
+    async fn cut_at_the_first_window_boundary(server: impl FnOnce(&mut Fixture)) -> SourceError {
+        let record = format!(
+            "{{\"n\":\"{}\"}}
+",
+            "a".repeat(16)
+        );
+        assert_eq!(record.len(), 25);
+        let mut fixture = Fixture::new(record.repeat(4));
+        server(&mut fixture);
+        fixture.change_after = 1;
+        fixture.changed_body = Some(record.repeat(2).into_bytes());
+        let (base, _) = serve(fixture).await;
+
+        let (_, error) = collect_error(
+            read_all(
+                &context(),
+                &config(&base, "ndjson"),
+                &Credential::new(),
+                &stream(&[]),
+                None,
+                50,
+                1,
+            )
+            .await,
+        )
+        .await;
+        error
+    }
+
+    #[tokio::test]
+    async fn a_known_total_with_a_file_cut_to_a_window_boundary_is_file_changed() {
+        // The ETag did not change with the file, so only the size the server gave says the read
+        // is short.
+        let error = cut_at_the_first_window_boundary(|_| {}).await;
+        assert_eq!(error, SourceError::Other("file_changed".into()));
+    }
+
+    #[tokio::test]
+    async fn an_unknown_total_without_a_validator_cut_to_a_window_boundary_is_file_changed() {
+        let error = cut_at_the_first_window_boundary(|fixture| {
+            fixture.unknown_total = true;
+            fixture.etag = None;
+        })
+        .await;
+        assert_eq!(error, SourceError::Other("file_changed".into()));
+    }
+
+    #[tokio::test]
+    async fn a_size_named_after_the_first_window_holds_for_the_rest_of_the_read() {
+        // Six records of 25 bytes in windows of 50: the first window names no size, the second
+        // names 150, and the file is cut to those two windows before the third request.
+        let record = format!(
+            "{{\"n\":\"{}\"}}
+",
+            "a".repeat(16)
+        );
+        assert_eq!(record.len(), 25);
+        let mut fixture = Fixture::new(record.repeat(6));
+        fixture.unknown_total = true;
+        fixture.total_from = 1;
+        fixture.change_after = 2;
+        fixture.changed_body = Some(record.repeat(4).into_bytes());
+        let (base, _) = serve(fixture).await;
+
+        let (_, error) = collect_error(
+            read_all(
+                &context(),
+                &config(&base, "ndjson"),
+                &Credential::new(),
+                &stream(&[]),
+                None,
+                50,
+                1,
+            )
+            .await,
+        )
+        .await;
+
+        assert_eq!(error, SourceError::Other("file_changed".into()));
+    }
+
+    #[tokio::test]
+    async fn an_unknown_total_under_a_last_modified_cut_to_a_window_boundary_is_file_changed() {
+        // A cut within the date's second leaves `Last-Modified` the same, so `If-Range` matches.
+        let error = cut_at_the_first_window_boundary(|fixture| {
+            fixture.unknown_total = true;
+            fixture.etag = None;
+            fixture.last_modified = Some("Mon, 16 Nov 2026 08:00:00 GMT");
+        })
         .await;
         assert_eq!(error, SourceError::Other("file_changed".into()));
     }

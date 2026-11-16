@@ -374,7 +374,10 @@ fn next_link(response: &RuntimeResponse, base: &Url) -> Result<Option<Url>, Runt
     if target.len() > MAX_TOKEN_BYTES {
         return Err(RuntimeError::PaginationTokenTooLong);
     }
-    Ok(base.join(&target).ok())
+    // A next link that cannot be resolved is a truncated run, not the end of the data.
+    base.join(&target)
+        .map(Some)
+        .map_err(|_| RuntimeError::UnexpectedShape)
 }
 
 /// The `(target, rel)` pairs of one `Link` header value (RFC 8288 section 3): comma-separated
@@ -819,6 +822,30 @@ mod tests {
             &RuntimeError::PaginationLoop
         );
         assert_eq!(mock.hits(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_unresolvable_next_link_is_an_error_not_a_clean_end() {
+        let mock = serve(Router::new().route(
+            "/items",
+            get(|| async {
+                let mut response = axum::Json(json!({"data": [{"id": 1}]})).into_response();
+                response
+                    .headers_mut()
+                    .insert("link", "<http://[bad>; rel=\"next\"".parse().unwrap());
+                response
+            }),
+        ))
+        .await;
+
+        let pages = read(&mock, Pagination::LinkHeader, &Auth::None).await;
+
+        assert!(pages[0].is_ok());
+        assert_eq!(
+            pages.last().unwrap().as_ref().unwrap_err(),
+            &RuntimeError::UnexpectedShape,
+            "stream ended cleanly: {pages:?}"
+        );
     }
 
     #[tokio::test]

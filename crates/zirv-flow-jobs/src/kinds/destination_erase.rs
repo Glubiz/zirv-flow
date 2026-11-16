@@ -23,13 +23,12 @@
 //! The external key reaches the outbound request only: never an event, a decision, a log line or
 //! a metric.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
 use tracing::warn;
 use uuid::Uuid;
-use zirv_flow_connectors::destinations::{DestinationContext, ErasedDestination, Registry};
+use zirv_flow_connectors::destinations::{ErasedDestination, Registry};
 use zirv_flow_connectors::http::HttpLimits;
 use zirv_flow_core::WorkspaceId;
 use zirv_flow_store::{
@@ -152,13 +151,9 @@ impl JobKind for DestinationErase {
             max_redirects: 0,
             ..HttpLimits::default()
         };
-        let context = DestinationContext::new(
-            Arc::clone(ctx.egress()),
-            limits,
-            driver.spec().kind,
-            destination.id.to_string(),
-        )
-        .map_err(|_| JobError::new("the outbound client could not be built"))?;
+        let context = ctx
+            .destination_context(limits, driver.spec().kind, destination.id.to_string())
+            .map_err(|_| JobError::new("the outbound client could not be built"))?;
         let idempotency = idempotency_key(job.ledger, job.destination);
         let done = delivery::erase(
             driver,
@@ -240,6 +235,8 @@ async fn settle(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use serde_json::json;
     use sqlx::PgPool;
     use time::macros::datetime;

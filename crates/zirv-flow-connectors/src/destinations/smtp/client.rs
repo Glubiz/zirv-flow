@@ -10,8 +10,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 pub(super) const STEP_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long the message body may take to be accepted: the server may scan it before it answers.
 pub(super) const DATA_TIMEOUT: Duration = Duration::from_secs(120);
-/// How long the goodbye may take; its answer does not matter.
-pub(super) const QUIT_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long the goodbye may take to be written; its answer is not read.
+pub(super) const QUIT_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// The longest reply line, with its line break. RFC 5321 allows 512; servers add a little.
 const MAX_LINE: usize = 1024;
@@ -95,6 +95,19 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
         bytes.extend_from_slice(line.as_bytes());
         bytes.extend_from_slice(b"\r\n");
         self.exchange(&bytes, limit).await
+    }
+
+    /// Writes `line` and a line break within `limit` and does not wait for a reply.
+    pub(super) async fn send_only(&mut self, line: &str, limit: Duration) -> Result<(), WireError> {
+        let mut bytes = Vec::with_capacity(line.len() + 2);
+        bytes.extend_from_slice(line.as_bytes());
+        bytes.extend_from_slice(b"\r\n");
+        tokio::time::timeout(limit, async {
+            self.io.write_all(&bytes).await.map_err(|_| WireError::Io)?;
+            self.io.flush().await.map_err(|_| WireError::Io)
+        })
+        .await
+        .map_err(|_| WireError::Timeout)?
     }
 
     /// Writes `bytes` as they are, then reads the reply, all within `limit`.

@@ -17,6 +17,10 @@ use crate::sources::{SourceContext, SourceError};
 pub(super) struct Expect {
     pub(super) validator: Option<String>,
     pub(super) size: Option<u64>,
+    /// Where the last window ended. A server that does not say the file's size (`bytes a-b/*`)
+    /// answers 416 for the request after a file that is an exact multiple of the window, which is
+    /// the end of the file only when the read stands at or past this.
+    pub(super) known_end: Option<u64>,
 }
 
 /// One window of the file.
@@ -29,6 +33,8 @@ pub(super) struct Window {
     pub(super) validator: Option<String>,
     /// Whether the window reaches the end of the file.
     pub(super) ended: bool,
+    /// The offset after the last byte of the window.
+    pub(super) end: u64,
 }
 
 /// Fetches `window` bytes from `offset`. The first window of a read passes no expectation; every
@@ -61,6 +67,29 @@ pub(super) async fn fetch_window(
                 total: Some(0),
                 validator: None,
                 ended: true,
+                end: 0,
+            });
+        }
+        // The window before this one was the last: the server never gave the size, so only the
+        // request for the bytes after it said so. That holds only under the `If-Range` sent with
+        // the first window's strong `ETag`, which a changed file answers with 200, not 416.
+        // Without one (no validator, or a `Last-Modified` that a change within its second leaves
+        // the same), a file cut at this offset answers the same, so it stays a changed file, as
+        // does a read short of that end or a 416 for a file whose size the server gave.
+        Err(RuntimeError::Status(416))
+            if expect.size.is_none()
+                && expect
+                    .validator
+                    .as_deref()
+                    .is_some_and(|validator| validator.starts_with('"'))
+                && expect.known_end.is_some_and(|end| offset >= end) =>
+        {
+            return Ok(Window {
+                bytes: Bytes::new(),
+                total: Some(offset),
+                validator: None,
+                ended: true,
+                end: offset,
             });
         }
         Err(RuntimeError::Status(416)) => return Err(error::file_changed()),
@@ -81,7 +110,7 @@ fn read_window(
     let validator = validator(response);
     let bytes = response.body().clone();
     let status = response.status().as_u16();
-    let (total, ended) = match status {
+    let (total, ended, end) = match status {
         206 => {
             let range = content_range(response).ok_or_else(error::file_range_invalid)?;
             check_range(&range, offset, window, bytes.len() as u64)?;
@@ -89,7 +118,7 @@ fn read_window(
                 Some(total) => range.last.saturating_add(1) >= total,
                 None => (bytes.len() as u64) < window,
             };
-            (range.total, ended)
+            (range.total, ended, range.last.saturating_add(1))
         }
         // The server ignored `Range` and sent the file whole, which is the first window or a
         // changed file: a read in progress asked with `If-Range` and expects 206.
@@ -99,7 +128,7 @@ fn read_window(
             {
                 return Err(error::file_range_invalid());
             }
-            (Some(bytes.len() as u64), true)
+            (Some(bytes.len() as u64), true, bytes.len() as u64)
         }
         200 => return Err(error::file_changed()),
         other => return Err(SourceError::Upstream(other)),
@@ -119,6 +148,7 @@ fn read_window(
         total,
         validator,
         ended,
+        end,
     })
 }
 
