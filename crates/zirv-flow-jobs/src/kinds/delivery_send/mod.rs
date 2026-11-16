@@ -35,6 +35,9 @@
 //! 9. `rate_limit`: the destination is loaded again (an archived one is refused whatever a held
 //!    block of tokens says) and a token is taken; with none, the send is queued again at the
 //!    instant the bucket will hold one.
+//!    The empty bucket is remembered in the process (`RateGates::hold`): a send that waited and
+//!    wakes before then is queued again at once, before gate 1, so only a send that may get a
+//!    token pays for the gates and the render.
 //! 10. `delivery`: the destination is called with the message id as idempotency key.
 //!
 //! **Idempotency.** The first run writes the `messages` row, `pending`, in a statement of its own
@@ -77,7 +80,7 @@ use zirv_flow_store::{
     insert_message, lock_webhook_person, mark_message_sending, mark_message_unconfirmed,
     message_address_hash, message_in_flight, message_status, message_unconfirmed,
     read_template_field_catalog, read_webhook_subject, record_message_deferral,
-    record_message_links, record_send_outcome, throttle_bucket,
+    record_message_links, record_send_outcome, release_message_slot, throttle_bucket,
 };
 
 pub(crate) use payload::Queued;
@@ -123,6 +126,9 @@ struct Trail {
     /// The suppression hash of an address a mail server refused for good: the write that ends the
     /// message suppresses it in the whole organization (a hard bounce, OQ-12).
     bounced: Option<[u8; 32]>,
+    /// The message failed before any destination call: the write that ends it gives back the
+    /// frequency-cap slot it holds, since nothing was sent.
+    release_slot: bool,
 }
 
 impl Trail {
@@ -138,6 +144,7 @@ impl Trail {
             category: None,
             attempts,
             bounced: None,
+            release_slot: false,
         }
     }
 
@@ -179,11 +186,12 @@ impl Trail {
 
     /// Ends the message here for a failure before the destination was called. A resumed message
     /// (its row carried an unconfirmed or in-flight mark) may have been accepted on an earlier
-    /// call, so it ends unconfirmed instead.
-    fn fail_unsent(self, resuming: bool, gate: &'static str, reason: &'static str) -> Step {
+    /// call, so it ends unconfirmed instead and keeps its cap slot; any other gives the slot back.
+    fn fail_unsent(mut self, resuming: bool, gate: &'static str, reason: &'static str) -> Step {
         if resuming {
             self.unconfirmed(gate, Some(reason))
         } else {
+            self.release_slot = true;
             self.fail(gate, reason)
         }
     }
@@ -210,6 +218,19 @@ impl JobKind for DeliverySend {
         // commit and the acknowledgement): there is nothing left to do.
         let recorded = message_status(ctx.conn(), job.workspace, job.message).await?;
         if recorded.is_some_and(MessageStatus::has_ended) {
+            return Ok(());
+        }
+        // A send that waited for a token and wakes while its destination's bucket is still known
+        // to be empty (another job found it so a moment ago) is queued again at once: no gate is
+        // read, no cap slot reserved and nothing rendered for a take that cannot succeed. The
+        // bucket stays the judge; the hold only skips the work in front of it. A send past its
+        // six hours falls through and fails at gate 8.
+        if job
+            .first_wait
+            .is_some_and(|first| now - first <= MAX_RATE_WAIT)
+            && let Some(wait) = ctx.rate_gates().held(job.destination, now)
+        {
+            defer(ctx, &job, &payload, Wait::RateLimit(wait), now).await?;
             return Ok(());
         }
         // A message that was being delivered when an earlier run failed may have gone out: it is
@@ -252,11 +273,11 @@ async fn decide(
     // Gate 1. Read with no lock: the delivery below can take as long as the destination does,
     // and nothing an ingest batch, a resume or an erasure needs may be held for that long.
     let Some(flow) = find_flow(ctx.conn(), workspace, job.flow).await? else {
-        return stopped(ctx, job, trail, "flow_inactive").await;
+        return stopped(ctx, job, trail, resuming, "flow_inactive").await;
     };
     match flow.state {
-        FlowState::Paused => return stopped(ctx, job, trail, "flow_paused").await,
-        FlowState::Archived => return stopped(ctx, job, trail, "flow_inactive").await,
+        FlowState::Paused => return stopped(ctx, job, trail, resuming, "flow_paused").await,
+        FlowState::Archived => return stopped(ctx, job, trail, resuming, "flow_inactive").await,
         FlowState::Draft | FlowState::Published => {}
     }
     let catalog = read_template_field_catalog(ctx.conn(), workspace).await?;
@@ -265,10 +286,10 @@ async fn decide(
         read_webhook_subject(ctx.conn(), workspace, job.enrollment, &keys).await?
     else {
         // Erased, exited (a goal, an operator, a merge) or merged away: nobody to send to.
-        return stopped(ctx, job, trail, "enrollment_ended").await;
+        return stopped(ctx, job, trail, resuming, "enrollment_ended").await;
     };
     if person != job.person {
-        return stopped(ctx, job, trail, "enrollment_ended").await;
+        return stopped(ctx, job, trail, resuming, "enrollment_ended").await;
     }
     trail.pass(GateRecord::passed("enrollment"));
     // The first run writes the row, pending, in a statement of its own: it stays whatever this
@@ -453,6 +474,7 @@ async fn decide(
     match gates.admit(&pool, destination.id, &clock).await? {
         Admission::Granted => trail.pass(GateRecord::passed("rate_limit")),
         Admission::Wait(wait) => {
+            gates.hold(destination.id, now + wait);
             return defer(ctx, job, payload, Wait::RateLimit(wait), now).await;
         }
         Admission::Gone => {
@@ -628,18 +650,25 @@ pub(crate) async fn slow_down(
 /// Gate 1 stopped the message. On the first run nobody is waiting for it: it is dropped, and a
 /// decision says so (ids only) with no row, event or attempt. A later run finds the row the first
 /// one wrote, pending: that message ends as skipped, for the same reason, so no row stays pending.
+/// A `sending` row ends the same way unless the run is resuming (`run`): only a call that may
+/// have been accepted makes it possibly delivered, and after a definitive refusal (a 429, a 5xx)
+/// the row stays `sending` with no mark and nothing went out.
 async fn stopped(
     ctx: &mut JobContext<'_>,
     job: &SendJob,
     trail: Trail,
+    resuming: bool,
     reason: &'static str,
 ) -> Result<Step, JobError> {
     let recorded = message_status(ctx.conn(), job.workspace, job.message).await?;
-    if recorded == Some(MessageStatus::Sending) {
+    if recorded == Some(MessageStatus::Sending) && resuming {
         // It may have gone out already: it is not skipped, which would say it was not sent.
         return Ok(trail.unconfirmed("enrollment", Some(reason)));
     }
-    if recorded == Some(MessageStatus::Pending) {
+    if matches!(
+        recorded,
+        Some(MessageStatus::Pending | MessageStatus::Sending)
+    ) {
         return Ok(trail.skip(Blocked::new("enrollment", reason)));
     }
     dropped(ctx, job, reason).await
@@ -808,7 +837,11 @@ async fn write_end(
         {
             WebhookPerson::Held => true,
             WebhookPerson::Moved => false,
-            WebhookPerson::Gone => return Ok(()),
+            WebhookPerson::Gone => {
+                // The erasure deleted the rows, but a hard bounce is about the address: it is
+                // suppressed all the same (the row is an HMAC and outlives erasure).
+                return suppress_bounced(connection, trail.bounced).await;
+            }
         };
     let dimensions: &Dimensions = &job.dimensions;
     let message = NewMessage {
@@ -861,9 +894,19 @@ async fn write_end(
         )
         .await?;
     }
-    if let Some(identifier_hash) = trail.bounced {
-        // A hard bounce suppresses the address in every workspace of the organization (OQ-19). The
-        // row holds the HMAC of the address, never the address.
+    if trail.release_slot {
+        release_message_slot(&mut *connection, job.workspace, job.message).await?;
+    }
+    suppress_bounced(connection, trail.bounced).await
+}
+
+/// A hard bounce suppresses the address in every workspace of the organization (OQ-19). The row
+/// holds the HMAC of the address, never the address.
+async fn suppress_bounced(
+    connection: &mut PgConnection,
+    bounced: Option<[u8; 32]>,
+) -> Result<(), JobError> {
+    if let Some(identifier_hash) = bounced {
         add_organization_suppression(
             &mut *connection,
             &NewSuppression {
@@ -2520,8 +2563,7 @@ mod tests {
         pool: PgPool,
     ) {
         zirv_flow_store::decision_testing::checked(pool, |pool| async move {
-            let mut env =
-                Env::with(pool, "one", json!({"mode": "lose_first_answer"}), 100, 100).await;
+            let mut env = Env::with(pool, "one", json!({"mode": "lose_reply"}), 100, 100).await;
             env.render = Some(start_pool("serve", "").await);
             let template = env.plain_template("transactional").await;
             let person = env.person(PERSONAL_DATA.email).await;
@@ -6472,6 +6514,313 @@ mod tests {
                     .as_str()
                     .unwrap()
                     .contains("D-4001")
+            );
+        })
+        .await;
+    }
+
+    /// A fake-provider environment with a message queued whose first attempt got a 503: the row
+    /// stays `sending` with neither the in-flight nor the unconfirmed mark.
+    async fn after_a_503(
+        pool: PgPool,
+        name: &str,
+    ) -> (zirv_flow_connectors::destinations::FakeProvider, Env, Uuid) {
+        use zirv_flow_connectors::destinations::{
+            FakeProvider, FakeProviderOptions, FakeProviderScript,
+        };
+
+        let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+        let env = provider_env(pool, name, &fake).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person(PERSONAL_DATA.email).await;
+        let queued = env.queue(person, template, 5).await;
+        fake.script(FakeProviderScript::Status {
+            status: 503,
+            body: json!({}),
+            retry_after: None,
+        });
+        env.attempt().await.unwrap_err();
+        assert_eq!(env.message(queued.message).await.status, "sending");
+        (fake, env, queued.message)
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_flow_paused_after_a_503_skips_the_retry_and_does_not_call_it_delivery_unconfirmed(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let (_fake, env, message) = after_a_503(pool, "pause503").await;
+            sqlx::query("UPDATE flows SET state = 'paused' WHERE id = $1")
+                .bind(env.flow)
+                .execute(&env.pool)
+                .await
+                .unwrap();
+
+            env.attempt().await.unwrap();
+
+            let message = env.message(message).await;
+            assert_eq!(
+                (message.status.as_str(), message.reason.as_deref()),
+                ("skipped", Some("flow_paused")),
+                "nothing was accepted, so the message was not possibly delivered: {}",
+                message.gate_results
+            );
+            assert_eq!(env.events("email.skipped").await.len(), 1);
+            assert_eq!(env.events("email.failed").await.len(), 0);
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_retry_after_a_503_that_falls_in_quiet_hours_is_deferred_and_gives_its_slot_back(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            use zirv_flow_connectors::destinations::{
+                FakeProvider, FakeProviderOptions, FakeProviderScript,
+            };
+
+            let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+            let env = provider_env(pool, "quiet503", &fake).await;
+            env.limits(
+                &[(24, 1, zirv_flow_store::CapMode::Skip)],
+                Some((hm(21, 0), hm(7, 0))),
+            )
+            .await;
+            let person = env.subscriber(PERSONAL_DATA.email).await;
+            let template = env.plain_template("marketing").await;
+            env.clock.set(datetime!(2031-05-06 20:59 UTC));
+            let queued = env.queue(person, template, 5).await;
+            fake.script(FakeProviderScript::Status {
+                status: 503,
+                body: json!({}),
+                retry_after: None,
+            });
+            env.attempt().await.unwrap_err();
+            assert_eq!(env.message(queued.message).await.status, "sending");
+            assert!(env.slot_of(queued.message).await.is_some());
+
+            env.clock.set(datetime!(2031-05-06 21:01 UTC));
+            env.attempt().await.unwrap();
+
+            assert_eq!(
+                env.slot_of(queued.message).await,
+                None,
+                "quiet hours give up the slot"
+            );
+            let message = env.message(queued.message).await;
+            assert_eq!(gate_names(&message).last().unwrap(), "quiet_hours:deferred");
+            assert_eq!(env.send_jobs().await.len(), 1);
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_message_that_fails_before_any_destination_call_gives_its_cap_slot_back(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let mut env = Env::new(pool, "capfail").await;
+            env.render = Some(start_pool("serve", "").await);
+            env.limits(&[(24, 1, zirv_flow_store::CapMode::Skip)], None)
+                .await;
+            let person = env.subscriber(PERSONAL_DATA.email).await;
+            let broken = env.template("marketing", "{% nosuchtag %}").await;
+            let plain = env.plain_template("marketing").await;
+
+            let failed = env.send(person, broken).await;
+            env.flow = Uuid::now_v7();
+            env.publish_flow().await;
+            let next = env.send(person, plain).await;
+
+            assert_eq!(
+                (failed.status.as_str(), failed.reason.as_deref()),
+                ("failed", Some("render_error"))
+            );
+            assert_eq!(
+                env.slot_of(failed.id).await,
+                None,
+                "nothing was sent, so the slot is free"
+            );
+            assert_eq!(
+                (next.status.as_str(), next.reason.as_deref()),
+                ("sent", None)
+            );
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_resumed_message_that_ends_unconfirmed_keeps_its_cap_slot(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            use zirv_flow_connectors::destinations::{
+                FakeProvider, FakeProviderOptions, FakeProviderScript,
+            };
+
+            let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+            let env = provider_env(pool, "capkeep", &fake).await;
+            env.limits(&[(24, 5, zirv_flow_store::CapMode::Skip)], None)
+                .await;
+            let person = env.subscriber(PERSONAL_DATA.email).await;
+            let template = env.plain_template("marketing").await;
+            let queued = env.queue(person, template, 5).await;
+            fake.script(FakeProviderScript::DropAfterAccept);
+            env.attempt().await.unwrap_err();
+            assert!(env.slot_of(queued.message).await.is_some());
+            sqlx::query("UPDATE destinations SET archived_at = now() WHERE id = $1")
+                .bind(env.destination)
+                .execute(&env.pool)
+                .await
+                .unwrap();
+
+            env.attempt().await.unwrap();
+
+            let message = env.message(queued.message).await;
+            assert_eq!(
+                (message.status.as_str(), message.reason.as_deref()),
+                ("failed", Some("delivery_unconfirmed"))
+            );
+            assert!(
+                env.slot_of(queued.message).await.is_some(),
+                "the earlier call may have been accepted, so the slot still counts"
+            );
+        })
+        .await;
+    }
+
+    /// Ends a message whose person and enrollment were deleted after the send job started, with
+    /// `bounced` set or not, and counts the organization suppressions of the bounce source.
+    async fn end_for_an_erased_person(pool: PgPool, bounced: Option<[u8; 32]>) -> i64 {
+        let mut env = Env::new(pool, "erased").await;
+        env.render = Some(start_pool("serve", "").await);
+        let template = env.plain_template("marketing").await;
+        let person = env.subscriber(PERSONAL_DATA.email).await;
+        let queued = env.queue(person, template, 5).await;
+        let claimed = env.claim().await.unwrap();
+        let job = SendJob::parse(&claimed.payload).unwrap();
+        let now = env.clock.now();
+        start_message(&env.pool, &job, now).await.unwrap();
+        sqlx::query("DELETE FROM messages WHERE id = $1")
+            .bind(queued.message)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM enrollments WHERE id = $1")
+            .bind(job.enrollment)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        let mut trail = Trail::new(1);
+        trail.bounced = bounced;
+        trail.status = MessageStatus::Failed;
+        trail.reason = Some("hard_bounce");
+
+        let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
+        write_end(
+            &mut tx,
+            &TraceContext::root(Cause::api("bounce")),
+            (claimed.id, 1),
+            &job,
+            trail,
+            now,
+        )
+        .await
+        .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+
+        env.count(
+            "SELECT count(*) FROM suppressions WHERE scope = 'organization' AND source = 'bounce'",
+        )
+        .await
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_hard_bounce_for_an_erased_person_still_suppresses_the_address_in_the_organization(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let suppressed = end_for_an_erased_person(pool, Some([7_u8; 32])).await;
+
+            assert_eq!(
+                suppressed, 1,
+                "the address hash is suppressed even though the person is gone"
+            );
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_ending_for_an_erased_person_without_a_bounce_writes_no_suppression(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            assert_eq!(end_for_an_erased_person(pool, None).await, 0);
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn sends_that_wake_while_the_bucket_is_known_empty_wait_again_without_gates_or_render(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let mut env = Env::with(pool, "herd", json!({"mode": "ok"}), 1, 1).await;
+            env.render = Some(start_pool("serve", "").await);
+            env.limits(&[(24, 100, zirv_flow_store::CapMode::Skip)], None)
+                .await;
+            let template = env.plain_template("marketing").await;
+            let first = env.subscriber("first@example.com").await;
+            assert_eq!(env.send(first, template).await.status, "sent");
+            for index in 0..8 {
+                let person = env.subscriber(&format!("waiter{index}@example.com")).await;
+                env.queue(person, template, 5).await;
+            }
+            // Round 1: the bucket is empty, so every send waits for a token.
+            for _ in 0..8 {
+                env.attempt().await.unwrap();
+            }
+            assert_eq!(env.send_jobs().await.len(), 8);
+
+            // Round 2: one second refills one token. The first job takes it; the next finds the
+            // bucket empty again and leaves the hold the other six honour.
+            env.clock.advance(Span::seconds(1));
+            env.due().await;
+            for _ in 0..8 {
+                env.attempt().await.unwrap();
+            }
+
+            let now = env.clock.now();
+            let reserved_again: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM messages WHERE workspace_id = $1 AND cap_slot_at = $2",
+            )
+            .bind(env.ws.as_uuid())
+            .bind(now)
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                env.count("SELECT count(*) FROM messages WHERE status = 'sent'")
+                    .await,
+                2
+            );
+            assert!(
+                reserved_again <= 2,
+                "only the granted send and the one that found the bucket empty re-ran the cap gate: {reserved_again}"
+            );
+            assert_eq!(env.send_jobs().await.len(), 7, "the others wait for a token");
+            assert_eq!(
+                env.decisions(&["message.send"])
+                    .await
+                    .iter()
+                    .filter(|(_, outcome, _)| outcome == "deferred")
+                    .count(),
+                15,
+                "a deferral is still a decision each time"
             );
         })
         .await;

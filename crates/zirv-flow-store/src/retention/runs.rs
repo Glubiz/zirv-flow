@@ -7,7 +7,7 @@ use time::OffsetDateTime;
 
 use crate::StoreError;
 
-/// When a window's job last finished and how many rows it removed.
+/// When a window's job last finished or made progress, and how many rows it removed.
 #[derive(Clone, Debug, Eq, FromRow, PartialEq)]
 pub struct RetentionRun {
     pub window: String,

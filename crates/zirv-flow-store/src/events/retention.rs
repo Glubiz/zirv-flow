@@ -167,6 +167,11 @@ pub struct RetentionReport {
     pub skipped_partitions: Vec<String>,
     pub rejects_deleted: u64,
     pub dedupe_deleted: u64,
+    /// The partition drops and event deletes ran to the end, so the `events` window ran cleanly
+    /// even when it removed nothing.
+    pub events_finished: bool,
+    /// The ingest-reject purge ran to the end, as [`Self::events_finished`] for `ingest_rejects`.
+    pub rejects_finished: bool,
     /// Test-send log rows past the configured window (`retention.test_send_months`, default 13; architecture 16.3).
     pub test_sends_deleted: u64,
 }
@@ -226,6 +231,7 @@ async fn apply_event_retention_in_batches(
             break;
         }
     }
+    report.events_finished = true;
 
     delete_in_batches(
         pool,
@@ -239,6 +245,7 @@ async fn apply_event_retention_in_batches(
         },
     )
     .await?;
+    report.rejects_finished = true;
 
     let longest_cutoff = longest_cutoff(pool, default_days, now).await?;
 
@@ -440,6 +447,15 @@ mod tests {
             .unwrap()
     }
 
+    /// What a run that finished and removed nothing reports.
+    fn finished_nothing() -> RetentionReport {
+        RetentionReport {
+            events_finished: true,
+            rejects_finished: true,
+            ..RetentionReport::default()
+        }
+    }
+
     async fn run(pool: &PgPool) -> RetentionReport {
         apply_event_retention(pool, &settings(), &Default::default(), NOW)
             .await
@@ -611,10 +627,7 @@ mod tests {
 
         let report = run_small_batches(&pool).await.unwrap();
         assert_eq!((report.events_deleted, report.dedupe_deleted), (0, 2));
-        assert_eq!(
-            run_small_batches(&pool).await.unwrap(),
-            RetentionReport::default()
-        );
+        assert_eq!(run_small_batches(&pool).await.unwrap(), finished_nothing());
     }
 
     #[sqlx::test]
@@ -881,7 +894,7 @@ mod tests {
         assert_eq!(remaining(&pool, "short").await, 1);
         assert_eq!(remaining(&pool, "long").await, 3);
         assert_eq!(remaining(&pool, "plain").await, 2);
-        assert_eq!(run(&pool).await, RetentionReport::default());
+        assert_eq!(run(&pool).await, finished_nothing());
     }
 
     #[sqlx::test]

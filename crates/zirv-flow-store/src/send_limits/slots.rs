@@ -1,14 +1,16 @@
 //! Gate 5, check and record: the frequency caps of a person.
 //!
 //! A message holds a *slot* against a person's caps from the moment gate 5 passes it
-//! (`messages.cap_slot_at`) until it is skipped, or until a quiet-hours deferral releases it.
+//! (`messages.cap_slot_at`) until it is skipped, until a quiet-hours deferral releases it, or until
+//! it fails before any destination call (including a send job that died and was ended
+//! `internal_error` by the orphan sweep; one ended `delivery_unconfirmed` keeps its slot).
 //! The check counts the slots of the person's other non-test messages inside each cap's window and
 //! reserves one for this message, in a transaction of its own under a per-person advisory lock, so
 //! two flows sending to one person at once can never both take the last slot. The transaction is
 //! short and ends before the message is rendered or delivered; the send job holds no lock while it
 //! calls the destination, and a retry of the job must not roll the reservation back.
 
-use sqlx::PgPool;
+use sqlx::{PgExecutor, PgPool};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
@@ -139,8 +141,10 @@ const SLOT_LEAVING: &str = "SELECT cap_slot_at FROM messages
 /// results (the gate, the instant, and a note when the gate has one). With `release_slot` the same
 /// write frees the slot the message holds, so the deferred run takes one when it really sends.
 ///
-/// A statement of its own, so the entry outlives a job transaction that rolls back. Returns false
-/// when the message is not pending (it ended meanwhile).
+/// A statement of its own, so the entry outlives a job transaction that rolls back. A `sending`
+/// message is deferred like a pending one when no call of it may have been accepted (it carries
+/// neither the in-flight nor the unconfirmed mark: a 429 or 5xx left it so). Returns false when
+/// the message is neither (it ended meanwhile, or an earlier call may have gone out).
 pub async fn record_message_deferral(
     pool: &PgPool,
     workspace: WorkspaceId,
@@ -160,7 +164,9 @@ pub async fn record_message_deferral(
              gate_results = gate_results || jsonb_build_array(jsonb_strip_nulls(jsonb_build_object(
                  'gate', $3::text, 'result', 'deferred', 'run_at', $4::text, 'note', $5::text))),
              cap_slot_at = CASE WHEN $6 THEN NULL ELSE cap_slot_at END
-         WHERE workspace_id = $1 AND id = $2 AND status = 'pending'",
+         WHERE workspace_id = $1 AND id = $2 AND (status = 'pending' OR (status = 'sending'
+             AND NOT gate_results @> '[{\"gate\": \"delivery\", \"result\": \"in_flight\"}]'
+             AND NOT gate_results @> '[{\"gate\": \"delivery\", \"result\": \"unconfirmed\"}]'))",
     )
     .bind(workspace.as_uuid())
     .bind(message)
@@ -173,6 +179,27 @@ pub async fn record_message_deferral(
     .map_err(StoreError::query)?
     .rows_affected();
     Ok(written == 1)
+}
+
+/// Gives back the slot of a message that ended `failed` before any destination call, in the write
+/// that ends it (the caller's connection, so one transaction). A message that failed after a call
+/// keeps its slot: it may have been delivered. Returns false when there was no slot to clear.
+pub async fn release_message_slot<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    message: Uuid,
+) -> Result<bool, StoreError> {
+    let released = sqlx::query(
+        "UPDATE messages SET cap_slot_at = NULL
+         WHERE workspace_id = $1 AND id = $2 AND status = 'failed' AND cap_slot_at IS NOT NULL",
+    )
+    .bind(workspace.as_uuid())
+    .bind(message)
+    .execute(executor)
+    .await
+    .map_err(StoreError::query)?
+    .rows_affected();
+    Ok(released == 1)
 }
 
 #[cfg(test)]
@@ -232,7 +259,11 @@ mod tests {
         async fn message(&self, status: MessageStatus) -> Uuid {
             let id = Uuid::now_v7();
             let dimensions = Dimensions::new();
-            let reason = (status == MessageStatus::Skipped).then_some("no_consent");
+            let reason = match status {
+                MessageStatus::Skipped => Some("no_consent"),
+                MessageStatus::Failed => Some("render_error"),
+                _ => None,
+            };
             insert_message(
                 &self.pool,
                 &NewMessage {
@@ -468,5 +499,80 @@ mod tests {
         assert_eq!(gates[0]["note"], "timezone_fallback");
         assert_eq!(gates[0]["run_at"], "2026-03-01T21:00:00Z");
         assert_eq!(gates[1]["gate"], "delivery");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_sending_message_is_deferred_only_when_no_call_may_have_been_accepted(pool: PgPool) {
+        let world = world(pool, &[(24, 5, CapMode::Skip)]).await;
+        let clean = world.message(MessageStatus::Sending).await;
+        let in_flight = world.message(MessageStatus::Sending).await;
+        for message in [clean, in_flight] {
+            assert_eq!(world.check(message, T0).await, CapVerdict::Reserved);
+        }
+        sqlx::query(
+            "UPDATE messages SET gate_results = '[{\"gate\": \"delivery\", \"result\": \"in_flight\", \"attempt\": 1}]' WHERE id = $1",
+        )
+        .bind(in_flight)
+        .execute(&world.pool)
+        .await
+        .unwrap();
+        let run_at = T0 + Duration::hours(9);
+
+        let clean_written = record_message_deferral(
+            &world.pool,
+            world.ws,
+            clean,
+            "quiet_hours",
+            run_at,
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+        let in_flight_written = record_message_deferral(
+            &world.pool,
+            world.ws,
+            in_flight,
+            "quiet_hours",
+            run_at,
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert!(clean_written && !in_flight_written);
+        assert_eq!(world.slot(clean).await, None);
+        assert_eq!(world.slot(in_flight).await, Some(T0));
+        let entries: serde_json::Value =
+            sqlx::query_scalar("SELECT gate_results FROM messages WHERE id = $1")
+                .bind(clean)
+                .fetch_one(&world.pool)
+                .await
+                .unwrap();
+        assert_eq!(entries[0]["result"], "deferred");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_failed_message_gives_its_slot_back_and_a_live_one_keeps_it(pool: PgPool) {
+        let world = world(pool, &[(24, 5, CapMode::Skip)]).await;
+        let failed = world.message(MessageStatus::Failed).await;
+        let sending = world.message(MessageStatus::Sending).await;
+        for message in [failed, sending] {
+            assert_eq!(world.check(message, T0).await, CapVerdict::Reserved);
+        }
+
+        let released = release_message_slot(&world.pool, world.ws, failed)
+            .await
+            .unwrap();
+        let untouched = release_message_slot(&world.pool, world.ws, sending)
+            .await
+            .unwrap();
+
+        assert!(released && !untouched);
+        assert_eq!(world.slot(failed).await, None);
+        assert_eq!(world.slot(sending).await, Some(T0));
     }
 }
