@@ -154,11 +154,14 @@ fn read_records(text: &str) -> Result<(Vec<String>, Vec<csv::Record>), AdminErro
 ///
 /// Every row is read first, then the valid ones are written in order of the person each write
 /// locks (a person merged into another is locked as the survivor, so the rows are ordered by
-/// survivor; one person's rows keep their file order, so the later one still wins). A write
+/// survivor, resolved on each attempt; one person's rows keep their file order, so the later one still wins). A write
 /// holds its person's lock to the end of the transaction, so two imports that write the same
 /// people in one order cannot deadlock each other, whichever merged ids their files name; an
-/// import that still loses a deadlock is run once more. A dry run writes too, to report what a commit
-/// would do, and holds its locks until it is rolled back. A state scoped to an archived
+/// import that still loses a deadlock is run once more, dry run or not, with the survivors
+/// resolved and the rows sorted again inside that attempt, so a merge that landed meanwhile is
+/// seen. That is a bounded backstop, not a guarantee: a second deadlock is returned as the
+/// retryable error. A dry run writes too, to report what a commit would do, and holds its locks
+/// until it is rolled back; it keeps nothing. A state scoped to an archived
 /// dimension or value is accepted, as an export lists those; one scoped to a dimension or value
 /// that does not exist is not.
 pub(crate) async fn import(
@@ -209,22 +212,9 @@ pub(crate) async fn import(
         };
         rows.push((line, row, topic));
     }
-    // Each row is ordered by the person the write locks: the survivor of a merged person. A
-    // person that does not resolve keeps its own id and is reported by the write. The sort is
-    // on (survivor, line), so one real person's rows stay in file order whichever alias they
-    // name, and every import takes its locks in the same order.
-    let mut survivors: HashMap<Uuid, Uuid> = HashMap::new();
-    for (_, row, _) in &rows {
-        if !survivors.contains_key(&row.person) {
-            let survivor = zirv_flow_store::current_person(pool, workspace, row.person)
-                .await?
-                .unwrap_or(row.person);
-            survivors.insert(row.person, survivor);
-        }
-    }
-    rows.sort_by_key(|(line, row, _)| (survivors[&row.person], *line));
-
-    let mut attempt = write_rows(
+    // A deadlock that survives the order is run once more, from a fresh order: a merge that
+    // landed after the first resolution is seen by the second.
+    let mut attempt = sorted_write(
         pool,
         context,
         workspace,
@@ -234,8 +224,8 @@ pub(crate) async fn import(
         actor,
     )
     .await;
-    if !dry_run && matches!(&attempt, Err(AdminError::Store(error)) if error.is_retryable()) {
-        attempt = write_rows(
+    if matches!(&attempt, Err(AdminError::Store(error)) if error.is_retryable()) {
+        attempt = sorted_write(
             pool,
             context,
             workspace,
@@ -254,6 +244,42 @@ pub(crate) async fn import(
     Ok(body)
 }
 
+/// One attempt: resolves each row's survivor now, orders the rows by (survivor, line) and writes
+/// them. A person that does not resolve keeps its own id and is reported by the write. The sort
+/// is on (survivor, line), so one real person's rows stay in file order whichever alias they
+/// name, and every attempt takes its locks in the same order.
+async fn sorted_write(
+    pool: &PgPool,
+    context: &Context,
+    workspace: WorkspaceId,
+    rows: &[(usize, Row, Option<Uuid>)],
+    already_invalid: usize,
+    dry_run: bool,
+    actor: Option<Uuid>,
+) -> Result<Written, AdminError> {
+    let mut survivors: HashMap<Uuid, Uuid> = HashMap::new();
+    for (_, row, _) in rows {
+        if !survivors.contains_key(&row.person) {
+            let survivor = zirv_flow_store::current_person(pool, workspace, row.person)
+                .await?
+                .unwrap_or(row.person);
+            survivors.insert(row.person, survivor);
+        }
+    }
+    let mut sorted: Vec<&(usize, Row, Option<Uuid>)> = rows.iter().collect();
+    sorted.sort_by_key(|(line, row, _)| (survivors[&row.person], *line));
+    write_rows(
+        pool,
+        context,
+        workspace,
+        &sorted,
+        already_invalid,
+        dry_run,
+        actor,
+    )
+    .await
+}
+
 /// What one attempt at writing the valid rows did.
 struct Written {
     changed: usize,
@@ -267,7 +293,7 @@ async fn write_rows(
     pool: &PgPool,
     context: &Context,
     workspace: WorkspaceId,
-    rows: &[(usize, Row, Option<Uuid>)],
+    rows: &[&(usize, Row, Option<Uuid>)],
     already_invalid: usize,
     dry_run: bool,
     actor: Option<Uuid>,
@@ -279,7 +305,7 @@ async fn write_rows(
         unchanged: 0,
         invalid: Vec::new(),
     };
-    for (line, row, topic) in rows {
+    for (line, row, topic) in rows.iter().copied() {
         let outcome = zirv_flow_store::set_consent(
             &mut tx,
             workspace,
@@ -699,6 +725,98 @@ mod tests {
             "first: {:?}, second: {:?}",
             first.as_ref().err(),
             second.as_ref().err()
+        );
+    }
+
+    /// A trigger on `consent_changes` that raises a deadlock (`40P01`) the first time it fires,
+    /// whatever the transaction: a sequence is not rolled back, so the next attempt passes.
+    async fn deadlock_once_on_the_first_history_row(pool: &PgPool) {
+        for statement in [
+            "CREATE SEQUENCE one_shot_deadlock",
+            "CREATE FUNCTION one_shot_deadlock() RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN \
+                 IF nextval('one_shot_deadlock') = 1 THEN \
+                     RAISE EXCEPTION 'deadlock detected' USING ERRCODE = '40P01'; \
+                 END IF; \
+                 RETURN NEW; \
+             END $$",
+            "CREATE TRIGGER one_shot_deadlock BEFORE INSERT ON consent_changes \
+             FOR EACH ROW EXECUTE FUNCTION one_shot_deadlock()",
+        ] {
+            sqlx::query(statement).execute(pool).await.unwrap();
+        }
+    }
+
+    async fn count(pool: &PgPool, sql: &'static str) -> i64 {
+        sqlx::query_scalar(sql).fetch_one(pool).await.unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_dry_run_that_loses_a_deadlock_is_retried_once_and_keeps_nothing(pool: PgPool) {
+        let (ws, ids) = workspace_with_people(&pool, 3).await;
+        let file = format!(
+            "{HEADER}{}",
+            ids.iter()
+                .map(|id| format!(
+                    "{id},email,,subscribed
+"
+                ))
+                .collect::<String>()
+        );
+        let expected = import(&pool, &Context::system(), ws, &file, true, None)
+            .await
+            .unwrap();
+        deadlock_once_on_the_first_history_row(&pool).await;
+
+        let report = import(&pool, &Context::system(), ws, &file, true, None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            (report.changed, report.unchanged, report.invalid.len()),
+            (expected.changed, expected.unchanged, expected.invalid.len())
+        );
+        assert_eq!(report.changed, 3);
+        assert_eq!(count(&pool, "SELECT count(*) FROM consent").await, 0);
+        assert_eq!(
+            count(&pool, "SELECT count(*) FROM consent_changes").await,
+            0
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_real_import_that_loses_a_deadlock_is_retried_once_and_writes_once(pool: PgPool) {
+        let (ws, ids) = workspace_with_people(&pool, 3).await;
+        let file = format!(
+            "{HEADER}{}",
+            ids.iter()
+                .map(|id| format!(
+                    "{id},email,,subscribed
+"
+                ))
+                .collect::<String>()
+        );
+        deadlock_once_on_the_first_history_row(&pool).await;
+
+        let report = import(&pool, &Context::system(), ws, &file, false, None)
+            .await
+            .unwrap();
+
+        assert_eq!((report.changed, report.unchanged), (3, 0));
+        assert_eq!(count(&pool, "SELECT count(*) FROM consent").await, 3);
+        assert_eq!(
+            count(&pool, "SELECT count(*) FROM consent_changes").await,
+            3
+        );
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT count(*) FROM audit_log WHERE action = 'consent.imported'"
+            )
+            .await,
+            1
         );
     }
 
