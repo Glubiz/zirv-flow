@@ -7,6 +7,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use hashbrown::HashMap;
+
 use serde_json::{Map, Value};
 use sqlx::PgConnection;
 use time::format_description::well_known::Rfc3339;
@@ -26,10 +28,12 @@ use super::lock::{LedgerKey, LockedRow, lock_batch};
 use super::registry::{Definitions, insert_inferred_definition};
 use super::resolve::{Resolution, resolve_person};
 use super::slots::lock_slots_shared;
-use crate::changes::mark_person;
+use crate::changes::mark_people;
 use crate::decisions::DecisionBuffer;
 use crate::subtransactions::{Isolated, Tried, apply_isolated};
-use crate::{DeleteReason, NewDecision, PgPool, StoreError, append_decision, begin, commit};
+use crate::{
+    DeleteReason, NewDecision, PgPool, StoreError, append_decision, append_decisions, begin, commit,
+};
 
 /// One record from a source, as the profile path receives it.
 #[derive(Clone, Debug)]
@@ -301,49 +305,126 @@ pub(crate) async fn remove_contribution_in(
     record_key: &str,
     trace: &TraceContext,
 ) -> Result<Option<RemovedRecord>, StoreError> {
+    let keys = [record_key.to_owned()];
+    let removed =
+        remove_contributions_in(connection, workspace, source, stream, &keys, trace).await?;
+    Ok(removed.into_iter().next().map(|(_, record)| record))
+}
+
+/// A record [`remove_contributions_in`] tombstoned.
+struct Tombstoned {
+    key: String,
+    record_id: Uuid,
+    person_id: Uuid,
+    /// The trait keys the record contributed.
+    trait_keys: BTreeSet<String>,
+    /// The `[{kind, value}]` the record listed.
+    identifiers: Value,
+}
+
+/// [`remove_contribution`] for each of `keys` of one stream, in the caller's transaction, in a
+/// fixed number of statements however many keys there are: the guards, the records and then
+/// their people locked once, the tombstones in one statement, the traits of each person recomputed
+/// once from what remains, the unshared identities, the events and the dirty marks as sets, and
+/// the decisions appended in one statement. The result is the removal of each key in turn: the
+/// end state is the same (an identity two of the keys list goes with the last of them), and a
+/// person left with nothing is deleted once, after all of their records are gone.
+///
+/// Returns each key that matched a live record, in the order of `keys`, with its ledger row; a key
+/// that matched none, or that repeats, is left out. A person's `trait.change` decision is
+/// recorded with each removed record of theirs that contributed one of the keys that changed.
+pub(crate) async fn remove_contributions_in(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    source: &str,
+    stream: &str,
+    keys: &[String],
+    trace: &TraceContext,
+) -> Result<Vec<(String, RemovedRecord)>, StoreError> {
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
     crate::changes::cache_change_readers(connection, workspace).await?;
     lock_slots_shared(connection, workspace).await?;
-    // The record is locked first, then its person: the order the drain's existing-record path
-    // uses. With the record locked a merge cannot move it, so the owner cannot change.
-    let record: Option<(Uuid, Uuid)> = sqlx::query_as(
-        "SELECT id, person_id FROM source_records \
-         WHERE workspace_id = $1 AND source = $2 AND stream = $3 AND record_key = $4 \
-           AND deleted_at IS NULL FOR UPDATE",
+    // The records are locked first, then their people: the order the drain's existing-record path
+    // uses. With a record locked a merge cannot move it, so its owner cannot change.
+    let locked: Vec<(Uuid, Uuid, String)> = sqlx::query_as(
+        "SELECT id, person_id, record_key FROM source_records \
+         WHERE workspace_id = $1 AND source = $2 AND stream = $3 AND record_key = ANY($4) \
+           AND deleted_at IS NULL ORDER BY id FOR UPDATE",
     )
     .bind(workspace.as_uuid())
     .bind(source)
     .bind(stream)
-    .bind(record_key)
-    .fetch_optional(&mut *connection)
+    .bind(keys)
+    .fetch_all(&mut *connection)
     .await
     .map_err(StoreError::query)?;
-    let Some((locked_id, owner)) = record else {
-        return Ok(None);
-    };
-    sqlx::query("SELECT id FROM people WHERE workspace_id = $1 AND id = $2 FOR UPDATE")
-        .bind(workspace.as_uuid())
-        .bind(owner)
-        .execute(&mut *connection)
-        .await
-        .map_err(StoreError::query)?;
-    let (record_id, person_id, traits, identifiers): (Uuid, Uuid, Value, Value) = sqlx::query_as(
+    if locked.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut owners: Vec<Uuid> = locked.iter().map(|(_, person, _)| *person).collect();
+    owners.sort_unstable();
+    owners.dedup();
+    sqlx::query(
+        "SELECT id FROM people WHERE workspace_id = $1 AND id = ANY($2) ORDER BY id FOR UPDATE",
+    )
+    .bind(workspace.as_uuid())
+    .bind(&owners)
+    .execute(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    let ids: Vec<Uuid> = locked.iter().map(|(id, ..)| *id).collect();
+    let old: Vec<(Uuid, Uuid, Value, Value)> = sqlx::query_as(
         // The tombstone keeps no personal data: the old traits and identifiers are returned for
         // the key set and the identity cleanup, then emptied in the row itself.
-        "WITH old AS (SELECT id, person_id, traits, identifiers FROM source_records WHERE id = $1) \
+        "WITH old AS (SELECT id, person_id, traits, identifiers FROM source_records \
+                      WHERE id = ANY($1)) \
          UPDATE source_records s SET deleted_at = now(), updated_at = now(), \
              traits = '{}'::jsonb, identifiers = '[]'::jsonb, content_hash = ''::bytea \
          FROM old WHERE s.id = old.id \
          RETURNING old.id, old.person_id, old.traits, old.identifiers",
     )
-    .bind(locked_id)
-    .fetch_one(&mut *connection)
+    .bind(&ids)
+    .fetch_all(&mut *connection)
     .await
     .map_err(StoreError::query)?;
-    let keys: BTreeSet<String> = traits
-        .as_object()
-        .map(|map| map.keys().cloned().collect())
-        .unwrap_or_default();
-    let wanted = BTreeMap::from([(person_id, keys)]);
+
+    // In the order of `keys`.
+    let mut by_key: HashMap<String, Uuid> =
+        locked.into_iter().map(|(id, _, key)| (key, id)).collect();
+    let mut by_id: HashMap<Uuid, (Uuid, Value, Value)> = old
+        .into_iter()
+        .map(|(id, person, traits, identifiers)| (id, (person, traits, identifiers)))
+        .collect();
+    let mut removed = Vec::with_capacity(ids.len());
+    for key in keys {
+        let Some(record_id) = by_key.remove(key) else {
+            continue;
+        };
+        let Some((person_id, traits, identifiers)) = by_id.remove(&record_id) else {
+            continue;
+        };
+        let trait_keys = traits
+            .as_object()
+            .map(|map| map.keys().cloned().collect())
+            .unwrap_or_default();
+        removed.push(Tombstoned {
+            key: key.clone(),
+            record_id,
+            person_id,
+            trait_keys,
+            identifiers,
+        });
+    }
+
+    let mut wanted: BTreeMap<Uuid, BTreeSet<String>> = BTreeMap::new();
+    for record in &removed {
+        wanted
+            .entry(record.person_id)
+            .or_default()
+            .extend(record.trait_keys.iter().cloned());
+    }
     let changed = recompute_people(
         &mut *connection,
         workspace,
@@ -351,57 +432,75 @@ pub(crate) async fn remove_contribution_in(
         &mut Definitions::default(),
     )
     .await?;
-    if changed.contains_key(&person_id) {
-        record_decision(
-            &mut *connection,
-            workspace,
-            trace,
-            &decision_actions::TRAIT_CHANGED,
-            None,
-            vec![("person", person_id), ("source_record", record_id)],
-        )
-        .await?;
+    let mut decisions = Vec::with_capacity(removed.len() * 2);
+    for record in &removed {
+        let trait_changed = changed
+            .get(&record.person_id)
+            .is_some_and(|keys| record.trait_keys.iter().any(|key| keys.contains(key)));
+        let specs = [
+            (trait_changed, &decision_actions::TRAIT_CHANGED),
+            (true, &decision_actions::CONTRIBUTION_REMOVED),
+        ];
+        for (_, spec) in specs.into_iter().filter(|(wanted, _)| *wanted) {
+            decisions.push(NewDecision {
+                graph: None,
+                workspace_id: workspace,
+                trace: trace.clone(),
+                spec,
+                detail: None,
+                subject_ids: vec![
+                    ("person", record.person_id),
+                    ("source_record", record.record_id),
+                ],
+                job: None,
+            });
+        }
     }
-    remove_unshared_identities(
+    let (people, identifiers): (Vec<Uuid>, Vec<Value>) = removed
+        .iter()
+        .map(|record| (record.person_id, record.identifiers.clone()))
+        .unzip();
+    remove_unshared_identities(&mut *connection, workspace, &people, &identifiers, trace).await?;
+    let record_ids: Vec<Uuid> = removed.iter().map(|record| record.record_id).collect();
+    remove_record_events(&mut *connection, workspace, &record_ids).await?;
+    mark_people(
         &mut *connection,
         workspace,
-        person_id,
-        record_id,
-        &identifiers,
-        trace,
-    )
-    .await?;
-    remove_record_events(&mut *connection, workspace, record_id).await?;
-    mark_dirty(
-        &mut *connection,
-        workspace,
-        person_id,
+        &people,
         ChangeClasses::TRAITS | ChangeClasses::EVENTS,
         trace,
-    )
-    .await?;
-    record_decision(
-        &mut *connection,
-        workspace,
-        trace,
-        &decision_actions::CONTRIBUTION_REMOVED,
         None,
-        vec![("person", person_id), ("source_record", record_id)],
     )
     .await?;
-    if crate::orphan_policy(&mut *connection, workspace).await? == Some(OrphanPolicy::Delete)
-        && is_orphan(&mut *connection, workspace, person_id).await?
-    {
-        crate::delete_person(
-            &mut *connection,
-            workspace,
-            person_id,
-            DeleteReason::Orphan,
-            trace,
-        )
-        .await?;
+    append_decisions(&mut *connection, &decisions).await?;
+    if crate::orphan_policy(&mut *connection, workspace).await? == Some(OrphanPolicy::Delete) {
+        let mut seen = BTreeSet::new();
+        for record in &removed {
+            if seen.insert(record.person_id)
+                && is_orphan(&mut *connection, workspace, record.person_id).await?
+            {
+                crate::delete_person(
+                    &mut *connection,
+                    workspace,
+                    record.person_id,
+                    DeleteReason::Orphan,
+                    trace,
+                )
+                .await?;
+            }
+        }
     }
-    Ok(Some(RemovedRecord { record_id }))
+    Ok(removed
+        .into_iter()
+        .map(|record| {
+            (
+                record.key,
+                RemovedRecord {
+                    record_id: record.record_id,
+                },
+            )
+        })
+        .collect())
 }
 
 /// The dedupe rows of deleted events, `$2` their message ids and `$3` their ids, found through
@@ -415,19 +514,19 @@ const DELETE_EVENT_DEDUPE: &str = "DELETE FROM event_dedupe d \
 /// How many dedupe rows one statement of [`remove_record_events`] deletes at most.
 const DEDUPE_CHUNK: usize = 1000;
 
-/// Deletes the events of one ledger record, and the dedupe and debugger rows that name them, in
-/// the removal's transaction. The dedupe rows go [`DEDUPE_CHUNK`] at a time, by their key.
+/// Deletes the events of ledger records, and the dedupe and debugger rows that name them, in the
+/// removal's transaction. The dedupe rows go [`DEDUPE_CHUNK`] at a time, by their key.
 async fn remove_record_events(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
-    record_id: Uuid,
+    record_ids: &[Uuid],
 ) -> Result<(), StoreError> {
     let events: Vec<(Uuid, Option<String>)> = sqlx::query_as(
-        "DELETE FROM events WHERE workspace_id = $1 AND source_record_id = $2 \
+        "DELETE FROM events WHERE workspace_id = $1 AND source_record_id = ANY($2) \
          RETURNING id, message_id",
     )
     .bind(workspace.as_uuid())
-    .bind(record_id)
+    .bind(record_ids)
     .fetch_all(&mut *connection)
     .await
     .map_err(StoreError::query)?;
@@ -462,55 +561,58 @@ async fn remove_record_events(
     Ok(())
 }
 
-/// Deletes each identity in `identifiers` (the removed record's `[{kind, value}]`) that
-/// belongs to the person and that no other live record of the person lists, together with
-/// the conflicts about it.
+/// Deletes each identity in `identifiers` (the `[{kind, value}]` a record listed, one per entry of
+/// `people`, the record's person) that belongs to that person and that no live record of the
+/// person lists, together with the conflicts about it. A removed record is already tombstoned,
+/// and a changed one already lists what it keeps.
 async fn remove_unshared_identities(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
-    person_id: Uuid,
-    record_id: Uuid,
-    identifiers: &Value,
+    people: &[Uuid],
+    identifiers: &[Value],
     trace: &TraceContext,
 ) -> Result<(), StoreError> {
-    let doomed: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT i.id FROM identities i \
-         WHERE i.workspace_id = $1 AND i.person_id = $2 \
-           AND EXISTS (SELECT 1 FROM jsonb_array_elements($3::jsonb) e \
+    let doomed: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT DISTINCT i.id, i.person_id FROM identities i \
+         JOIN unnest($2::uuid[], $3::jsonb[]) AS r(person_id, identifiers) \
+           ON r.person_id = i.person_id \
+         WHERE i.workspace_id = $1 \
+           AND EXISTS (SELECT 1 FROM jsonb_array_elements(r.identifiers) e \
                        WHERE e ->> 'kind' = i.kind AND e ->> 'value' = i.value) \
            AND NOT EXISTS (SELECT 1 FROM source_records s \
-                           WHERE s.workspace_id = $1 AND s.person_id = $2 \
-                             AND s.deleted_at IS NULL AND s.id <> $4 \
+                           WHERE s.workspace_id = $1 AND s.person_id = i.person_id \
+                             AND s.deleted_at IS NULL \
                              AND s.identifiers @> jsonb_build_array( \
                                  jsonb_build_object('kind', i.kind, 'value', i.value)))",
     )
     .bind(workspace.as_uuid())
-    .bind(person_id)
+    .bind(people)
     .bind(identifiers)
-    .bind(record_id)
     .fetch_all(&mut *connection)
     .await
     .map_err(StoreError::query)?;
     if doomed.is_empty() {
         return Ok(());
     }
+    let (ids, owners): (Vec<Uuid>, Vec<Uuid>) = doomed.into_iter().unzip();
     for statement in [
         "DELETE FROM identity_conflicts WHERE workspace_id = $1 AND identity_id = ANY($2)",
         "DELETE FROM identities WHERE workspace_id = $1 AND id = ANY($2)",
     ] {
         sqlx::query(statement)
             .bind(workspace.as_uuid())
-            .bind(&doomed)
+            .bind(&ids)
             .execute(&mut *connection)
             .await
             .map_err(StoreError::query)?;
     }
-    mark_dirty(
+    mark_people(
         connection,
         workspace,
-        person_id,
+        &owners,
         ChangeClasses::IDENTIFIERS,
         trace,
+        None,
     )
     .await
 }
@@ -1180,9 +1282,8 @@ async fn upsert_ledger_row(
                 remove_unshared_identities(
                     connection,
                     workspace,
-                    person_id,
-                    row.id,
-                    &Value::Array(released),
+                    &[person_id],
+                    &[Value::Array(released)],
                     &record.trace,
                 )
                 .await?;
@@ -1247,17 +1348,6 @@ fn exact_integer(number: &serde_json::Number) -> Option<i128> {
 fn float_is_integer(float: f64, integer: i128) -> bool {
     // 2^127 is the first float outside i128, so every float below it converts exactly.
     float.fract() == 0.0 && float.abs() < 2f64.powi(127) && float as i128 == integer
-}
-
-/// Marks the person dirty in `classes`, on the trace of the change (see `changes`).
-pub(super) async fn mark_dirty(
-    connection: &mut PgConnection,
-    workspace: WorkspaceId,
-    person_id: Uuid,
-    classes: ChangeClasses,
-    trace: &TraceContext,
-) -> Result<(), StoreError> {
-    mark_person(connection, workspace, person_id, classes, trace, None).await
 }
 
 /// Queues a decision for the caller's flush; the same record as [`record_decision`].
@@ -3572,5 +3662,194 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(inferred, MAX_INFERRED_PER_WORKSPACE);
+    }
+
+    /// A workspace of three people over two sources: `a@` has two crm records that list its one
+    /// identity (traits `plan` and `tier`), `b@` a crm record and a newer shop record that list
+    /// theirs (the shop's `plan` wins), `c@` one crm record.
+    async fn removal_scenario(
+        pool: &PgPool,
+        slug: &str,
+        policy: Option<OrphanPolicy>,
+    ) -> WorkspaceId {
+        let ws = workspace(pool, slug).await;
+        define(pool, ws, "plan", Precedence::Latest, &[]).await;
+        let old = datetime!(2031-01-01 00:00 UTC);
+        let new = datetime!(2031-02-01 00:00 UTC);
+        let records = [
+            record("crm", "1", "a@example.com", json!({"plan": "a1"}), old),
+            record("crm", "2", "a@example.com", json!({"tier": "gold"}), old),
+            record("crm", "3", "b@example.com", json!({"plan": "b3"}), old),
+            record("shop", "9", "b@example.com", json!({"plan": "s9"}), new),
+            record("crm", "4", "c@example.com", json!({"plan": "c4"}), old),
+        ];
+        for one in &records {
+            apply_profile_batch(pool, ws, std::slice::from_ref(one))
+                .await
+                .unwrap();
+        }
+        if let Some(policy) = policy {
+            crate::set_orphan_policy(pool, ws, policy).await.unwrap();
+        }
+        ws
+    }
+
+    /// What a removal leaves, in a form that does not hold ids: the people by identity, the
+    /// ledger rows, the identities, the dirty marks and the decisions by kind.
+    async fn removal_state(pool: &PgPool, ws: WorkspaceId) -> Vec<String> {
+        let mut state = Vec::new();
+        for sql in [
+            "SELECT coalesce((SELECT string_agg(i.value, ',' ORDER BY i.value) FROM identities i \
+                              WHERE i.person_id = p.id), '-') || ' ' || p.traits::text \
+             FROM people p WHERE p.workspace_id = $1",
+            "SELECT source || '/' || record_key || ' ' || (deleted_at IS NOT NULL)::text || ' ' \
+                    || coalesce((SELECT jsonb_object_agg(e.key, e.value -> 'v') \
+                                 FROM jsonb_each(traits) e), '{}'::jsonb)::text \
+                    || ' ' || identifiers::text \
+             FROM source_records WHERE workspace_id = $1",
+            "SELECT 'identity ' || kind || ' ' || value FROM identities WHERE workspace_id = $1",
+            "SELECT 'marked ' || c.classes::text FROM person_changes c WHERE c.workspace_id = $1",
+            "SELECT 'decision ' || action || ' ' || outcome || ' ' || coalesce(reason, '-') \
+             FROM decision_records WHERE workspace_id = $1",
+        ] {
+            let mut rows: Vec<String> = sqlx::query_scalar(sql)
+                .bind(ws.as_uuid())
+                .fetch_all(pool)
+                .await
+                .unwrap();
+            rows.sort();
+            state.extend(rows);
+        }
+        state
+    }
+
+    /// Removes `keys` of `ws` one at a time, as the sweep did, and all together; the two end the
+    /// same, and the all-together one returns what the one-at-a-time ones did.
+    async fn removed_both_ways(pool: &PgPool, policy: Option<OrphanPolicy>, keys: &[&str]) {
+        let keys: Vec<String> = keys.iter().map(|key| (*key).to_owned()).collect();
+        let (one_by_one, together) = (
+            removal_scenario(pool, "serial", policy).await,
+            removal_scenario(pool, "together", policy).await,
+        );
+        let mut tx = begin(pool).await.unwrap();
+        let mut serial = Vec::new();
+        for key in &keys {
+            let source = if key == "9" { "shop" } else { "crm" };
+            if let Some(removed) =
+                remove_contribution_in(&mut tx, one_by_one, source, "contacts", key, &trace())
+                    .await
+                    .unwrap()
+            {
+                serial.push(key.clone());
+                let _ = removed;
+            }
+        }
+        commit(tx).await.unwrap();
+
+        let mut together_removed = Vec::new();
+        let mut tx = begin(pool).await.unwrap();
+        for source in ["crm", "shop"] {
+            let wanted: Vec<String> = keys
+                .iter()
+                .filter(|key| (key.as_str() == "9") == (source == "shop"))
+                .cloned()
+                .collect();
+            together_removed.extend(
+                remove_contributions_in(&mut tx, together, source, "contacts", &wanted, &trace())
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|(key, _)| key),
+            );
+        }
+        commit(tx).await.unwrap();
+
+        serial.sort();
+        together_removed.sort();
+        assert_eq!(
+            together_removed, serial,
+            "the keys that matched a live record"
+        );
+        assert_eq!(
+            removal_state(pool, together).await,
+            removal_state(pool, one_by_one).await
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn removing_keys_together_equals_removing_them_one_by_one(pool: PgPool) {
+        // `a@`'s two records share its identity, `b@` keeps a second live record, "absent" is no
+        // record and "1" repeats.
+        removed_both_ways(&pool, None, &["1", "2", "3", "absent", "1"]).await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn removing_keys_together_deletes_an_orphan_once_under_the_delete_policy(pool: PgPool) {
+        removed_both_ways(
+            &pool,
+            Some(OrphanPolicy::Delete),
+            &["1", "2", "3", "4", "9"],
+        )
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn removing_keys_together_keeps_what_a_second_live_record_still_holds(pool: PgPool) {
+        let ws = removal_scenario(&pool, "ours", None).await;
+        let mut tx = begin(&pool).await.unwrap();
+
+        let removed = remove_contributions_in(
+            &mut tx,
+            ws,
+            "crm",
+            "contacts",
+            &[
+                "3".to_owned(),
+                "1".to_owned(),
+                "2".to_owned(),
+                "gone".to_owned(),
+            ],
+            &trace(),
+        )
+        .await
+        .unwrap();
+        commit(tx).await.unwrap();
+
+        assert_eq!(
+            removed
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .collect::<Vec<_>>(),
+            ["3", "1", "2"],
+            "in the order asked, the key that matched nothing left out"
+        );
+        let identities: Vec<String> = sqlx::query_scalar(
+            "SELECT value FROM identities WHERE workspace_id = $1 ORDER BY value",
+        )
+        .bind(ws.as_uuid())
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            identities,
+            ["a@example.com", "b@example.com", "c@example.com"][1..],
+            "a@'s identity went with its last record; b@'s stays with the shop record"
+        );
+        let plan: Option<Value> = sqlx::query_scalar(
+            "SELECT p.traits -> 'plan' FROM people p JOIN identities i ON i.person_id = p.id \
+             WHERE p.workspace_id = $1 AND i.value = 'b@example.com'",
+        )
+        .bind(ws.as_uuid())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            plan,
+            Some(json!("s9")),
+            "recomputed from the live shop record"
+        );
     }
 }

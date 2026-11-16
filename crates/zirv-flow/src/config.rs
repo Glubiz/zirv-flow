@@ -24,6 +24,9 @@ const MAX_UNIT_SIZE: u32 = 1000;
 /// The most slots a worker may dedicate to `ingest.drain`.
 const MAX_DRAIN_SLOTS: u32 = 64;
 
+/// The most `worker.webhook_slots` may be.
+const MAX_WEBHOOK_SLOTS: u32 = 64;
+
 /// The most render-host children `render.pool_size` may ask for.
 const MAX_RENDER_POOL: u32 = 32;
 
@@ -45,7 +48,7 @@ use zirv_flow_store::{
     JOB_HISTORY_DAYS_BOUNDS, TEST_SEND_MONTHS_BOUNDS,
 };
 
-pub(crate) const CONFIG_KEYS: [&str; 73] = [
+pub(crate) const CONFIG_KEYS: [&str; 74] = [
     "server.bind",
     "server.cookie_secure",
     "server.public_url",
@@ -65,6 +68,7 @@ pub(crate) const CONFIG_KEYS: [&str; 73] = [
     "database.migrate_on_start",
     "worker.concurrency",
     "worker.drain_slots",
+    "worker.webhook_slots",
     "worker.lease_seconds",
     "worker.max_running_per_workspace",
     "events.retention_days",
@@ -382,6 +386,11 @@ struct WorkerConfig {
     /// shard at once.
     #[serde(default)]
     drain_slots: Option<u32>,
+    /// Slots beside `concurrency` that claim only `webhook.call`, so a receiver that does not answer
+    /// holds these and no other work; 0 leaves the calls to the general slots. Unset means the
+    /// worker's default of 2.
+    #[serde(default)]
+    webhook_slots: Option<u32>,
     lease_seconds: u32,
     /// Unset means unlimited.
     #[serde(default)]
@@ -815,6 +824,17 @@ impl Config {
                 "worker.drain_slots",
                 "must be between 0 and 64",
                 source_for("worker.drain_slots", path, &env_sources),
+            ));
+        }
+        if config
+            .worker
+            .webhook_slots
+            .is_some_and(|slots| slots > MAX_WEBHOOK_SLOTS)
+        {
+            return Err(ConfigError::new(
+                "worker.webhook_slots",
+                "must be between 0 and 64",
+                source_for("worker.webhook_slots", path, &env_sources),
             ));
         }
 
@@ -1355,6 +1375,12 @@ impl Config {
     /// configured, else one per drain shard.
     pub(crate) fn worker_drain_slots(&self) -> u32 {
         self.worker.drain_slots.unwrap_or(self.ingest.drain_shards)
+    }
+
+    /// Slots a worker process dedicates to `webhook.call`, beside its general slots, when the
+    /// operator set them; the worker's own default otherwise.
+    pub(crate) fn worker_webhook_slots(&self) -> Option<u32> {
+        self.worker.webhook_slots
     }
 
     /// How long a claimed job's lease lasts without a heartbeat.
@@ -2361,6 +2387,25 @@ cookie_secure = false
         env.push(("ZIRV_FLOW_WORKER__DRAIN_SLOTS".into(), "65".into()));
         let error = Config::load(None, env).unwrap_err().to_string();
         assert!(error.contains("worker.drain_slots"), "{error}");
+        assert!(error.contains("between 0 and 64"), "{error}");
+    }
+
+    #[test]
+    fn the_webhook_slots_are_unset_by_default_and_can_be_set_to_zero_or_sixty_four_but_not_more() {
+        let config = Config::load(None, database_env("postgres://localhost/database")).unwrap();
+        assert_eq!(config.worker_webhook_slots(), None);
+
+        for (value, slots) in [("0", 0), ("64", 64)] {
+            let mut env = database_env("postgres://localhost/database");
+            env.push(("ZIRV_FLOW_WORKER__WEBHOOK_SLOTS".into(), value.into()));
+            let config = Config::load(None, env).unwrap();
+            assert_eq!(config.worker_webhook_slots(), Some(slots));
+        }
+
+        let mut env = database_env("postgres://localhost/database");
+        env.push(("ZIRV_FLOW_WORKER__WEBHOOK_SLOTS".into(), "65".into()));
+        let error = Config::load(None, env).unwrap_err().to_string();
+        assert!(error.contains("worker.webhook_slots"), "{error}");
         assert!(error.contains("between 0 and 64"), "{error}");
     }
 

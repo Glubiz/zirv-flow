@@ -13,7 +13,8 @@ use time::OffsetDateTime;
 /// The exponent stops growing here; the cap bounds the delay long before this matters.
 const MAX_DOUBLINGS: u32 = 30;
 
-/// How long to wait before retrying a job that has failed `attempts` times:
+/// How long to wait before retrying a job that has failed `attempts` times before (0 for the
+/// first retry, which waits the base):
 /// `min(base * 2^attempts, cap) * jitter`, with the jitter in `[0.5, 1.0]`.
 ///
 /// `random_unit` is a random number in `[0, 1]` supplied by the caller, so the math stays

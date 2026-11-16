@@ -104,7 +104,7 @@ guidance. It was one development machine with CPU and memory caps, not reference
 - **More app replicas do not raise throughput while the database is at its cap.** Add workers only when worker
   CPU or the job queue is the limit (see the guidance above). Every added worker or drain slot raises the
   connection budget: use the [connection arithmetic](#connection-arithmetic) with `ingest.drain_shards`,
-  `worker.drain_slots` and the per-worker connections `D + 3 x C + 1`, and keep PostgreSQL's `max_connections`
+  `worker.drain_slots`, `worker.webhook_slots` and the per-worker connections `D + 3 x C + 1`, and keep PostgreSQL's `max_connections`
   above the total. The benchmark used 16 drain shards, 4 workers with 4 drain slots each and
   `max_connections` 350.
 - **Database memory.** The page cache filled the 10 GiB `zf-db` container in every window, and as the database
@@ -129,7 +129,7 @@ guidance. It was one development machine with CPU and memory caps, not reference
 deployment. A process running a worker also opens separate jobs and heartbeat
 pools, and a process running `serve` opens an explorer pool. Let D be its main pool
 limit, E be `explorer.max_connections` (default 4), C be `worker.concurrency` plus
-`worker.drain_slots` (default `ingest.drain_shards`). The maximum is:
+`worker.drain_slots` (default `ingest.drain_shards`) plus `worker.webhook_slots` (default 2). The maximum is:
 
 - `scheduler`: D.
 - `serve`: D + E. The explorer pool serves every explorer query and CSV export page,
@@ -163,10 +163,10 @@ pool. Keep capacity available there for ordinary queries.
 Worked example: separate `serve`, `worker` and `scheduler`, each using the current
 [configured default](../../crates/zirv-flow/src/config.rs) D = 10, with C = 4 and
 S = 8 as in [M2 §2.1](../benchmarks/m2-ingestion.md#21-stack-and-tiers), and the default
-eight drain slots (C = 4 + 8 = 12). The extra worker budget is 3 × 12 + 1 = **37** connections; the
-deployment total is 3 × 10 + 37 + E = 3 × 10 + 37 + 4 = **71**. Against the benchmark PostgreSQL
+eight drain slots and two webhook slots (C = 4 + 8 + 2 = 14). The extra worker budget is 3 × 14 + 1 = **43** connections; the
+deployment total is 3 × 10 + 43 + E = 3 × 10 + 43 + 4 = **77**. Against the benchmark PostgreSQL
 `max_connections` of **100**
-([M stack](../benchmarks/data/M/sustained-stack.txt)), that leaves **29** before
+([M stack](../benchmarks/data/M/sustained-stack.txt)), that leaves **23** before
 subtracting PostgreSQL reserved slots, monitoring clients, migrations, and the
 admin CLI's own pool. These are calculated ceilings, not a recommended spare
 capacity or observed usage. Count every additional process and concurrent admin

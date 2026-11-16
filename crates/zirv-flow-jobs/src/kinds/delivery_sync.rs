@@ -354,6 +354,16 @@ async fn call(
     match gates.admit(&pool, plan.destination.id, &clock).await? {
         Admission::Granted => {}
         Admission::Wait(wait) => {
+            // The jobs waiting for this bucket wake one token apart, not all at the instant the
+            // bucket first holds one.
+            let interval = Duration::from_secs_f64(1.0 / f64::from(plan.destination.rate.max(1)));
+            let wait = gates.reserve(
+                plan.destination.id,
+                now,
+                wait,
+                interval,
+                MAX_RATE_WAIT.unsigned_abs(),
+            );
             // Whether the copy was enqueued or the person is gone, this run ends with no call.
             wait_for_token(ctx, job, person, wait, now).await?;
             return Ok(Called::Waiting);
@@ -513,6 +523,8 @@ mod tests {
         ws: WorkspaceId,
         fake: FakeProvider,
         destination: Uuid,
+        /// The gates of the process, which every attempt shares as a worker's do.
+        gates: Arc<crate::delivery::rate::RateGates>,
     }
 
     impl Env {
@@ -580,6 +592,7 @@ mod tests {
                 ws,
                 fake,
                 destination,
+                gates: Arc::default(),
             }
         }
 
@@ -721,6 +734,7 @@ mod tests {
             let egress = Arc::new(EgressPolicy::parse(&["127.0.0.1/32".to_owned()]).unwrap());
             let mut ctx = JobContext::new(tx, claimed)
                 .with_outbound(None, egress, Arc::default())
+                .with_rate_gates(Arc::clone(&self.gates))
                 .with_ingest(IngestSettings {
                     pool: self.pool.clone(),
                     redaction_key: None,
@@ -1575,6 +1589,39 @@ mod tests {
                 [env.destination],
                 "the survivor's erasure reaches the destination contacted during the merge"
             );
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_waiting_copies_are_spaced_a_token_apart(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::with(pool, |manifest| manifest, 2, 1).await;
+            let person = env.person().await;
+            for _ in 0..6 {
+                let enrolled = env.enroll(person).await;
+                env.queue(&enrolled, "upsert", 5).await;
+            }
+
+            for _ in 0..6 {
+                env.attempt().await.unwrap();
+            }
+
+            assert_eq!(env.fake.requests(), 1, "one token, one call");
+            let due: Vec<time::OffsetDateTime> = sqlx::query_scalar(
+                "SELECT run_at FROM jobs WHERE kind = 'delivery.sync' ORDER BY run_at",
+            )
+            .fetch_all(&env.pool)
+            .await
+            .unwrap();
+            assert_eq!(due.len(), 5);
+            for pair in due.windows(2) {
+                assert!(
+                    pair[1] - pair[0] >= time::Duration::milliseconds(400),
+                    "the copies wake a token apart (500 ms), not together: {due:?}"
+                );
+            }
         })
         .await;
     }

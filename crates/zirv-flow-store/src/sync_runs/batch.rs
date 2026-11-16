@@ -26,7 +26,7 @@ use crate::lists::{
 };
 use crate::people::{
     HeldPeople, LedgerKey, ProfileOutcome, ProfileRecord, apply_profile_records_held,
-    apply_profile_records_singly, remove_contribution_in,
+    apply_profile_records_singly, remove_contributions_in,
 };
 use crate::stream_offsets::PartitionOffset;
 use crate::subtransactions::{Isolated, MAX_RUNS, Tried, apply_isolated};
@@ -326,17 +326,21 @@ pub async fn commit_sync_batch(
 
     // The store's own `contribution.removed` decision says what happened to the person; the
     // `deleted` decision names the ledger row, as the person may go with it.
+    let keys: Vec<String> = batch.deleted.iter().map(|(key, _)| key.clone()).collect();
+    let mut removed: HashMap<_, _> = remove_contributions_in(
+        &mut tx,
+        batch.workspace,
+        batch.source,
+        batch.stream,
+        &keys,
+        batch.trace,
+    )
+    .await?
+    .into_iter()
+    .collect();
     for (key, why) in batch.deleted {
-        let removed = remove_contribution_in(
-            &mut tx,
-            batch.workspace,
-            batch.source,
-            batch.stream,
-            key,
-            batch.trace,
-        )
-        .await?;
-        if let Some(removed) = removed {
+        // A key that repeats is removed once.
+        if let Some(removed) = removed.remove(key) {
             counts.deleted += 1;
             decisions.push(decision(
                 batch,

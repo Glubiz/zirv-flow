@@ -505,6 +505,9 @@ async fn run_roles_reporting(
         worker_config.max_running_per_workspace = config.worker_max_running_per_workspace();
         worker_config.drain_slots =
             usize::try_from(config.worker_drain_slots()).unwrap_or(usize::MAX);
+        if let Some(slots) = config.worker_webhook_slots() {
+            worker_config.webhook_slots = usize::try_from(slots).unwrap_or(usize::MAX);
+        }
         worker_config.event_retention = config.events_retention();
         worker_config.export_max_bytes = config.export_max_bytes();
         worker_config.message_retention = config.messages_retention();

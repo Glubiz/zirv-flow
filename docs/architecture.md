@@ -570,8 +570,9 @@ that hold rows and completes. A batch is up to `ingest.drain_batch_size` of the
 oldest rows of the shard's buckets, picked through `(workspace_id, affinity, id)`, so a scan
 never walks another shard's backlog. A key lives in one bucket, so its
 rows still apply in id order; two shards may share a person under different keys, and a
-deadlock between them is the retryable `40P01`. The worker pool holds `(concurrency + drain_slots) * 2
-+ 1` connections. Each loop is `drain_batch`: in one transaction it picks the
+deadlock between them is the retryable `40P01`. The worker pool holds `(concurrency + drain_slots + webhook_slots) * 2
++ 1` connections (`webhook_slots`, default 2, are slots that claim only `webhook.call`, as drain slots claim only
+`ingest.drain`, so a receiver that does not answer holds those and no other kind's slot). Each loop is `drain_batch`: in one transaction it picks the
 batch's ids without locking, locks those rows with `FOR UPDATE SKIP LOCKED` (a batch never
 applies past a row it could not lock: the rest of that bucket's picked rows wait for the next
 batch, and a batch that takes nothing ends the loop), applies them in id order through the

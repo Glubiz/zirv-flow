@@ -28,7 +28,7 @@ pub use apply::{
 pub(crate) use apply::{
     NativeWrite, apply_native_record, apply_profile_record, apply_profile_record_into,
     apply_profile_records, apply_profile_records_held, apply_profile_records_singly,
-    remove_contribution_in,
+    remove_contribution_in, remove_contributions_in,
 };
 pub(crate) use apply::{normalize_identifiers, record_resolution};
 #[cfg(test)]

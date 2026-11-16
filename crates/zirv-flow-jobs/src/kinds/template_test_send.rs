@@ -145,27 +145,35 @@ impl JobKind for TemplateTestSend {
             return Ok(());
         }
         let last = ctx.attempts() >= ctx.max_attempts();
+        if last {
+            // The last attempt ends the row on the job's own transaction, which holds the row's
+            // lock from the recorded versions on and is aborted by a failing statement: the
+            // savepoint lets the failure be written there after the rollback.
+            sqlx::query("SAVEPOINT test_send")
+                .execute(&mut *ctx.conn())
+                .await?;
+        }
         match decide(ctx, &job, &row, &payload, now).await {
             Ok(Step::Over) => Ok(()),
             Ok(Step::End { outcome, reason }) => {
                 finish_test_send(ctx.conn(), job.workspace, job.id, outcome, reason, now).await?;
                 Ok(())
             }
-            Err(error) if last => {
+            Err(_) if last => {
                 // The job completes either way.
                 warn!("a test send ends failed on its last attempt");
-                if let Some(pool) = ctx.pool() {
-                    let mut connection = pool.acquire().await.map_err(|_| error)?;
-                    finish_test_send(
-                        &mut connection,
-                        job.workspace,
-                        job.id,
-                        TestSendOutcome::Failed,
-                        Some("internal_error"),
-                        now,
-                    )
+                sqlx::query("ROLLBACK TO SAVEPOINT test_send")
+                    .execute(&mut *ctx.conn())
                     .await?;
-                }
+                finish_test_send(
+                    ctx.conn(),
+                    job.workspace,
+                    job.id,
+                    TestSendOutcome::Failed,
+                    Some("internal_error"),
+                    now,
+                )
+                .await?;
                 Ok(())
             }
             Err(error) => Err(error),
@@ -1396,6 +1404,75 @@ mod tests {
             0,
             "the payload is gone"
         );
+    }
+
+    /// Runs the only attempt of a test send under `fault`, SQL that makes a later statement of
+    /// the job fail, and ends the run if it hangs (#709: the failure was written on a second
+    /// connection that waited for the row lock of the job's own transaction).
+    async fn last_attempt_under(pool: PgPool, fault: &str) {
+        let env = Env::new(pool, json!({"mode": "ok"})).await;
+        let template = env.html_template().await;
+        let id = env.reserve(template, "qa@example.org", None).await;
+        sqlx::query("UPDATE jobs SET max_attempts = 1")
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql(sqlx::AssertSqlSafe(fault.to_owned()))
+            .execute(&env.pool)
+            .await
+            .unwrap();
+
+        let ended = tokio::time::timeout(Duration::from_secs(20), env.attempt()).await;
+
+        assert!(ended.is_ok(), "the job hung on its own row lock");
+        ended.unwrap().unwrap();
+        let row = env.row(id).await;
+        assert_eq!(row.outcome, TestSendOutcome::Failed);
+        assert_eq!(row.reason.as_deref(), Some("internal_error"));
+        assert_eq!(env.count("SELECT count(*) FROM jobs").await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_error_after_the_versions_are_recorded_on_the_last_attempt_ends_the_row_failed(
+        pool: PgPool,
+    ) {
+        // The destination load decodes its credential fields from NULL and fails.
+        last_attempt_under(
+            pool,
+            "CREATE OR REPLACE FUNCTION credential_field_names(ws uuid, credential uuid) \
+             RETURNS text[] LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$",
+        )
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_statement_error_on_the_last_attempt_aborts_the_transaction_and_still_ends_the_row(
+        pool: PgPool,
+    ) {
+        // A raised error leaves the job's transaction aborted until the savepoint is rolled back.
+        last_attempt_under(
+            pool,
+            "CREATE OR REPLACE FUNCTION credential_field_names(ws uuid, credential uuid) \
+             RETURNS text[] LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'broken'; END $$",
+        )
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_error_while_the_versions_are_recorded_on_the_last_attempt_ends_the_row_failed(
+        pool: PgPool,
+    ) {
+        last_attempt_under(
+            pool,
+            "CREATE FUNCTION refuse_test_send_update() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN RAISE EXCEPTION 'refused'; END $$; \
+             CREATE TRIGGER refuse BEFORE UPDATE ON test_sends \
+             FOR EACH ROW WHEN (NEW.outcome::text = 'queued') EXECUTE FUNCTION refuse_test_send_update()",
+        )
+        .await;
     }
 
     #[sqlx::test]
