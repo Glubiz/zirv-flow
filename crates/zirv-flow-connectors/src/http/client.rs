@@ -836,6 +836,71 @@ mod tests {
         assert_eq!(response.status(), 307);
     }
 
+    /// How [`Stub`] answers any name.
+    enum Answer {
+        Empty,
+        Never,
+    }
+
+    struct Stub(Answer);
+
+    impl Lookup for Stub {
+        fn lookup<'a>(
+            &'a self,
+            _host: &'a str,
+        ) -> Pin<Box<dyn Future<Output = io::Result<Vec<IpAddr>>> + Send + 'a>> {
+            Box::pin(async move {
+                match self.0 {
+                    Answer::Empty => Ok(Vec::new()),
+                    Answer::Never => std::future::pending().await,
+                }
+            })
+        }
+    }
+
+    /// The URL of a server on the loopback whose `/hop` answers a 307 to `https://hop.test/x`.
+    async fn redirect_to_a_name() -> String {
+        let router = Router::new().route(
+            "/hop",
+            get(|| async { Redirect::temporary("https://hop.test/x") }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        format!("http://127.0.0.1:{port}/hop")
+    }
+
+    fn stubbed(answer: Answer, limits: HttpLimits) -> GuardedClient {
+        let policy = Arc::new(EgressPolicy::parse(&["127.0.0.1/32".to_owned()]).unwrap());
+        GuardedClient::with_lookup(policy, limits, Arc::new(Stub(answer))).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_redirect_to_a_name_that_resolves_to_nothing_is_returned_as_the_answer() {
+        let url = redirect_to_a_name().await;
+        let guarded = stubbed(Answer::Empty, HttpLimits::default());
+
+        let response = get_url(&guarded, &url)
+            .await
+            .expect("an empty answer is no egress risk");
+
+        assert_eq!(response.status(), 307);
+    }
+
+    #[tokio::test]
+    async fn a_lookup_of_a_redirect_target_that_never_completes_times_out() {
+        let url = redirect_to_a_name().await;
+        let limits = HttpLimits {
+            connect_timeout: Duration::from_millis(100),
+            ..HttpLimits::default()
+        };
+        let guarded = stubbed(Answer::Never, limits);
+
+        let result = get_url(&guarded, &url).await;
+
+        assert_eq!(result.unwrap_err(), HttpError::Timeout);
+    }
+
     #[tokio::test]
     async fn a_limit_of_zero_returns_the_redirect_itself_and_follows_nothing() {
         let (port, hits) = serve().await;

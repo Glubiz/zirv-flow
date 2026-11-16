@@ -1141,10 +1141,7 @@ mod tests {
             .await,
         );
 
-        assert_eq!(
-            keys(&all),
-            [1, 2, 3, 4, 5].map(|row| format!("\u{1f}row:{row}"))
-        );
+        assert_eq!(keys(&all), [1, 2, 3, 4, 5].map(|row| format!("row:{row}")));
         assert_eq!(
             keys(&resumed),
             keys(&all)[all[0].records.len() + all[1].records.len()..]

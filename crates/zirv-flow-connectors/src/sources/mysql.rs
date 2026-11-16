@@ -239,7 +239,16 @@ impl KeyType {
     /// text. An unsigned cursor stops at zero instead of wrapping.
     fn lookback(self, lookback: u64) -> Option<(String, usize)> {
         Some(match self {
-            Self::Signed => (format!("(? - {lookback})"), 1),
+            Self::Signed => {
+                // `BIGINT - n` errors below the type's minimum, so a checkpoint nearer to it
+                // than `n` is read back to the minimum itself.
+                let lookback = lookback.min(i64::MAX as u64) as i64;
+                let floor = i64::MIN + lookback;
+                (
+                    format!("IF(? > {floor}, ? - {lookback}, -9223372036854775807 - 1)"),
+                    2,
+                )
+            }
             Self::Unsigned => (format!("IF(? > {lookback}, ? - {lookback}, 0)"), 2),
             Self::Decimal(_) => (format!("({} - {lookback})", self.placeholder()), 1),
             Self::Temporal => (format!("(? - INTERVAL {lookback} SECOND)"), 1),
@@ -711,7 +720,12 @@ mod tests {
             "SELECT CAST(s.`id` AS CHAR) AS `id`, CAST(s.`updated_at` AS CHAR) AS `updated_at` FROM t AS s WHERE s.`updated_at` IS NOT NULL AND s.`updated_at` > (? - INTERVAL 300 SECOND) ORDER BY s.`updated_at`, s.`id` LIMIT 500"
         );
         assert_eq!(count, 1);
-        assert!(window(KeyType::Signed).unwrap().0.contains("> (? - 300)"));
+        let (signed, count) = window(KeyType::Signed).unwrap();
+        assert!(
+            signed.contains("> IF(? > -9223372036854775508, ? - 300, -9223372036854775807 - 1)"),
+            "{signed}"
+        );
+        assert_eq!(count, 2);
         let (unsigned, count) = window(KeyType::Unsigned).unwrap();
         assert!(unsigned.contains("> IF(? > 300, ? - 300, 0)"), "{unsigned}");
         assert_eq!(count, 2);
@@ -1626,6 +1640,97 @@ mod tests {
             ]
         );
         assert_eq!(keys(&rest_price), ["9007199254740993", "9007199254740992"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires MySQL; set ZIRV_FLOW_TEST_MYSQL_URL"]
+    async fn a_late_row_is_read_under_a_lookback_for_every_cursor_type() {
+        let fixture = Fixture::new().await;
+        // (column type, checkpoint cursor, late cursor, lookback) with the late cursor older
+        // than the checkpoint's by less than the lookback.
+        let cases = [
+            (
+                "DATETIME",
+                "2024-01-01 08:00:00",
+                "2024-01-01 07:00:00",
+                7200,
+            ),
+            ("DATE", "2024-01-10", "2024-01-09", 2 * 86_400),
+            ("BIGINT UNSIGNED", "100", "95", 10),
+            ("BIGINT", "100", "95", 10),
+            ("DECIMAL(10,2)", "100.50", "95.25", 10),
+        ];
+        for (index, (ty, checkpoint_at, late_at, lookback)) in cases.into_iter().enumerate() {
+            let table = format!("lb_{index}");
+            let qualified = format!("`{}`.`{table}`", fixture.database);
+            admin_exec(
+                &fixture.admin,
+                &format!(
+                    "CREATE TABLE {qualified} (id BIGINT PRIMARY KEY, c {ty} NOT NULL);
+                     INSERT INTO {qualified} VALUES (1, '{checkpoint_at}');
+"
+                ),
+            )
+            .await;
+            let stream = stream(&table, SyncMode::Incremental, Some("c"), &["id"]);
+            let plain = fixture.config(json!({}));
+            let first = fixture.read(&plain, &stream, None).await.unwrap();
+            let checkpoint = first.last().unwrap().checkpoint.clone();
+            admin_exec(
+                &fixture.admin,
+                &format!(
+                    "INSERT INTO {qualified} VALUES (2, '{late_at}');
+"
+                ),
+            )
+            .await;
+
+            let strict = fixture
+                .read(&plain, &stream, Some(checkpoint.clone()))
+                .await
+                .unwrap();
+            let widened = fixture
+                .read(
+                    &fixture.config(json!({"cursor_lookback": lookback})),
+                    &stream,
+                    Some(checkpoint),
+                )
+                .await
+                .unwrap();
+
+            assert!(!keys(&strict).contains(&"2".to_owned()), "{ty}");
+            assert!(keys(&widened).contains(&"2".to_owned()), "{ty}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires MySQL; set ZIRV_FLOW_TEST_MYSQL_URL"]
+    async fn a_lookback_at_the_smallest_integer_cursor_reads_without_overflowing() {
+        let fixture = Fixture::new().await;
+        let qualified = format!("`{}`.`lb_min`", fixture.database);
+        admin_exec(
+            &fixture.admin,
+            &format!(
+                "CREATE TABLE {qualified} (id BIGINT PRIMARY KEY, c BIGINT NOT NULL);
+                 INSERT INTO {qualified} VALUES (1, -9223372036854775807 - 1), (2, -9223372036854775807);
+"
+            ),
+        )
+        .await;
+        let stream = stream("lb_min", SyncMode::Incremental, Some("c"), &["id"]);
+
+        let widened = fixture
+            .read(
+                &fixture.config(json!({"cursor_lookback": 1})),
+                &stream,
+                Some(Checkpoint(
+                    json!({"v": 1, "key": ["-9223372036854775808", "1"]}),
+                )),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(keys(&widened), ["2"]);
     }
 
     #[tokio::test(flavor = "multi_thread")]

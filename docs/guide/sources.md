@@ -109,9 +109,11 @@ refused), all text. For JSON they are the top-level keys of the first 100 record
 the first value that is not null; nested values are reached with a dotted path in the mapping
 (see the Mapping reference). Choose the stream's **primary key** in **Set up**: a record's key
 is its value, or several values joined as a JSON array. Without a primary key the key is the
-record's position in the file (U+001F then `row:<n>`, so no real id such as `row:3` can equal it),
-which holds only while the file is not reordered. A real id that itself starts with U+001F is
-stored with one more.
+record's position in the file, `row:<n>`, which holds only while the file is not reordered. A real
+id that looks like that (`row:3`, or one that starts with U+001F before `row:3`) is stored with one
+more U+001F, so it never equals a position. A file whose real ids look like `row:<n>` has those
+keys changed once after an upgrade, so its first full refresh re-creates those records and may
+trip the sweep limit.
 
 **Full refresh only.** A file has no cursor, so every run reads it from the start; the content
 hashes make an unchanged row cost nothing, and a row removed from the file is removed, with its

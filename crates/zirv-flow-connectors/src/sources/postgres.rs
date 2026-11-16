@@ -289,7 +289,13 @@ impl KeyType {
     /// compare as `int8`, which every integer column's index serves.
     fn lookback(self, lookback: u64) -> Option<String> {
         Some(match self {
-            Self::Int2 | Self::Int4 | Self::Int8 => format!("($1::text::int8 - {lookback})"),
+            Self::Int2 | Self::Int4 | Self::Int8 => {
+                // `int8 - n` errors below the type's minimum, so a checkpoint nearer to it than
+                // `n` is raised to the lowest value that still subtracts cleanly.
+                let lookback = lookback.min(i64::MAX as u64) as i64;
+                let floor = i64::MIN + lookback;
+                format!("(GREATEST($1::text::int8, {floor}::int8) - {lookback})")
+            }
             Self::Numeric => format!("($1::text::numeric - {lookback})"),
             Self::Date | Self::Timestamp | Self::Timestamptz => format!(
                 "($1::text::{} - interval '{lookback} seconds')",
@@ -772,7 +778,7 @@ mod tests {
         assert!(
             window(KeyType::Int4, KeyType::Int8)
                 .unwrap()
-                .contains("> ($1::text::int8 - 300)")
+                .contains("> (GREATEST($1::text::int8, -9223372036854775508::int8) - 300)")
         );
         assert!(
             window(KeyType::Numeric, KeyType::Int8)
@@ -1970,6 +1976,93 @@ mod tests {
         let strict = fixture.read(&plain, &text_cursor, resume).await.unwrap();
         assert_eq!(keys(&ignored), keys(&strict));
         assert!(!keys(&ignored).is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_late_row_is_read_under_a_lookback_for_every_cursor_type() {
+        let fixture = Fixture::new().await;
+        // (column type, checkpoint cursor, late cursor, lookback) with the late cursor older
+        // than the checkpoint's by less than the lookback.
+        let cases = [
+            ("date", "2024-01-10", "2024-01-09", 2 * 86_400),
+            (
+                "timestamp",
+                "2024-01-01 08:00:00",
+                "2024-01-01 07:00:00",
+                7200,
+            ),
+            ("smallint", "100", "95", 10),
+            ("integer", "100", "95", 10),
+            ("bigint", "100", "95", 10),
+            ("numeric", "100.50", "95.25", 10),
+        ];
+        for (index, (ty, checkpoint_at, late_at, lookback)) in cases.into_iter().enumerate() {
+            let table = format!("lb_{index}");
+            let qualified = format!("{}.{table}", fixture.schema);
+            admin_exec(
+                &fixture.admin,
+                &format!(
+                    "CREATE TABLE {qualified} (id bigint PRIMARY KEY, c {ty} NOT NULL);                      INSERT INTO {qualified} VALUES (1, '{checkpoint_at}');                      GRANT SELECT ON {qualified} TO {}",
+                    fixture.role
+                ),
+            )
+            .await;
+            let stream = stream(&table, SyncMode::Incremental, Some("c"), &["id"]);
+            let plain = fixture.config(serde_json::json!({}));
+            let first = fixture.read(&plain, &stream, None).await.unwrap();
+            let checkpoint = first.last().unwrap().checkpoint.clone();
+            admin_exec(
+                &fixture.admin,
+                &format!("INSERT INTO {qualified} VALUES (2, '{late_at}')"),
+            )
+            .await;
+
+            let strict = fixture
+                .read(&plain, &stream, Some(checkpoint.clone()))
+                .await
+                .unwrap();
+            let widened = fixture
+                .read(
+                    &fixture.config(serde_json::json!({"cursor_lookback": lookback})),
+                    &stream,
+                    Some(checkpoint),
+                )
+                .await
+                .unwrap();
+
+            assert!(!keys(&strict).contains(&"2".to_owned()), "{ty}");
+            assert!(keys(&widened).contains(&"2".to_owned()), "{ty}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_lookback_at_the_smallest_integer_cursor_reads_without_overflowing() {
+        let fixture = Fixture::new().await;
+        let qualified = format!("{}.lb_min", fixture.schema);
+        admin_exec(
+            &fixture.admin,
+            &format!(
+                "CREATE TABLE {qualified} (id bigint PRIMARY KEY, c bigint NOT NULL);                  INSERT INTO {qualified} VALUES (1, -9223372036854775808), (2, -9223372036854775807);                  GRANT SELECT ON {qualified} TO {}",
+                fixture.role
+            ),
+        )
+        .await;
+        let stream = stream("lb_min", SyncMode::Incremental, Some("c"), &["id"]);
+
+        let widened = fixture
+            .read(
+                &fixture.config(serde_json::json!({"cursor_lookback": 1})),
+                &stream,
+                Some(Checkpoint(
+                    serde_json::json!({"v": 1, "key": ["-9223372036854775808", "1"]}),
+                )),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(keys(&widened), ["2"]);
     }
 
     #[tokio::test(flavor = "multi_thread")]
