@@ -1,0 +1,14 @@
+-- A flow's draft had no revision, so a save from a stale editor replaced the whole graph and
+-- dropped what another editor had saved in between, with no error to either of them. The
+-- snippet, template and send-settings drafts already count their saves and refuse a save made
+-- from an older read.
+--
+-- `draft_revision` counts the writes to the draft (the name, the graph and the settings) and
+-- starts at 1. `update_flow_draft` adds one with every save, under the row lock it already takes,
+-- and a save that names the revision it read is refused when the draft has moved on. A publish,
+-- a pause, an archive and the warm-up changes do not touch the draft and leave it alone.
+--
+-- Lock: a constant default is metadata-only on PostgreSQL 11 and later, so no rewrite and no scan.
+-- `ALTER TABLE` takes ACCESS EXCLUSIVE on `flows` for an instant, and waits behind the
+-- transactions that already use the table. `flows` has a row per flow. No index.
+ALTER TABLE flows ADD COLUMN draft_revision integer NOT NULL DEFAULT 1;

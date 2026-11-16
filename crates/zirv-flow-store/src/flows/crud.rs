@@ -31,6 +31,9 @@ pub struct Flow {
     pub updated_at: OffsetDateTime,
     /// The warm-up setting and the window it last started.
     pub warmup: Warmup,
+    /// How many times the draft was written; 1 for a new flow. A save that names the revision it
+    /// read is refused when this has moved on.
+    pub draft_revision: i32,
 }
 
 /// One immutable published version of a flow.
@@ -60,6 +63,7 @@ pub(super) struct FlowRow {
     updated_at: OffsetDateTime,
     #[sqlx(flatten)]
     warmup: WarmupRow,
+    draft_revision: i32,
 }
 
 impl FlowRow {
@@ -79,6 +83,7 @@ impl FlowRow {
             created_at: self.created_at,
             updated_at: self.updated_at,
             warmup: self.warmup.into(),
+            draft_revision: self.draft_revision,
         })
     }
 }
@@ -87,7 +92,7 @@ macro_rules! flow_columns {
     () => {
         "id, name, state, draft_graph, draft_settings, current_version, archived_at, created_by, \
          created_at, updated_at, warmup_enabled, warmup_seconds, warmup_started_at, \
-         warmup_opened_at"
+         warmup_opened_at, draft_revision"
     };
 }
 
@@ -129,6 +134,8 @@ pub enum FlowError {
     },
     /// The flow is archived and its draft no longer changes.
     Archived,
+    /// The draft was saved since the caller read it; `current` is its revision now.
+    RevisionMismatch { current: i32 },
     /// A warm-up length outside `MIN_WARMUP_SECONDS..=MAX_WARMUP_SECONDS`.
     WarmupOutOfBounds,
     /// Open now is refused: only a published flow admits the entries that wait.
@@ -155,6 +162,7 @@ impl fmt::Display for FlowError {
                 )
             }
             Self::Archived => formatter.write_str("the flow is archived"),
+            Self::RevisionMismatch { .. } => formatter.write_str("the flow draft changed"),
             Self::WarmupOutOfBounds => {
                 formatter.write_str("the warm-up length is outside its bounds")
             }
@@ -269,21 +277,42 @@ pub async fn list_flows<'e>(
     rows.into_iter().map(FlowRow::into_flow).collect()
 }
 
-/// Changes the given draft fields of a flow that is not archived. The draft is not validated: a
-/// flow is edited in steps, and the publish checks it.
+/// Changes the given draft fields of a flow that is not archived and counts the save. The draft
+/// is not validated: a flow is edited in steps, and the publish checks it.
 pub async fn update_flow_draft(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     id: Uuid,
     patch: &FlowPatch,
 ) -> Result<Flow, FlowError> {
+    update_flow_draft_checked(connection, workspace, id, patch, None).await
+}
+
+/// [`update_flow_draft`] that, with `expected_revision`, only saves if the draft is still at that
+/// revision, else it is [`FlowError::RevisionMismatch`]. The check runs under the row lock the
+/// save takes, so two saves from the same read cannot both win.
+pub async fn update_flow_draft_checked(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    id: Uuid,
+    patch: &FlowPatch,
+    expected_revision: Option<i32>,
+) -> Result<Flow, FlowError> {
     let held = lock_flow(connection, workspace, id).await?;
     if held.flow.state == FlowState::Archived {
         return Err(FlowError::Archived);
     }
+    if let Some(expected) = expected_revision
+        && held.flow.draft_revision != expected
+    {
+        return Err(FlowError::RevisionMismatch {
+            current: held.flow.draft_revision,
+        });
+    }
     let row: FlowRow = sqlx::query_as(concat!(
         "UPDATE flows SET name = COALESCE($3, name), draft_graph = COALESCE($4, draft_graph), \
-            draft_settings = COALESCE($5, draft_settings), updated_at = now() \
+            draft_settings = COALESCE($5, draft_settings), updated_at = now(), \
+            draft_revision = draft_revision + 1 \
          WHERE workspace_id = $1 AND id = $2 RETURNING ",
         flow_columns!()
     ))
@@ -362,6 +391,61 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(find_flow(&pool, ws, flow.id).await.unwrap(), Some(flow));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_draft_save_counts_and_a_stale_revision_is_refused(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let flow = create(&pool, ws, "Welcome").await;
+        assert_eq!(flow.draft_revision, 1);
+        let save = |patch: FlowPatch, expected: Option<i32>| {
+            let pool = pool.clone();
+            async move {
+                let mut connection = pool.acquire().await.unwrap();
+                update_flow_draft_checked(&mut connection, ws, flow.id, &patch, expected).await
+            }
+        };
+        let graph_a = FlowPatch {
+            graph: Some(graph("a")),
+            ..FlowPatch::default()
+        };
+
+        let first = save(graph_a.clone(), Some(1)).await.unwrap();
+        let stale = save(
+            FlowPatch {
+                graph: Some(graph("b")),
+                ..FlowPatch::default()
+            },
+            Some(1),
+        )
+        .await;
+        let unchecked = save(
+            FlowPatch {
+                name: Some("Renamed".to_owned()),
+                ..FlowPatch::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        publish(&pool, ws, flow.id).await.unwrap();
+
+        assert_eq!((first.draft_revision, first.draft_graph), (2, graph("a")));
+        assert!(matches!(
+            stale,
+            Err(FlowError::RevisionMismatch { current: 2 })
+        ));
+        assert_eq!(unchecked.draft_revision, 3);
+        let stored = find_flow(&pool, ws, flow.id).await.unwrap().unwrap();
+        // The refused save changed nothing, and the publish does not count as a draft write.
+        assert_eq!(stored.draft_graph, graph("a"));
+        assert_eq!(stored.draft_revision, 3);
+        let mut connection = pool.acquire().await.unwrap();
+        let wrapper = update_flow_draft(&mut connection, ws, flow.id, &graph_a)
+            .await
+            .unwrap();
+        assert_eq!(wrapper.draft_revision, 4);
     }
 
     #[sqlx::test]

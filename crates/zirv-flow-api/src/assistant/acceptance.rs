@@ -1483,6 +1483,110 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_demoted_admin_cannot_accept_a_manifest_draft(pool: PgPool) {
+        let fx = setup(&pool, true, 100_000_000).await;
+        let port = serve_api().await;
+        let mut saved = manifest(port, &["id", "email"]);
+        saved["headers"] = json!({"X-Api-Key": "SECRET-HEADER-VALUE"});
+        let created = fx
+            .as_key(
+                "POST",
+                "/sources",
+                Some(
+                    json!({"kind": "http", "name": "API", "config": {"manifest": saved},
+                    "credential": {"token": "tok"}}),
+                ),
+            )
+            .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+        let source = created.body["id"].as_str().unwrap().to_owned();
+        let mut answer_manifest = saved.clone();
+        answer_manifest["headers"] = json!({"X-Api-Key": "(kept)"});
+        fx.fake.push(answer(
+            "draft_manifest",
+            json!({"manifest": answer_manifest}),
+        ));
+        let reply = fx
+            .draft(json!({"kind": "manifest", "source_id": source, "prompt": "Same"}))
+            .await;
+        assert_eq!(reply.status, StatusCode::CREATED, "{:?}", reply.body);
+        let id = reply.body["id"].as_str().unwrap().to_owned();
+        admin::set_member(&pool, &Context::system(), fx.ws, fx.admin_id, Role::Editor)
+            .await
+            .unwrap();
+
+        let accepted = fx.accept(&fx.admin, &id).await;
+
+        assert_eq!(
+            accepted.status,
+            StatusCode::FORBIDDEN,
+            "status {} body {:?}",
+            accepted.status,
+            accepted.body
+        );
+        assert!(!accepted.body.to_string().contains("SECRET-HEADER-VALUE"));
+        // The refusal left the draft open: the admin it belongs to can still accept it.
+        admin::set_member(&pool, &Context::system(), fx.ws, fx.admin_id, Role::Admin)
+            .await
+            .unwrap();
+        let accepted = fx.accept(&fx.admin, &id).await;
+        assert_eq!(accepted.status, StatusCode::OK, "{:?}", accepted.body);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_demoted_admin_cannot_accept_a_mapping_draft(pool: PgPool) {
+        let fx = setup(&pool, false, 100_000_000).await;
+        let source = fx.pulled_source(json!({})).await;
+        fx.fake.push(answer("draft_mapping", good_mapping()));
+        let reply = fx.draft(mapping_run(&source)).await;
+        assert_eq!(reply.status, StatusCode::CREATED, "{:?}", reply.body);
+        assert_eq!(reply.body["status"], "valid");
+        let id = reply.body["id"].as_str().unwrap().to_owned();
+        let stored = || async {
+            sqlx::query_as::<_, (String, Option<Value>)>(
+                "SELECT status, content FROM ai_drafts WHERE id = $1::uuid",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+        let before = stored().await;
+        admin::set_member(&pool, &Context::system(), fx.ws, fx.admin_id, Role::Editor)
+            .await
+            .unwrap();
+
+        let accepted = fx.accept(&fx.admin, &id).await;
+
+        assert_eq!(
+            accepted.status,
+            StatusCode::FORBIDDEN,
+            "status {} body {:?}",
+            accepted.status,
+            accepted.body
+        );
+        let body = accepted.body.to_string();
+        for content in ["display_name", "identifier", "stream_1", "email"] {
+            assert!(!body.contains(content), "{content} in {body}");
+        }
+        assert_eq!(
+            stored().await,
+            before,
+            "the refusal left the draft as it was"
+        );
+        assert!(fx.saved_mapping(&source).await.is_null());
+        // The draft is still open: the admin it belongs to can accept it once admin again.
+        admin::set_member(&pool, &Context::system(), fx.ws, fx.admin_id, Role::Admin)
+            .await
+            .unwrap();
+        let accepted = fx.accept(&fx.admin, &id).await;
+        assert_eq!(accepted.status, StatusCode::OK, "{:?}", accepted.body);
+        assert_eq!(accepted.body["content"]["columns"][0]["column"], "email");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_saved_header_and_query_value_never_reach_the_provider_and_come_back_in_the_draft(
         pool: PgPool,
     ) {
@@ -1660,6 +1764,59 @@ mod tests {
             .await
             .unwrap();
         assert!(!stored.to_string().contains("(kept)"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_manifest_draft_that_moves_base_url_does_not_get_the_saved_secrets_back(
+        pool: PgPool,
+    ) {
+        let fx = setup(&pool, true, 100_000_000).await;
+        let port = serve_api().await;
+        let mut saved = manifest(port, &["id", "email"]);
+        saved["headers"] = json!({"X-Api-Key": "SECRET-HEADER-VALUE"});
+        let created = fx
+            .as_key(
+                "POST",
+                "/sources",
+                Some(
+                    json!({"kind": "http", "name": "API", "config": {"manifest": saved},
+                    "credential": {"token": "tok"}}),
+                ),
+            )
+            .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+        let source = created.body["id"].as_str().unwrap().to_owned();
+        let mut moved = saved.clone();
+        moved["base_url"] = json!("https://collector.example");
+        moved["headers"] = json!({"X-Api-Key": "(kept)"});
+        let mut same = saved.clone();
+        same["headers"] = json!({"X-Api-Key": "(kept)"});
+        fx.fake
+            .push(answer("draft_manifest", json!({"manifest": moved})));
+        fx.fake
+            .push(answer("draft_manifest", json!({"manifest": same})));
+        let sent = fx.fake.call_count();
+
+        let reply = fx
+            .draft(json!({"kind": "manifest", "source_id": source, "prompt": "Same"}))
+            .await;
+
+        assert_eq!(reply.body["status"], "valid", "{:?}", reply.body);
+        assert_eq!(reply.body["attempts"], 2);
+        let requests = fx.requests_after(sent);
+        let feedback = last_feedback(&requests[1]);
+        assert!(
+            feedback.contains("placeholder_left at /headers/X-Api-Key"),
+            "{feedback}"
+        );
+        assert!(!feedback.contains("SECRET-HEADER-VALUE"), "{feedback}");
+        // Back on the saved host the value comes back, and only then is a draft stored.
+        assert_eq!(
+            reply.body["content"]["headers"]["X-Api-Key"],
+            "SECRET-HEADER-VALUE"
+        );
+        assert_eq!(reply.body["content"]["base_url"], saved["base_url"]);
     }
 
     #[sqlx::test]
@@ -2495,6 +2652,101 @@ mod tests {
             body["segment_id"] = json!(segment);
         }
         body
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_unusable_provider_key_is_a_server_fault_and_not_a_disabled_assistant(pool: PgPool) {
+        let fx = setup(&pool, false, 100_000_000).await;
+        fx.segment_traits().await;
+        let segment = fx.segment("Saved", saved_definition()).await;
+        sqlx::query(
+            "UPDATE encrypted_secrets SET ciphertext = decode('00', 'hex') \
+             WHERE purpose = 'ai_provider_key'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let sent = fx.fake.call_count();
+
+        let drafted = fx.draft(segment_run(None)).await;
+        let explained = fx.explain(&fx.admin, &segment, None).await;
+
+        for reply in [&drafted, &explained] {
+            assert_eq!(
+                reply.status,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "status {} body {:?}",
+                reply.status,
+                reply.body
+            );
+            assert_ne!(reply.body["code"], "ai_disabled", "{:?}", reply.body);
+        }
+        // Nothing reached the provider.
+        assert_eq!(fx.fake.call_count(), sent);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_deployment_without_a_master_key_answers_503_to_a_draft_and_an_explain(pool: PgPool) {
+        let mut fx = setup(&pool, false, 100_000_000).await;
+        fx.segment_traits().await;
+        let segment = fx.segment("Saved", saved_definition()).await;
+        // The provider key was saved while a master key was set; the process now runs without one.
+        fx.router = router(fx.state.clone().without_keyring());
+        let sent = fx.fake.call_count();
+
+        let drafted = fx.draft(segment_run(None)).await;
+        let explained = fx.explain(&fx.admin, &segment, None).await;
+
+        for reply in [&drafted, &explained] {
+            assert_eq!(
+                reply.status,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "status {} body {:?}",
+                reply.status,
+                reply.body
+            );
+            assert_ne!(reply.body["code"], "ai_disabled", "{:?}", reply.body);
+        }
+        assert_eq!(fx.fake.call_count(), sent, "nothing reached the provider");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_call_log_that_cannot_be_written_is_a_store_fault_for_a_draft_and_an_explain(
+        pool: PgPool,
+    ) {
+        let fx = setup(&pool, false, 100_000_000).await;
+        fx.segment_traits().await;
+        let segment = fx.segment("Saved", saved_definition()).await;
+        for statement in [
+            "CREATE FUNCTION refuse_call_log() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN RAISE EXCEPTION 'call log down'; END $$",
+            "CREATE TRIGGER refuse_call_log BEFORE INSERT ON ai_calls \
+             FOR EACH ROW EXECUTE FUNCTION refuse_call_log()",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+        let sent = fx.fake.call_count();
+
+        let drafted = fx.draft(segment_run(None)).await;
+        let explained = fx.explain(&fx.admin, &segment, None).await;
+
+        for reply in [&drafted, &explained] {
+            // The documented answer for a database fault, and neither a disabled assistant (409)
+            // nor a failed provider (502).
+            assert_eq!(
+                reply.status,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "status {} body {:?}",
+                reply.status,
+                reply.body
+            );
+            assert_ne!(reply.body["code"], "ai_disabled", "{:?}", reply.body);
+            assert_ne!(reply.body["code"], "ai_provider_error", "{:?}", reply.body);
+        }
+        assert_eq!(fx.fake.call_count(), sent, "nothing reached the provider");
     }
 
     fn pro_in_the_same_cities() -> Value {
@@ -3335,6 +3587,40 @@ mod tests {
                 .unwrap();
             assert_eq!(records.len(), 4);
             (trace.trace_id.to_string(), records)
+        }
+
+        /// A trace of `count` skipped steps, longer than the explanation reads.
+        async fn seeded_long_trace(&self, count: usize) -> String {
+            let trace = zirv_flow_core::TraceContext::root(
+                zirv_flow_core::Cause::definition_change(Uuid::now_v7()),
+            );
+            let subjects = vec![("flow", Uuid::now_v7())];
+            let spec: &'static _ = Box::leak(Box::new(
+                zirv_flow_core::decision_actions::DecisionSpec::for_test(
+                    "flow.step",
+                    "skipped",
+                    zirv_flow_core::decision_actions::Reason::Detail("test"),
+                    &[zirv_flow_core::CauseKind::Api],
+                    &[],
+                ),
+            ));
+            let rows: Vec<_> = (0..count)
+                .map(|_| zirv_flow_store::NewDecision {
+                    workspace_id: self.ws,
+                    trace: trace.clone(),
+                    spec,
+                    detail: None,
+                    subject_ids: subjects.clone(),
+                    job: None,
+                    graph: Some(zirv_flow_store::GraphPoint::at(1, "bump")),
+                })
+                .collect();
+            let mut tx = zirv_flow_store::begin(&self.pool).await.unwrap();
+            zirv_flow_store::append_decisions(&mut tx, &rows)
+                .await
+                .unwrap();
+            zirv_flow_store::commit(tx).await.unwrap();
+            trace.trace_id.to_string()
         }
     }
 
@@ -4219,6 +4505,29 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn explain_trace_flags_the_omitted_count_as_incomplete_past_the_read_cap(pool: PgPool) {
+        let fx = setup(&pool, false, 100_000_000).await;
+        let trace = fx.seeded_long_trace(1005).await;
+        let labels: Vec<String> = (1..=60).map(|n| format!("r{n}")).collect();
+        fx.fake.push(answer(
+            "explain_trace",
+            json!({"summary": "A long run of skipped steps.",
+                "records": labels.iter().map(|label| json!({
+                    "record": label, "text": format!("What happened at {label}.")
+                })).collect::<Vec<_>>()}),
+        ));
+
+        let reply = fx.ai_explain_trace(&fx.admin, &trace).await;
+
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+        // 1000 records were read and 60 shown; the trace has 5 more that were never read, so the
+        // count is a lower bound and the body says so.
+        assert_eq!(reply.body["omitted_records"], 940);
+        assert_eq!(reply.body["truncated"], true);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn criterion_7_explain_trace_cites_the_decision_records_it_describes(pool: PgPool) {
         let fx = setup(&pool, false, 100_000_000).await;
         let (trace, records) = fx.seeded_trace().await;
@@ -4242,6 +4551,7 @@ mod tests {
         assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
         assert_eq!(reply.body["trace_id"], trace);
         assert_eq!(reply.body["omitted_records"], 0);
+        assert_eq!(reply.body["truncated"], false);
         // The explanation cites the decision-record ids it describes, in the trace's order.
         let cited: Vec<&str> = reply.body["records"]
             .as_array()

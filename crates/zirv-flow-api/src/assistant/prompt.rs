@@ -55,7 +55,8 @@ never invent a path, a field or a pagination style. The manifest holds no secret
 are entered separately, so name only the kind of authentication. In the saved manifest every \
 static header value and every static query value is shown as \"(kept)\": keep a value as \
 \"(kept)\" to leave it as it is, and write a real value only for a header or parameter you add \
-or change.
+or change. A value shown as \"(kept)\" only comes back while base_url is the saved one; if you \
+change base_url, write the value you mean or drop the key.
 
 If your answer is refused, the problems are listed with their JSON pointers: fix exactly those \
 and call the tool again.";
@@ -138,7 +139,13 @@ pub(crate) fn mask_manifest(manifest: &Value) -> Value {
 /// [`KEPT_VALUE`]. A key the draft adds, and a value it changes, stay the model's. Header names
 /// match ignoring ASCII case, as HTTP does, and a restored header takes the saved spelling, so the
 /// validator and the diff see the same header the source already sends. Query keys match exactly.
+/// Nothing comes back when the draft changes `base_url`: the values belong to the saved host.
 pub(crate) fn restore_kept(draft: &mut Value, saved: &Value) {
+    // A value is a secret of the host it was saved for. A draft that moves `base_url` gets
+    // nothing back, so the placeholder is reported and the secrets never follow a new host.
+    if draft.get("base_url") != saved.get("base_url") {
+        return;
+    }
     if let (Some(headers), Some(saved)) = (
         draft.get_mut("headers").and_then(Value::as_object_mut),
         saved.get("headers").and_then(Value::as_object),
@@ -645,6 +652,40 @@ mod tests {
         assert_eq!(draft["streams"][0]["query"]["limit"], 10);
         // A key the saved manifest never had has nothing to come back to.
         assert_eq!(draft["streams"][0]["query"]["extra"], "(kept)");
+    }
+
+    #[test]
+    fn secrets_are_not_restored_when_base_url_changed() {
+        let saved = json!({"base_url": "https://a.test", "headers": {"X-Api-Key": "secret"},
+            "streams": [{"name": "s", "query": {"token": "SECRET"}}]});
+        let mut draft = json!({"base_url": "https://b.test", "headers": {"X-Api-Key": "(kept)"},
+            "streams": [{"name": "s", "query": {"token": "(kept)"}}]});
+
+        restore_kept(&mut draft, &saved);
+
+        assert_eq!(
+            leftover_placeholders(&draft),
+            [
+                "placeholder_left at /headers/X-Api-Key",
+                "placeholder_left at /streams/0/query/token"
+            ],
+            "draft after restore: {draft}"
+        );
+    }
+
+    #[test]
+    fn secrets_are_restored_while_base_url_is_the_saved_one() {
+        let saved = json!({"base_url": "https://a.test", "headers": {"X-Api-Key": "secret"},
+            "streams": [{"name": "s", "path": "/a", "query": {"token": "SECRET"}}]});
+        // A different path stays on the same host, so the values come back.
+        let mut draft = json!({"base_url": "https://a.test", "headers": {"X-Api-Key": "(kept)"},
+            "streams": [{"name": "s", "path": "/b", "query": {"token": "(kept)"}}]});
+
+        restore_kept(&mut draft, &saved);
+
+        assert_eq!(draft["headers"]["X-Api-Key"], "secret");
+        assert_eq!(draft["streams"][0]["query"]["token"], "SECRET");
+        assert!(leftover_placeholders(&draft).is_empty());
     }
 
     #[test]

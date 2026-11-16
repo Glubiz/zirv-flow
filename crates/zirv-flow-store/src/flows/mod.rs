@@ -32,6 +32,7 @@ pub(crate) use control::{enqueue_segment_settles, exit_people};
 pub use crud::{
     Flow, FlowError, FlowPatch, FlowVersion, LockedFlow, NewFlow, create_flow, find_flow,
     find_flow_version, list_flow_versions, list_flows, lock_flow, update_flow_draft,
+    update_flow_draft_checked,
 };
 pub use delivery::{
     SyncDetail, WebhookOutcome, WebhookPerson, WebhookResult, WebhookSubject, lock_sync_person,

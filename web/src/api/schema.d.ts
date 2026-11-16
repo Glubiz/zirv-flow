@@ -4872,7 +4872,10 @@ export interface components {
         };
         /** @description The explanation of a trace. */
         AiTraceExplainBody: {
-            /** @description How many later records of the trace the model was not shown (the trace is long). */
+            /**
+             * @description How many later records of the trace the model was not shown (the trace is long). A lower
+             *     bound when `truncated` is true: the trace has more records than were read.
+             */
             omitted_records: number;
             /** @description One entry for every record the model was shown, each citing the record's id. */
             records: components["schemas"]["AiExplainedRecord"][];
@@ -4880,6 +4883,11 @@ export interface components {
             summary: string;
             /** @description The trace id: 32 lowercase hex characters. */
             trace_id: string;
+            /**
+             * @description True when the trace is longer than the records read for the explanation, so
+             *     `omitted_records` counts only the records that were read and not shown.
+             */
+            truncated: boolean;
         };
         AiUsageBody: {
             /**
@@ -7269,6 +7277,12 @@ export interface components {
          */
         FlowDetailBody: components["schemas"]["FlowBody"] & {
             graph: components["schemas"]["FlowGraph"];
+            /**
+             * Format: int32
+             * @description How many times the draft was written. Send it back as `revision` when saving, so a save
+             *     made from an older read is refused instead of replacing a newer draft.
+             */
+            revision: number;
             settings: components["schemas"]["FlowSettings"];
             /** @description The warm-up that ramps enrollments into the flow after it starts taking them. */
             warmup: components["schemas"]["WarmupBody"];
@@ -11308,6 +11322,12 @@ export interface components {
         UpdateFlowRequest: {
             graph?: components["schemas"]["FlowGraph"];
             name?: string | null;
+            /**
+             * Format: int32
+             * @description The `revision` of the flow as it was read. When it is not the draft's current revision the
+             *     save is refused with 409 `flow_draft_revision_mismatch`; left out, the save always applies.
+             */
+            revision?: number | null;
             settings?: components["schemas"]["FlowSettings"];
         };
         UpdateListRequest: {
@@ -18712,7 +18732,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Another flow has that name, or the flow is archived (`code` is `flow_archived`) */
+            /** @description Another flow has that name, the flow is archived (`code` is `flow_archived`), or the draft was saved since the `revision` sent was read (`flow_draft_revision_mismatch`, with `current_revision`) */
             409: {
                 headers: {
                     [name: string]: unknown;

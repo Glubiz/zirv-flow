@@ -534,6 +534,69 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_stale_draft_save_is_refused_and_leaves_the_newer_graph(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let f = fixture(&pool).await;
+            let id = f.create("Welcome", simple_graph(), manual()).await;
+            let read = f.lead("GET", &format!("/{id}"), None).await;
+            let revision = read.body["revision"].clone();
+            assert_eq!(revision, 1);
+            let longer = json!({"v": 1, "nodes": [
+                {"id": "wait", "type": "wait.duration", "seconds": 3600},
+                {"id": "end", "type": "exit"}
+            ], "edges": [{"id": "e1", "from": "wait", "port": "next", "to": "end"}]});
+
+            // Two editors read revision 1; the first saves, the second is stale.
+            let first = f
+                .lead(
+                    "PATCH",
+                    &format!("/{id}"),
+                    Some(json!({"graph": longer, "revision": revision})),
+                )
+                .await;
+            let stale = f
+                .lead(
+                    "PATCH",
+                    &format!("/{id}"),
+                    Some(json!({"graph": simple_graph(), "revision": revision})),
+                )
+                .await;
+
+            assert_eq!(first.status, StatusCode::OK, "{:?}", first.body);
+            assert_eq!(first.body["revision"], 2);
+            assert_eq!(stale.status, StatusCode::CONFLICT, "{:?}", stale.body);
+            assert_eq!(stale.body["code"], "flow_draft_revision_mismatch");
+            assert_eq!(stale.body["current_revision"], 2);
+            let stored = f.lead("GET", &format!("/{id}"), None).await;
+            assert_eq!(stored.body["graph"], longer);
+            // A save with no revision still applies, a name-only one counts, a publish does not.
+            let renamed = f
+                .lead("PATCH", &format!("/{id}"), Some(json!({"name": "Renamed"})))
+                .await;
+            assert_eq!(renamed.body["revision"], 3);
+            let fixed = f
+                .lead(
+                    "PATCH",
+                    &format!("/{id}"),
+                    Some(json!({"graph": simple_graph(), "settings": manual()})),
+                )
+                .await;
+            assert_eq!(fixed.body["revision"], 4);
+            let published = f.lead("POST", &format!("/{id}/publish"), None).await;
+            assert_eq!(
+                published.status,
+                StatusCode::CREATED,
+                "{:?}",
+                published.body
+            );
+            let after = f.lead("GET", &format!("/{id}"), None).await;
+            assert_eq!(after.body["revision"], 4);
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_flow_is_drafted_validated_published_paused_resumed_and_archived(pool: PgPool) {
         zirv_flow_store::decision_testing::checked(pool, |pool| async move {
             let f = fixture(&pool).await;

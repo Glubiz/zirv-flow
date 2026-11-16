@@ -9996,7 +9996,7 @@
             }
           },
           "409": {
-            "description": "Another flow has that name, or the flow is archived (`code` is `flow_archived`)",
+            "description": "Another flow has that name, the flow is archived (`code` is `flow_archived`), or the draft was saved since the `revision` sent was read (`flow_draft_revision_mismatch`, with `current_revision`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -31188,12 +31188,13 @@
           "trace_id",
           "summary",
           "records",
-          "omitted_records"
+          "omitted_records",
+          "truncated"
         ],
         "properties": {
           "omitted_records": {
             "type": "integer",
-            "description": "How many later records of the trace the model was not shown (the trace is long).",
+            "description": "How many later records of the trace the model was not shown (the trace is long). A lower\nbound when `truncated` is true: the trace has more records than were read.",
             "minimum": 0
           },
           "records": {
@@ -31210,6 +31211,10 @@
           "trace_id": {
             "type": "string",
             "description": "The trace id: 32 lowercase hex characters."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "True when the trace is longer than the records read for the explanation, so\n`omitted_records` counts only the records that were read and not shown."
           }
         }
       },
@@ -36640,11 +36645,17 @@
             "required": [
               "graph",
               "settings",
-              "warmup"
+              "warmup",
+              "revision"
             ],
             "properties": {
               "graph": {
                 "$ref": "#/components/schemas/FlowGraph"
+              },
+              "revision": {
+                "type": "integer",
+                "format": "int32",
+                "description": "How many times the draft was written. Send it back as `revision` when saving, so a save\nmade from an older read is refused instead of replacing a newer draft."
               },
               "settings": {
                 "$ref": "#/components/schemas/FlowSettings"
@@ -46943,6 +46954,14 @@
               "string",
               "null"
             ]
+          },
+          "revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The `revision` of the flow as it was read. When it is not the draft's current revision the\nsave is refused with 409 `flow_draft_revision_mismatch`; left out, the save always applies."
           },
           "settings": {
             "$ref": "#/components/schemas/FlowSettings"

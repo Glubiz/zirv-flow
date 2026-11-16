@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type RefObject } from "react";
 
 import { client, unwrap, type components } from "../../api";
 import { Button, EmptyState, InlineError, LoadingState } from "../../ui";
-import { AssistantDock, AssistantPanel, assistantGone, failureText, type Draft, type Failure } from "../assistant";
+import { AssistantDock, AssistantPanel, assistantGone, failureText, type AcceptedDraft, type Draft, type Failure } from "../assistant";
 import type { Names } from "./describe";
 import { FlowChanges } from "./FlowChanges";
 import { TRIGGER_ID, type Graph } from "./model";
@@ -13,8 +13,8 @@ type Explained = components["schemas"]["AiFlowExplainBody"];
 export interface FlowDrafting {
   /** Asked before the accept request; false keeps the person's edits and accepts nothing. */
   confirmAccept: () => boolean | Promise<boolean>;
-  /** Loads the accepted draft (graph and settings) into the editor. */
-  onAccept: (content: unknown) => void;
+  /** Loads the accepted draft (graph and settings) into the editor; `accepted.flow` carries the revision it was written at. */
+  onAccept: (content: unknown, accepted: AcceptedDraft) => void;
   /** The accept request failed after the editor was made ready for it. */
   onAcceptFailed: () => unknown;
 }

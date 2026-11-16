@@ -53,7 +53,6 @@ fn lines_of(issues: &[Issue]) -> Vec<String> {
 
 /// The pointers of the `segment` nodes that name `own`.
 fn self_references(definition: &Value, own: Uuid) -> Vec<String> {
-    let own = own.to_string();
     nodes(definition)
         .into_iter()
         .filter(|node| node.kind == "segment")
@@ -61,7 +60,10 @@ fn self_references(definition: &Value, own: Uuid) -> Vec<String> {
             node.value
                 .get("segment")
                 .and_then(Value::as_str)
-                .is_some_and(|id| id.eq_ignore_ascii_case(&own))
+                // The parser reads ids with `Uuid::parse_str`, so compare as the parser does:
+                // the hyphenless, braced and urn forms name the segment too.
+                .and_then(|id| Uuid::parse_str(id).ok())
+                .is_some_and(|id| id == own)
         })
         .map(|node| format!("{}/segment", node.pointer))
         .collect()
@@ -191,6 +193,23 @@ mod tests {
     }
 
     const NOW: OffsetDateTime = datetime!(2026-05-15 12:00 UTC);
+
+    #[test]
+    fn a_self_reference_in_any_uuid_form_the_parser_reads_is_a_cycle() {
+        let (list, own) = (Uuid::now_v7(), Uuid::now_v7());
+        for form in [
+            own.simple().to_string(),
+            own.braced().to_string(),
+            own.urn().to_string(),
+        ] {
+            let arguments = json!({"definition": {"v": 1, "segment": form}});
+            let result = check_draft(&arguments, &catalog(list, own), Some(own), NOW);
+            assert!(
+                matches!(&result, Err(lines) if lines.iter().any(|l| l.starts_with("segment_cycle"))),
+                "form {form}: expected segment_cycle, got {result:?}"
+            );
+        }
+    }
 
     #[test]
     fn the_parameters_hold_the_definition_as_an_object() {

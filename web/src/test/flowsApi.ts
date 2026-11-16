@@ -66,7 +66,7 @@ export function sampleSettings() {
 }
 
 export function flowDetail(overrides: Record<string, unknown> = {}) {
-  return { ...flowBody(), graph: sampleGraph(), settings: sampleSettings(), warmup: warmupBody(), ...overrides };
+  return { ...flowBody(), graph: sampleGraph(), settings: sampleSettings(), warmup: warmupBody(), revision: 1, ...overrides };
 }
 
 interface Options {
@@ -77,7 +77,7 @@ interface Options {
   issues?: Issue[] | ((asked: number) => Issue[]);
 }
 
-/** The session, the catalog, the flow and its save and validate endpoints. PATCH applies what it is sent. */
+/** The session, the catalog, the flow and its save and validate endpoints. PATCH applies what it is sent and refuses a stale `revision`. */
 export function flowRoutes({ role = "writer", flow, issues = [] }: Options = {}): Record<string, Handler> {
   let current: Record<string, unknown> = flowDetail(flow);
   let asked = 0;
@@ -92,7 +92,26 @@ export function flowRoutes({ role = "writer", flow, issues = [] }: Options = {})
     [`GET ${WS}/flows/${FLOW_ID}`]: () => json(current),
     [`GET ${WS}/flows/${FLOW_ID}/versions`]: () => json([]),
     [`PATCH ${WS}/flows/${FLOW_ID}`]: async (request) => {
-      current = { ...current, ...((await request.json()) as Record<string, unknown>) };
+      // As the server does: a save that names a revision other than the current one is refused, and one that names none applies.
+      const changes = (await request.json()) as Record<string, unknown>;
+      const named = changes.revision;
+      delete changes.revision;
+      if (named !== undefined && named !== null && named !== current.revision) {
+        return new Response(
+          JSON.stringify({
+            type: "about:blank",
+            title: "Conflict",
+            status: 409,
+            detail: "the flow draft was saved by someone else; read it again",
+            trace_id: null,
+            request_id: null,
+            code: "flow_draft_revision_mismatch",
+            current_revision: current.revision,
+          }),
+          { status: 409, headers: { "content-type": "application/problem+json" } },
+        );
+      }
+      current = { ...current, ...changes, revision: Number(current.revision) + 1 };
       return json(current);
     },
     [`POST ${WS}/flows/${FLOW_ID}/validate`]: () => {
