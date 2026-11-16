@@ -284,21 +284,27 @@ impl KeyType {
         })
     }
 
-    /// The right-hand side that moves the checkpoint's cursor, `$1`, back by `lookback`: seconds
-    /// for a date or time type, units for a number. `None` for text and uuid. Integer cursors
-    /// compare as `int8`, which every integer column's index serves.
+    /// The comparison that reads the rows newer than the checkpoint's cursor, `$1`, moved back by
+    /// `lookback`: seconds for a date or time type, units for a number. `None` for text and uuid.
+    /// Integer cursors compare as `int8`, which every integer column's index serves.
     fn lookback(self, lookback: u64) -> Option<String> {
         Some(match self {
             Self::Int2 | Self::Int4 | Self::Int8 => {
-                // `int8 - n` errors below the type's minimum, so a checkpoint nearer to it than
-                // `n` is raised to the lowest value that still subtracts cleanly.
-                let lookback = lookback.min(i64::MAX as u64) as i64;
-                let floor = i64::MIN + lookback;
-                format!("(GREATEST($1::text::int8, {floor}::int8) - {lookback})")
+                // `c > cursor - lookback` is `c >= cursor - (lookback - 1)` for integers. `int8 -
+                // n` errors below the type's minimum, so a checkpoint nearer to it than `n` is
+                // raised to the lowest value that still subtracts cleanly, which reads from the
+                // minimum itself.
+                let back = lookback.clamp(1, i64::MAX as u64) as i64 - 1;
+                let floor = match i64::MIN.checked_add(back) {
+                    // `-9223372036854775808::int8` casts before it negates, and overflows.
+                    Some(i64::MIN) | None => "'-9223372036854775808'::int8".to_owned(),
+                    Some(floor) => format!("{floor}::int8"),
+                };
+                format!(">= (GREATEST($1::text::int8, {floor}) - {back})")
             }
-            Self::Numeric => format!("($1::text::numeric - {lookback})"),
+            Self::Numeric => format!("> ($1::text::numeric - {lookback})"),
             Self::Date | Self::Timestamp | Self::Timestamptz => format!(
-                "($1::text::{} - interval '{lookback} seconds')",
+                "> ($1::text::{} - interval '{lookback} seconds')",
                 self.cast()
             ),
             Self::Text | Self::Varchar | Self::Bpchar | Self::Uuid => return None,
@@ -393,7 +399,7 @@ fn window_sql(
     let cursor = keys[0].1;
     let bound = cursor.lookback(lookback)?;
     let sql = keyset::window_sql(&select_list(columns), from, keys, quote, |column| {
-        format!("{column} > {bound}")
+        format!("{column} {bound}")
     });
     Some(keyset::limited(&sql, rows))
 }
@@ -778,7 +784,19 @@ mod tests {
         assert!(
             window(KeyType::Int4, KeyType::Int8)
                 .unwrap()
-                .contains("> (GREATEST($1::text::int8, -9223372036854775508::int8) - 300)")
+                .contains(">= (GREATEST($1::text::int8, -9223372036854775509::int8) - 299)")
+        );
+        // A lookback of one reaches the type's minimum, written so that it does not overflow.
+        assert!(
+            window_sql(
+                "t",
+                &columns()[..2],
+                &key_list(&[("id", KeyType::Int8)]),
+                1,
+                keyset::BATCH_ROWS,
+            )
+            .unwrap()
+            .contains(">= (GREATEST($1::text::int8, '-9223372036854775808'::int8) - 0)")
         );
         assert!(
             window(KeyType::Numeric, KeyType::Int8)
@@ -1934,7 +1952,8 @@ mod tests {
         admin_exec(
             &fixture.admin,
             &format!(
-                "INSERT INTO {}.contacts (id, email, updated_at)                  VALUES (9999, 'late@example.com', timestamptz '2024-01-01 05:13:00+00')",
+                "INSERT INTO {}.contacts (id, email, updated_at) \
+                 VALUES (9999, 'late@example.com', timestamptz '2024-01-01 05:13:00+00')",
                 fixture.schema
             ),
         )
@@ -2003,7 +2022,9 @@ mod tests {
             admin_exec(
                 &fixture.admin,
                 &format!(
-                    "CREATE TABLE {qualified} (id bigint PRIMARY KEY, c {ty} NOT NULL);                      INSERT INTO {qualified} VALUES (1, '{checkpoint_at}');                      GRANT SELECT ON {qualified} TO {}",
+                    "CREATE TABLE {qualified} (id bigint PRIMARY KEY, c {ty} NOT NULL); \
+                     INSERT INTO {qualified} VALUES (1, '{checkpoint_at}'); \
+                     GRANT SELECT ON {qualified} TO {}",
                     fixture.role
                 ),
             )
@@ -2044,7 +2065,9 @@ mod tests {
         admin_exec(
             &fixture.admin,
             &format!(
-                "CREATE TABLE {qualified} (id bigint PRIMARY KEY, c bigint NOT NULL);                  INSERT INTO {qualified} VALUES (1, -9223372036854775808), (2, -9223372036854775807);                  GRANT SELECT ON {qualified} TO {}",
+                "CREATE TABLE {qualified} (id bigint PRIMARY KEY, c bigint NOT NULL); \
+                 INSERT INTO {qualified} VALUES (1, -9223372036854775808), (2, -9223372036854775807); \
+                 GRANT SELECT ON {qualified} TO {}",
                 fixture.role
             ),
         )
@@ -2062,7 +2085,36 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(keys(&widened), ["2"]);
+        assert_eq!(keys(&widened), ["1", "2"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_lookback_window_is_exact_away_from_the_smallest_integer_cursor() {
+        let fixture = Fixture::new().await;
+        let qualified = format!("{}.lb_exact", fixture.schema);
+        admin_exec(
+            &fixture.admin,
+            &format!(
+                "CREATE TABLE {qualified} (id bigint PRIMARY KEY, c bigint NOT NULL); \
+                 INSERT INTO {qualified} VALUES (1, 90), (2, 91), (3, 100); \
+                 GRANT SELECT ON {qualified} TO {}",
+                fixture.role
+            ),
+        )
+        .await;
+        let stream = stream("lb_exact", SyncMode::Incremental, Some("c"), &["id"]);
+
+        let widened = fixture
+            .read(
+                &fixture.config(serde_json::json!({"cursor_lookback": 10})),
+                &stream,
+                Some(Checkpoint(serde_json::json!({"v": 1, "key": ["100", "3"]}))),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(keys(&widened), ["2", "3"]);
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -234,24 +234,33 @@ impl KeyType {
         }
     }
 
-    /// The right-hand side that moves the checkpoint's cursor, bound as `?`, back by `lookback`,
-    /// and how many `?` it holds: seconds for a temporal type, units for a number. `None` for
-    /// text. An unsigned cursor stops at zero instead of wrapping.
+    /// The comparison that reads the rows newer than the checkpoint's cursor, bound as `?`, moved
+    /// back by `lookback`, and how many `?` it holds: seconds for a temporal type, units for a
+    /// number. `None` for text. An unsigned cursor stops at zero instead of wrapping.
     fn lookback(self, lookback: u64) -> Option<(String, usize)> {
         Some(match self {
             Self::Signed => {
-                // `BIGINT - n` errors below the type's minimum, so a checkpoint nearer to it
-                // than `n` is read back to the minimum itself.
-                let lookback = lookback.min(i64::MAX as u64) as i64;
-                let floor = i64::MIN + lookback;
+                // `c > cursor - lookback` is `c >= cursor - (lookback - 1)` for integers.
+                // `BIGINT - n` errors below the type's minimum, so a checkpoint nearer to it than
+                // `n` is read back to the minimum itself, and the whole range is read.
+                let back = lookback.clamp(1, i64::MAX as u64) as i64 - 1;
+                let floor = i64::MIN + back;
+                let floor = if back == 0 {
+                    "(-9223372036854775807 - 1)".to_owned()
+                } else {
+                    floor.to_string()
+                };
                 (
-                    format!("IF(? > {floor}, ? - {lookback}, -9223372036854775807 - 1)"),
+                    format!(">= IF(? > {floor}, ? - {back}, -9223372036854775807 - 1)"),
                     2,
                 )
             }
-            Self::Unsigned => (format!("IF(? > {lookback}, ? - {lookback}, 0)"), 2),
-            Self::Decimal(_) => (format!("({} - {lookback})", self.placeholder()), 1),
-            Self::Temporal => (format!("(? - INTERVAL {lookback} SECOND)"), 1),
+            Self::Unsigned => {
+                let back = lookback.max(1) - 1;
+                (format!(">= IF(? > {back}, ? - {back}, 0)"), 2)
+            }
+            Self::Decimal(_) => (format!("> ({} - {lookback})", self.placeholder()), 1),
+            Self::Temporal => (format!("> (? - INTERVAL {lookback} SECOND)"), 1),
             Self::Text => return None,
         })
     }
@@ -399,7 +408,7 @@ fn window_sql(
 ) -> Option<(String, usize)> {
     let (bound, count) = keys[0].1.lookback(lookback)?;
     let sql = keyset::window_sql(&select_list(columns), from, keys, quote, |column| {
-        format!("{column} > {bound}")
+        format!("{column} {bound}")
     });
     Some((keyset::limited(&sql, rows), count))
 }
@@ -722,12 +731,15 @@ mod tests {
         assert_eq!(count, 1);
         let (signed, count) = window(KeyType::Signed).unwrap();
         assert!(
-            signed.contains("> IF(? > -9223372036854775508, ? - 300, -9223372036854775807 - 1)"),
+            signed.contains(">= IF(? > -9223372036854775509, ? - 299, -9223372036854775807 - 1)"),
             "{signed}"
         );
         assert_eq!(count, 2);
         let (unsigned, count) = window(KeyType::Unsigned).unwrap();
-        assert!(unsigned.contains("> IF(? > 300, ? - 300, 0)"), "{unsigned}");
+        assert!(
+            unsigned.contains(">= IF(? > 299, ? - 299, 0)"),
+            "{unsigned}"
+        );
         assert_eq!(count, 2);
         assert!(
             window(KeyType::Decimal(2))
@@ -736,6 +748,20 @@ mod tests {
                 .contains("> (CAST(? AS DECIMAL(65,2)) - 300)")
         );
         assert_eq!(window(KeyType::Text), None);
+        // A lookback of one reaches the type's minimum, written so that it does not overflow.
+        let one = window_sql(
+            "t",
+            &cols()[..2],
+            &keys_of(&[("id", KeyType::Signed)]),
+            1,
+            keyset::BATCH_ROWS,
+        )
+        .unwrap()
+        .0;
+        assert!(
+            one.contains(">= IF(? > (-9223372036854775807 - 1), ? - 0, -9223372036854775807 - 1)"),
+            "{one}"
+        );
     }
 
     #[test]
@@ -1730,7 +1756,63 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(keys(&widened), ["2"]);
+        assert_eq!(keys(&widened), ["1", "2"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires MySQL; set ZIRV_FLOW_TEST_MYSQL_URL"]
+    async fn a_lookback_reaches_a_late_row_at_zero_for_an_unsigned_cursor() {
+        let fixture = Fixture::new().await;
+        let qualified = format!("`{}`.`lb_zero`", fixture.database);
+        admin_exec(
+            &fixture.admin,
+            &format!(
+                "CREATE TABLE {qualified} (id BIGINT PRIMARY KEY, c BIGINT UNSIGNED NOT NULL);
+                 INSERT INTO {qualified} VALUES (1, 3), (2, 0);
+"
+            ),
+        )
+        .await;
+        let stream = stream("lb_zero", SyncMode::Incremental, Some("c"), &["id"]);
+
+        let widened = fixture
+            .read(
+                &fixture.config(json!({"cursor_lookback": 5})),
+                &stream,
+                Some(Checkpoint(json!({"v": 1, "key": ["3", "1"]}))),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(keys(&widened), ["2", "1"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires MySQL; set ZIRV_FLOW_TEST_MYSQL_URL"]
+    async fn a_lookback_window_is_exact_away_from_the_smallest_integer_cursor() {
+        let fixture = Fixture::new().await;
+        let qualified = format!("`{}`.`lb_exact`", fixture.database);
+        admin_exec(
+            &fixture.admin,
+            &format!(
+                "CREATE TABLE {qualified} (id BIGINT PRIMARY KEY, c BIGINT NOT NULL);
+                 INSERT INTO {qualified} VALUES (1, 90), (2, 91), (3, 100);
+"
+            ),
+        )
+        .await;
+        let stream = stream("lb_exact", SyncMode::Incremental, Some("c"), &["id"]);
+
+        let widened = fixture
+            .read(
+                &fixture.config(json!({"cursor_lookback": 10})),
+                &stream,
+                Some(Checkpoint(json!({"v": 1, "key": ["100", "3"]}))),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(keys(&widened), ["2", "3"]);
     }
 
     #[tokio::test(flavor = "multi_thread")]

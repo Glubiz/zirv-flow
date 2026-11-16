@@ -842,15 +842,20 @@ mod tests {
         Never,
     }
 
-    struct Stub(Answer);
+    /// Answers any name as `answer` says and records the names it was asked for.
+    struct Stub {
+        answer: Answer,
+        asked: std::sync::Mutex<Vec<String>>,
+    }
 
     impl Lookup for Stub {
         fn lookup<'a>(
             &'a self,
-            _host: &'a str,
+            host: &'a str,
         ) -> Pin<Box<dyn Future<Output = io::Result<Vec<IpAddr>>> + Send + 'a>> {
+            self.asked.lock().unwrap().push(host.to_owned());
             Box::pin(async move {
-                match self.0 {
+                match self.answer {
                     Answer::Empty => Ok(Vec::new()),
                     Answer::Never => std::future::pending().await,
                 }
@@ -870,21 +875,27 @@ mod tests {
         format!("http://127.0.0.1:{port}/hop")
     }
 
-    fn stubbed(answer: Answer, limits: HttpLimits) -> GuardedClient {
+    fn stubbed(answer: Answer, limits: HttpLimits) -> (GuardedClient, Arc<Stub>) {
         let policy = Arc::new(EgressPolicy::parse(&["127.0.0.1/32".to_owned()]).unwrap());
-        GuardedClient::with_lookup(policy, limits, Arc::new(Stub(answer))).unwrap()
+        let stub = Arc::new(Stub {
+            answer,
+            asked: std::sync::Mutex::new(Vec::new()),
+        });
+        let guarded = GuardedClient::with_lookup(policy, limits, stub.clone()).unwrap();
+        (guarded, stub)
     }
 
     #[tokio::test]
     async fn a_redirect_to_a_name_that_resolves_to_nothing_is_returned_as_the_answer() {
         let url = redirect_to_a_name().await;
-        let guarded = stubbed(Answer::Empty, HttpLimits::default());
+        let (guarded, stub) = stubbed(Answer::Empty, HttpLimits::default());
 
         let response = get_url(&guarded, &url)
             .await
             .expect("an empty answer is no egress risk");
 
         assert_eq!(response.status(), 307);
+        assert_eq!(*stub.asked.lock().unwrap(), ["hop.test"]);
     }
 
     #[tokio::test]
@@ -894,7 +905,7 @@ mod tests {
             connect_timeout: Duration::from_millis(100),
             ..HttpLimits::default()
         };
-        let guarded = stubbed(Answer::Never, limits);
+        let (guarded, _) = stubbed(Answer::Never, limits);
 
         let result = get_url(&guarded, &url).await;
 
