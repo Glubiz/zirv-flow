@@ -463,30 +463,46 @@ pub(crate) fn mask_many(definitions: &[Value], clear: &ClearKeys) -> (Vec<Value>
 }
 
 /// Whether a condition is within what the walks above cover: the nodes and the depth, counted as
-/// they count them. A condition that is not could hide a literal past their reach, so it is
-/// never masked and never sent.
+/// they count them, and every node well formed, which is a map with exactly one node key. A
+/// condition that is not could hide a literal past their reach (a second node key next to the one
+/// the walks read, or a value in a place they never look), so it is never masked and never sent.
+/// A null stands for nothing and passes; the validator refuses what the walks skip.
 pub(crate) fn within_walk(value: &Value, depth: usize, nodes: &mut usize) -> bool {
     if depth > WALK_DEPTH {
         return false;
     }
-    let Some(map) = value.as_object() else {
-        return true;
+    let map = match value {
+        Value::Null => return true,
+        Value::Object(map) => map,
+        _ => return false,
     };
     *nodes += 1;
     if *nodes > MAX_NODES {
         return false;
     }
-    for key in ["all", "any"] {
-        if let Some(children) = map.get(key).and_then(Value::as_array) {
-            for child in children {
-                if !within_walk(child, depth + 1, nodes) {
-                    return false;
-                }
-            }
-        }
+    if NODE_KEYS
+        .into_iter()
+        .filter(|key| map.contains_key(*key))
+        .count()
+        != 1
+    {
+        return false;
     }
-    map.get("not")
-        .is_none_or(|child| within_walk(child, depth + 1, nodes))
+    match key_of(map) {
+        Some(kind @ ("all" | "any")) => {
+            map.get(kind)
+                .and_then(Value::as_array)
+                .is_some_and(|children| {
+                    children
+                        .iter()
+                        .all(|child| within_walk(child, depth + 1, nodes))
+                })
+        }
+        Some("not") => map
+            .get("not")
+            .is_some_and(|child| within_walk(child, depth + 1, nodes)),
+        _ => true,
+    }
 }
 
 /// The catalog as request content: names, types and descriptions, each list capped with a note
@@ -992,6 +1008,32 @@ mod tests {
                 "placeholder_moved at /all/2/where/0/value"
             ]
         );
+    }
+
+    #[test]
+    fn a_condition_is_within_the_walk_only_when_every_node_has_exactly_one_key() {
+        let leaf = json!({"trait": "city", "op": "eq", "value": "Aarhus"});
+        for fine in [
+            Value::Null,
+            leaf.clone(),
+            json!({"all": [leaf.clone(), {"any": [leaf.clone()]}, {"not": leaf.clone()}]}),
+        ] {
+            assert!(within_walk(&fine, 1, &mut 0), "{fine}");
+        }
+        for bad in [
+            // A second node key next to the one the walks read.
+            json!({"all": [leaf.clone()], "trait": "email", "op": "eq", "value": "jane@x.dk"}),
+            // No node key, with a value no walk reaches.
+            json!({"op": "eq", "value": "jane@x.dk"}),
+            json!({}),
+            // A child no walk masks.
+            json!({"all": ["jane@x.dk"]}),
+            json!({"not": "jane@x.dk"}),
+            json!({"any": "jane@x.dk"}),
+            json!("jane@x.dk"),
+        ] {
+            assert!(!within_walk(&bad, 1, &mut 0), "{bad}");
+        }
     }
 
     #[test]

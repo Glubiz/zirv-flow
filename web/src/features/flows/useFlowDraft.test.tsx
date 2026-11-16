@@ -98,6 +98,47 @@ describe("useFlowDraft", () => {
   });
 });
 
+describe("useFlowDraft against a draft someone else saved", () => {
+  it("sends the revision it read, and on a refused save shows the server's draft and says why", async () => {
+    const newer = flowDetail({
+      name: "Their name",
+      revision: 5,
+      graph: { v: 1, nodes: [{ id: "theirs", type: "exit" }], edges: [] },
+    });
+    const sent: unknown[] = [];
+    let refuse = true;
+    mockApi({
+      ...flowRoutes(),
+      [`PATCH ${WS}/flows/${FLOW_ID}`]: async (request) => {
+        const body = (await request.json()) as Record<string, unknown>;
+        sent.push(body.revision);
+        if (!refuse) return json({ ...newer, ...body, revision: 6 });
+        refuse = false;
+        return problem(409, "Conflict", "the flow draft was saved by someone else; read it again", "t-9", "flow_draft_revision_mismatch");
+      },
+      [`GET ${WS}/flows/${FLOW_ID}`]: () => json(newer),
+      [`POST ${WS}/flows/${FLOW_ID}/validate`]: () => json({ valid: true, issues: [] }),
+    });
+    const { result } = renderHook(() =>
+      useFlowDraft({ workspaceId: "ws1", flow: flowDetail() as unknown as FlowDetail, editable: true }),
+    );
+
+    act(() => result.current.edit((draft) => ({ ...draft, name: "My name" })));
+    await waitFor(() => expect(result.current.status).toBe("error"), { timeout: 3000 });
+
+    expect(sent).toEqual([1]);
+    expect(result.current.failure?.title).toBe("Your changes were not saved");
+    expect(result.current.failure?.detail).toContain("Someone else saved this flow first");
+    expect(result.current.draft.name).toBe("Their name");
+    expect(result.current.unsaved).toBe(false);
+    expect(result.current.canUndo).toBe(true);
+
+    // The next edit saves against the revision the reload read.
+    act(() => result.current.edit((draft) => ({ ...draft, name: "Again" })));
+    await waitFor(() => expect(sent).toEqual([1, 5]), { timeout: 3000 });
+  });
+});
+
 describe("useFlowDraft replacing the draft", () => {
   const replacement = {
     graph: { v: 1, nodes: [{ id: "only", type: "exit" }], edges: [] },
@@ -270,7 +311,7 @@ describe("useFlowDraft replacing the draft", () => {
       expect(outcome).toBe("unchanged");
       expect(result.current.held).toBe(false);
       expect(result.current.draft.name).toBe("Edited");
-      expect(saves(calls)).toEqual([{ name: "Edited" }]);
+      expect(saves(calls)).toEqual([{ name: "Edited", revision: 1 }]);
     });
 
     it("adopts the server's draft when it changed, and never saves the old edits over it", async () => {
@@ -319,7 +360,7 @@ describe("useFlowDraft replacing the draft", () => {
 
       act(() => result.current.retry());
       await flush(100);
-      expect(saves(calls)).toEqual([{ name: "Edited" }]);
+      expect(saves(calls)).toEqual([{ name: "Edited", revision: 1 }]);
     });
   });
 });

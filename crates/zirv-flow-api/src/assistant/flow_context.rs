@@ -363,8 +363,8 @@ fn too_many_nodes(doc: &Value) -> bool {
 }
 
 /// The document with each personal literal replaced by a placeholder, and the table to put them
-/// back. A condition larger than the masking walks cover is refused: its literals could not all be
-/// found.
+/// back. A condition larger than the masking walks cover, or not well formed, is refused: its
+/// literals could not all be found.
 pub(crate) fn mask_document(
     doc: &Value,
     clear: &ClearKeys,
@@ -1026,6 +1026,34 @@ mod tests {
             table.restore_text("Posts to (kept-url:2) and (kept-url:7)."),
             "Posts to https://h.example.com/y and (kept-url:7)."
         );
+    }
+
+    #[test]
+    fn a_condition_that_carries_a_second_node_key_is_refused_and_never_sent() {
+        let flow = |condition: Value| {
+            json!({"graph":{"v":1,"nodes":[
+                {"id":"check","type":"branch","conditions":[condition]},
+                {"id":"end","type":"exit"}],"edges":[]},
+                "settings":{"reentry":{"mode":"once"}}})
+        };
+        for condition in [
+            json!({"all":[{"trait":"city","op":"eq","value":"Aarhus"}],
+                "trait":"email","op":"eq","value":"jane@x.dk"}),
+            // No node key at all, with a value no walk reaches.
+            json!({"op":"eq","value":"jane@x.dk"}),
+            json!({"all":["jane@x.dk"]}),
+        ] {
+            let doc = flow(condition.clone());
+            assert_eq!(
+                mask_document(&doc, &ClearKeys::of(&details())).unwrap_err(),
+                TooLarge,
+                "{condition}"
+            );
+            assert!(
+                flow_context(&details(), "Flow", &doc, Privacy::SchemaOnly).is_err(),
+                "{condition}"
+            );
+        }
     }
 
     #[test]

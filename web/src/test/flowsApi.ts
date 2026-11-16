@@ -66,7 +66,7 @@ export function sampleSettings() {
 }
 
 export function flowDetail(overrides: Record<string, unknown> = {}) {
-  return { ...flowBody(), graph: sampleGraph(), settings: sampleSettings(), warmup: warmupBody(), ...overrides };
+  return { ...flowBody(), graph: sampleGraph(), settings: sampleSettings(), warmup: warmupBody(), revision: 1, ...overrides };
 }
 
 interface Options {
@@ -92,7 +92,10 @@ export function flowRoutes({ role = "writer", flow, issues = [] }: Options = {})
     [`GET ${WS}/flows/${FLOW_ID}`]: () => json(current),
     [`GET ${WS}/flows/${FLOW_ID}/versions`]: () => json([]),
     [`PATCH ${WS}/flows/${FLOW_ID}`]: async (request) => {
-      current = { ...current, ...((await request.json()) as Record<string, unknown>) };
+      // A save counts the draft; the `revision` it names is checked by the tests that care.
+      const changes = (await request.json()) as Record<string, unknown>;
+      delete changes.revision;
+      current = { ...current, ...changes, revision: Number(current.revision) + 1 };
       return json(current);
     },
     [`POST ${WS}/flows/${FLOW_ID}/validate`]: () => {

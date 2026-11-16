@@ -124,7 +124,7 @@ pub(super) async fn run(
     match outcome {
         Ok(RepairOutcome::Valid(explained, _)) => Ok(explained),
         Ok(RepairOutcome::Exhausted(issues, _)) => Err(failed(&issues)),
-        Err(RepairError::Dispatch(error)) => Err(DispatchError::Ai(error).into()),
+        Err(RepairError::Dispatch(error)) => Err(dispatcher.failure(error).into()),
         Err(RepairError::Aborted(error)) => Err(error),
     }
 }

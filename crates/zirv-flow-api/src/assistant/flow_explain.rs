@@ -95,8 +95,12 @@ pub(crate) struct AiTraceExplainBody {
     summary: String,
     /// One entry for every record the model was shown, each citing the record's id.
     records: Vec<AiExplainedRecord>,
-    /// How many later records of the trace the model was not shown (the trace is long).
+    /// How many later records of the trace the model was not shown (the trace is long). A lower
+    /// bound when `truncated` is true: the trace has more records than were read.
     omitted_records: usize,
+    /// True when the trace is longer than the records read for the explanation, so
+    /// `omitted_records` counts only the records that were read and not shown.
+    truncated: bool,
 }
 
 /// Reads the optional body: an empty one means the current draft.
@@ -170,7 +174,12 @@ fn flow_body(
 }
 
 /// The explanation of a trace as the response.
-fn trace_body(trace_id: TraceId, explained: &Value, omitted_records: usize) -> AiTraceExplainBody {
+fn trace_body(
+    trace_id: TraceId,
+    explained: &Value,
+    omitted_records: usize,
+    truncated: bool,
+) -> AiTraceExplainBody {
     AiTraceExplainBody {
         trace_id: trace_id.to_string(),
         summary: explained
@@ -195,6 +204,7 @@ fn trace_body(trace_id: TraceId, explained: &Value, omitted_records: usize) -> A
             })
             .collect(),
         omitted_records,
+        truncated,
     }
 }
 
@@ -374,7 +384,7 @@ pub(crate) async fn explain_trace(
         ApiError::ai_explain_failed_for("trace", problem_issues(issues))
     })
     .await?;
-    Ok(Json(trace_body(trace_id, &explained, omitted)))
+    Ok(Json(trace_body(trace_id, &explained, omitted, truncated)))
 }
 
 #[cfg(test)]
@@ -429,11 +439,12 @@ mod tests {
             {"id": "not-an-id", "text": "dropped"}
         ]});
 
-        let body = trace_body(TraceId::new(), &explained, 3);
+        let body = trace_body(TraceId::new(), &explained, 3, true);
 
         assert_eq!(body.records.len(), 1);
         assert_eq!(body.records[0].id, id);
         assert_eq!(body.omitted_records, 3);
+        assert!(body.truncated);
         assert_eq!(body.summary, "It failed.");
     }
 

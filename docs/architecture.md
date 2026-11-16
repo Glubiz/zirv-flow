@@ -3161,6 +3161,9 @@ credentials, webhooks) answers `409` on a retry and takes no key. Set additions
 and ingestion retain their existing de-duplication. Publishing actions are
 excluded from the keyed-create set: flow, snippet, template and theme publishes
 can create another version on a retry; revision checks protect edits, not retries.
+A flow's draft counts its writes in `flows.draft_revision` (migration 0110, bumped by draft saves only, not by a
+publish or a pause): `PATCH /flows/{id}` takes an optional `revision` and answers `409 flow_draft_revision_mismatch`
+with `current_revision` when it is stale; a save that leaves it out always applies.
 An event-schema publish consumes its draft, so a repeat is `409` until a new draft
 is saved. The complete classification is in `docs/api.md` and `docs/api-audit.md`.
 The six unguarded resource creates take an optional `Idempotency-Key` header of 1 to 255
@@ -3985,7 +3988,7 @@ they were ruled as their capabilities were added to the plan.
   stays in `jsonb`. `string_list` traits stay in `jsonb`. The promotion is built in the
   segment milestone (M4); until the slots exist the `jsonb_path_ops` index stays, and it is reconsidered once promoted
   traits cover the equality searches. The slots are live (#125): states `backfilling`, `ready` and `retiring`; writers take the shared slot lock before they read the assignments and assignment changes take the exclusive one, so a backfill never leaves a stale value (`people/slots.rs`); the routes are `POST` and `DELETE /traits/{key}/index`.
-  Known limitation and upgrade decision: keep released migration 0033 and its checksum. Its initial `ALTER TABLE` holds ACCESS EXCLUSIVE on `people` through all 30 partial index builds, blocking reads and writes. Populated upgrades stop all roles and budget the full build when upgrading from before 0033; `v0.187.0` already contains it. No populated build timing is recorded. Rehearse at the installation's row counts before setting the downtime window; see the [lock review](operations/upgrade.md#lock-review-through-0109). This supports stopped upgrades only; online and mixed-version upgrades remain OQ-17.
+  Known limitation and upgrade decision: keep released migration 0033 and its checksum. Its initial `ALTER TABLE` holds ACCESS EXCLUSIVE on `people` through all 30 partial index builds, blocking reads and writes. Populated upgrades stop all roles and budget the full build when upgrading from before 0033; `v0.187.0` already contains it. No populated build timing is recorded. Rehearse at the installation's row counts before setting the downtime window; see the [lock review](operations/upgrade.md#lock-review-through-0110). This supports stopped upgrades only; online and mixed-version upgrades remain OQ-17.
   Details in [docs/benchmarks/m2-ingestion.md](benchmarks/m2-ingestion.md).
 
 - **OQ-8:** A per-workspace running cap in the claim query

@@ -130,7 +130,8 @@ fn condition_pointers(sections: Option<&Value>, base: &str) -> Vec<String> {
 }
 
 /// The document with the personal literals of its conditions replaced by placeholders, and the
-/// table to put them back. A condition deeper or larger than the masking walk covers is refused:
+/// table to put them back. A condition deeper or larger than the masking walk covers, or not well
+/// formed, is refused:
 /// its literals could not all be found.
 fn mask_document(document: &Value, clear: &ClearKeys) -> Result<(Value, Placeholders), ApiError> {
     let pointers = condition_pointers(document.pointer("/blocks/sections"), "/blocks/sections");
@@ -140,7 +141,8 @@ fn mask_document(document: &Value, clear: &ClearKeys) -> Result<(Value, Placehol
             .is_some_and(|condition| !within_walk(condition, 1, &mut 0))
         {
             return Err(ApiError::ai_template_unsupported(format!(
-                "the condition at {pointer} is too deep or too large for the assistant;                  simplify that condition first"
+                "the condition at {pointer} is too deep, too large or not well formed for the assistant; \
+                 simplify that condition first"
             )));
         }
     }
@@ -489,6 +491,23 @@ mod tests {
                 (covered, other) => panic!("covered {covered}: {:?}", other.is_ok()),
             }
         }
+    }
+
+    #[test]
+    fn schema_only_refuses_a_visible_if_with_a_second_node_key() {
+        let document = with_condition(json!({"all": [
+            {"trait": "city", "op": "eq", "value": "Aarhus"}],
+            "trait": "email", "op": "eq", "value": "jane@example.org"}));
+
+        let error = render_template_context(
+            &context(&document, TemplateTask::Copy),
+            &ClearKeys::default(),
+            Privacy::SchemaOnly,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), Some("ai_template_unsupported"));
+        assert!(!error.detail().contains("jane@example.org"));
     }
 
     #[test]

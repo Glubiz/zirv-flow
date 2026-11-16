@@ -57,6 +57,7 @@ const EXPLAINED = {
   trace_id: TRACE,
   summary: "The person entered, waited a day and finished.",
   omitted_records: 0,
+  truncated: false,
   records: [
     { id: D2, text: "They moved past the wait." },
     { id: NOT_SHOWN, text: "Something the list does not show." },
@@ -107,6 +108,17 @@ describe("explaining a trace in the inspector", () => {
     await waitFor(() => expect(cited).toHaveFocus());
     expect(cited).toHaveClass("trace-record-active");
     expect(cited).toHaveAttribute("aria-current", "true");
+  });
+
+  it("says the omitted count is a lower bound when the trace was cut short", async () => {
+    mockApi(routes({ [EXPLAIN]: () => json({ ...EXPLAINED, omitted_records: 940, truncated: true }) }));
+    const user = userEvent.setup();
+    mount();
+    const sheet = await openEnrollment(user);
+
+    await user.click(await within(sheet).findByRole("button", { name: "Explain this trace" }));
+
+    expect(await within(sheet).findByText(/did not see at least 940 records/)).toBeInTheDocument();
   });
 
   it("shows the reason when the explanation fails, and explains again on request", async () => {
