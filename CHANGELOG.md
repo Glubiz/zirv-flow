@@ -15,3 +15,14 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v1.0.8 (2026-11-16)
+
+### Fixes
+
+- backfill template uses on upgrade, refuse unsigned webhooks before the body, probe audit at clock time (#667, #662, #664)
+- secret refresh locks, webhook rate charge, audit probe, retention cursors, attempt purge, destination report, orphan sweep and template use rollup (#662-#670)
+
+### Chores
+
+- seed many workspaces in the person-index plan test (#665)
+
