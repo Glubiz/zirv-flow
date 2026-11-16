@@ -3706,6 +3706,45 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn discovery_does_not_store_descriptors_fetched_with_a_rotated_credential(pool: PgPool) {
+        let fx = fixture_with_loopback_egress(&pool).await;
+        let slow = fx.slow_postgres_source(&pool).await;
+        let source = format!("/sources/{}", slow.id);
+        let credential: uuid::Uuid = sqlx::query_scalar("SELECT credential_id FROM sources")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let url = url::Url::parse(&std::env::var("DATABASE_URL").unwrap()).unwrap();
+
+        let discover_tail = format!("{source}/discover");
+        let discover = fx.as_admin("POST", &discover_tail, None);
+        let rotate = async {
+            slow.accepted.await.unwrap();
+            let rotated = fx
+                .as_admin(
+                    "PUT",
+                    &format!("/credentials/{credential}/secret"),
+                    Some(json!({"secret": {
+                        "username": url.username(), "password": url.password().unwrap()
+                    }})),
+                )
+                .await;
+            assert_eq!(rotated.status, StatusCode::OK, "{:?}", rotated.body);
+            slow.release.send(()).unwrap();
+        };
+        let (reply, ()) = tokio::join!(discover, rotate);
+
+        assert_eq!(reply.status, StatusCode::CONFLICT, "{:?}", reply.body);
+        assert_eq!(reply.body["code"], "source_changed");
+        assert!(
+            fx.stream_names().await.is_empty(),
+            "discovery under the rotated credential stored {:?}",
+            fx.stream_names().await
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn discovery_with_no_concurrent_change_stores_the_streams(pool: PgPool) {
         let fx = fixture_with_loopback_egress(&pool).await;
         let slow = fx.slow_postgres_source(&pool).await;

@@ -5832,6 +5832,124 @@ mod tests {
         assert_eq!((status.as_str(), history), ("subscribed", 2));
     }
 
+    /// Seeds `count` people and returns their ids in ascending order.
+    async fn seed_sorted_people(pool: &PgPool, ws: &str, count: usize) -> Vec<uuid::Uuid> {
+        let mut ids = Vec::new();
+        for n in 0..count {
+            let id = seed_person(pool, ws, &format!("person{n}@example.com")).await;
+            ids.push(id.parse::<uuid::Uuid>().unwrap());
+        }
+        ids.sort();
+        ids
+    }
+
+    async fn merge_into(pool: &PgPool, alias: uuid::Uuid, survivor: uuid::Uuid) {
+        sqlx::query("UPDATE people SET merged_into = $1 WHERE id = $2")
+            .bind(survivor)
+            .bind(alias)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_import_keeps_file_order_for_a_survivor_and_its_merged_alias(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let ids = seed_sorted_people(&pool, &ws, 2).await;
+        // The alias sorts below its survivor, so a sort by the raw id would write it first.
+        let (alias, survivor) = (ids[0], ids[1]);
+        merge_into(&pool, alias, survivor).await;
+
+        let reply = call_text(
+            &router,
+            "POST",
+            &consent_csv_uri(&ws, "import"),
+            Some("text/csv"),
+            format!(
+                "person_id,channel,topic,status
+{survivor},email,,subscribed
+{alias},email,,unsubscribed
+"
+            ),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.text);
+        let status: String = sqlx::query_scalar("SELECT status FROM consent WHERE person_id = $1")
+            .bind(survivor)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "unsubscribed", "the later line wins");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn imports_reaching_the_same_survivors_through_aliases_in_opposite_orders_do_not_deadlock(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let ids = seed_sorted_people(&pool, &ws, 4).await;
+        let (a, b, first, second) = (ids[0], ids[1], ids[2], ids[3]);
+        // By raw id, `a` (an alias of `second`) sorts before `first`, but `b` (an alias of
+        // `first`) sorts before `second`: the two files reach the survivors in opposite orders.
+        merge_into(&pool, a, second).await;
+        merge_into(&pool, b, first).await;
+        let header = "person_id,channel,topic,status
+";
+        let one = format!(
+            "{header}{a},email,,subscribed
+{first},email,,subscribed
+"
+        );
+        let two = format!(
+            "{header}{b},email,,unsubscribed
+{second},email,,unsubscribed
+"
+        );
+        let database: String = sqlx::query_scalar("SELECT current_database()")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        for _ in 0..15 {
+            let import = |csv: String| {
+                let (router, owner, uri) = (router.clone(), &owner, consent_csv_uri(&ws, "import"));
+                async move {
+                    call_text(
+                        &router,
+                        "POST",
+                        &uri,
+                        Some("text/csv"),
+                        csv,
+                        Auth::Session(owner),
+                    )
+                    .await
+                }
+            };
+            let (x, y) = tokio::join!(import(one.clone()), import(two.clone()));
+            assert_eq!(x.status, StatusCode::OK, "{}", x.text);
+            assert_eq!(y.status, StatusCode::OK, "{}", y.text);
+        }
+
+        // A deadlock the retry hides is still counted by the database. The counter is flushed
+        // by the statistics system a moment after the fact.
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        let deadlocks: i64 =
+            sqlx::query_scalar("SELECT deadlocks FROM pg_stat_database WHERE datname = $1")
+                .bind(&database)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(deadlocks, 0, "no import lost a deadlock");
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn consent_is_set_read_and_its_history_shows_source_and_evidence(pool: PgPool) {

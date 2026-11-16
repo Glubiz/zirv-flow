@@ -152,11 +152,12 @@ fn read_records(text: &str) -> Result<(Vec<String>, Vec<csv::Record>), AdminErro
 /// A real import is audited as `consent.imported` with counts only. Each written change is
 /// recorded in the person history with the source `import`.
 ///
-/// Every row is read first, then the valid ones are written in person order (a person's own
-/// rows keep their file order, so the later one still wins). A write holds its person's lock to
-/// the end of the transaction, so two imports that write the same people in one order cannot
-/// deadlock each other; a person merged into another is locked as the survivor, and an import
-/// that still loses a deadlock is run once more. A dry run writes too, to report what a commit
+/// Every row is read first, then the valid ones are written in order of the person each write
+/// locks (a person merged into another is locked as the survivor, so the rows are ordered by
+/// survivor; one person's rows keep their file order, so the later one still wins). A write
+/// holds its person's lock to the end of the transaction, so two imports that write the same
+/// people in one order cannot deadlock each other, whichever merged ids their files name; an
+/// import that still loses a deadlock is run once more. A dry run writes too, to report what a commit
 /// would do, and holds its locks until it is rolled back. A state scoped to an archived
 /// dimension or value is accepted, as an export lists those; one scoped to a dimension or value
 /// that does not exist is not.
@@ -208,8 +209,20 @@ pub(crate) async fn import(
         };
         rows.push((line, row, topic));
     }
-    // A stable sort: one person's rows stay in file order.
-    rows.sort_by_key(|(line, row, _)| (row.person, *line));
+    // Each row is ordered by the person the write locks: the survivor of a merged person. A
+    // person that does not resolve keeps its own id and is reported by the write. The sort is
+    // on (survivor, line), so one real person's rows stay in file order whichever alias they
+    // name, and every import takes its locks in the same order.
+    let mut survivors: HashMap<Uuid, Uuid> = HashMap::new();
+    for (_, row, _) in &rows {
+        if !survivors.contains_key(&row.person) {
+            let survivor = zirv_flow_store::current_person(pool, workspace, row.person)
+                .await?
+                .unwrap_or(row.person);
+            survivors.insert(row.person, survivor);
+        }
+    }
+    rows.sort_by_key(|(line, row, _)| (survivors[&row.person], *line));
 
     let mut attempt = write_rows(
         pool,
