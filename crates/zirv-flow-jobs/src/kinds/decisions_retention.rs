@@ -7,7 +7,7 @@ use serde_json::Value;
 use tracing::{info, warn};
 use zirv_flow_store::{
     DecisionRetentionReport, apply_decision_retention_progress, decision_log_size,
-    record_retention_run, workspace_windows,
+    workspace_windows,
 };
 
 use crate::{JobContext, JobError, JobKind, metrics};
@@ -48,7 +48,14 @@ impl JobKind for DecisionsRetention {
             report.records_deleted,
             now.unix_timestamp() as f64,
         );
-        record_retention_run(&pool, "decision_log", now, report.records_deleted).await?;
+        super::record_run(
+            &pool,
+            "decision_log",
+            now,
+            report.records_deleted,
+            outcome.is_err(),
+        )
+        .await?;
         for partition in &report.skipped_partitions {
             warn!(partition = %partition, "decision partition drop skipped: the table is locked");
         }

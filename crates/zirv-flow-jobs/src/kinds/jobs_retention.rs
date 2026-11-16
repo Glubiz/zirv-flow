@@ -5,7 +5,7 @@
 use serde_json::Value;
 use time::Duration;
 use tracing::info;
-use zirv_flow_store::{purge_dead_jobs, record_retention_run};
+use zirv_flow_store::purge_dead_jobs;
 
 use crate::{JobContext, JobError, JobKind, metrics};
 
@@ -43,7 +43,7 @@ impl JobKind for JobsRetention {
             }
         };
         metrics::record_retention("jobs", deleted, now.unix_timestamp() as f64);
-        record_retention_run(&pool, "job_history", now, deleted).await?;
+        super::record_run(&pool, "job_history", now, deleted, outcome.is_err()).await?;
         outcome?;
         info!(jobs_deleted = deleted, days, "job history retention ran");
         Ok(())

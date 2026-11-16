@@ -18,6 +18,11 @@
 //! erasure never waits on a delivery. The outcome write is fenced on the attempt number, so a row
 //! that was re-driven or erased meanwhile is left alone.
 //!
+//! A row that finds its destination's bucket empty is given back without spending an attempt, and
+//! the run ends there: the rows claimed after it are released as they were (same due time, no
+//! attempt counted), and the bucket's wait is remembered, so a run that starts inside it claims
+//! nothing. The successor is due at the end of that wait, not at the backlog's first due row.
+//!
 //! When due rows remain, or rows wait for a retry, the job leaves its successor behind. It never
 //! writes an event and never enqueues flow arrivals. Every `delivery_attempts` row, metric and
 //! decision names ids and fixed codes only; the payload reaches none of them.
@@ -36,8 +41,8 @@ use zirv_flow_core::schedule::backoff;
 use zirv_flow_core::{Cause, TraceContext, TraceId, WorkspaceId};
 use zirv_flow_store::{
     Admission, ClaimedRow, DELIVERED_RETENTION, Destination, FORWARD_JOB_KIND, NewDecision, PgPool,
-    Settled, SubjectKind, append_decision, claim_due, defer_row, ensure_forward_job, extend_lease,
-    find_destination, next_due, purge_delivered, settle_row, throttle_bucket,
+    Settled, SubjectKind, append_decision, claim_due, ensure_forward_job, extend_lease,
+    find_destination, next_due, purge_delivered, release_rows, settle_row, throttle_bucket,
 };
 
 use super::workspace_and_id;
@@ -141,19 +146,43 @@ impl JobKind for EventForward {
             .filter(|driver| driver.spec().capabilities.channels.contains(&CHANNEL));
         purge_delivered(&pool, destination_id, DELIVERED_RETENTION, PURGE_LIMIT).await?;
 
+        // A bucket another run found empty a moment ago is not asked again: nothing is claimed
+        // until it holds a token.
+        let clock = ctx.clock().clone();
+        let start = clock.now(ctx.conn()).await?;
+        let mut wait_until = driver
+            .filter(|driver| driver.spec().capabilities.rate_limit)
+            .and_then(|_| ctx.rate_gates().held(destination_id, start))
+            .map(|wait| start + wait);
         let mut credential: Option<Result<Credential, Verdict>> = None;
-        for _ in 0..ROUNDS {
+        'rounds: for _ in 0..ROUNDS {
+            if wait_until.is_some() {
+                break;
+            }
             let claimed = claim(&pool, workspace, destination_id).await?;
             if claimed.is_empty() {
                 break;
             }
-            for row in claimed {
-                forward_one(ctx, &pool, &destination, driver, &mut credential, &row).await?;
+            for (index, row) in claimed.iter().enumerate() {
+                if let Some(until) =
+                    forward_one(ctx, &pool, &destination, driver, &mut credential, row).await?
+                {
+                    // The bucket is empty: this row and the ones after it go back as they were,
+                    // due at their original instants, so the queue keeps its order and the oldest
+                    // is claimed first after the wait. The run ends, so the backlog is not walked
+                    // for a token that is not there; the successor and the hold wait for `until`.
+                    let mut tx = zirv_flow_store::begin(&pool).await?;
+                    release_rows(&mut tx, &claimed[index..]).await?;
+                    zirv_flow_store::commit(tx).await?;
+                    wait_until = Some(until);
+                    break 'rounds;
+                }
             }
         }
 
         if let Some(due) = next_due(ctx.conn(), destination_id).await? {
             let now = ctx.clock().clone().now(ctx.conn()).await?;
+            let due = wait_until.map_or(due, |until| due.max(until));
             let at = (due > now).then_some(due);
             ensure_forward_job(ctx.conn(), workspace, destination_id, at).await?;
         }
@@ -172,7 +201,9 @@ async fn claim(
     Ok(rows)
 }
 
-/// Delivers one claimed row and writes how it went.
+/// Delivers one claimed row and writes how it went. Returns when the destination can be asked
+/// again if the row waited for a rate-limit token (it was not delivered and the caller gives it
+/// back), else none.
 async fn forward_one(
     ctx: &mut JobContext<'_>,
     pool: &PgPool,
@@ -180,7 +211,7 @@ async fn forward_one(
     driver: Option<&'static dyn ErasedDestination>,
     credential: &mut Option<Result<Credential, Verdict>>,
     row: &ClaimedRow,
-) -> Result<(), JobError> {
+) -> Result<Option<OffsetDateTime>, JobError> {
     let workspace = WorkspaceId::from_uuid(row.workspace_id);
     let clock = ctx.clock().clone();
     let now = clock.now(ctx.conn()).await?;
@@ -194,14 +225,15 @@ async fn forward_one(
                 let gates = std::sync::Arc::clone(ctx.rate_gates());
                 let wait = match gates.admit(pool, destination.id, &clock).await? {
                     Admission::Granted => None,
-                    Admission::Wait(wait) => Some(wait),
+                    Admission::Wait(wait) => {
+                        gates.hold(destination.id, now + wait);
+                        Some(wait)
+                    }
                     Admission::Gone => Some(GONE_WAIT),
                 };
                 if let Some(wait) = wait {
-                    let mut tx = zirv_flow_store::begin(pool).await?;
-                    defer_row(&mut tx, row.id, row.claim_token, now + wait).await?;
-                    zirv_flow_store::commit(tx).await?;
-                    return Ok(());
+                    // The caller gives this row back with the unreached ones.
+                    return Ok(Some(now + wait));
                 }
             }
             if credential.is_none() {
@@ -218,7 +250,7 @@ async fn forward_one(
                     let held = extend_lease(&mut tx, row.id, row.claim_token, LEASE).await?;
                     zirv_flow_store::commit(tx).await?;
                     if !held {
-                        return Ok(());
+                        return Ok(None);
                     }
                     call(ctx, destination, driver, credential, row, now).await?
                 }
@@ -294,7 +326,7 @@ async fn forward_one(
         .await?;
     }
     zirv_flow_store::commit(tx).await?;
-    Ok(())
+    Ok(None)
 }
 
 fn early(verdict: Verdict) -> Attempt {
@@ -668,6 +700,11 @@ mod tests {
             .execute(&self.pool)
             .await
             .unwrap();
+            self.run_job().await;
+        }
+
+        /// [`Env::run`] with the rows' due times as they are.
+        async fn run_job(&self) {
             sqlx::query("UPDATE jobs SET run_at = now() WHERE kind = 'event.forward'")
                 .execute(&self.pool)
                 .await
@@ -1260,6 +1297,133 @@ mod tests {
                     .await
                     .unwrap();
             assert_eq!(token, Some(second.claim_token), "the newer claim is intact");
+        })
+        .await;
+    }
+
+    /// The pending rows as (id, attempts, due), oldest first.
+    async fn waiting(env: &Env) -> Vec<(Uuid, i32, OffsetDateTime)> {
+        sqlx::query_as(
+            "SELECT id, attempts, next_attempt_at FROM forwarding_outbox \
+             WHERE state = 'pending' ORDER BY created_at, id",
+        )
+        .fetch_all(&env.pool)
+        .await
+        .unwrap()
+    }
+
+    /// When the one ready `event.forward` job is due.
+    async fn successor_run_at(env: &Env) -> OffsetDateTime {
+        sqlx::query_scalar(
+            "SELECT run_at FROM jobs WHERE kind = 'event.forward' AND state = 'ready'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_empty_bucket_ends_the_run_gives_the_unreached_rows_back_and_sets_the_successor_at_the_wait(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::with(pool, "rate", "fake", json!({"mode": "ok"}), 1, 1).await;
+            for _ in 0..8 {
+                env.order().await;
+            }
+            sqlx::query(
+                "UPDATE forwarding_outbox o SET next_attempt_at = now() - interval '10 minutes' \
+                     + make_interval(secs => r.n) \
+                 FROM (SELECT id, row_number() OVER (ORDER BY created_at, id) AS n \
+                       FROM forwarding_outbox) r WHERE o.id = r.id",
+            )
+            .execute(&env.pool)
+            .await
+            .unwrap();
+            let before = waiting(&env).await;
+            let started: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
+                .fetch_one(&env.pool)
+                .await
+                .unwrap();
+
+            env.run_job().await;
+
+            let rows = env.rows().await;
+            assert_eq!(
+                rows.iter().filter(|row| row.0 == "delivered").count(),
+                1,
+                "{rows:?}"
+            );
+            let after = waiting(&env).await;
+            assert_eq!(after.len(), 7);
+            assert!(
+                after.iter().all(|row| row.1 == 0),
+                "no waiting row spent an attempt: {after:?}"
+            );
+            // The row that met the empty bucket and the six not reached all keep the due they
+            // had, so the queue keeps its order: after the wait the oldest row goes first.
+            for (kept, original) in after.iter().zip(&before[1..]) {
+                assert_eq!((kept.0, kept.2), (original.0, original.2), "{after:?}");
+            }
+            assert!(
+                successor_run_at(&env).await > started,
+                "the successor waits for a token instead of walking the backlog at once"
+            );
+            // The next claim after the wait takes the row that met the empty bucket first.
+            let mut connection = env.pool.acquire().await.unwrap();
+            let next = zirv_flow_store::claim_due(
+                &mut connection,
+                env.ws,
+                env.destination,
+                BATCH,
+                Duration::from_secs(300),
+            )
+            .await
+            .unwrap();
+            let order: Vec<Uuid> = next.iter().map(|row| row.id).collect();
+            let expected: Vec<Uuid> = before[1..].iter().map(|row| row.0).collect();
+            assert_eq!(order, expected, "claimed oldest first after the wait");
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_run_inside_the_hold_claims_nothing_and_leaves_its_successor_at_the_hold(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::with(pool, "rate", "fake", json!({"mode": "ok"}), 1, 1).await;
+            for _ in 0..3 {
+                env.order().await;
+            }
+            let until = OffsetDateTime::now_utc() + time::Duration::hours(1);
+            env.gates.hold(env.destination, until);
+            let versions = |env: &Env| {
+                let pool = env.pool.clone();
+                async move {
+                    sqlx::query_as::<_, (Uuid, String)>(
+                        "SELECT id, xmin::text FROM forwarding_outbox ORDER BY id",
+                    )
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap()
+                }
+            };
+            sqlx::query(
+                "UPDATE forwarding_outbox SET next_attempt_at = now() WHERE state = 'pending'",
+            )
+            .execute(&env.pool)
+            .await
+            .unwrap();
+            let before = versions(&env).await;
+
+            env.run_job().await;
+
+            assert_eq!(versions(&env).await, before, "no row was claimed");
+            assert_eq!(fake_ledger_calls(&env.ledger).len(), 0);
+            assert!(successor_run_at(&env).await >= until - time::Duration::seconds(1));
         })
         .await;
     }

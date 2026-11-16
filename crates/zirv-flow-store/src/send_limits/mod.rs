@@ -14,4 +14,6 @@ pub use settings::{
     CapMode, FrequencyCap, NewFrequencyCap, QuietHours, SendLimits, read_quiet_hours,
     read_send_limits, replace_send_limits,
 };
-pub use slots::{CAP_LOCK_CLASS, CapVerdict, check_frequency_caps, record_message_deferral};
+pub use slots::{
+    CAP_LOCK_CLASS, CapVerdict, check_frequency_caps, record_message_deferral, release_message_slot,
+};

@@ -2,6 +2,12 @@
 //! runs here, so the block of tokens a take brings is spent by all of them and a destination costs
 //! one take per block, not one per job (architecture 10.1 gate 8 and 14).
 //!
+//! A take that found the bucket empty also leaves a *hold*: the instant the bucket will hold a
+//! token. A send or forward job that wakes before then is queued again at once, without reading
+//! its gates, reserving a cap slot or rendering, only to find the bucket empty again. The hold
+//! never grants: the bucket stays authoritative, and a stale hold only delays a take by at most
+//! the wait it recorded.
+//!
 //! The token bucket itself lives in the store, shared by every worker of every process
 //! (`destination_rate_buckets`); this only holds the process's view of it. A gate is created on
 //! the first send to a destination and dropped when the destination is archived.
@@ -10,6 +16,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use hashbrown::HashMap;
+use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_store::{Admission, Clock, PgPool, RateGate, StoreError};
 
@@ -17,6 +24,8 @@ use zirv_flow_store::{Admission, Clock, PgPool, RateGate, StoreError};
 #[derive(Default)]
 pub struct RateGates {
     gates: Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<RateGate>>>>,
+    /// Per destination, the instant its bucket was last found empty until.
+    held: Mutex<HashMap<Uuid, OffsetDateTime>>,
 }
 
 impl fmt::Debug for RateGates {
@@ -52,6 +61,12 @@ impl RateGates {
                 }))
             };
         let admission = gate.lock().await.admit(pool, clock).await?;
+        if admission == Admission::Granted {
+            self.held
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&destination);
+        }
         if admission == Admission::Gone {
             self.gates
                 .lock()
@@ -59,6 +74,32 @@ impl RateGates {
                 .remove(&destination);
         }
         Ok(admission)
+    }
+
+    /// Remembers that the destination's bucket holds no token until `until`.
+    pub(crate) fn hold(&self, destination: Uuid, until: OffsetDateTime) {
+        self.held
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(destination, until);
+    }
+
+    /// How long from `now` (the job's clock) the destination's bucket is known to be empty, or
+    /// none when there is no hold or it has passed.
+    pub(crate) fn held(
+        &self,
+        destination: Uuid,
+        now: OffsetDateTime,
+    ) -> Option<std::time::Duration> {
+        let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+        let until = *held.get(&destination)?;
+        match (until - now).try_into() {
+            Ok(wait) if until > now => Some(wait),
+            _ => {
+                held.remove(&destination);
+                None
+            }
+        }
     }
 
     /// How many destinations the process holds a gate for.
@@ -83,6 +124,31 @@ mod tests {
 
         assert_eq!(gates.len(), 0);
         assert_eq!(format!("{gates:?}"), "RateGates { destinations: 0 }");
+    }
+
+    #[test]
+    fn a_hold_lasts_until_its_instant_and_not_for_another_destination() {
+        let gates = RateGates::default();
+        let destination = Uuid::from_u128(1);
+        let now = time::macros::datetime!(2031-05-06 07:08:09 UTC);
+
+        assert_eq!(gates.held(destination, now), None);
+        gates.hold(destination, now + time::Duration::seconds(30));
+
+        assert_eq!(
+            gates.held(destination, now + time::Duration::seconds(10)),
+            Some(Duration::from_secs(20))
+        );
+        assert_eq!(gates.held(Uuid::from_u128(2), now), None);
+        assert_eq!(
+            gates.held(destination, now + time::Duration::seconds(30)),
+            None
+        );
+        assert_eq!(
+            gates.held(destination, now),
+            None,
+            "an expired hold is gone"
+        );
     }
 
     #[tokio::test]
