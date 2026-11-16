@@ -17,7 +17,7 @@ use hashbrown::HashSet;
 use serde_json::Value;
 use uuid::Uuid;
 use zirv_flow_ai::{AiError, ChatRequest, Content, Privacy, RequestBuilder, ToolSpec};
-use zirv_flow_core::segment::{MAX_NODES, NODE_KEYS, pointer_push};
+use zirv_flow_core::segment::{AggFn, MAX_NODES, NODE_KEYS, Op, pointer_push};
 use zirv_flow_store::CatalogDetails;
 
 use super::catalog::{name, names};
@@ -463,10 +463,13 @@ pub(crate) fn mask_many(definitions: &[Value], clear: &ClearKeys) -> (Vec<Value>
 }
 
 /// Whether a condition is within what the walks above cover: the nodes and the depth, counted as
-/// they count them, and every node well formed, which is a map with exactly one node key. A
-/// condition that is not could hide a literal past their reach (a second node key next to the one
-/// the walks read, or a value in a place they never look), so it is never masked and never sent.
-/// A null stands for nothing and passes; the validator refuses what the walks skip.
+/// they count them, and every node well formed. Well formed means a map with exactly one node key
+/// and no key the segment parser does not read beside it, and in every place the walks read a
+/// literal from, the type they read: a string trait or event, a filter or aggregate value that is
+/// a scalar or an array of scalars. A condition that is not could hide a literal past their reach
+/// (a second node key, a note field, an object where a value goes, a trait the walks cannot name),
+/// so it is never masked and never sent. A null stands for nothing and passes; the validator
+/// refuses what the walks skip.
 pub(crate) fn within_walk(value: &Value, depth: usize, nodes: &mut usize) -> bool {
     if depth > WALK_DEPTH {
         return false;
@@ -488,21 +491,160 @@ pub(crate) fn within_walk(value: &Value, depth: usize, nodes: &mut usize) -> boo
     {
         return false;
     }
-    match key_of(map) {
-        Some(kind @ ("all" | "any")) => {
-            map.get(kind)
-                .and_then(Value::as_array)
-                .is_some_and(|children| {
-                    children
-                        .iter()
-                        .all(|child| within_walk(child, depth + 1, nodes))
-                })
-        }
-        Some("not") => map
-            .get("not")
-            .is_some_and(|child| within_walk(child, depth + 1, nodes)),
-        _ => true,
+    let Some(kind) = key_of(map) else {
+        return false;
+    };
+    let siblings: &[&str] = match kind {
+        "trait" => &["op", "value"],
+        "event" => &["where", "agg", "window"],
+        _ => &[],
+    };
+    // The version sits beside the root's node key, as a number.
+    let known = |name: &str| {
+        name == kind
+            || siblings.contains(&name)
+            || (depth == 1 && name == "v" && map.get("v").is_some_and(Value::is_number))
+    };
+    if !map.keys().all(|name| known(name)) {
+        return false;
     }
+    let body = &map[kind];
+    match kind {
+        "all" | "any" => body.as_array().is_some_and(|children| {
+            children
+                .iter()
+                .all(|child| within_walk(child, depth + 1, nodes))
+        }),
+        "not" => within_walk(body, depth + 1, nodes),
+        "trait" => body.is_string() && op_ok(map.get("op")) && value_ok(map.get("value"), false),
+        "event" => body.is_string() && event_ok(map),
+        "list" | "segment" => body
+            .as_str()
+            .is_some_and(|id| id.is_empty() || Uuid::parse_str(id).is_ok()),
+        "consent" => body.as_object().is_some_and(|consent| {
+            only_keys(consent, &["channel", "topic", "status"])
+                && consent.values().all(Value::is_string)
+        }),
+        "messages" => body.as_object().is_some_and(messages_ok),
+        _ => body.is_string(),
+    }
+}
+
+/// Whether the map holds no key outside `allowed`.
+fn only_keys(map: &serde_json::Map<String, Value>, allowed: &[&str]) -> bool {
+    map.keys().all(|name| allowed.contains(&name.as_str()))
+}
+
+/// Whether an `op` is absent or the name of an operator.
+fn op_ok(op: Option<&Value>) -> bool {
+    op.is_none_or(|op| {
+        op.as_str()
+            .is_some_and(|name| Op::from_name(name).is_some())
+    })
+}
+
+/// Whether a string has the shape of a duration (`P90D`) or of a date or timestamp
+/// (`2024-01-01T00:00:00Z`): the only text an aggregate with no property, or a window, compares.
+fn is_time_text(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let duration = bytes.first() == Some(&b'P')
+        && bytes.len() > 1
+        && bytes[1..]
+            .iter()
+            .all(|b| b.is_ascii_digit() || matches!(b, b'A'..=b'Z' | b'.' | b','));
+    let date = bytes.len() >= 10
+        && bytes[..10].iter().enumerate().all(|(at, b)| match at {
+            4 | 7 => *b == b'-',
+            _ => b.is_ascii_digit(),
+        })
+        && bytes[10..]
+            .iter()
+            .all(|b| b.is_ascii_digit() || matches!(b, b'T' | b'Z' | b':' | b'.' | b'+' | b'-'));
+    duration || date
+}
+
+/// Whether a `value` is absent, a scalar, or an array of scalars: what `value_slots` reads. With
+/// `timed`, no slot masks the value, so a string in it must be a duration or a timestamp.
+fn value_ok(value: Option<&Value>, timed: bool) -> bool {
+    let scalar = |item: &Value| match item {
+        Value::String(text) => !timed || is_time_text(text),
+        other => other.is_null() || is_scalar(other),
+    };
+    match value {
+        None => true,
+        Some(Value::Array(items)) => items.iter().all(scalar),
+        Some(other) => scalar(other),
+    }
+}
+
+/// Whether an aggregate is well formed. With a string `prop` its value is a literal compared
+/// against that property, which the walks mask unless `timed`; with none, nothing masks it.
+fn aggregate_ok(value: &Value, timed: bool) -> bool {
+    let Some(map) = value.as_object() else {
+        return false;
+    };
+    only_keys(map, &["fn", "prop", "op", "value"])
+        && map.get("fn").is_none_or(|func| {
+            func.as_str()
+                .is_some_and(|name| AggFn::from_name(name).is_some())
+        })
+        && op_ok(map.get("op"))
+        && match map.get("prop") {
+            None => value_ok(map.get("value"), true),
+            Some(Value::String(_)) => value_ok(map.get("value"), timed),
+            Some(_) => false,
+        }
+}
+
+/// Whether a window is a map with only the keys the parser reads, each of its type.
+fn window_ok(value: &Value) -> bool {
+    let Some(map) = value.as_object() else {
+        return false;
+    };
+    only_keys(map, &["last", "between", "since_trait"])
+        && map
+            .get("last")
+            .is_none_or(|last| last.as_str().is_some_and(is_time_text))
+        && map.get("between").is_none_or(|between| {
+            between.as_array().is_some_and(|ends| {
+                ends.iter()
+                    .all(|end| end.as_str().is_some_and(is_time_text))
+            })
+        })
+        && map.get("since_trait").is_none_or(Value::is_string)
+}
+
+/// Whether the members of an event node besides its name are well formed.
+fn event_ok(map: &serde_json::Map<String, Value>) -> bool {
+    let filters_ok = map.get("where").is_none_or(|filters| {
+        filters.as_array().is_some_and(|filters| {
+            filters.iter().all(|filter| {
+                filter.as_object().is_some_and(|filter| {
+                    only_keys(filter, &["prop", "op", "value"])
+                        && filter.get("prop").is_some_and(Value::is_string)
+                        && op_ok(filter.get("op"))
+                        && value_ok(filter.get("value"), false)
+                })
+            })
+        })
+    });
+    filters_ok
+        && map.get("agg").is_none_or(|agg| aggregate_ok(agg, false))
+        && map.get("window").is_none_or(window_ok)
+}
+
+/// Whether the members of a messages node are well formed. The walks mask none of its values, so
+/// its aggregate may compare only a number, a boolean, a duration or a timestamp.
+fn messages_ok(map: &serde_json::Map<String, Value>) -> bool {
+    only_keys(map, &["channel", "dimensions", "agg", "window"])
+        && map.get("channel").is_none_or(Value::is_string)
+        && map.get("dimensions").is_none_or(|dimensions| {
+            dimensions
+                .as_object()
+                .is_some_and(|entries| entries.values().all(Value::is_string))
+        })
+        && map.get("agg").is_none_or(|agg| aggregate_ok(agg, true))
+        && map.get("window").is_none_or(window_ok)
 }
 
 /// The catalog as request content: names, types and descriptions, each list capped with a note
@@ -658,6 +800,67 @@ pub(crate) fn build_explain_request(
         .tool(tool)?
         .max_output_tokens(MAX_OUTPUT_TOKENS)
         .build())
+}
+
+/// Conditions that were saved without the validator's check and carry a literal where no masking
+/// walk looks: a note field, an object for a value, a trait that is not a string, an aggregate
+/// with no property to name it. Each holds `jane@example.com`.
+#[cfg(test)]
+pub(crate) fn smuggling_conditions() -> Vec<Value> {
+    use serde_json::json;
+
+    let leaf = json!({"trait": "city", "op": "eq", "value": "Aarhus"});
+    let event = |member: Value| {
+        let mut node = json!({"event": "order"});
+        if let (Some(node), Some(member)) = (node.as_object_mut(), member.as_object()) {
+            node.extend(member.clone());
+        }
+        node
+    };
+    vec![
+        json!({"trait": "city", "op": "eq", "value": "x", "note": "jane@example.com"}),
+        json!({"all": [leaf.clone()], "note": "jane@example.com"}),
+        json!({"any": [leaf.clone()], "note": "jane@example.com"}),
+        json!({"not": leaf.clone(), "note": "jane@example.com"}),
+        json!({"trait": "city", "op": "eq", "value": {"note": "jane@example.com"}}),
+        json!({"trait": "city", "op": "in", "value": [["jane@example.com"]]}),
+        json!({"trait": "city", "op": "in", "value": [{"k": "jane@example.com"}]}),
+        json!({"trait": {"k": 1}, "op": "eq", "value": "jane@example.com"}),
+        json!({"trait": "city", "op": "jane@example.com", "value": "x"}),
+        json!({"trait": "city", "op": {"k": "jane@example.com"}, "value": "x"}),
+        json!({"all": [{"trait": "city", "op": "eq", "value": "x", "note": "jane@example.com"}]}),
+        event(json!({"note": "jane@example.com"})),
+        event(
+            json!({"where": [{"prop": "city", "op": "eq", "value": "x", "note": "jane@example.com"}]}),
+        ),
+        event(json!({"where": [{"prop": "city", "op": "eq", "value": {"k": "jane@example.com"}}]})),
+        event(json!({"where": [{"prop": {"k": "jane@example.com"}, "op": "eq", "value": "x"}]})),
+        event(json!({"where": "jane@example.com"})),
+        event(json!({"where": ["jane@example.com"]})),
+        event(
+            json!({"agg": {"fn": "sum", "prop": {"k": 1}, "op": "gte", "value": "jane@example.com"}}),
+        ),
+        event(json!({"agg": {"fn": "count", "op": "gte", "value": "jane@example.com"}})),
+        event(json!({"agg": {"fn": "count", "op": "gte", "value": 2, "note": "jane@example.com"}})),
+        event(json!({"agg": {"fn": "jane@example.com", "op": "gte", "value": 2}})),
+        event(json!({"agg": "jane@example.com"})),
+        event(json!({"window": {"last": "P90D", "note": "jane@example.com"}})),
+        event(json!({"window": {"last": "jane@example.com"}})),
+        event(json!({"window": {"between": ["2024-01-01", "jane@example.com"]}})),
+        event(json!({"window": "jane@example.com"})),
+        json!({"event": {"k": "jane@example.com"}}),
+        json!({"list": "jane@example.com"}),
+        json!({"segment": {"k": "jane@example.com"}}),
+        json!({"consent": {"channel": "email", "status": "none", "note": "jane@example.com"}}),
+        json!({"consent": "jane@example.com"}),
+        json!({"identifier": {"k": "jane@example.com"}}),
+        json!({"messages": {"channel": "email", "note": "jane@example.com",
+            "agg": {"fn": "count", "op": "gte", "value": 1}}}),
+        json!({"messages": {"channel": "email",
+            "agg": {"fn": "count", "op": "gte", "value": "jane@example.com"}}}),
+        json!({"messages": {"channel": "email", "dimensions": {"v": {"k": "jane@example.com"}},
+            "agg": {"fn": "count", "op": "gte", "value": 1}}}),
+    ]
 }
 
 #[cfg(test)]
@@ -1033,6 +1236,49 @@ mod tests {
             json!("jane@x.dk"),
         ] {
             assert!(!within_walk(&bad, 1, &mut 0), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_condition_that_hides_a_literal_past_the_walks_is_not_within_them() {
+        for bad in smuggling_conditions() {
+            assert!(!within_walk(&bad, 1, &mut 0), "{bad}");
+        }
+    }
+
+    #[test]
+    fn every_shape_the_editor_and_a_valid_definition_produce_is_within_the_walk() {
+        let id = "018f0000-0000-7000-8000-000000000001";
+        for fine in [
+            // What the editor starts a new condition with.
+            json!({"trait": "", "op": "eq"}),
+            json!({"trait": "plan", "op": "exists"}),
+            json!({"trait": "age", "op": "between", "value": [18, 65]}),
+            json!({"trait": "vip", "op": "eq", "value": true}),
+            json!({"trait": "seen", "op": "within_last", "value": "P30D"}),
+            json!({"trait": "city", "op": "in", "value": ["Aarhus", "Odense"]}),
+            json!({"v": 1, "all": [{"trait": "city", "op": "eq", "value": null}]}),
+            json!({"list": id}),
+            json!({"list": ""}),
+            json!({"segment": id}),
+            json!({"identifier": "external:crm"}),
+            json!({"consent": {"channel": "email", "topic": "news", "status": "subscribed"}}),
+            json!({"consent": {"status": "none"}}),
+            json!({"event": "order"}),
+            json!({"event": "order",
+                "where": [{"prop": "total", "op": "gte", "value": 50}, {"prop": "city", "op": "exists"}],
+                "agg": {"fn": "count", "op": "gte", "value": 2},
+                "window": {"last": "P90D"}}),
+            json!({"event": "order", "agg": {"fn": "sum", "prop": "total", "op": "gte", "value": 100}}),
+            json!({"event": "order", "agg": {"fn": "last_time", "op": "within_last", "value": "P1D"}}),
+            json!({"event": "order", "window": {"between": ["2024-01-01", "2024-02-01T00:00:00Z"]}}),
+            json!({"event": "order", "window": {"since_trait": "signed_up"}}),
+            json!({"messages": {"channel": "email", "dimensions": {"vertical": "sports"},
+                "agg": {"fn": "count", "op": "gte", "value": 3}, "window": {"last": "P7D"}}}),
+            json!({"messages": {"channel": "email",
+                "agg": {"fn": "last_time", "op": "within_last", "value": "P1D"}}}),
+        ] {
+            assert!(within_walk(&fine, 1, &mut 0), "{fine}");
         }
     }
 

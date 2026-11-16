@@ -50,7 +50,7 @@ interface FlowDraft {
   /** Whether a hold is on: the editor is read-only until the replacement lands or is given up. */
   held: boolean;
   /** Shows a draft the server already holds (the graph and settings) as both the draft and the saved state, and ends the hold. */
-  adopt: (document: { graph: Draft["graph"]; settings: Draft["settings"] }) => void;
+  adopt: (document: { graph: Draft["graph"]; settings: Draft["settings"]; revision: number }) => void;
   /** Ends a hold without replacing anything: the draft is exactly as it was, and an edit that was waiting to be saved is saved. */
   release: () => void;
   /**
@@ -127,11 +127,10 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
   const lastEdit = useRef<{ key: string; at: number } | null>(null);
   const flowId = flow.id;
   /**
-   * The revision of the server's draft as last read or saved, sent with each save so a save made
-   * from an older read is refused. Null once the server's draft was replaced by a write whose
-   * revision is not known (an accepted assistant draft): the next save is sent without it.
+   * The revision of the server's draft as last read, saved or accepted, sent with each save so a
+   * save made from an older read is refused.
    */
-  const revision = useRef<number | null>(flow.revision);
+  const revision = useRef<number>(flow.revision);
   const flushRef = useRef<() => Promise<void>>(() => Promise.resolve());
   /** The save under way, so a caller can wait for it. */
   const running = useRef<Promise<void> | null>(null);
@@ -167,16 +166,23 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
     }
   }, [workspaceId, flowId]);
 
-  /**
-   * After a save was refused because someone else saved the flow first: shows the server's draft in
-   * place of this one, and says so. The refused edits stay one step back in the undo history. False
-   * when the flow cannot be read, so the refusal is reported as an ordinary failed save.
-   */
-  const reload = useCallback(async (): Promise<boolean> => {
+  /** The flow as the server holds it, or null when it cannot be read. */
+  const read = useCallback(async (): Promise<FlowDetail | null> => {
     try {
-      const server = await unwrap(
+      return await unwrap(
         client.GET("/api/v1/workspaces/{ws}/flows/{id}", { params: { path: { ws: workspaceId, id: flowId } } }),
       );
+    } catch {
+      return null;
+    }
+  }, [workspaceId, flowId]);
+
+  /**
+   * After a save was refused because someone else saved the flow first: shows the server's draft in
+   * place of this one, and says so. The refused edits stay one step back in the undo history.
+   */
+  const reload = useCallback(
+    (server: FlowDetail) => {
       const next = draftOf(server);
       history.current = [...history.current.slice(-(UNDO_LIMIT - 1)), draftRef.current];
       setUndoDepth(history.current.length);
@@ -196,11 +202,9 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
       });
       setStatus("error");
       void check();
-      return true;
-    } catch {
-      return false;
-    }
-  }, [workspaceId, flowId, check]);
+    },
+    [check],
+  );
 
   const run = useCallback(async () => {
     if (timer.current !== null) {
@@ -227,15 +231,10 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
     const sentEdit = edits.current;
     inflight.current = true;
     setStatus("saving");
-    try {
-      const updated = await unwrap(
-        client.PATCH("/api/v1/workspaces/{ws}/flows/{id}", {
-          params: { path: { ws: workspaceId, id: flowId } },
-          body: revision.current === null ? body : { ...body, revision: revision.current },
-        }),
-      );
-      revision.current = updated.revision;
-      const now: Draft = { name: updated.name, graph: sent.graph, settings: sent.settings };
+    /** The server holds `sent`: learns its name and revision, and goes on with what was edited since. */
+    const landed = (serverName: string, serverRevision: number) => {
+      revision.current = serverRevision;
+      const now: Draft = { name: serverName, graph: sent.graph, settings: sent.settings };
       savedRef.current = now;
       setSaved(now);
       setSaves((count) => count + 1);
@@ -255,9 +254,32 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
       }
       setStatus("saved");
       void check();
+    };
+    try {
+      const updated = await unwrap(
+        client.PATCH("/api/v1/workspaces/{ws}/flows/{id}", {
+          params: { path: { ws: workspaceId, id: flowId } },
+          body: { ...body, revision: revision.current },
+        }),
+      );
+      landed(updated.name, updated.revision);
     } catch (error) {
       if (error instanceof ApiError && error.code === "flow_draft_revision_mismatch") {
-        if (await reload()) return;
+        const server = await read();
+        if (server !== null) {
+          // This editor's own save committed and only its reply was lost: the server holds what was sent.
+          const wanted = name !== "" ? name : base.name;
+          if (
+            server.name === wanted &&
+            sameCanonical(server.graph, sent.graph) &&
+            sameCanonical(server.settings, sent.settings)
+          ) {
+            landed(server.name, server.revision);
+            return;
+          }
+          reload(server);
+          return;
+        }
       }
       inflight.current = false;
       failed.current = true;
@@ -267,7 +289,7 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
       if (edits.current === sentEdit) setChecking(false);
       else if (!isSet(timer) && !isOn(holding)) void flushRef.current();
     }
-  }, [workspaceId, flowId, check, reload]);
+  }, [workspaceId, flowId, check, read, reload]);
 
   const flush = useCallback(() => {
     if (inflight.current) return Promise.resolve();
@@ -391,7 +413,7 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
   }, [schedule]);
 
   const adopt = useCallback(
-    (document: { graph: Draft["graph"]; settings: Draft["settings"] }) => {
+    (document: { graph: Draft["graph"]; settings: Draft["settings"]; revision: number }) => {
       const before = draftRef.current;
       // The accepted draft carries no name, so an unsaved rename stays and is saved like any edit.
       const next: Draft = { name: before.name, graph: document.graph, settings: document.settings };
@@ -401,8 +423,8 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
       lastEdit.current = null;
       draftRef.current = next;
       savedRef.current = base;
-      // The server's revision moved with the accepted draft; the next save learns it.
-      revision.current = null;
+      // The server's revision moved with the accepted draft; later saves are checked against it.
+      revision.current = document.revision;
       edits.current += 1;
       setDraft(next);
       setSaved(base);
@@ -428,7 +450,7 @@ export function useFlowDraft({ workspaceId, flow, editable }: Options): FlowDraf
         release();
         return "unchanged";
       }
-      adopt({ graph: server.graph, settings: server.settings });
+      adopt({ graph: server.graph, settings: server.settings, revision: server.revision });
       return "adopted";
     } catch (error) {
       // Whether the accept committed is not known, so saving the old edits could overwrite it: they wait for a retry.

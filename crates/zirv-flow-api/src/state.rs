@@ -340,6 +340,13 @@ impl AppState {
         self
     }
 
+    /// The state as a deployment without a master key has it, for a test of what fails then.
+    #[cfg(test)]
+    pub(crate) fn without_keyring(mut self) -> Self {
+        self.keyring = None;
+        self
+    }
+
     /// The master keys that open stored secrets, when they were given.
     pub fn keyring(&self) -> Option<&Arc<Keyring>> {
         self.keyring.as_ref()

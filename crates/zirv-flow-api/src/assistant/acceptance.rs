@@ -1535,6 +1535,58 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_demoted_admin_cannot_accept_a_mapping_draft(pool: PgPool) {
+        let fx = setup(&pool, false, 100_000_000).await;
+        let source = fx.pulled_source(json!({})).await;
+        fx.fake.push(answer("draft_mapping", good_mapping()));
+        let reply = fx.draft(mapping_run(&source)).await;
+        assert_eq!(reply.status, StatusCode::CREATED, "{:?}", reply.body);
+        assert_eq!(reply.body["status"], "valid");
+        let id = reply.body["id"].as_str().unwrap().to_owned();
+        let stored = || async {
+            sqlx::query_as::<_, (String, Option<Value>)>(
+                "SELECT status, content FROM ai_drafts WHERE id = $1::uuid",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+        let before = stored().await;
+        admin::set_member(&pool, &Context::system(), fx.ws, fx.admin_id, Role::Editor)
+            .await
+            .unwrap();
+
+        let accepted = fx.accept(&fx.admin, &id).await;
+
+        assert_eq!(
+            accepted.status,
+            StatusCode::FORBIDDEN,
+            "status {} body {:?}",
+            accepted.status,
+            accepted.body
+        );
+        let body = accepted.body.to_string();
+        for content in ["display_name", "identifier", "stream_1", "email"] {
+            assert!(!body.contains(content), "{content} in {body}");
+        }
+        assert_eq!(
+            stored().await,
+            before,
+            "the refusal left the draft as it was"
+        );
+        assert!(fx.saved_mapping(&source).await.is_null());
+        // The draft is still open: the admin it belongs to can accept it once admin again.
+        admin::set_member(&pool, &Context::system(), fx.ws, fx.admin_id, Role::Admin)
+            .await
+            .unwrap();
+        let accepted = fx.accept(&fx.admin, &id).await;
+        assert_eq!(accepted.status, StatusCode::OK, "{:?}", accepted.body);
+        assert_eq!(accepted.body["content"]["columns"][0]["column"], "email");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_saved_header_and_query_value_never_reach_the_provider_and_come_back_in_the_draft(
         pool: PgPool,
     ) {
@@ -2632,6 +2684,69 @@ mod tests {
         }
         // Nothing reached the provider.
         assert_eq!(fx.fake.call_count(), sent);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_deployment_without_a_master_key_answers_503_to_a_draft_and_an_explain(pool: PgPool) {
+        let mut fx = setup(&pool, false, 100_000_000).await;
+        fx.segment_traits().await;
+        let segment = fx.segment("Saved", saved_definition()).await;
+        // The provider key was saved while a master key was set; the process now runs without one.
+        fx.router = router(fx.state.clone().without_keyring());
+        let sent = fx.fake.call_count();
+
+        let drafted = fx.draft(segment_run(None)).await;
+        let explained = fx.explain(&fx.admin, &segment, None).await;
+
+        for reply in [&drafted, &explained] {
+            assert_eq!(
+                reply.status,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "status {} body {:?}",
+                reply.status,
+                reply.body
+            );
+            assert_ne!(reply.body["code"], "ai_disabled", "{:?}", reply.body);
+        }
+        assert_eq!(fx.fake.call_count(), sent, "nothing reached the provider");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_call_log_that_cannot_be_written_is_a_store_fault_for_a_draft_and_an_explain(
+        pool: PgPool,
+    ) {
+        let fx = setup(&pool, false, 100_000_000).await;
+        fx.segment_traits().await;
+        let segment = fx.segment("Saved", saved_definition()).await;
+        for statement in [
+            "CREATE FUNCTION refuse_call_log() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN RAISE EXCEPTION 'call log down'; END $$",
+            "CREATE TRIGGER refuse_call_log BEFORE INSERT ON ai_calls \
+             FOR EACH ROW EXECUTE FUNCTION refuse_call_log()",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+        let sent = fx.fake.call_count();
+
+        let drafted = fx.draft(segment_run(None)).await;
+        let explained = fx.explain(&fx.admin, &segment, None).await;
+
+        for reply in [&drafted, &explained] {
+            // The documented answer for a database fault, and neither a disabled assistant (409)
+            // nor a failed provider (502).
+            assert_eq!(
+                reply.status,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "status {} body {:?}",
+                reply.status,
+                reply.body
+            );
+            assert_ne!(reply.body["code"], "ai_disabled", "{:?}", reply.body);
+            assert_ne!(reply.body["code"], "ai_provider_error", "{:?}", reply.body);
+        }
+        assert_eq!(fx.fake.call_count(), sent, "nothing reached the provider");
     }
 
     fn pro_in_the_same_cities() -> Value {

@@ -400,6 +400,31 @@ mod tests {
     }
 
     #[test]
+    fn a_condition_that_hides_a_literal_past_the_masking_is_refused_and_never_sent() {
+        for condition in crate::assistant::segment_context::smuggling_conditions() {
+            let mut document = conditioned();
+            document["blocks"]["sections"][0]["visible_if"] = condition.clone();
+            document["blocks"]["sections"][0]["columns"][0][0]["visible_if"] = Value::Null;
+
+            let result = render_template_context(
+                &context(&document, TemplateTask::Copy),
+                &ClearKeys::default(),
+                Privacy::SchemaOnly,
+            );
+
+            match result {
+                Ok((parts, _)) => {
+                    let text: String = parts.iter().map(Content::render).collect();
+                    panic!("reached the prompt: {condition}: {text}");
+                }
+                Err(error) => {
+                    assert_eq!(error.code(), Some("ai_template_unsupported"), "{condition}")
+                }
+            }
+        }
+    }
+
+    #[test]
     fn a_placeholder_that_moved_or_was_made_up_is_named_for_repair() {
         let document = conditioned();
         let (_, table) = render_template_context(

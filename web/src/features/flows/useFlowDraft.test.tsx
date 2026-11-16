@@ -199,7 +199,7 @@ describe("useFlowDraft replacing the draft", () => {
     act(() => result.current.edit((draft) => ({ ...draft, settings: replacement.settings, graph: { ...draft.graph, edges: [] } })));
     await act(() => result.current.hold());
 
-    act(() => result.current.adopt(replacement));
+    act(() => result.current.adopt({ ...replacement, revision: 1 }));
     await flush(1500);
 
     expect(result.current.draft.graph).toEqual(replacement.graph);
@@ -270,13 +270,77 @@ describe("useFlowDraft replacing the draft", () => {
     act(() => result.current.edit((draft) => ({ ...draft, name: "Renamed" })));
     await act(() => result.current.hold());
 
-    act(() => result.current.adopt(replacement));
+    act(() => result.current.adopt({ ...replacement, revision: 1 }));
 
     expect(result.current.draft.name).toBe("Renamed");
     expect(result.current.draft.graph).toEqual(replacement.graph);
     expect(result.current.unsaved).toBe(true);
     await flush(1000);
-    expect(saves(calls)).toEqual([{ name: "Renamed" }]);
+    expect(saves(calls)).toEqual([{ name: "Renamed", revision: 1 }]);
+  });
+
+  it("saves against the revision of the accepted flow, so a save from a stale tab is refused", async () => {
+    const calls = mockApi(flowRoutes({ flow: { revision: 6 } }));
+    const { result } = mountDraft();
+    await act(() => result.current.hold());
+
+    act(() => result.current.adopt({ ...replacement, revision: 6 }));
+    act(() => result.current.edit((draft) => ({ ...draft, name: "After" })));
+    await flush(1000);
+
+    expect(saves(calls)).toEqual([{ name: "After", revision: 6 }]);
+  });
+
+  it("does not overwrite a save made elsewhere after the accept", async () => {
+    // The server moved to 7 (another editor saved) after this editor's accept left it at 6.
+    const calls = mockApi(flowRoutes({ flow: { revision: 7 } }));
+    const { result } = mountDraft();
+    await act(() => result.current.hold());
+
+    act(() => result.current.adopt({ ...replacement, revision: 6 }));
+    act(() => result.current.edit((draft) => ({ ...draft, name: "Stale" })));
+    await flush(1000);
+
+    expect(saves(calls)).toEqual([{ name: "Stale", revision: 6 }]);
+    expect(result.current.failure?.title).toBe("Your changes were not saved");
+  });
+
+  it("recovers an own save whose reply was lost without a notice or an undo step", async () => {
+    const routes = flowRoutes();
+    const save = routes[`PATCH ${WS}/flows/${FLOW_ID}`]!;
+    let patches = 0;
+    const calls = mockApi({
+      ...routes,
+      [`PATCH ${WS}/flows/${FLOW_ID}`]: async (request) => {
+        patches += 1;
+        if (patches === 1) {
+          // Commits on the server, then the reply is lost.
+          await save(request);
+          return problem(503, "Service Unavailable", "the reply was lost");
+        }
+        return save(request);
+      },
+    });
+    const { result } = mountDraft();
+    act(() => result.current.edit((draft) => ({ ...draft, name: "Mine" }), "name"));
+    await flush(1000);
+    expect(result.current.status).toBe("error");
+
+    act(() => result.current.retry());
+    await flush(500);
+
+    expect(saves(calls)).toEqual([
+      { name: "Mine", revision: 1 },
+      { name: "Mine", revision: 1 },
+    ]);
+    expect(result.current.status).toBe("saved");
+    expect(result.current.failure).toBeNull();
+    expect(result.current.draft.name).toBe("Mine");
+    expect(result.current.unsaved).toBe(false);
+    // Only the edit itself is a step of undo; the quiet recovery added none.
+    act(() => result.current.undo());
+    expect(result.current.draft.name).toBe("Welcome series");
+    expect(result.current.canUndo).toBe(false);
   });
 
   it("schedules nothing when the hold is released after the editor is gone", async () => {
@@ -335,6 +399,23 @@ describe("useFlowDraft replacing the draft", () => {
       expect(result.current.draft.settings).toEqual(replacement.settings);
       expect(result.current.unsaved).toBe(false);
       expect(saves(calls)).toHaveLength(0);
+    });
+
+    it("keeps the revision of the flow it read, so the next save is checked against it", async () => {
+      const calls = mockApi({
+        ...flowRoutes({ flow: { graph: replacement.graph, settings: replacement.settings, revision: 8 } }),
+      });
+      const { result } = mountDraft();
+      act(() => result.current.edit((draft) => ({ ...draft, settings: { ...draft.settings, reentry: { mode: "always" } } })));
+      await act(() => result.current.hold());
+
+      await act(async () => {
+        await result.current.reconcile();
+      });
+      act(() => result.current.edit((draft) => ({ ...draft, name: "After" })));
+      await flush(1000);
+
+      expect(saves(calls)).toEqual([{ name: "After", revision: 8 }]);
     });
 
     it("saves nothing until a retry when the flow cannot be read either", async () => {

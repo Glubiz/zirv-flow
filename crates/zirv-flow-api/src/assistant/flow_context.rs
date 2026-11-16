@@ -1057,6 +1057,42 @@ mod tests {
     }
 
     #[test]
+    fn a_condition_that_hides_a_literal_past_the_masking_is_refused_and_never_sent() {
+        for condition in crate::assistant::segment_context::smuggling_conditions() {
+            let doc = json!({"graph":{"v":1,"nodes":[
+                {"id":"check","type":"branch","conditions":[condition.clone()]},
+                {"id":"end","type":"exit"}],"edges":[]},
+                "settings":{"reentry":{"mode":"once"}}});
+            let sent = match flow_context(&details(), "Flow", &doc, Privacy::SchemaOnly) {
+                Ok((parts, _)) => Some(parts.iter().map(Content::render).collect::<String>()),
+                Err(TooLarge) => None,
+            };
+            assert_eq!(sent, None, "reached the prompt: {condition}");
+            assert_eq!(
+                mask_document(&doc, &ClearKeys::of(&details())).unwrap_err(),
+                TooLarge,
+                "{condition}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_condition_with_the_editors_default_shape_is_still_sent() {
+        let doc = json!({"graph":{"v":1,"nodes":[
+            {"id":"check","type":"branch","conditions":[
+                {"trait":"","op":"eq"},
+                {"trait":"city","op":"eq","value":"jane@example.com"}]},
+            {"id":"end","type":"exit"}],"edges":[]},
+            "settings":{"reentry":{"mode":"once"}}});
+
+        let (parts, _) = flow_context(&details(), "Flow", &doc, Privacy::SchemaOnly).unwrap();
+        let text: String = parts.iter().map(Content::render).collect();
+
+        assert!(!text.contains("jane@example.com"), "{text}");
+        assert!(text.contains("(kept:1)"), "{text}");
+    }
+
+    #[test]
     fn a_flow_over_the_node_limit_is_never_rendered() {
         let nodes: Vec<Value> = (0..=MAX_NODES)
             .map(|index| json!({"id": format!("n{index}"), "type": "exit"}))
