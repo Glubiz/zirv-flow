@@ -10,15 +10,16 @@ use tracing::{info, warn};
 use zirv_flow_core::schedule::latest_slot;
 use zirv_flow_core::{Cause, CauseKind, TraceContext, WorkspaceId};
 use zirv_flow_store::{
-    EnrollmentSample, JOB_DEAD, Leadership, NewJob, PgPool, QueueCounts, Reaped, RetentionSettings,
-    Schedule, StoreError, abandon_orphaned_test_sends, advance_schedule, begin, database_now,
-    delete_expired_import_data, destination_report, dirty_backlog, dirty_heads, disable_schedule,
-    drain_shards, due_schedules, due_sending_domains, end_orphaned_messages, enqueue,
-    enqueue_domain_verify, enqueue_pending_drains, enqueue_reevaluate, ensure_decision_partitions,
-    ensure_event_partitions, ensure_forward_job, expire_api_idempotency,
-    expire_contact_idempotency, expire_exports, fail_orphaned_runs, forwarding_report, inbox_heads,
-    prune_debugger_feed, reap_expired, reconcile_flow_schedules, reconcile_segment_schedules,
-    record_retention_run, sample_enrollments, sample_queue_depths, stream_freshness, try_lead,
+    EnrollmentSample, JOB_DEAD, Leadership, NewJob, OrphanCursor, PgPool, QueueCounts, Reaped,
+    RetentionSettings, Schedule, StoreError, abandon_orphaned_test_sends, advance_schedule, begin,
+    database_now, delete_expired_import_data, destination_report, dirty_backlog, dirty_heads,
+    disable_schedule, drain_shards, due_schedules, due_sending_domains, end_orphaned_messages_from,
+    enqueue, enqueue_domain_verify, enqueue_pending_drains, enqueue_reevaluate,
+    ensure_decision_partitions, ensure_event_partitions, ensure_forward_job,
+    expire_api_idempotency, expire_contact_idempotency, expire_exports, fail_orphaned_runs,
+    forwarding_report, inbox_heads, prune_debugger_feed, reap_expired, reconcile_flow_schedules,
+    reconcile_segment_schedules, record_retention_run, sample_enrollments, sample_queue_depths,
+    stream_freshness, try_lead,
 };
 
 use crate::metrics::{
@@ -136,6 +137,8 @@ pub struct Scheduler {
     /// When the sync runs were last reconciled with their jobs; none until this instance leads.
     sync_reconciled: Option<Instant>,
     messages_reconciled: Option<Instant>,
+    /// Where the orphan-message sweep resumes; lost with leadership, which only restarts the walk.
+    orphan_cursor: Option<OrphanCursor>,
     /// The stream freshness gauges.
     freshness: FreshnessGauges,
     /// When the freshness gauges were last refreshed; none until this instance leads.
@@ -170,6 +173,7 @@ impl Scheduler {
             feed_pruned: None,
             sync_reconciled: None,
             messages_reconciled: None,
+            orphan_cursor: None,
             freshness: FreshnessGauges::default(),
             freshness_checked: None,
             destinations: DestinationGauges::default(),
@@ -387,23 +391,26 @@ impl Scheduler {
             return;
         }
         self.messages_reconciled = Some(Instant::now());
-        match end_orphaned_messages(&self.pool, now).await {
-            Ok(ended) if !ended.is_empty() => {
-                warn!(
-                    "ended {} message(s) whose send job is dead or gone",
-                    ended.len()
-                );
-                for orphan in &ended {
+        match end_orphaned_messages_from(&self.pool, now, self.orphan_cursor).await {
+            Ok(sweep) => {
+                self.orphan_cursor = sweep.next;
+                let ended = sweep.ended;
+                if !ended.is_empty() {
                     warn!(
-                        message = %orphan.message,
-                        workspace = %orphan.workspace,
-                        reason = orphan.reason,
-                        note = JOB_DEAD,
-                        "ended a message whose send job is dead or gone"
+                        "ended {} message(s) whose send job is dead or gone",
+                        ended.len()
                     );
+                    for orphan in &ended {
+                        warn!(
+                            message = %orphan.message,
+                            workspace = %orphan.workspace,
+                            reason = orphan.reason,
+                            note = JOB_DEAD,
+                            "ended a message whose send job is dead or gone"
+                        );
+                    }
                 }
             }
-            Ok(_) => {}
             Err(error) => warn!("could not end the messages whose send job is gone: {error}"),
         }
         match self.pool.acquire().await {
@@ -595,6 +602,7 @@ impl Scheduler {
             self.feed_pruned = None;
             self.sync_reconciled = None;
             self.messages_reconciled = None;
+            self.orphan_cursor = None;
             self.freshness_checked = None;
             self.freshness.zero_all();
             self.destinations_checked = None;

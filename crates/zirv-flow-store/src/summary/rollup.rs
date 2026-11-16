@@ -1,4 +1,5 @@
-//! The daily rollup behind the Home summary. A scheduled job calls [`refresh_workspace_summary`]
+//! The daily rollup behind the Home summary and the library's most-used sort (`template_use_daily`,
+//! `0109_template_use_daily.sql`). A scheduled job calls [`refresh_workspace_summary`]
 //! for each workspace: it adds the rows written since the last run to their UTC day, recounts a
 //! day exactly once it has closed, backfills the last 30 days and refreshes the per-flow
 //! snapshot. The endpoint reads only what this module writes (`0085_summary_rollup.sql`).
@@ -55,6 +56,8 @@ struct Counts {
     events: i64,
     flow_sent: Vec<(Uuid, i64)>,
     flow_goals: Vec<(Uuid, i64)>,
+    /// Non-test messages created in the slice, by template: the library's most-used sort.
+    template_uses: Vec<(Uuid, i64)>,
 }
 
 impl Counts {
@@ -195,6 +198,21 @@ async fn count_slice(
     .fetch_one(&mut *conn)
     .await
     .map_err(StoreError::query)?;
+    // By template through `messages_template_idx` (workspace, template, created time); a message
+    // is counted when it is created, whatever its status, as the library's old live count did.
+    let template_uses: Vec<(Uuid, i64)> = sqlx::query_as(
+        "SELECT t.id, c.uses FROM templates t \
+         CROSS JOIN LATERAL (SELECT count(*) AS uses FROM messages m \
+             WHERE m.workspace_id = t.workspace_id AND m.template_id = t.id AND NOT m.test \
+               AND m.created_at >= $2 AND m.created_at < $3) c \
+         WHERE t.workspace_id = $1 AND c.uses > 0",
+    )
+    .bind(workspace)
+    .bind(from)
+    .bind(to)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(StoreError::query)?;
     if goals.is_none() {
         *goals = Some(load_goal_sets(conn, workspace).await?);
     }
@@ -222,6 +240,7 @@ async fn count_slice(
             .filter_map(|(flow, count)| flow.map(|flow| (flow, count)))
             .collect(),
         flow_goals,
+        template_uses,
     })
 }
 
@@ -257,6 +276,32 @@ async fn write_rows(
             .execute(&mut *conn)
             .await
             .map_err(StoreError::query)?;
+    }
+    if replace {
+        sqlx::query("DELETE FROM template_use_daily WHERE workspace_id = $1 AND day = $2")
+            .bind(workspace)
+            .bind(day)
+            .execute(&mut *conn)
+            .await
+            .map_err(StoreError::query)?;
+    }
+    if !counts.template_uses.is_empty() {
+        let templates: Vec<Uuid> = counts.template_uses.iter().map(|(id, _)| *id).collect();
+        let uses: Vec<i64> = counts.template_uses.iter().map(|(_, n)| *n).collect();
+        sqlx::query(
+            "INSERT INTO template_use_daily (workspace_id, template_id, day, uses) \
+             SELECT $1, t.template_id, $2, t.uses \
+             FROM unnest($3::uuid[], $4::bigint[]) AS t (template_id, uses) \
+             ON CONFLICT (workspace_id, template_id, day) \
+             DO UPDATE SET uses = template_use_daily.uses + EXCLUDED.uses",
+        )
+        .bind(workspace)
+        .bind(day)
+        .bind(&templates)
+        .bind(&uses)
+        .execute(&mut *conn)
+        .await
+        .map_err(StoreError::query)?;
     }
     let rows = counts.rows();
     let metrics: Vec<&str> = rows.iter().map(|(metric, _, _)| *metric).collect();
@@ -501,6 +546,12 @@ async fn advance(pool: &PgPool, ws: Uuid, now: OffsetDateTime) -> Result<(), Sto
 
     let mut tx = begin_bounded_for(pool, TIMEOUT).await?;
     sqlx::query("DELETE FROM summary_daily WHERE workspace_id = $1 AND day < $2")
+        .bind(ws)
+        .bind(upper_day - Span::days(KEPT_DAYS + 5))
+        .execute(&mut *tx)
+        .await
+        .map_err(StoreError::query)?;
+    sqlx::query("DELETE FROM template_use_daily WHERE workspace_id = $1 AND day < $2")
         .bind(ws)
         .bind(upper_day - Span::days(KEPT_DAYS + 5))
         .execute(&mut *tx)
@@ -1052,5 +1103,97 @@ mod tests {
             total(&pool, ws, date!(2030 - 01 - 15), PEOPLE_CREATED).await,
             1
         );
+    }
+
+    /// A message of `template`, created at `at`, in the given status.
+    async fn template_message(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        person: Uuid,
+        template: Uuid,
+        (status, test): (&str, bool),
+        at: OffsetDateTime,
+    ) {
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO messages (id, workspace_id, person_id, enrollment_id, node_id, \
+                template_id, destination_id, status, reason, test, created_at, completed_at) \
+             VALUES ($1, $2, $3, $1, 'send', $4, $1, $5, \
+                CASE WHEN $5 IN ('skipped', 'failed') THEN 'x' END, $6, $7, \
+                CASE WHEN $5 IN ('pending', 'sending') THEN NULL ELSE $7 END)",
+        )
+        .bind(id)
+        .bind(ws.as_uuid())
+        .bind(person)
+        .bind(template)
+        .bind(status)
+        .bind(test)
+        .bind(at)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_rollup_counts_template_uses_like_the_live_count_and_the_library_reads_it(
+        pool: PgPool,
+    ) {
+        use crate::templates::tests_support::create as create_template;
+        use crate::templates::{TemplateListQuery, TemplateSort, list_templates};
+
+        crate::migrate(&pool).await.unwrap();
+        let ws = workspace(&pool, "one").await;
+        let quiet = create_template(&pool, ws, "Quiet").await;
+        let busy = create_template(&pool, ws, "Busy").await;
+        let someone = person(&pool, ws, datetime!(2030-01-15 11:00 UTC)).await;
+        // A day well inside the 30 the library reads, and always in the past.
+        let day = OffsetDateTime::now_utc().date() - Span::days(5);
+        let at = day.with_hms(12, 0, 0).unwrap().assume_utc();
+        for (status, test) in [
+            ("sent", false),
+            ("failed", false),
+            ("pending", false),
+            ("sent", true),
+        ] {
+            template_message(&pool, ws, someone, busy.id, (status, test), at).await;
+        }
+        template_message(&pool, ws, someone, quiet.id, ("sent", false), at).await;
+
+        refresh_workspace_summary(&pool, ws, at + Span::minutes(30))
+            .await
+            .unwrap();
+        // A second run counts nothing twice.
+        refresh_workspace_summary(&pool, ws, at + Span::minutes(31))
+            .await
+            .unwrap();
+
+        let live: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM messages WHERE template_id = $1 AND NOT test \
+               AND created_at >= now() - interval '30 days'",
+        )
+        .bind(busy.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let rolled: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(sum(uses), 0)::bigint FROM template_use_daily WHERE template_id = $1",
+        )
+        .bind(busy.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((live, rolled), (3, 3), "test sends are left out of both");
+        let query = TemplateListQuery {
+            sort: TemplateSort::MostUsed,
+            ..Default::default()
+        };
+        let names: Vec<String> = list_templates(&pool, ws, &query)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|template| template.template.name)
+            .collect();
+        assert_eq!(names, ["Busy", "Quiet"]);
     }
 }

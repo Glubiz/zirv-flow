@@ -38,9 +38,15 @@ pub(crate) fn delete_and_mark(gone: &str) -> String {
 /// [`delete_and_mark`] with more data-modifying CTEs after `marked`, each written as
 /// `, name AS (...)`, that read `gone` too and so commit or fail with the delete.
 pub(crate) fn delete_and_mark_with(gone: &str, extra_ctes: &str) -> String {
+    delete_and_mark_selecting(gone, extra_ctes, "count(*)")
+}
+
+/// [`delete_and_mark_with`] returning `columns` over `gone` instead of the count alone, such as
+/// `count(*), max(handled_at)` for a caller that walks on from the newest row it removed.
+pub(crate) fn delete_and_mark_selecting(gone: &str, extra_ctes: &str, columns: &str) -> String {
     format!(
         "WITH gone AS ({gone}), marked AS ({WRITE_MARKERS} RETURNING 1){extra_ctes} \
-         SELECT count(*) FROM gone"
+         SELECT {columns} FROM gone"
     )
 }
 

@@ -805,6 +805,40 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn unsigned_and_wrongly_signed_requests_never_spend_the_hooks_rate_bucket(pool: PgPool) {
+        let limits = IngestLimits {
+            rate_per_hook: 1,
+            burst_per_hook: 2,
+            ..IngestLimits::default()
+        };
+        let fx = fixture_with(&pool, Some(keyring()), limits).await;
+        let hook = fx.hook("orders").await;
+
+        let mut unsigned = Vec::new();
+        for n in 0..4 {
+            let reply = post_hook(&fx.router, &hook.id, &[], order(&n.to_string(), "a")).await;
+            unsigned.push(reply.status);
+        }
+        let body = order("9", "a");
+        let wrong = signed("not-the-secret", now(), &body);
+        for _ in 0..4 {
+            let reply = post_hook(&fx.router, &hook.id, &wrong, body.clone()).await;
+            unsigned.push(reply.status);
+        }
+        let genuine = deliver(&fx, &hook, order("1", "a")).await;
+
+        assert_eq!(unsigned, vec![StatusCode::UNAUTHORIZED; 8]);
+        assert_eq!(
+            genuine.status,
+            StatusCode::ACCEPTED,
+            "genuine signed delivery: {:?}",
+            genuine.body
+        );
+        assert_eq!(fx.count("SELECT count(*) FROM ingest_inbox").await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn unknown_ids_never_get_a_bucket_so_a_flood_of_them_cannot_grow_the_limiter(
         pool: PgPool,
     ) {

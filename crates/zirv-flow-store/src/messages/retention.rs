@@ -42,15 +42,17 @@ pub struct MessageRetentionReport {
     pub messages_deleted: u64,
 }
 
-/// Deletes the terminal messages of one batch, oldest first, and writes their markers. `$1` is
+/// Deletes the terminal messages of one batch, oldest first, from `$7` (the cursor) on, and writes
+/// their markers; it returns the count and the newest `created_at` removed. `$1` is
 /// now, `$2` the batch size, `$3`/`$4` the workspaces with their own window and its days, `$5`
 /// the default days and `$6` the shortest of all windows, which bounds the index scan. A message
 /// still `pending` or `sending` belongs to a live job and stays.
 fn batch_statement() -> String {
-    crate::privacy::delete_and_mark_with(
+    crate::privacy::delete_and_mark_selecting(
         "DELETE FROM messages m USING ( \
             SELECT x.workspace_id, x.id FROM messages x \
             WHERE x.status IN ('sent', 'skipped', 'failed') \
+              AND x.created_at >= $7 \
               AND x.created_at < $1 - make_interval(days => $6) \
               AND x.created_at < $1 - make_interval(days => COALESCE( \
                     (SELECT o.days FROM unnest($3::uuid[], $4::int[]) AS o(workspace_id, days) \
@@ -69,6 +71,7 @@ fn batch_statement() -> String {
             JOIN people p ON p.workspace_id = g.workspace_id AND p.id = g.person_id \
             WHERE g.status = 'sent' \
             ON CONFLICT (message_id) DO NOTHING RETURNING 1)",
+        "count(*), max(handled_at)",
     )
 }
 
@@ -121,21 +124,28 @@ async fn purge_in_batches(
         .unzip();
     let shortest = windows.iter().copied().fold(days(settings.days), i32::min);
     let statement = batch_statement();
+    // Rows before the cursor were skipped by a batch (a longer window, a live job) and `now` is
+    // fixed for the run, so they stay undeletable: each batch starts where the last one ended
+    // instead of re-walking them. Rows sharing the cursor's timestamp are walked once more.
+    let mut cursor = OffsetDateTime::UNIX_EPOCH;
     loop {
-        let deleted: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(statement.clone()))
-            .bind(now)
-            .bind(batch_size)
-            .bind(&workspaces)
-            .bind(&windows)
-            .bind(days(settings.days))
-            .bind(shortest)
-            .fetch_one(pool)
-            .await
-            .map_err(StoreError::query)?;
+        let (deleted, newest): (i64, Option<OffsetDateTime>) =
+            sqlx::query_as(sqlx::AssertSqlSafe(statement.clone()))
+                .bind(now)
+                .bind(batch_size)
+                .bind(&workspaces)
+                .bind(&windows)
+                .bind(days(settings.days))
+                .bind(shortest)
+                .bind(cursor)
+                .fetch_one(pool)
+                .await
+                .map_err(StoreError::query)?;
         report.messages_deleted += u64::try_from(deleted).unwrap_or(0);
         if deleted < batch_size {
             return Ok(());
         }
+        cursor = newest.unwrap_or(cursor);
     }
 }
 
@@ -336,6 +346,161 @@ mod tests {
         // A second run purges nothing and writes no second tombstone.
         run(&pool).await;
         assert_eq!(count(&pool, "message_tombstones").await, seeded + 1);
+    }
+
+    /// The rows `EXPLAIN ANALYZE` of one batch from `cursor` filtered out, without keeping the delete.
+    async fn rows_removed_by_filter(pool: &PgPool, cursor: OffsetDateTime) -> i64 {
+        fn walk(plan: &serde_json::Value) -> i64 {
+            let own = plan["Rows Removed by Filter"].as_i64().unwrap_or(0);
+            let children = plan["Plans"]
+                .as_array()
+                .map_or(0, |all| all.iter().map(walk).sum());
+            own + children
+        }
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("SET LOCAL enable_seqscan = off")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("SET LOCAL enable_sort = off")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let sql = format!("EXPLAIN (ANALYZE, FORMAT JSON) {}", batch_statement());
+        let (plan,): (serde_json::Value,) = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+            .bind(NOW)
+            .bind(2_i64)
+            .bind(Vec::<Uuid>::new())
+            .bind(Vec::<i32>::new())
+            .bind(100_i32)
+            .bind(100_i32)
+            .bind(cursor)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        tx.rollback().await.unwrap();
+        walk(&plan[0]["Plan"])
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn batches_walk_on_from_where_the_last_one_ended_instead_of_rewalking_skipped_rows(
+        pool: PgPool,
+    ) {
+        let (ws, person, destination) = world(&pool).await;
+        // 3000 live-job messages, older than the deletable ones, sit at the front of the index.
+        sqlx::query(
+            "INSERT INTO messages (id, workspace_id, person_id, enrollment_id, node_id, \
+                template_id, destination_id, status, created_at) \
+             SELECT gen_random_uuid(), $1, $2, gen_random_uuid(), 'live', gen_random_uuid(), $3, \
+                'pending', $4::timestamptz - make_interval(days => 300) + make_interval(secs => g) \
+             FROM generate_series(1, 3000) g",
+        )
+        .bind(ws.as_uuid())
+        .bind(person)
+        .bind(destination)
+        .bind(NOW)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("ANALYZE messages")
+            .execute(&pool)
+            .await
+            .unwrap();
+        for n in 0..9 {
+            message(&pool, (ws, person, destination), 200 - n, "sent", "gone").await;
+        }
+        let kept = message(&pool, (ws, person, destination), 5, "sent", "kept").await;
+        let start = NOW - Duration::days(200);
+
+        let from_start = rows_removed_by_filter(&pool, OffsetDateTime::UNIX_EPOCH).await;
+        let from_cursor = rows_removed_by_filter(&pool, start).await;
+        let mut report = MessageRetentionReport::default();
+        purge_in_batches(&pool, &settings(), &HashMap::new(), NOW, 2, &mut report)
+            .await
+            .unwrap();
+
+        assert!(
+            from_start >= 3000,
+            "every batch used to walk {from_start} rows"
+        );
+        assert!(
+            from_cursor < 100,
+            "a batch from its cursor walks {from_cursor} rows"
+        );
+        assert_eq!(report.messages_deleted, 9);
+        assert_eq!(count(&pool, "messages WHERE node_id = 'live'").await, 3000);
+        assert_eq!(
+            sqlx::query_scalar::<_, Uuid>("SELECT id FROM messages WHERE node_id <> 'live'")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            kept
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_message_that_ends_after_a_run_is_deleted_by_the_next_run(pool: PgPool) {
+        let world = world(&pool).await;
+        let live = message(&pool, world, 300, "pending", "live").await;
+        message(&pool, world, 200, "sent", "gone").await;
+
+        assert_eq!(run(&pool).await.messages_deleted, 1);
+        sqlx::query("UPDATE messages SET status = 'sent', completed_at = created_at WHERE id = $1")
+            .bind(live)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(run(&pool).await.messages_deleted, 1);
+        assert!(nodes(&pool).await.is_empty());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn deleting_a_person_finds_its_messages_through_the_person_index(pool: PgPool) {
+        let (ws, person, destination) = world(&pool).await;
+        // Many people, so the foreign-key lookup of one person is selective.
+        sqlx::query(
+            "INSERT INTO people (id, workspace_id) \
+             SELECT gen_random_uuid(), $1 FROM generate_series(1, 300)",
+        )
+        .bind(ws.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO messages (id, workspace_id, person_id, enrollment_id, node_id, \
+                template_id, destination_id, status, created_at, completed_at) \
+             SELECT gen_random_uuid(), $1, p.id, gen_random_uuid(), 'n', gen_random_uuid(), $2, \
+                'sent', now(), now() FROM (SELECT id FROM people WHERE workspace_id = $1) p, \
+                generate_series(1, 30) g",
+        )
+        .bind(ws.as_uuid())
+        .bind(destination)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("ANALYZE messages")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // The query the `messages_person_id_fkey` trigger runs for a person delete.
+        let plan: Vec<String> = sqlx::query_scalar(
+            "EXPLAIN SELECT 1 FROM ONLY messages x WHERE person_id = $1 FOR KEY SHARE OF x",
+        )
+        .bind(person)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+
+        assert!(
+            plan.iter()
+                .any(|line| line.contains("messages_person_id_idx")),
+            "{plan:?}"
+        );
     }
 
     #[sqlx::test]

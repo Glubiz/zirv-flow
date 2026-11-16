@@ -15,7 +15,8 @@ mod where_used;
 pub use attempts::{
     AttemptOutcome, AttemptStats, DeliveryAttempt, DestinationStat, NewDeliveryAttempt,
     StatusClass, SubjectKind, count_delivery_attempt, count_delivery_attempt_record_failure,
-    destination_attempt_stats, destination_report, list_delivery_attempts, record_delivery_attempt,
+    destination_attempt_stats, destination_report, list_delivery_attempts, purge_attempts,
+    record_delivery_attempt,
 };
 pub use bucket::{
     Admission, BucketState, DEFAULT_RETRY_AFTER, LEASE, MAX_BLOCK, MAX_RETRY_AFTER, RateGate,

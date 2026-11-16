@@ -172,8 +172,13 @@ const VALUE_FREE: &[(&[&str], &str)] = &[
         "retention settings: day counts per workspace and the last run of each window as a row count, no person column",
     ),
     (
-        &["summary_daily", "summary_state", "summary_flows"],
-        "Home summary rollup: per workspace and day counts, high-water timestamps, and per flow counts and a goal flag; no person column",
+        &[
+            "summary_daily",
+            "summary_state",
+            "summary_flows",
+            "template_use_daily",
+        ],
+        "Home summary and template-use rollups: per workspace and day counts, high-water timestamps, and per flow or template counts and a goal flag; no person column",
     ),
     (
         &["api_idempotency"],

@@ -705,7 +705,7 @@ fn list_query(query: &str) -> Result<TemplateListQuery, ApiError> {
         ("channel" = Option<String>, Query, description = "`email` or `webhook`"),
         ("status" = Option<String>, Query, description = "`live` (published, draft unchanged), `changes` (published, draft changed), `draft` (never published) or `archived`; without it, everything except archived templates"),
         ("theme" = Option<String>, Query, description = "A theme id, `default` or `none`"),
-        ("sort" = Option<String>, Query, description = "`edited` (the default), `name` or `most_used` (non-test messages in the last 30 days)")
+        ("sort" = Option<String>, Query, description = "`edited` (the default), `name` or `most_used` (non-test messages created in the last 30 UTC days, from the daily rollup)")
     ),
     responses(
         (status = 200, description = "The templates", body = Vec<TemplateListItemBody>),
