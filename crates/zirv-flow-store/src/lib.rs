@@ -179,7 +179,7 @@ pub use flows::{
     reopen_failed_step, resolve_survivors, resume_batch, resume_failed, resume_flow,
     rotate_signing_key, sample_enrollments, save_enrollment, segment_is_watched,
     segment_trigger_flows, set_warmup, settle_wait_step, step_zones, unhealthy_inputs,
-    update_flow_draft, version_node_counts, wait_filters, warmup_counts,
+    update_flow_draft, update_flow_draft_checked, version_node_counts, wait_filters, warmup_counts,
 };
 pub use forwarding::{
     ClaimedRow, DELIVERED_RETENTION, DeadLetter, FORWARD_JOB_KIND, FORWARDING_COUNT_CAP,

@@ -67,14 +67,14 @@ With all roles stopped, a lock wait is not application traffic. Check other admi
 sessions, open transactions, backups and another migrator in `pg_stat_activity` and `pg_locks`.
 End the conflicting operation deliberately before retrying. Do not kill sessions blindly.
 
-## Lock review through 0109
+## Lock review through 0110
 
-This review covers every migration added in M8 and after, from `0060` through `0109`; there are no `0076`,
+This review covers every migration added in M8 and after, from `0060` through `0110`; there are no `0076`,
 `0080` or `0086` files. Paths are relative to `crates/zirv-flow-store/migrations/`. Every merged
 version is published as a release. As of 2026-11-12 the latest is `v0.286.0`, which includes
 every migration through `0095`. An upgrade from an older release replays the files after its last
-one: from `v0.214.0`, which ends at `0088`, it replays `0089` through `0109`, and from `v0.187.0`
-it replays `0084` through `0109`. The drill selects the latest published older
+one: from `v0.214.0`, which ends at `0088`, it replays `0089` through `0110`, and from `v0.187.0`
+it replays `0084` through `0110`. The drill selects the latest published older
 stable release from GitHub at runtime, independently of local git tags. Its replay range can
 change as releases are published.
 
@@ -134,6 +134,7 @@ referenced tables, even when the new child table is empty.
 | `0107_messages_person_id_idx.sql` | One index, `messages_person_id_idx` on `messages (person_id)`, so the foreign-key check of a person delete (`messages_person_id_fkey`, `ON DELETE CASCADE`) finds the person's rows by an index; every other `messages` index leads with `workspace_id`. Measured on PostgreSQL 16 with 1,000,000 messages of 10,000 people: the cascade trigger of one person delete took 1.08 ms without the index and 0.12 ms with it (the issue measured 145 ms for 3,000,000 messages over several workspaces). The build takes SHARE on `messages` until the commit, so every message insert and update waits; reads go on. Budget it at the installation's message count. Write path of a message (insert pending, then the completing update, 8,000 messages per run, 1,000,000 rows in the table, three runs each, medians): 17.55 s without the index and 17.30 s with it, inside the run-to-run spread (17.26 to 17.86 s). Keep. Pre-build before the stop under the same name: `CREATE INDEX CONCURRENTLY IF NOT EXISTS messages_person_id_idx ON messages (person_id);` (drop an invalid index a failed build leaves). |
 | `0108_delivery_attempts_attempted_at_idx.sql` | One index, `delivery_attempts_attempted_at_idx` on `delivery_attempts (attempted_at)`, which serves the age purge the message-retention job now runs (`purge_attempts`: attempts older than the longest message window, 5,000 rows a batch, each batch committing alone; an attempt names no person). Before it, nothing deleted attempts. The build takes SHARE on `delivery_attempts` until the commit, so every send waits to record its attempt; reads go on. Write path (insert of an attempt, 15,000 inserts per run on a table of 1,000,000 rows, three runs each, medians): 15.79 s without the index and 16.14 s with it (+2.2 %, run-to-run spread 15.63 to 16.18 s). Keep. Pre-build before the stop under the same name: `CREATE INDEX CONCURRENTLY IF NOT EXISTS delivery_attempts_attempted_at_idx ON delivery_attempts (attempted_at);` The first run of the job after the upgrade deletes the whole backlog older than the window in batches. |
 | `0109_template_use_daily.sql` | A new table, `template_use_daily (workspace_id, template_id, day, uses)`, filled by the existing `summary.rollup` job beside `summary_daily`, and read by the library's "most used" sort instead of a live `count(*)` over `messages`. No lock on an existing table. Visible change: the sort counts the last 30 whole UTC days (today and the 29 before), not the last 30 x 24 hours, and trails the messages by the job's five-minute period. The migration also clears every workspace's rollup marks (`summary_state`), so the job recounts today and backfills the last 30 days, a few days per run (under an hour), for both `template_use_daily` and `summary_daily`: "most used" ranks by the days counted so far until then, and the Home summary keeps its older rows until each day is recounted. One `UPDATE` over the small `summary_state` table, a row per workspace. The job's per-day count reads `messages_template_idx` (workspace, template, created time). Measured on PostgreSQL 16 with 667,000 messages of one template: the live count took 36 to 38 ms warm (the review measured 1,058 ms cold on a larger table), the rollup read of the library 2 to 5 ms. |
+| `0110_flows_draft_revision.sql` | Adds `draft_revision integer NOT NULL DEFAULT 1` to `flows`, which counts the writes to a flow's draft so a save made from an older read is refused (409 `flow_draft_revision_mismatch`). A constant default is metadata-only on PostgreSQL 11 and later: no rewrite and no scan. ACCESS EXCLUSIVE on `flows` for an instant, waiting behind transactions that already use the table, which has one row per flow. No index. Keep. |
 
 **Older installs: `0033_trait_slots.sql`.** This is already present in `v0.187.0`, so that upgrade
 does not replay it. Keep its released SQL. It adds 30 nullable columns to `people`, builds 30

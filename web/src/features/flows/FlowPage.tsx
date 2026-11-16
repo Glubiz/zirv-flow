@@ -3,7 +3,7 @@ import { Link, useParams, useSearchParams } from "react-router";
 
 import { ApiError, client, describeError, unwrap, useResource, type components, type ErrorSummary } from "../../api";
 import { Button, Dialog, EmptyState, LoadError, LoadingState, Panel, plural } from "../../ui";
-import { AssistantToggle, useAssistantAccess, useAssistantDock, withoutDock, type Draft } from "../assistant";
+import { AssistantToggle, useAssistantAccess, useAssistantDock, withoutDock, type AcceptedDraft, type Draft } from "../assistant";
 import { useCatalog, useLeaveGuard } from "../segments";
 import { useFlowAccess } from "./access";
 import { Canvas, type FocusRequest, type IssueItem } from "./Canvas";
@@ -359,13 +359,14 @@ function Editor({
   }
 
   /** The server has written the accepted draft as the flow's draft; the editor shows it. Nothing is published. */
-  function loadAssistantDraft(content: unknown) {
+  function loadAssistantDraft(content: unknown, accepted: AcceptedDraft) {
     const document = content as { graph?: Graph; settings?: Settings } | null;
-    if (!document?.graph || !document.settings) {
+    if (!document?.graph || !document.settings || accepted.flow === null || accepted.flow === undefined) {
       store.release();
       return;
     }
-    store.adopt({ graph: document.graph, settings: document.settings });
+    // The flow the accept returns carries the revision it was written at, which later saves are checked against.
+    store.adopt({ graph: document.graph, settings: document.settings, revision: accepted.flow.revision });
     setSelected(null);
     setCited([]);
     setLayoutEpoch((epoch) => epoch + 1);

@@ -130,7 +130,8 @@ fn condition_pointers(sections: Option<&Value>, base: &str) -> Vec<String> {
 }
 
 /// The document with the personal literals of its conditions replaced by placeholders, and the
-/// table to put them back. A condition deeper or larger than the masking walk covers is refused:
+/// table to put them back. A condition deeper or larger than the masking walk covers, or not well
+/// formed, is refused:
 /// its literals could not all be found.
 fn mask_document(document: &Value, clear: &ClearKeys) -> Result<(Value, Placeholders), ApiError> {
     let pointers = condition_pointers(document.pointer("/blocks/sections"), "/blocks/sections");
@@ -140,7 +141,8 @@ fn mask_document(document: &Value, clear: &ClearKeys) -> Result<(Value, Placehol
             .is_some_and(|condition| !within_walk(condition, 1, &mut 0))
         {
             return Err(ApiError::ai_template_unsupported(format!(
-                "the condition at {pointer} is too deep or too large for the assistant;                  simplify that condition first"
+                "the condition at {pointer} is too deep, too large or not well formed for the assistant; \
+                 simplify that condition first"
             )));
         }
     }
@@ -398,6 +400,31 @@ mod tests {
     }
 
     #[test]
+    fn a_condition_that_hides_a_literal_past_the_masking_is_refused_and_never_sent() {
+        for condition in crate::assistant::segment_context::smuggling_conditions() {
+            let mut document = conditioned();
+            document["blocks"]["sections"][0]["visible_if"] = condition.clone();
+            document["blocks"]["sections"][0]["columns"][0][0]["visible_if"] = Value::Null;
+
+            let result = render_template_context(
+                &context(&document, TemplateTask::Copy),
+                &ClearKeys::default(),
+                Privacy::SchemaOnly,
+            );
+
+            match result {
+                Ok((parts, _)) => {
+                    let text: String = parts.iter().map(Content::render).collect();
+                    panic!("reached the prompt: {condition}: {text}");
+                }
+                Err(error) => {
+                    assert_eq!(error.code(), Some("ai_template_unsupported"), "{condition}")
+                }
+            }
+        }
+    }
+
+    #[test]
     fn a_placeholder_that_moved_or_was_made_up_is_named_for_repair() {
         let document = conditioned();
         let (_, table) = render_template_context(
@@ -489,6 +516,23 @@ mod tests {
                 (covered, other) => panic!("covered {covered}: {:?}", other.is_ok()),
             }
         }
+    }
+
+    #[test]
+    fn schema_only_refuses_a_visible_if_with_a_second_node_key() {
+        let document = with_condition(json!({"all": [
+            {"trait": "city", "op": "eq", "value": "Aarhus"}],
+            "trait": "email", "op": "eq", "value": "jane@example.org"}));
+
+        let error = render_template_context(
+            &context(&document, TemplateTask::Copy),
+            &ClearKeys::default(),
+            Privacy::SchemaOnly,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), Some("ai_template_unsupported"));
+        assert!(!error.detail().contains("jane@example.org"));
     }
 
     #[test]

@@ -80,7 +80,9 @@ export function TraceExplanation({ workspaceId, traceId, recordLabel, onCited, o
           <p>{run.explained.summary}</p>
           {run.explained.omitted_records > 0 ? (
             <p className="muted">
-              The trace is long: the assistant did not see the last {run.explained.omitted_records} records.
+              {run.explained.truncated
+                ? `The trace is very long: the assistant did not see at least ${run.explained.omitted_records} records.`
+                : `The trace is long: the assistant did not see the last ${run.explained.omitted_records} records.`}
             </p>
           ) : null}
           {run.explained.records.length === 0 ? (

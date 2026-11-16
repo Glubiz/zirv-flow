@@ -110,6 +110,9 @@ pub(crate) struct FlowDetailBody {
     settings: Value,
     /// The warm-up that ramps enrollments into the flow after it starts taking them.
     warmup: WarmupBody,
+    /// How many times the draft was written. Send it back as `revision` when saving, so a save
+    /// made from an older read is refused instead of replacing a newer draft.
+    revision: i32,
 }
 
 /// The warm-up of a flow: its setting and the window it last started.
@@ -159,6 +162,7 @@ impl From<&Flow> for FlowDetailBody {
             graph: flow.draft_graph.clone(),
             settings: flow.draft_settings.clone(),
             warmup: WarmupBody::new(&flow.warmup, WarmupCounts::default()),
+            revision: flow.draft_revision,
         }
     }
 }
@@ -228,6 +232,9 @@ pub(crate) struct UpdateFlowRequest {
     /// Replaces the draft settings.
     #[schema(schema_with = settings_schema)]
     settings: Option<Value>,
+    /// The `revision` of the flow as it was read. When it is not the draft's current revision the
+    /// save is refused with 409 `flow_draft_revision_mismatch`; left out, the save always applies.
+    revision: Option<i32>,
 }
 
 /// What validating a flow found.
@@ -561,7 +568,7 @@ pub(crate) async fn get(
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the write scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or flow, or no access", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "Another flow has that name, or the flow is archived (`code` is `flow_archived`)", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "Another flow has that name, the flow is archived (`code` is `flow_archived`), or the draft was saved since the `revision` sent was read (`flow_draft_revision_mismatch`, with `current_revision`)", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "An invalid name, no field at all, or a graph or settings that are not flow documents (`flow_malformed`)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
@@ -609,9 +616,15 @@ pub(crate) async fn update(
         settings,
     };
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
-    let flow = zirv_flow_store::update_flow_draft(&mut tx, workspace.id, id, &patch)
-        .await
-        .map_err(flow_error)?;
+    let flow = zirv_flow_store::update_flow_draft_checked(
+        &mut tx,
+        workspace.id,
+        id,
+        &patch,
+        body.revision,
+    )
+    .await
+    .map_err(flow_error)?;
     admin::audit(
         &mut tx,
         &principal.context(),

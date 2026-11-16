@@ -92,7 +92,7 @@ function routes({ role = "writer", enabled = true, routes: extra = {} }: Options
     [`GET ${WS}/ai/settings`]: () => json(aiSettings(enabled)),
     [DRAFT]: () => json(VALID, 201),
     [ACCEPT]: () =>
-      json({ id: "d1", kind: "flow", flow_id: FLOW_ID, content: CONTENT, flow: { id: FLOW_ID, name: "Welcome series", ...CONTENT } }),
+      json({ id: "d1", kind: "flow", flow_id: FLOW_ID, content: CONTENT, flow: flowDetail({ ...CONTENT, revision: 2 }) }),
     [EXPLAIN]: () => json(EXPLAINED),
     ...extra,
   };
@@ -441,10 +441,10 @@ describe("accepting while the editor has unsaved work", () => {
 
   it("is read-only while the accepted draft loads, and takes edits again afterwards", async () => {
     const wait = gate();
-    mockApi(
+    const calls = mockApi(
       failingSave(async () => {
         await wait.opened;
-        return json({ id: "d1", kind: "flow", flow_id: FLOW_ID, content: CONTENT });
+        return json({ id: "d1", kind: "flow", flow_id: FLOW_ID, content: CONTENT, flow: flowDetail({ ...CONTENT, revision: 2 }) });
       }),
     );
     const user = userEvent.setup();
@@ -469,14 +469,20 @@ describe("accepting while the editor has unsaved work", () => {
     expect(screen.queryByText("Loading the draft…")).not.toBeInTheDocument();
     expect(screen.getByRole("complementary", { name: "Step palette" })).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Flow name" })).toBeEnabled();
-  });
+
+    // The next save is checked against the revision the accept wrote.
+    const before = saves(calls).length;
+    await editWait(user, "5");
+    await waitFor(() => expect(saves(calls).length).toBeGreaterThan(before), { timeout: 3000 });
+    expect(saves(calls).at(-1)).toMatchObject({ revision: 2 });
+  }, 15_000);
 
   it("sends no save, publish or explain request while the accept is in flight", async () => {
     const wait = gate();
     const calls = mockApi(
       failingSave(async () => {
         await wait.opened;
-        return json({ id: "d1", kind: "flow", flow_id: FLOW_ID, content: CONTENT });
+        return json({ id: "d1", kind: "flow", flow_id: FLOW_ID, content: CONTENT, flow: flowDetail({ ...CONTENT, revision: 2 }) });
       }),
     );
     const user = userEvent.setup();

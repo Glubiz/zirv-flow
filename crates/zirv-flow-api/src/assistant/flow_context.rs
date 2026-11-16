@@ -363,8 +363,8 @@ fn too_many_nodes(doc: &Value) -> bool {
 }
 
 /// The document with each personal literal replaced by a placeholder, and the table to put them
-/// back. A condition larger than the masking walks cover is refused: its literals could not all be
-/// found.
+/// back. A condition larger than the masking walks cover, or not well formed, is refused: its
+/// literals could not all be found.
 pub(crate) fn mask_document(
     doc: &Value,
     clear: &ClearKeys,
@@ -1026,6 +1026,89 @@ mod tests {
             table.restore_text("Posts to (kept-url:2) and (kept-url:7)."),
             "Posts to https://h.example.com/y and (kept-url:7)."
         );
+    }
+
+    #[test]
+    fn a_condition_that_carries_a_second_node_key_is_refused_and_never_sent() {
+        let flow = |condition: Value| {
+            json!({"graph":{"v":1,"nodes":[
+                {"id":"check","type":"branch","conditions":[condition]},
+                {"id":"end","type":"exit"}],"edges":[]},
+                "settings":{"reentry":{"mode":"once"}}})
+        };
+        for condition in [
+            json!({"all":[{"trait":"city","op":"eq","value":"Aarhus"}],
+                "trait":"email","op":"eq","value":"jane@x.dk"}),
+            // No node key at all, with a value no walk reaches.
+            json!({"op":"eq","value":"jane@x.dk"}),
+            json!({"all":["jane@x.dk"]}),
+        ] {
+            let doc = flow(condition.clone());
+            assert_eq!(
+                mask_document(&doc, &ClearKeys::of(&details())).unwrap_err(),
+                TooLarge,
+                "{condition}"
+            );
+            assert!(
+                flow_context(&details(), "Flow", &doc, Privacy::SchemaOnly).is_err(),
+                "{condition}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_condition_that_hides_a_literal_past_the_masking_is_refused_and_never_sent() {
+        for condition in crate::assistant::segment_context::smuggling_conditions() {
+            let doc = json!({"graph":{"v":1,"nodes":[
+                {"id":"check","type":"branch","conditions":[condition.clone()]},
+                {"id":"end","type":"exit"}],"edges":[]},
+                "settings":{"reentry":{"mode":"once"}}});
+            let sent = match flow_context(&details(), "Flow", &doc, Privacy::SchemaOnly) {
+                Ok((parts, _)) => Some(parts.iter().map(Content::render).collect::<String>()),
+                Err(TooLarge) => None,
+            };
+            assert_eq!(sent, None, "reached the prompt: {condition}");
+            assert_eq!(
+                mask_document(&doc, &ClearKeys::of(&details())).unwrap_err(),
+                TooLarge,
+                "{condition}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_condition_with_the_editors_default_shape_is_still_sent() {
+        let doc = json!({"graph":{"v":1,"nodes":[
+            {"id":"check","type":"branch","conditions":[
+                {"trait":"","op":"eq"},
+                {"trait":"city","op":"eq","value":"jane@example.com"}]},
+            {"id":"end","type":"exit"}],"edges":[]},
+            "settings":{"reentry":{"mode":"once"}}});
+
+        let (parts, _) = flow_context(&details(), "Flow", &doc, Privacy::SchemaOnly).unwrap();
+        let text: String = parts.iter().map(Content::render).collect();
+
+        assert!(!text.contains("jane@example.com"), "{text}");
+        assert!(text.contains("(kept:1)"), "{text}");
+    }
+
+    #[test]
+    fn a_flow_with_a_window_still_being_typed_is_still_sent() {
+        let doc = json!({"graph":{"v":1,"nodes":[
+            {"id":"check","type":"branch","conditions":[
+                {"event":"order","window":{"last":"P1"}},
+                {"event":"order","window":{"between":["",""]}},
+                {"event":"order","window":{"since_trait":""}},
+                {"trait":"city","op":"eq","value":"jane@example.com"}]},
+            {"id":"end","type":"exit"}],"edges":[]},
+            "settings":{"reentry":{"mode":"once"}}});
+
+        let (parts, _) = flow_context(&details(), "Flow", &doc, Privacy::SchemaOnly).unwrap();
+        let text: String = parts.iter().map(Content::render).collect();
+
+        assert!(text.contains(r#""last":"P1""#), "{text}");
+        assert!(text.contains(r#""between":["",""]"#), "{text}");
+        assert!(!text.contains("jane@example.com"), "{text}");
     }
 
     #[test]

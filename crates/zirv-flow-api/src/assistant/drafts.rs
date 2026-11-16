@@ -1170,7 +1170,7 @@ pub(crate) async fn create(
         }
         Err(RepairError::Dispatch(error)) => {
             run_outcome(kind, "failed");
-            return Err(DispatchError::Ai(error).into());
+            return Err(dispatcher.failure(error).into());
         }
         Err(RepairError::Aborted(error)) => {
             run_outcome(kind, "failed");
@@ -1795,6 +1795,11 @@ pub(crate) async fn accept(
     let draft = zirv_flow_store::find_ai_draft(&state.pool, workspace.id, user, id, now)
         .await?
         .ok_or_else(ApiError::not_found)?;
+    // A mapping or manifest draft is the admin's to see, as when it was made: an author demoted
+    // since then gets neither the source's restored header values nor the mapping back.
+    if matches!(draft.kind, DraftKind::Mapping | DraftKind::Manifest) {
+        authorize(&state, &principal, workspace.id, Need::Admin).await?;
+    }
     if draft.status == DraftStatus::Invalid {
         return Err(ApiError::ai_draft_invalid());
     }

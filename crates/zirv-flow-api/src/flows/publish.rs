@@ -476,6 +476,7 @@ mod tests {
             created_at: OffsetDateTime::UNIX_EPOCH,
             updated_at: OffsetDateTime::UNIX_EPOCH,
             warmup: zirv_flow_store::Warmup::default(),
+            draft_revision: 1,
         };
 
         for state in [FlowState::Draft, FlowState::Published, FlowState::Paused] {

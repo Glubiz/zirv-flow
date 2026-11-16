@@ -331,6 +331,7 @@ A test reads the sources and fails when a code used there is missing from this l
 | `flow_malformed` | A flow document cannot be read |
 | `flow_state` | The flow's state does not allow the change |
 | `flow_archived` | The flow is archived |
+| `flow_draft_revision_mismatch` | A stale flow draft save; `current_revision` says the current one |
 | `flow_paused` | The flow is paused |
 | `enrollment_state` | The enrollment's state does not allow the change |
 | `flow_test_request_invalid` | A flow test request is malformed |

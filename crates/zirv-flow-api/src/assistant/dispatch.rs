@@ -129,6 +129,8 @@ pub struct Dispatcher<'a> {
     model: &'a AiModelConfig,
     key: SecretId,
     draft_id: Option<Uuid>,
+    /// The failure the [`Sender`] had to flatten into an [`AiError`], for [`Self::failure`].
+    fault: std::sync::Mutex<Option<DispatchError>>,
 }
 
 impl<'a> Dispatcher<'a> {
@@ -164,7 +166,21 @@ impl<'a> Dispatcher<'a> {
             model,
             key,
             draft_id: None,
+            fault: std::sync::Mutex::new(None),
         })
+    }
+
+    /// The error a repair loop that ended on `error` answers with. The [`Sender`] has to return
+    /// an [`AiError`], so a missing master key, an unusable provider key and a call-log store
+    /// error come back from the loop as a disabled assistant or a provider failure; this gives
+    /// the [`DispatchError`] the call really failed with, so the answer is the documented 503,
+    /// 500 or store status. Any other failure is `error` as it was.
+    pub(crate) fn failure(&self, error: AiError) -> DispatchError {
+        self.fault
+            .lock()
+            .ok()
+            .and_then(|mut fault| fault.take())
+            .unwrap_or(DispatchError::Ai(error))
     }
 
     /// What a call of `input_tokens` and `output_tokens` costs on the chosen model, in micro-units.
@@ -482,12 +498,21 @@ impl Sender for Dispatcher<'_> {
     ) -> BoxFuture<'a, Result<ChatResponse, AiError>> {
         Box::pin(async move {
             let sent = async { self.call(request).await }.await;
-            sent.map_err(|error| match error {
-                DispatchError::Ai(error) => error,
-                DispatchError::Store(_) => {
-                    AiError::Transport("the call log could not be used".to_owned())
+            sent.map_err(|error| {
+                if let DispatchError::Ai(error) = error {
+                    return error;
                 }
-                DispatchError::SecretsUnavailable | DispatchError::KeyUnusable => AiError::Disabled,
+                let flat = match &error {
+                    DispatchError::Store(_) => {
+                        AiError::Transport("the call log could not be used".to_owned())
+                    }
+                    _ => AiError::Disabled,
+                };
+                // Keep what it really was: the repair loop only carries the flat error.
+                if let Ok(mut fault) = self.fault.lock() {
+                    *fault = Some(error);
+                }
+                flat
             })
         })
     }

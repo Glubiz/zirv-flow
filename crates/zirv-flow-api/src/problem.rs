@@ -846,7 +846,7 @@ impl ApiError {
             code: Some("ai_flow_too_large"),
             ..Self::unprocessable(
                 "this flow is too large to send to the assistant without personal data (more than \
-                 200 nodes, or a condition too deep); simplify it first",
+                 200 nodes, or a condition too deep, too large or not well formed); simplify it first",
             )
         }
     }
@@ -970,6 +970,22 @@ impl ApiError {
             ..Self::new(
                 StatusCode::CONFLICT,
                 "the draft was saved by someone else; read it again",
+            )
+        }
+    }
+
+    /// A flow draft save that names a revision other than the current one: the draft was saved
+    /// since the caller read it.
+    pub(crate) fn flow_draft_revision_mismatch(current: i32) -> Self {
+        Self {
+            code: Some("flow_draft_revision_mismatch"),
+            segment: Some(Box::new(SegmentExtra {
+                current_revision: Some(current),
+                ..SegmentExtra::default()
+            })),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "the flow draft was saved by someone else; read it again",
             )
         }
     }

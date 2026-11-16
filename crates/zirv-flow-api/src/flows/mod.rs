@@ -92,6 +92,7 @@ pub(crate) fn flow_error(error: FlowError) -> ApiError {
     match error {
         FlowError::NotFound => ApiError::not_found(),
         FlowError::Archived => ApiError::flow_archived(),
+        FlowError::RevisionMismatch { current } => ApiError::flow_draft_revision_mismatch(current),
         FlowError::WarmupOutOfBounds => {
             ValidationError::new("seconds", "must be 60 to 86400").into()
         }
