@@ -460,24 +460,32 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn deleting_a_person_finds_its_messages_through_the_person_index(pool: PgPool) {
-        let (ws, person, destination) = world(&pool).await;
-        // Many people, so the foreign-key lookup of one person is selective.
+        let (_, person, destination) = world(&pool).await;
+        // Many people over many workspaces, as an installation has, so the foreign-key lookup of
+        // one person is selective. With one workspace, PostgreSQL 18 answers it as well by a skip
+        // scan of `messages_person_idx`, which leads with the workspace; over many it cannot.
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, slug) \
+             SELECT gen_random_uuid(), 'w' || g, 'person-index-' || g \
+             FROM generate_series(1, 200) g",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
         sqlx::query(
             "INSERT INTO people (id, workspace_id) \
-             SELECT gen_random_uuid(), $1 FROM generate_series(1, 300)",
+             SELECT gen_random_uuid(), w.id FROM workspaces w, generate_series(1, 5)",
         )
-        .bind(ws.as_uuid())
         .execute(&pool)
         .await
         .unwrap();
         sqlx::query(
             "INSERT INTO messages (id, workspace_id, person_id, enrollment_id, node_id, \
                 template_id, destination_id, status, created_at, completed_at) \
-             SELECT gen_random_uuid(), $1, p.id, gen_random_uuid(), 'n', gen_random_uuid(), $2, \
-                'sent', now(), now() FROM (SELECT id FROM people WHERE workspace_id = $1) p, \
-                generate_series(1, 30) g",
+             SELECT gen_random_uuid(), p.workspace_id, p.id, gen_random_uuid(), 'n', \
+                gen_random_uuid(), $1, 'sent', now(), now() \
+             FROM people p, generate_series(1, 10) g",
         )
-        .bind(ws.as_uuid())
         .bind(destination)
         .execute(&pool)
         .await
