@@ -72,12 +72,16 @@ pub(super) async fn fetch_window(
         }
         // The window before this one was the last: the server never gave the size, so only the
         // request for the bytes after it said so. That holds only under the `If-Range` sent with
-        // the first window's validator, which a changed file answers with 200, not 416. Without
-        // a validator, a file cut at this offset answers the same, so it stays a changed file, as
+        // the first window's strong `ETag`, which a changed file answers with 200, not 416.
+        // Without one (no validator, or a `Last-Modified` that a change within its second leaves
+        // the same), a file cut at this offset answers the same, so it stays a changed file, as
         // does a read short of that end or a 416 for a file whose size the server gave.
         Err(RuntimeError::Status(416))
             if expect.size.is_none()
-                && expect.validator.is_some()
+                && expect
+                    .validator
+                    .as_deref()
+                    .is_some_and(|validator| validator.starts_with('"'))
                 && expect.known_end.is_some_and(|end| offset >= end) =>
         {
             return Ok(Window {
