@@ -730,18 +730,22 @@ async fn rows_page(
         .filter_map(|row| Some((row.name.clone(), row.schema_version?)))
         .collect();
     let mut schemas: HashMap<(String, i32), Arc<Vec<SchemaProperty>>> = HashMap::new();
-    for (name, version) in wanted {
-        let found: Option<Json<Vec<SchemaProperty>>> = sqlx::query_scalar(
-            "SELECT properties FROM event_schema_versions \
-             WHERE workspace_id = $1 AND name = $2 AND version = $3",
+    if !wanted.is_empty() {
+        // One statement for every (name, version) of the page, by the table's primary key.
+        let (names, versions): (Vec<String>, Vec<i32>) = wanted.into_iter().unzip();
+        let found: Vec<(String, i32, Json<Vec<SchemaProperty>>)> = sqlx::query_as(
+            "SELECT v.name, v.version, v.properties \
+             FROM unnest($2::text[], $3::int[]) AS w(name, version) \
+             JOIN event_schema_versions v \
+               ON v.workspace_id = $1 AND v.name = w.name AND v.version = w.version",
         )
         .bind(workspace.as_uuid())
-        .bind(&name)
-        .bind(version)
-        .fetch_optional(&mut *tx)
+        .bind(&names)
+        .bind(&versions)
+        .fetch_all(&mut *tx)
         .await
         .map_err(bounded)?;
-        if let Some(properties) = found {
+        for (name, version, properties) in found {
             schemas.insert((name, version), Arc::new(properties.0));
         }
     }
@@ -1769,5 +1773,42 @@ mod tests {
                 .unwrap();
 
         assert_eq!(breakdown.values.len(), 3, "{breakdown:?}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_page_reads_the_schema_of_every_name_and_version_in_one_statement(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        for index in 0..41 {
+            let name = format!("ev{index}");
+            publish(
+                &pool,
+                ws,
+                &name,
+                vec![property("plan", PropertyType::String, false)],
+            )
+            .await;
+            send(&pool, ws, "a@example.com", &name, 1, json!({"plan": "pro"})).await;
+        }
+
+        let (page, statements) = crate::people::statements_of(explore_rows(
+            &pool,
+            ws,
+            &scope(None, &[]),
+            None,
+            200,
+            LIMITS,
+            true,
+        ))
+        .await;
+
+        let page = page.unwrap();
+        assert_eq!(page.rows.len(), 41);
+        assert!(page.rows.iter().all(|row| row.schema.is_some()));
+        let schema_reads = statements
+            .iter()
+            .filter(|sql| sql.contains("event_schema_versions"))
+            .count();
+        assert_eq!(schema_reads, 1, "{statements:?}");
     }
 }

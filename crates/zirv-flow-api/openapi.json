@@ -4412,7 +4412,7 @@
         "tags": [
           "consent"
         ],
-        "summary": "Every consent state as CSV, `person_id,channel,topic,status` and one `dimension:<key>`\ncolumn per declared dimension, streamed page by page. The file imports back as it is.",
+        "summary": "Every consent state as CSV, `person_id,channel,topic,status` and one `dimension:<key>`\ncolumn per declared dimension, streamed page by page. The file imports back as it is, a\nstate scoped to an archived dimension or value included; one that names a dimension or value\nthe workspace never had is refused.",
         "operationId": "export_consent",
         "parameters": [
           {
@@ -22678,7 +22678,7 @@
             }
           },
           "409": {
-            "description": "The source type is not in this build",
+            "description": "The source type is not in this build, or the source was changed while it was being read (`code` is `source_changed`); run discovery again",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -38540,7 +38540,7 @@
           },
           "sample": {
             "type": "object",
-            "description": "`{properties, masked}`: the values of PII-flagged properties, of unplanned properties\nand of every property of an unplanned event are null and listed in `masked`."
+            "description": "`{properties, masked}`: the values of PII-flagged properties, of unplanned properties\nand of every property of an unplanned event are null and listed in `masked`. An event\nreject is masked again against the schema published when it is read, so a property\nflagged PII after the reject was stored is null here too."
           },
           "source": {
             "type": "string"

@@ -3452,4 +3452,273 @@ mod tests {
             .collect();
         assert_eq!(keys, ["k1", "k2"]);
     }
+
+    fn active(runs: &[(String, String)]) -> usize {
+        runs.iter()
+            .filter(|(state, mode)| mode == "stream" && (state == "queued" || state == "running"))
+            .count()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn re_enabling_a_source_restarts_its_stream_consumers(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let id = fx.kafka_source().await;
+        let tail = format!("/sources/{id}/streams/orders");
+        fx.as_admin("PUT", &tail, Some(Fixture::consumer_settings(true)))
+            .await;
+        for enabled in [false, true] {
+            let reply = fx
+                .as_admin(
+                    "PATCH",
+                    &format!("/sources/{id}"),
+                    Some(json!({"enabled": enabled})),
+                )
+                .await;
+            assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+        }
+
+        let runs = fx.consumer_runs().await;
+
+        assert_eq!(
+            active(&runs),
+            1,
+            "no active consumer after re-enable: {runs:?}"
+        );
+        let audited: Value = sqlx::query_scalar(
+            "SELECT summary FROM audit_log WHERE action = 'source.updated' \
+             ORDER BY id DESC LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(audited["consumers_started"], 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn re_enabling_a_source_starts_no_consumer_for_a_stream_that_has_none_to_start(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        let id = fx.kafka_source().await;
+        let source = format!("/sources/{id}");
+        let tail = format!("{source}/streams/orders");
+        fx.as_admin("PUT", &tail, Some(Fixture::consumer_settings(false)))
+            .await;
+        for enabled in [false, true] {
+            fx.as_admin("PATCH", &source, Some(json!({"enabled": enabled})))
+                .await;
+        }
+        assert_eq!(active(&fx.consumer_runs().await), 0, "a disabled stream");
+
+        // A save that leaves the source enabled queues nothing, and a pull stream is the
+        // cron's, not a consumer.
+        fx.as_admin("PUT", &tail, Some(Fixture::consumer_settings(true)))
+            .await;
+        let before = fx.consumer_runs().await;
+        let renamed = fx
+            .as_admin("PATCH", &source, Some(json!({"name": "Renamed"})))
+            .await;
+        assert_eq!(renamed.status, StatusCode::OK, "{:?}", renamed.body);
+        assert_eq!(fx.consumer_runs().await, before, "a name-only save");
+
+        let fake = fx.create_ok("CRM", "ok", 1).await;
+        fx.as_admin("POST", &format!("/sources/{fake}/discover"), None)
+            .await;
+        let pulled = fx
+            .as_admin(
+                "PUT",
+                &format!("/sources/{fake}/streams/stream_1"),
+                Some(json!({"enabled": true, "sync_mode": "full_refresh",
+                    "mapping": mapping_body()})),
+            )
+            .await;
+        assert_eq!(pulled.status, StatusCode::OK, "{:?}", pulled.body);
+        for enabled in [false, true] {
+            fx.as_admin(
+                "PATCH",
+                &format!("/sources/{fake}"),
+                Some(json!({"enabled": enabled})),
+            )
+            .await;
+        }
+        let queued: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM sync_runs WHERE sync_mode <> 'stream'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(queued, 0, "a full-refresh stream is owned by its cron");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn pii_holders_who_are_not_admins_do_not_see_the_high_water_mark(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let id = fx.mapped_source(1).await;
+        sqlx::query("UPDATE streams SET checkpoint = $1 WHERE enabled")
+            .bind(json!({"after": "zz-cursor-marker@example.com"}))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE memberships SET view_pii = true WHERE workspace_id = $1")
+            .bind(fx.ws.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let pii_key = admin::create_api_key(
+            &pool,
+            &Context::system(),
+            fx.ws,
+            "pii",
+            &[Scope::Read, Scope::Pii],
+        )
+        .await
+        .unwrap()
+        .plaintext;
+
+        let member = fx.stream_freshness(&id, Auth::Session(&fx.member)).await;
+        let keyed = fx.stream_freshness(&id, Auth::Key(&pii_key)).await;
+
+        assert_eq!(
+            member[0]["freshness"]["high_water_mark"],
+            Value::Null,
+            "view_pii member sees the checkpoint"
+        );
+        assert_eq!(
+            keyed[0]["freshness"]["high_water_mark"],
+            Value::Null,
+            "pii-scoped key sees the checkpoint"
+        );
+        let admin = fx.stream_freshness(&id, Auth::Key(&fx.admin)).await;
+        assert_eq!(
+            admin[0]["freshness"]["high_water_mark"],
+            json!({"after": "zz-cursor-marker@example.com"})
+        );
+    }
+
+    /// A postgres source that connects through a proxy this test controls, so a save can land
+    /// while discovery waits for the connection. The proxy accepts one connection, tells the
+    /// test, and forwards it once released.
+    struct SlowSource {
+        id: String,
+        port: u16,
+        accepted: tokio::sync::oneshot::Receiver<()>,
+        release: tokio::sync::oneshot::Sender<()>,
+    }
+
+    impl Fixture {
+        async fn slow_postgres_source(&self, pool: &PgPool) -> SlowSource {
+            use tokio::net::{TcpListener, TcpStream};
+            for statement in [
+                "CREATE TABLE race_items (id bigint PRIMARY KEY, email text)",
+                "CREATE SCHEMA race_alt",
+                "CREATE TABLE race_alt.race_other (id bigint PRIMARY KEY, email text)",
+            ] {
+                sqlx::query(statement).execute(pool).await.unwrap();
+            }
+            let options = pool.connect_options();
+            let (host, upstream_port) = (options.get_host().to_owned(), options.get_port());
+            let url = url::Url::parse(&std::env::var("DATABASE_URL").unwrap()).unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (accepted_tx, accepted) = tokio::sync::oneshot::channel::<()>();
+            let (release, release_rx) = tokio::sync::oneshot::channel::<()>();
+            tokio::spawn(async move {
+                let (mut client, _) = listener.accept().await.unwrap();
+                let _ = accepted_tx.send(());
+                let _ = release_rx.await;
+                let mut upstream = TcpStream::connect((host.as_str(), upstream_port))
+                    .await
+                    .unwrap();
+                let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+            });
+            let created = self
+                .as_admin(
+                    "POST",
+                    "/sources",
+                    Some(json!({
+                        "kind": "postgres",
+                        "name": "warehouse",
+                        "config": {
+                            "host": "127.0.0.1", "port": port,
+                            "database": options.get_database().unwrap(),
+                            "tls": "off", "schema": "public"
+                        },
+                        "credential": {
+                            "username": url.username(), "password": url.password().unwrap()
+                        }
+                    })),
+                )
+                .await;
+            assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+            SlowSource {
+                id: created.body["id"].as_str().unwrap().to_owned(),
+                port,
+                accepted,
+                release,
+            }
+        }
+
+        async fn stream_names(&self) -> Vec<String> {
+            sqlx::query_scalar("SELECT name FROM streams ORDER BY name")
+                .fetch_all(&self.pool)
+                .await
+                .unwrap()
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn discovery_does_not_store_descriptors_fetched_with_a_replaced_config(pool: PgPool) {
+        let fx = fixture_with_loopback_egress(&pool).await;
+        let slow = fx.slow_postgres_source(&pool).await;
+        let source = format!("/sources/{}", slow.id);
+        let database = pool.connect_options().get_database().unwrap().to_owned();
+
+        let discover_tail = format!("{source}/discover");
+        let discover = fx.as_admin("POST", &discover_tail, None);
+        let replace = async {
+            slow.accepted.await.unwrap();
+            let saved = fx
+                .as_admin(
+                    "PATCH",
+                    &source,
+                    Some(json!({"config": {
+                        "host": "127.0.0.1", "port": slow.port, "database": database,
+                        "tls": "off", "schema": "race_alt"
+                    }})),
+                )
+                .await;
+            assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+            slow.release.send(()).unwrap();
+        };
+        let (reply, ()) = tokio::join!(discover, replace);
+
+        assert_eq!(reply.status, StatusCode::CONFLICT, "{:?}", reply.body);
+        assert_eq!(reply.body["code"], "source_changed");
+        assert!(
+            fx.stream_names().await.is_empty(),
+            "discovery under the replaced config stored {:?}",
+            fx.stream_names().await
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn discovery_with_no_concurrent_change_stores_the_streams(pool: PgPool) {
+        let fx = fixture_with_loopback_egress(&pool).await;
+        let slow = fx.slow_postgres_source(&pool).await;
+        let discover_tail = format!("/sources/{}/discover", slow.id);
+        let discover = fx.as_admin("POST", &discover_tail, None);
+        let release = async {
+            slow.accepted.await.unwrap();
+            slow.release.send(()).unwrap();
+        };
+
+        let (reply, ()) = tokio::join!(discover, release);
+
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+        assert!(fx.stream_names().await.contains(&"race_items".to_owned()));
+    }
 }

@@ -143,9 +143,9 @@ pub use events::{
     explore_count, explore_rows, explore_rows_prepared, explore_start, explore_total,
     find_event_schema, get_event_policy, list_event_schemas, list_ingest_rejects,
     list_schema_versions, listen_for_debugger, preview_replay, prune_debugger_feed,
-    publish_schema_draft, read_debugger_batch, read_debugger_feed, read_debugger_feed_at,
-    replay_rejects, save_schema_draft, select_rejects, set_event_policy, touch_debugger_watch,
-    update_event_schema,
+    publish_schema_draft, published_event_properties, read_debugger_batch, read_debugger_feed,
+    read_debugger_feed_at, replay_rejects, save_schema_draft, select_rejects, set_event_policy,
+    touch_debugger_watch, update_event_schema,
 };
 pub use feedback::{
     FeedbackEvent, FeedbackOutcome, ProviderFeedback, SuppressionMade, record_provider_feedback,

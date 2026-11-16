@@ -15,7 +15,7 @@ use zirv_flow_core::people::TraitType;
 
 use super::profiles::{StoredIdentity, find_person};
 use crate::StoreError;
-use crate::bounded::begin_bounded;
+use crate::bounded::begin_snapshot;
 
 /// The identities one source lists for the person.
 #[derive(Clone, Debug, PartialEq)]
@@ -76,16 +76,18 @@ pub struct Profile {
 }
 
 /// The profile of `person`, or of its survivor when it was merged. `None` when the workspace
-/// has no such person.
+/// has no such person. The person and everything read about them come from one snapshot, so a
+/// merge that commits during the read cannot give the traits of one person and the identities
+/// of another.
 pub async fn load_profile(
     pool: &PgPool,
     workspace: WorkspaceId,
     person: Uuid,
 ) -> Result<Option<Profile>, StoreError> {
-    let Some(found) = find_person(pool, workspace, person).await? else {
+    let mut tx = begin_snapshot(pool).await?;
+    let Some(found) = find_person(&mut *tx, workspace, person).await? else {
         return Ok(None);
     };
-    let mut tx = begin_bounded(pool).await?;
     let identities: Vec<StoredIdentity> = sqlx::query_as(
         "SELECT id, person_id, kind, value FROM identities \
          WHERE workspace_id = $1 AND person_id = $2 ORDER BY kind, value",
@@ -535,6 +537,93 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_merge_committing_between_the_person_lookup_and_the_identity_read_keeps_the_identities(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let t = datetime!(2026-01-01 00:00 UTC);
+        let p = apply(
+            &pool,
+            ws,
+            "crm",
+            "p",
+            &[("email", "p@example.com")],
+            json!({"plan": "pro"}),
+            t,
+        )
+        .await;
+        let s = apply(
+            &pool,
+            ws,
+            "crm",
+            "s",
+            &[("email", "s@example.com")],
+            json!({}),
+            t,
+        )
+        .await;
+        // The merge holds the identities table while it moves them, so a reader that has
+        // already looked the person up waits for it at the identity read.
+        let mut locker = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE identities IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *locker)
+            .await
+            .unwrap();
+        let reader = {
+            let pool = pool.clone();
+            tokio::spawn(async move { load_profile(&pool, ws, p).await })
+        };
+        for _ in 0..100 {
+            let blocked: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity \
+                 WHERE wait_event_type = 'Lock' AND query ILIKE '%FROM identities%'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if blocked > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        for table in ["identities", "source_records"] {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "UPDATE {table} SET person_id = $1 WHERE person_id = $2"
+            )))
+            .bind(s)
+            .bind(p)
+            .execute(&mut *locker)
+            .await
+            .unwrap();
+        }
+        sqlx::query("UPDATE people SET merged_into = $1 WHERE id = $2")
+            .bind(s)
+            .bind(p)
+            .execute(&mut *locker)
+            .await
+            .unwrap();
+        locker.commit().await.unwrap();
+
+        let profile = reader.await.unwrap().unwrap().unwrap();
+
+        let identities = profile
+            .identity_groups
+            .iter()
+            .map(|group| group.identities.len())
+            .sum::<usize>()
+            + profile.observed.len();
+        assert!(
+            profile.traits.is_empty() || identities > 0,
+            "profile of {} (merged_from {:?}) shows {} traits but {} identities",
+            profile.id,
+            profile.merged_from,
+            profile.traits.len(),
+            identities
         );
     }
 }

@@ -263,6 +263,18 @@ pub(crate) async fn discover_source(
         })
         .collect();
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
+    // The descriptors describe what the source was when it was called: a save that replaced its
+    // settings or credential during the call (it takes this lock too) makes them stale.
+    let locked = zirv_flow_store::find_source_for_update(&mut tx, workspace, id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    if locked.config != call.source.config || locked.credential_id != call.source.credential_id {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "the source was changed while it was being read; run discovery again",
+        )
+        .with_code("source_changed"));
+    }
     let streams = zirv_flow_store::upsert_discovered_streams(&mut tx, workspace, id, &discovered)
         .await?
         .ok_or_else(ApiError::not_found)?;
@@ -415,7 +427,7 @@ pub(crate) async fn test(
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a missing scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or source, or no access", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "The source type is not in this build", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "The source type is not in this build, or the source was changed while it was being read (`code` is `source_changed`); run discovery again", body = Problem, content_type = "application/problem+json"),
         (status = 502, description = "The source refused or failed the request", body = Problem, content_type = "application/problem+json"),
         (status = 503, description = "The server has no master key to open the credential", body = Problem, content_type = "application/problem+json"),
         (status = 504, description = "The source did not answer in time", body = Problem, content_type = "application/problem+json")

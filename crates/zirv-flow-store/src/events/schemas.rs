@@ -414,6 +414,21 @@ pub(crate) async fn find_published_schemas(
         .collect()
 }
 
+/// The properties of the published schema of each of `names`, as a reader sees them now. A name
+/// without a published version is absent from the map.
+pub async fn published_event_properties(
+    pool: &sqlx::PgPool,
+    workspace: WorkspaceId,
+    names: &[String],
+) -> Result<HashMap<String, Vec<SchemaProperty>>, StoreError> {
+    let mut connection = pool.acquire().await.map_err(StoreError::query)?;
+    Ok(find_published_schemas(&mut connection, workspace, names)
+        .await?
+        .into_iter()
+        .map(|(name, schema)| (name, schema.properties))
+        .collect())
+}
+
 /// The workspace's policy, or the defaults when none was saved.
 pub async fn get_event_policy<'e>(
     executor: impl PgExecutor<'e>,

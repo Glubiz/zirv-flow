@@ -14,7 +14,7 @@ use zirv_flow_core::decision_actions;
 use zirv_flow_core::segment::ChangeClasses;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
-use super::dimensions::{live_dimension, unknown_dimension_entry};
+use super::dimensions::{live_dimension, unknown_dimension_entry, unknown_dimension_entry_with};
 use super::topics::find_topic;
 use crate::StoreError;
 use crate::changes::{mark_person, request_reevaluation};
@@ -116,11 +116,19 @@ pub async fn set_consent(
             _ => return Ok(ConsentOutcome::NoSuchTopic),
         }
     }
-    if let Some((dimension, _)) =
-        unknown_dimension_entry(&mut *connection, workspace, &change.dimensions).await?
+    // An import restores what an export listed, archived scopes included; no other writer may
+    // scope a new state to an archived dimension or value.
+    let archived_known = change.source == ChangeSource::Import;
+    if let Some((dimension, _)) = unknown_dimension_entry_with(
+        &mut *connection,
+        workspace,
+        &change.dimensions,
+        archived_known,
+    )
+    .await?
     {
         return Ok(
-            if live_dimension(connection, workspace, &dimension).await? {
+            if live_dimension(connection, workspace, &dimension, archived_known).await? {
                 ConsentOutcome::NoSuchDimensionValue
             } else {
                 ConsentOutcome::NoSuchDimension
@@ -2073,6 +2081,56 @@ mod tests {
 
             let (history, _) = reading.await.unwrap();
             assert_eq!(history.len(), 2, "the change and the merge's record");
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn only_an_import_may_scope_a_state_to_an_archived_value(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            use crate::{DimensionUpdate, update_dimension_value};
+
+            let ws = workspace(&pool, "one").await;
+            verticals(&pool, ws).await;
+            update_dimension_value(
+                &pool,
+                ws,
+                "vertical",
+                "b2b",
+                &DimensionUpdate {
+                    name: None,
+                    archived: Some(true),
+                },
+            )
+            .await
+            .unwrap();
+            let ada = person(&pool, ws, PERSONAL_DATA.email).await;
+            let trace = TraceContext::root(Cause::api("test"));
+            let mut archived = scoped_change(
+                ada,
+                None,
+                &[("vertical", "b2b")],
+                ConsentStatus::Unsubscribed,
+                T1,
+            );
+
+            let by_api = set(&pool, ws, &archived, &trace).await;
+            archived.source = ChangeSource::Import;
+            let by_import = set(&pool, ws, &archived, &trace).await;
+            let mut missing = scoped_change(
+                ada,
+                None,
+                &[("vertical", "gone")],
+                ConsentStatus::Unsubscribed,
+                T1,
+            );
+            missing.source = ChangeSource::Import;
+            let never_created = set(&pool, ws, &missing, &trace).await;
+
+            assert_eq!(by_api, ConsentOutcome::NoSuchDimensionValue);
+            assert!(matches!(by_import, ConsentOutcome::Changed { .. }));
+            assert_eq!(never_created, ConsentOutcome::NoSuchDimensionValue);
         })
         .await;
     }

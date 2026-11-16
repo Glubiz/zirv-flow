@@ -779,7 +779,9 @@ export interface paths {
         };
         /**
          * Every consent state as CSV, `person_id,channel,topic,status` and one `dimension:<key>`
-         *     column per declared dimension, streamed page by page. The file imports back as it is.
+         *     column per declared dimension, streamed page by page. The file imports back as it is, a
+         *     state scoped to an archived dimension or value included; one that names a dimension or value
+         *     the workspace never had is refused.
          */
         get: operations["export_consent"];
         put?: never;
@@ -7925,7 +7927,9 @@ export interface components {
             replayed_at?: string | null;
             /**
              * @description `{properties, masked}`: the values of PII-flagged properties, of unplanned properties
-             *     and of every property of an unplanned event are null and listed in `masked`.
+             *     and of every property of an unplanned event are null and listed in `masked`. An event
+             *     reject is masked again against the schema published when it is read, so a property
+             *     flagged PII after the reject was stored is null here too.
              */
             sample: Record<string, never>;
             source: string;
@@ -27236,7 +27240,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The source type is not in this build */
+            /** @description The source type is not in this build, or the source was changed while it was being read (`code` is `source_changed`); run discovery again */
             409: {
                 headers: {
                     [name: string]: unknown;

@@ -289,10 +289,16 @@ impl ParsedImport {
     }
 }
 
+/// The header and the data records. Reading stops at the first record past the cap, so an
+/// oversized body is refused without every record of it being held.
+fn read_records(text: &str) -> Vec<csv::Record> {
+    csv::parse_up_to(text, MAX_IMPORT_ROWS + 1)
+}
+
 /// Reads the CSV: a header `kind,value` or `kind,value,note`, then one record per
 /// identifier. Bad rows are listed by line number and code; the rest are hashed.
 fn parse_import(text: &str, key: &HmacKey) -> Result<ParsedImport, AdminError> {
-    let mut records = csv::parse(text).into_iter();
+    let mut records = read_records(text).into_iter();
     let header: Vec<String> = records
         .next()
         .map(|record| record.fields)
@@ -884,6 +890,25 @@ mod tests {
             parse_import(&text, &key()).unwrap().entries.len(),
             MAX_IMPORT_ROWS
         );
+    }
+
+    #[test]
+    fn an_oversized_import_is_read_only_to_the_first_row_past_the_cap() {
+        let body = format!(
+            "kind,value
+{}",
+            "email,a@example.com
+"
+            .repeat(MAX_IMPORT_ROWS * 3)
+        );
+
+        let read = read_records(&body);
+
+        assert_eq!(read.len(), MAX_IMPORT_ROWS + 2);
+        assert!(matches!(
+            parse_import(&body, &key()),
+            Err(AdminError::Invalid(error)) if error.field() == "rows"
+        ));
     }
 
     #[test]

@@ -151,6 +151,15 @@ fn read_records(text: &str) -> Result<(Vec<String>, Vec<csv::Record>), AdminErro
 /// nothing is kept. Bad rows are reported by line number and code and do not stop the rest.
 /// A real import is audited as `consent.imported` with counts only. Each written change is
 /// recorded in the person history with the source `import`.
+///
+/// Every row is read first, then the valid ones are written in person order (a person's own
+/// rows keep their file order, so the later one still wins). A write holds its person's lock to
+/// the end of the transaction, so two imports that write the same people in one order cannot
+/// deadlock each other; a person merged into another is locked as the survivor, and an import
+/// that still loses a deadlock is run once more. A dry run writes too, to report what a commit
+/// would do, and holds its locks until it is rolled back. A state scoped to an archived
+/// dimension or value is accepted, as an export lists those; one scoped to a dimension or value
+/// that does not exist is not.
 pub(crate) async fn import(
     pool: &PgPool,
     context: &Context,
@@ -166,14 +175,13 @@ pub(crate) async fn import(
         .into_iter()
         .map(|topic| (topic.key, topic.id))
         .collect();
-    let trace = crate::trace::request_trace();
-    let mut tx = zirv_flow_store::begin(pool).await?;
     let mut body = ConsentImportBody {
         dry_run,
         changed: 0,
         unchanged: 0,
         invalid: Vec::new(),
     };
+    let mut rows: Vec<(usize, Row, Option<Uuid>)> = Vec::with_capacity(records.len());
     for csv::Record { line, fields } in records {
         let reject = |body: &mut ConsentImportBody, reason: &str| {
             body.invalid.push(ConsentImportRowBody {
@@ -198,14 +206,77 @@ pub(crate) async fn import(
             },
             None => None,
         };
+        rows.push((line, row, topic));
+    }
+    // A stable sort: one person's rows stay in file order.
+    rows.sort_by_key(|(line, row, _)| (row.person, *line));
+
+    let attempt = write_rows(
+        pool,
+        context,
+        workspace,
+        &rows,
+        body.invalid.len(),
+        dry_run,
+        actor,
+    )
+    .await;
+    let written = match attempt {
+        Err(AdminError::Store(error)) if !dry_run && error.is_retryable() => {
+            write_rows(
+                pool,
+                context,
+                workspace,
+                &rows,
+                body.invalid.len(),
+                dry_run,
+                actor,
+            )
+            .await?
+        }
+        other => other?,
+    };
+    body.changed = written.changed;
+    body.unchanged = written.unchanged;
+    body.invalid.extend(written.invalid);
+    body.invalid.sort_by_key(|row| row.row);
+    Ok(body)
+}
+
+/// What one attempt at writing the valid rows did.
+struct Written {
+    changed: usize,
+    unchanged: usize,
+    invalid: Vec<ConsentImportRowBody>,
+}
+
+/// Writes `rows` in one transaction, in the order given, and commits it unless this is a dry
+/// run. `already_invalid` counts the rows refused before, for the audit entry.
+async fn write_rows(
+    pool: &PgPool,
+    context: &Context,
+    workspace: WorkspaceId,
+    rows: &[(usize, Row, Option<Uuid>)],
+    already_invalid: usize,
+    dry_run: bool,
+    actor: Option<Uuid>,
+) -> Result<Written, AdminError> {
+    let trace = crate::trace::request_trace();
+    let mut tx = zirv_flow_store::begin(pool).await?;
+    let mut written = Written {
+        changed: 0,
+        unchanged: 0,
+        invalid: Vec::new(),
+    };
+    for (line, row, topic) in rows {
         let outcome = zirv_flow_store::set_consent(
             &mut tx,
             workspace,
             &ConsentChange {
                 person: row.person,
                 channel: row.channel,
-                topic,
-                dimensions: row.dimensions,
+                topic: *topic,
+                dimensions: row.dimensions.clone(),
                 status: row.status,
                 source: ChangeSource::Import,
                 evidence: json!({}),
@@ -215,14 +286,24 @@ pub(crate) async fn import(
             &trace,
         )
         .await?;
-        match outcome {
-            ConsentOutcome::Changed { .. } => body.changed += 1,
-            ConsentOutcome::Unchanged | ConsentOutcome::Superseded => body.unchanged += 1,
-            ConsentOutcome::NoSuchPerson => reject(&mut body, "no_such_person"),
-            ConsentOutcome::NoSuchTopic => reject(&mut body, "unknown_topic"),
-            ConsentOutcome::NoSuchDimension => reject(&mut body, "unknown_dimension"),
-            ConsentOutcome::NoSuchDimensionValue => reject(&mut body, "unknown_dimension_value"),
-        }
+        let reason = match outcome {
+            ConsentOutcome::Changed { .. } => {
+                written.changed += 1;
+                continue;
+            }
+            ConsentOutcome::Unchanged | ConsentOutcome::Superseded => {
+                written.unchanged += 1;
+                continue;
+            }
+            ConsentOutcome::NoSuchPerson => "no_such_person",
+            ConsentOutcome::NoSuchTopic => "unknown_topic",
+            ConsentOutcome::NoSuchDimension => "unknown_dimension",
+            ConsentOutcome::NoSuchDimensionValue => "unknown_dimension_value",
+        };
+        written.invalid.push(ConsentImportRowBody {
+            row: *line,
+            reason: reason.to_owned(),
+        });
     }
     if !dry_run {
         admin::audit(
@@ -232,15 +313,15 @@ pub(crate) async fn import(
             "consent.imported",
             None,
             json!({
-                "changed": body.changed,
-                "unchanged": body.unchanged,
-                "invalid": body.invalid.len(),
+                "changed": written.changed,
+                "unchanged": written.unchanged,
+                "invalid": already_invalid + written.invalid.len(),
             }),
         )
         .await?;
         zirv_flow_store::commit(tx).await?;
     }
-    Ok(body)
+    Ok(written)
 }
 
 /// The export header for the dimension columns `keys`.
@@ -331,7 +412,9 @@ pub(crate) async fn import_handler(
 }
 
 /// Every consent state as CSV, `person_id,channel,topic,status` and one `dimension:<key>`
-/// column per declared dimension, streamed page by page. The file imports back as it is.
+/// column per declared dimension, streamed page by page. The file imports back as it is, a
+/// state scoped to an archived dimension or value included; one that names a dimension or value
+/// the workspace never had is refused.
 #[utoipa::path(
     get,
     operation_id = "export_consent",
@@ -549,5 +632,221 @@ mod tests {
         );
         assert_eq!(back.status, ConsentStatus::Unsubscribed);
         assert_eq!(export_header(&[]), "person_id,channel,topic,status\n");
+    }
+
+    async fn workspace_with_people(pool: &PgPool, people: u32) -> (WorkspaceId, Vec<Uuid>) {
+        use zirv_flow_core::{Slug, WorkspaceName};
+
+        zirv_flow_store::migrate(pool).await.unwrap();
+        let ws = zirv_flow_store::create_workspace(
+            pool,
+            &WorkspaceName::parse("ours").unwrap(),
+            &Slug::parse("ours").unwrap(),
+        )
+        .await
+        .unwrap()
+        .id;
+        let ids = sqlx::query_scalar(
+            "INSERT INTO people (id, workspace_id) \
+             SELECT gen_random_uuid(), $1 FROM generate_series(1, $2) RETURNING id",
+        )
+        .bind(ws.as_uuid())
+        .bind(people as i32)
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        (ws, ids)
+    }
+
+    const HEADER: &str = "person_id,channel,topic,status\n";
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn two_concurrent_imports_touching_the_same_people_in_opposite_order_both_succeed(
+        pool: PgPool,
+    ) {
+        let (ws, ids) = workspace_with_people(&pool, 602).await;
+        let (a, b) = (ids[0], ids[1]);
+        let line = |id: &Uuid| format!("{id},email,,subscribed\n");
+        let mut one = vec![a];
+        one.extend(&ids[2..302]);
+        one.push(b);
+        let mut two = vec![b];
+        two.extend(&ids[302..602]);
+        two.push(a);
+        let one = format!("{HEADER}{}", one.iter().map(&line).collect::<String>());
+        let two = format!("{HEADER}{}", two.iter().map(&line).collect::<String>());
+        let context = Context::system();
+
+        let (first, second) = tokio::join!(
+            import(&pool, &context, ws, &one, false, None),
+            import(&pool, &context, ws, &two, false, None)
+        );
+
+        assert!(
+            first.is_ok() && second.is_ok(),
+            "first: {:?}, second: {:?}",
+            first.as_ref().err(),
+            second.as_ref().err()
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn one_persons_rows_apply_in_file_order_and_the_invalid_rows_stay_in_row_order(
+        pool: PgPool,
+    ) {
+        let (ws, ids) = workspace_with_people(&pool, 2).await;
+        let (early, late) = (ids[0].min(ids[1]), ids[0].max(ids[1]));
+        let stranger = Uuid::now_v7();
+        let file = format!(
+            "{HEADER}\
+             {stranger},email,,subscribed\n\
+             {late},email,,subscribed\n\
+             not-a-person,email,,subscribed\n\
+             {early},email,,subscribed\n\
+             {late},email,,unsubscribed\n\
+             {early},email,nosuchtopic,subscribed\n\
+             {stranger},email,,unsubscribed\n"
+        );
+
+        let result = import(&pool, &Context::system(), ws, &file, false, None)
+            .await
+            .unwrap();
+
+        let rows: Vec<(usize, &str)> = result
+            .invalid
+            .iter()
+            .map(|row| (row.row, row.reason.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (2, "no_such_person"),
+                (4, "invalid_person_id"),
+                (7, "unknown_topic"),
+                (8, "no_such_person")
+            ]
+        );
+        let status: String = sqlx::query_scalar(
+            "SELECT status FROM consent WHERE person_id = $1 AND channel = 'email'",
+        )
+        .bind(late)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "unsubscribed", "the later row of one person wins");
+        assert_eq!((result.changed, result.unchanged), (3, 0));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_export_with_a_value_scoped_state_imports_back_after_the_value_is_archived(
+        pool: PgPool,
+    ) {
+        use zirv_flow_store::{DimensionUpdate, NewDimension};
+
+        let (ws, ids) = workspace_with_people(&pool, 1).await;
+        zirv_flow_store::create_dimension(
+            &pool,
+            ws,
+            &NewDimension {
+                key: "brand".into(),
+                name: "Brand".into(),
+            },
+        )
+        .await
+        .unwrap();
+        zirv_flow_store::create_dimension_value(&pool, ws, "brand", "acme", "Acme")
+            .await
+            .unwrap();
+        let file = format!("{HEADER_WITH_BRAND}{},email,,unsubscribed,acme\n", ids[0]);
+        let stored = import(&pool, &Context::system(), ws, &file, false, None)
+            .await
+            .unwrap();
+        assert!(stored.invalid.is_empty(), "{:?}", stored.invalid.len());
+        zirv_flow_store::update_dimension_value(
+            &pool,
+            ws,
+            "brand",
+            "acme",
+            &DimensionUpdate {
+                name: None,
+                archived: Some(true),
+            },
+        )
+        .await
+        .unwrap();
+        let mut connection = zirv_flow_store::begin(&pool).await.unwrap();
+        let keys: Vec<String> = zirv_flow_store::list_dimensions(&mut connection, ws, true)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|dimension| !dimension.builtin)
+            .map(|dimension| dimension.key)
+            .collect();
+        drop(connection);
+        let page = zirv_flow_store::consent_export_page(&pool, ws, None, 100)
+            .await
+            .unwrap();
+        let exported = format!(
+            "{}{}",
+            export_header(&keys),
+            page.iter()
+                .map(|row| export_line(row, &keys))
+                .collect::<String>()
+        );
+
+        let result = import(&pool, &Context::system(), ws, &exported, true, None)
+            .await
+            .unwrap();
+
+        let reasons: Vec<&str> = result
+            .invalid
+            .iter()
+            .map(|row| row.reason.as_str())
+            .collect();
+        assert!(
+            result.invalid.is_empty(),
+            "file:\n{exported}\nimport rejected rows: {reasons:?}"
+        );
+    }
+
+    const HEADER_WITH_BRAND: &str = "person_id,channel,topic,status,dimension:brand\n";
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_import_still_refuses_a_dimension_or_value_that_does_not_exist(pool: PgPool) {
+        let (ws, ids) = workspace_with_people(&pool, 1).await;
+        zirv_flow_store::create_dimension(
+            &pool,
+            ws,
+            &zirv_flow_store::NewDimension {
+                key: "brand".into(),
+                name: "Brand".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let file = format!(
+            "person_id,channel,topic,status,dimension:brand,dimension:region\n\
+             {id},email,,unsubscribed,acme,\n\
+             {id},email,,unsubscribed,,north\n",
+            id = ids[0]
+        );
+
+        let result = import(&pool, &Context::system(), ws, &file, true, None)
+            .await
+            .unwrap();
+
+        let reasons: Vec<(usize, &str)> = result
+            .invalid
+            .iter()
+            .map(|row| (row.row, row.reason.as_str()))
+            .collect();
+        assert_eq!(
+            reasons,
+            [(2, "unknown_dimension_value"), (3, "unknown_dimension")]
+        );
     }
 }

@@ -288,6 +288,7 @@ A test reads the sources and fails when a code used there is missing from this l
 | `oauth_not_configured` | The source has no authorization-code authentication |
 | `public_url_not_configured` | `server.public_url` is not set, so a consent cannot start |
 | `managed_by_webhooks` | A webhook source is managed through the webhooks API |
+| `source_changed` | The source's settings or credential changed while discovery was reading it; run discovery again |
 | `push_source` | A webhook source receives records as sent and has no run |
 | `sync_run_active` | A sync run is active for the source |
 | `sync_run_not_active` | The run is not queued or running |
