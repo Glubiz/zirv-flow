@@ -15,3 +15,10 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v1.0.11 (2026-11-16)
+
+### Fixes
+
+- give back an orphan's unsent cap slot, stamp each retention window on its own, keep the forwarding order at an empty bucket (#697, #698, #702)
+- hold sends while the bucket is empty, give back unsent cap slots, stamp only real retention runs, skip unmarked paused retries, suppress bounces for erased people, stop event forwarding at an empty bucket (#696-#702)
+
