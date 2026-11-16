@@ -15,3 +15,11 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v1.0.9 (2026-11-16)
+
+### Fixes
+
+- end a file of unknown size only under a strong ETag, keep a size named on any window (#688)
+- end a file of unknown size only under If-Range, test the refusal reset on a move (#688, #689)
+- share outbound clients, skip the QUIT reply, cap retries first, fail loud on bad links, encode token credentials, end files at their known size, stop offset-refusal loops (#683-#689)
+
