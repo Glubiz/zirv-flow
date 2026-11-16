@@ -15,3 +15,15 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v1.0.15 (2026-11-16)
+
+### Fixes
+
+- review round 2 finding for consent import retries (#727)
+- review round 1 findings for consent import order and discovery (#726, #727)
+- sources, consent, profile, event and ingest review findings (#724-#733)
+
+### Chores
+
+- one retry of a consent import as a single reassignment (#727)
+
