@@ -17,17 +17,19 @@ pub(super) struct Record {
     pub(super) fields: Vec<String>,
 }
 
-/// Splits `text` into records of fields. A byte order mark at the start is ignored, blank
-/// lines are skipped, and a quote that never closes ends the last field at the end of the
-/// text. Lines are counted by LF, by CRLF once, and by a CR on its own; a line break inside
-/// quotes counts too.
+/// Every record of `text`; for tests. An import reads with [`parse_up_to`], so a body it will
+/// refuse is not held whole.
+#[cfg(test)]
 pub(super) fn parse(text: &str) -> Vec<Record> {
     parse_up_to(text, usize::MAX)
 }
 
-/// Like [`parse`], but stops reading as soon as it has more than `limit` records, and returns
-/// those `limit + 1`. A caller that refuses a file of more than `limit` records learns that
-/// without reading the rest of a body it will refuse.
+/// Splits `text` into records of fields, and stops reading as soon as it has more than `limit`
+/// records, returning those `limit + 1`. A caller that refuses a file of more than `limit`
+/// records learns that without reading the rest of a body it will refuse. A byte order mark at
+/// the start is ignored, blank lines are skipped, and a quote that never closes ends the last
+/// field at the end of the text. Lines are counted by LF, by CRLF once, and by a CR on its own;
+/// a line break inside quotes counts too.
 pub(super) fn parse_up_to(text: &str, limit: usize) -> Vec<Record> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut records = Vec::new();

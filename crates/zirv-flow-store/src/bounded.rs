@@ -32,6 +32,12 @@ pub(crate) async fn begin_bounded(pool: &sqlx::PgPool) -> Result<Tx, StoreError>
     begin_bounded_for(pool, QUERY_TIMEOUT).await
 }
 
+/// Starts a read-only snapshot transaction bounded by [`QUERY_TIMEOUT`]; see
+/// [`begin_snapshot_for`].
+pub(crate) async fn begin_snapshot(pool: &sqlx::PgPool) -> Result<Tx, StoreError> {
+    begin_snapshot_for(pool, QUERY_TIMEOUT).await
+}
+
 /// Starts a read-only transaction that PostgreSQL cancels a statement of after `timeout`.
 pub(crate) async fn begin_bounded_for(
     pool: &sqlx::PgPool,

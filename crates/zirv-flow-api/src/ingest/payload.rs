@@ -226,7 +226,8 @@ fn map_field(
 }
 
 /// `userId`, `anonymousId` and `identifiers`, as `(kind, value)` pairs. At least one is
-/// required; a pair that repeats another, after normalisation, is kept once.
+/// required; a pair that repeats another, after normalisation, is kept once. A `null` value
+/// (or `identifiers: null`) counts as absent, as it does for the other optional fields.
 fn identifiers(
     index: usize,
     object: &Map<String, Value>,
@@ -236,6 +237,9 @@ fn identifiers(
     let mut found: Vec<(String, String)> = Vec::new();
     let mut seen: Vec<Identifier> = Vec::new();
     let mut add = |field: &str, kind: &str, value: &Value, errors: &mut Vec<ItemError>| {
+        if value.is_null() {
+            return;
+        }
         let Some(text) = value.as_str() else {
             errors.push(error(index, field, "wrong_type"));
             return;
@@ -257,7 +261,7 @@ fn identifiers(
         add("anonymousId", "anonymous_id", value, errors);
     }
     match object.get("identifiers") {
-        None => {}
+        None | Some(Value::Null) => {}
         Some(Value::Object(map)) if map.len() > MAX_IDENTIFIERS => {
             errors.push(error(index, "identifiers", "too_many_identifiers"));
         }
@@ -427,6 +431,56 @@ mod tests {
                 [("identifiers".to_owned(), "no_identifier")]
             );
         }
+    }
+
+    #[test]
+    fn a_null_identifier_is_absent_not_a_wrong_type() {
+        let item = one(
+            json!({"userId": null, "anonymousId": "a", "event": "e"}),
+            Kind::Track,
+        )
+        .unwrap();
+        assert_eq!(
+            item.identifiers,
+            [("anonymous_id".to_owned(), "a".to_owned())]
+        );
+
+        let item = one(
+            json!({"userId": "u-1", "identifiers": {"email": null}}),
+            Kind::Identify,
+        )
+        .unwrap();
+        assert_eq!(
+            item.identifiers,
+            [("external:user_id".to_owned(), "u-1".to_owned())]
+        );
+
+        let item = one(
+            json!({"userId": "u-1", "identifiers": null}),
+            Kind::Identify,
+        )
+        .unwrap();
+        assert_eq!(item.identifiers.len(), 1);
+
+        let mixed = parse_items(
+            &[
+                json!({"userId": null, "anonymousId": "a", "event": "e"}),
+                json!({"userId": "u", "event": "e"}),
+            ],
+            Some(Kind::Track),
+        );
+        assert_eq!(mixed.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn nothing_but_nulls_is_still_no_identifier() {
+        assert_eq!(
+            errors_of(
+                json!({"userId": null, "anonymousId": null, "identifiers": {"email": null}}),
+                Kind::Identify
+            ),
+            [("identifiers".to_owned(), "no_identifier")]
+        );
     }
 
     #[test]

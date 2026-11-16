@@ -19,6 +19,7 @@ use zirv_flow_connectors::sources::{
 use zirv_flow_core::{Freshness, SecretId, UserId, WorkspaceId};
 use zirv_flow_store::{NewSource, PgPool, Source, SourceUpdate, StoreError};
 
+use super::streams::restart_consumers;
 use super::{field_problems, invalid, is_push, kind_unavailable, managed_by_webhooks, registry};
 use crate::AppState;
 use crate::admin::{self, Context};
@@ -416,13 +417,19 @@ pub(crate) async fn update_source(
     if !source.enabled {
         zirv_flow_store::cancel_consumer_runs(&mut tx, workspace, source.id, None).await?;
     }
+    // Enabling it again starts them: nothing else does, and a stream-mode source has no cron.
+    let consumers_started = if source.enabled && !locked.enabled {
+        restart_consumers(&mut tx, workspace, &source).await?
+    } else {
+        0
+    };
     admin::audit(
         &mut tx,
         context,
         Some(workspace),
         "source.updated",
         Some(("source", source.id)),
-        json!({"fields": fields}),
+        json!({"fields": fields, "consumers_started": consumers_started}),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;

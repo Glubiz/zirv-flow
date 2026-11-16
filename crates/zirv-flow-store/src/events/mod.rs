@@ -48,6 +48,6 @@ pub use retention::{
 pub use schemas::{
     EventPolicy, EventSchema, EventSchemaUpdate, NewEventSchema, PublishOutcome, SchemaVersion,
     create_event_schema, find_event_schema, get_event_policy, list_event_schemas,
-    list_schema_versions, publish_schema_draft, save_schema_draft, set_event_policy,
-    update_event_schema,
+    list_schema_versions, publish_schema_draft, published_event_properties, save_schema_draft,
+    set_event_policy, update_event_schema,
 };
