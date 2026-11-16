@@ -1093,6 +1093,25 @@ mod tests {
     }
 
     #[test]
+    fn a_flow_with_a_window_still_being_typed_is_still_sent() {
+        let doc = json!({"graph":{"v":1,"nodes":[
+            {"id":"check","type":"branch","conditions":[
+                {"event":"order","window":{"last":"P1"}},
+                {"event":"order","window":{"between":["",""]}},
+                {"event":"order","window":{"since_trait":""}},
+                {"trait":"city","op":"eq","value":"jane@example.com"}]},
+            {"id":"end","type":"exit"}],"edges":[]},
+            "settings":{"reentry":{"mode":"once"}}});
+
+        let (parts, _) = flow_context(&details(), "Flow", &doc, Privacy::SchemaOnly).unwrap();
+        let text: String = parts.iter().map(Content::render).collect();
+
+        assert!(text.contains(r#""last":"P1""#), "{text}");
+        assert!(text.contains(r#""between":["",""]"#), "{text}");
+        assert!(!text.contains("jane@example.com"), "{text}");
+    }
+
+    #[test]
     fn a_flow_over_the_node_limit_is_never_rendered() {
         let nodes: Vec<Value> = (0..=MAX_NODES)
             .map(|index| json!({"id": format!("n{index}"), "type": "exit"}))

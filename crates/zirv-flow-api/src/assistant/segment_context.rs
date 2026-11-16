@@ -15,6 +15,9 @@
 
 use hashbrown::HashSet;
 use serde_json::Value;
+use time::format_description::well_known::Rfc3339;
+use time::macros::format_description;
+use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 use zirv_flow_ai::{AiError, ChatRequest, Content, Privacy, RequestBuilder, ToolSpec};
 use zirv_flow_core::segment::{AggFn, MAX_NODES, NODE_KEYS, Op, pointer_push};
@@ -543,24 +546,40 @@ fn op_ok(op: Option<&Value>) -> bool {
     })
 }
 
-/// Whether a string has the shape of a duration (`P90D`) or of a date or timestamp
-/// (`2024-01-01T00:00:00Z`): the only text an aggregate with no property, or a window, compares.
+/// Whether a string is a duration the segment compiler reads (`P90D`, `PT12H`, `P1DT12H`), or a
+/// prefix of one that is still being typed (`P`, `P1`, `PT`, `P1DT2`). The grammar is the one of
+/// `zirv_flow_segments::parse_duration`, whose range limits do not matter here: the text is only
+/// digits and the two unit letters either way.
+fn is_duration_text(text: &str) -> bool {
+    let Some(rest) = text.strip_prefix('P') else {
+        return false;
+    };
+    // `digits` then an optional closing unit letter: whole, or a prefix when it has no unit yet.
+    let part = |part: &str, unit: char| match part.strip_suffix(unit) {
+        Some(digits) => !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()),
+        None => part.bytes().all(|b| b.is_ascii_digit()),
+    };
+    match rest.split_once('T') {
+        // A day part, when there is one, is complete before the `T`.
+        Some((days, time)) => {
+            (days.is_empty() || part(days, 'D') && days.ends_with('D')) && part(time, 'H')
+        }
+        None => part(rest, 'D'),
+    }
+}
+
+/// Whether a string is a date (`2024-01-01`) or an RFC 3339 timestamp, the only absolute times
+/// the segment compiler reads.
+fn is_timestamp_text(text: &str) -> bool {
+    OffsetDateTime::parse(text, &Rfc3339).is_ok()
+        || Date::parse(text, format_description!("[year]-[month]-[day]")).is_ok()
+}
+
+/// Whether a string has the shape of a duration or of a date or timestamp, or is empty (a field
+/// the editor has not filled yet): the only text an aggregate with no property, or a window,
+/// compares.
 fn is_time_text(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    let duration = bytes.first() == Some(&b'P')
-        && bytes.len() > 1
-        && bytes[1..]
-            .iter()
-            .all(|b| b.is_ascii_digit() || matches!(b, b'A'..=b'Z' | b'.' | b','));
-    let date = bytes.len() >= 10
-        && bytes[..10].iter().enumerate().all(|(at, b)| match at {
-            4 | 7 => *b == b'-',
-            _ => b.is_ascii_digit(),
-        })
-        && bytes[10..]
-            .iter()
-            .all(|b| b.is_ascii_digit() || matches!(b, b'T' | b'Z' | b':' | b'.' | b'+' | b'-'));
-    duration || date
+    text.is_empty() || is_duration_text(text) || is_timestamp_text(text)
 }
 
 /// Whether a `value` is absent, a scalar, or an array of scalars: what `value_slots` reads. With
@@ -848,6 +867,16 @@ pub(crate) fn smuggling_conditions() -> Vec<Value> {
         event(json!({"window": {"last": "jane@example.com"}})),
         event(json!({"window": {"between": ["2024-01-01", "jane@example.com"]}})),
         event(json!({"window": "jane@example.com"})),
+        // Text that starts like a duration or a date and carries a secret after it.
+        event(json!({"window": {"last": "PSECRET42"}})),
+        event(json!({"window": {"last": "P1DSECRET"}})),
+        event(json!({"window": {"last": "PT1Hjane"}})),
+        event(json!({"window": {"last": "P1Y"}})),
+        event(json!({"window": {"between": ["2026-01-01Tjane", "2026-02-01"]}})),
+        event(json!({"window": {"between": ["2026-01-01", "2026-01-01jane"]}})),
+        event(json!({"window": {"between": ["2026-01-01T00:00:00Zjane", "2026-02-01"]}})),
+        event(json!({"agg": {"fn": "count", "op": "gte", "value": "PJOHNSMITH"}})),
+        event(json!({"agg": {"fn": "last_time", "op": "within_last", "value": "2026-01-01Tjane"}})),
         json!({"event": {"k": "jane@example.com"}}),
         json!({"list": "jane@example.com"}),
         json!({"segment": {"k": "jane@example.com"}}),
@@ -1273,6 +1302,22 @@ mod tests {
             json!({"event": "order", "agg": {"fn": "last_time", "op": "within_last", "value": "P1D"}}),
             json!({"event": "order", "window": {"between": ["2024-01-01", "2024-02-01T00:00:00Z"]}}),
             json!({"event": "order", "window": {"since_trait": "signed_up"}}),
+            // What the editor holds while a window is being typed.
+            json!({"event": "order", "window": {"last": ""}}),
+            json!({"event": "order", "window": {"between": ["", ""]}}),
+            json!({"event": "order", "window": {"between": ["2024-01-01", ""]}}),
+            json!({"event": "order", "window": {"since_trait": ""}}),
+            json!({"event": "order", "window": {"last": "P"}}),
+            json!({"event": "order", "window": {"last": "P1"}}),
+            json!({"event": "order", "window": {"last": "P1D"}}),
+            json!({"event": "order", "window": {"last": "PT"}}),
+            json!({"event": "order", "window": {"last": "PT2"}}),
+            json!({"event": "order", "window": {"last": "P1DT"}}),
+            json!({"event": "order", "window": {"last": "P1DT2"}}),
+            json!({"event": "order", "window": {"last": "P1DT2H"}}),
+            json!({"event": "order", "agg": {"fn": "count", "op": "gte"}}),
+            json!({"event": "order", "agg": {"fn": "count", "op": "gte", "value": ""}}),
+            json!({"messages": {"channel": "email", "agg": {"fn": "count", "op": "gte", "value": ""}}}),
             json!({"messages": {"channel": "email", "dimensions": {"vertical": "sports"},
                 "agg": {"fn": "count", "op": "gte", "value": 3}, "window": {"last": "P7D"}}}),
             json!({"messages": {"channel": "email",

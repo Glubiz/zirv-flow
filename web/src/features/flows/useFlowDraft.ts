@@ -80,12 +80,17 @@ function isSet(ref: { current: unknown }): boolean {
   return ref.current !== null;
 }
 
-/** The same JSON whatever the order of the keys, which a server need not keep. */
+/**
+ * The same JSON whatever the order of the keys, which a server need not keep. As `JSON.stringify`
+ * writes it, a member that is `undefined` is left out and an `undefined` array item is `null`, so
+ * a draft compares equal to the copy the server stored from it.
+ */
 function canonical(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (Array.isArray(value)) return `[${value.map((item) => canonical(item ?? null)).join(",")}]`;
   if (typeof value === "object" && value !== null) {
     const record = value as Record<string, unknown>;
     return `{${Object.keys(record)
+      .filter((key) => record[key] !== undefined)
       .sort()
       .map((key) => `${JSON.stringify(key)}:${canonical(record[key])}`)
       .join(",")}}`;
