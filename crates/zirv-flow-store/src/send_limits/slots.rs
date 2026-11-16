@@ -2,7 +2,8 @@
 //!
 //! A message holds a *slot* against a person's caps from the moment gate 5 passes it
 //! (`messages.cap_slot_at`) until it is skipped, until a quiet-hours deferral releases it, or until
-//! it fails before any destination call.
+//! it fails before any destination call (including a send job that died and was ended
+//! `internal_error` by the orphan sweep; one ended `delivery_unconfirmed` keeps its slot).
 //! The check counts the slots of the person's other non-test messages inside each cap's window and
 //! reserves one for this message, in a transaction of its own under a per-person advisory lock, so
 //! two flows sending to one person at once can never both take the last slot. The transaction is

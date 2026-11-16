@@ -184,7 +184,7 @@ pub use flows::{
 pub use forwarding::{
     ClaimedRow, DELIVERED_RETENTION, DeadLetter, FORWARD_JOB_KIND, FORWARDING_COUNT_CAP,
     ForwardRef, ForwardingRule, ForwardingStat, NewRule, QueueStatus, Redrive, RuleUpdate,
-    RuleWrite, Settled, claim_due, create_rule, defer_row, delete_rule, enqueue_forwarding,
+    RuleWrite, Settled, claim_due, create_rule, delete_rule, enqueue_forwarding,
     enqueue_segment_forwarding, ensure_forward_job, extend_lease, find_rule, forwarding_report,
     forwarding_status, list_dead_letters, list_rules, lock_rule, next_due, purge_delivered,
     purge_forwarding_outbox, redrive, release_rows, settle_row, update_rule,

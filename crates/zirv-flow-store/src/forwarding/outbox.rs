@@ -648,29 +648,6 @@ pub async fn extend_lease(
         > 0)
 }
 
-/// Gives a claimed row back without counting the attempt, due at `at`: the destination was not
-/// called (a rate-limit wait). Fenced like [`settle_row`].
-pub async fn defer_row(
-    connection: &mut PgConnection,
-    id: Uuid,
-    claim_token: Uuid,
-    at: OffsetDateTime,
-) -> Result<bool, StoreError> {
-    Ok(sqlx::query(
-        "UPDATE forwarding_outbox SET attempts = attempts - 1, next_attempt_at = $3, \
-             claim_token = NULL, updated_at = now() \
-         WHERE id = $1 AND state = 'pending' AND claim_token = $2",
-    )
-    .bind(id)
-    .bind(claim_token)
-    .bind(at)
-    .execute(connection)
-    .await
-    .map_err(StoreError::query)?
-    .rows_affected()
-        > 0)
-}
-
 /// Gives claimed rows back untouched, in one statement: the attempt is not counted and each row is
 /// due again when it was before the claim, so the order of the queue is kept. For rows a job
 /// claimed and then did not reach (the destination's bucket ran empty). Fenced like [`settle_row`];
@@ -683,7 +660,10 @@ pub async fn release_rows(
     let tokens: Vec<Uuid> = rows.iter().map(|row| row.claim_token).collect();
     let dues: Vec<OffsetDateTime> = rows.iter().map(|row| row.due).collect();
     Ok(sqlx::query(
-        "UPDATE forwarding_outbox o SET attempts = o.attempts - 1, next_attempt_at = r.due,              claim_token = NULL, updated_at = now()          FROM unnest($1::uuid[], $2::uuid[], $3::timestamptz[]) AS r(id, token, due)          WHERE o.id = r.id AND o.state = 'pending' AND o.claim_token = r.token",
+        "UPDATE forwarding_outbox o SET attempts = o.attempts - 1, next_attempt_at = r.due, \
+             claim_token = NULL, updated_at = now() \
+         FROM unnest($1::uuid[], $2::uuid[], $3::timestamptz[]) AS r(id, token, due) \
+         WHERE o.id = r.id AND o.state = 'pending' AND o.claim_token = r.token",
     )
     .bind(&ids)
     .bind(&tokens)
@@ -1372,15 +1352,13 @@ mod tests {
             )
             .await
             .unwrap();
-            let late_defer = defer_row(
-                &mut connection,
-                first.id,
-                first.claim_token,
-                OffsetDateTime::now_utc(),
-            )
-            .await
-            .unwrap();
-            assert!(!late_dead && !late_defer, "the older claim changes nothing");
+            let late_release = release_rows(&mut connection, std::slice::from_ref(&first))
+                .await
+                .unwrap();
+            assert!(
+                !late_dead && late_release == 0,
+                "the older claim changes nothing"
+            );
             let (state, attempts): (String, i32) =
                 sqlx::query_as("SELECT state, attempts FROM forwarding_outbox WHERE id = $1")
                     .bind(first.id)

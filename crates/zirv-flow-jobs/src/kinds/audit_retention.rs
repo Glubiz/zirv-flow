@@ -259,13 +259,15 @@ mod tests {
         zirv_flow_store::migrate(&pool).await.unwrap();
         insert_rows(&pool, "old", 800, 3).await;
         sqlx::query(
-            "CREATE FUNCTION refuse_all() RETURNS trigger LANGUAGE plpgsql AS              $$ BEGIN RAISE EXCEPTION 'refused'; END $$",
+            "CREATE FUNCTION refuse_all() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN RAISE EXCEPTION 'refused'; END $$",
         )
         .execute(&pool)
         .await
         .unwrap();
         sqlx::query(
-            "CREATE TRIGGER aaa_refuse_all BEFORE DELETE ON audit_log              FOR EACH ROW EXECUTE FUNCTION refuse_all()",
+            "CREATE TRIGGER aaa_refuse_all BEFORE DELETE ON audit_log \
+             FOR EACH ROW EXECUTE FUNCTION refuse_all()",
         )
         .execute(&pool)
         .await
