@@ -13,6 +13,7 @@
 //! commits with the job or not at all. A failed attempt rolls back to a savepoint and is retried
 //! with backoff; on the last attempt the enrollment becomes `failed` with the error stored.
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
@@ -134,7 +135,7 @@ impl JobKind for FlowStep {
             &run,
             read,
             flow_state,
-            Some(&mut batch.graphs),
+            Some(&mut batch.shared),
             &mut batch.decisions,
             &mut batch.lists,
         )
@@ -186,7 +187,7 @@ async fn step(
     run: &StepRun<'_>,
     read: EnrollmentRead,
     flow_state: Option<FlowState>,
-    graphs: Option<&mut PinnedGraphs>,
+    reads: Option<&mut BatchReads>,
     decisions: &mut DecisionBuffer,
     lists: &mut ListCounts,
 ) -> Result<(), JobError> {
@@ -252,7 +253,7 @@ async fn step(
         run,
         &enrollment,
         zones,
-        graphs,
+        reads,
         decisions,
         lists,
     )
@@ -293,8 +294,8 @@ pub(crate) struct WakeBatch {
     /// The state of each of their flows, read under the lock the transaction holds until it ends;
     /// a flow that is gone is absent.
     flows: HashMap<Uuid, FlowState>,
-    /// The pinned versions read so far.
-    graphs: PinnedGraphs,
+    /// What the wakes read once for all of them.
+    shared: BatchReads,
     /// The decisions of the wakes kept so far, in the order they were made, appended in one
     /// statement before the batch commits.
     decisions: DecisionBuffer,
@@ -385,7 +386,7 @@ pub(crate) async fn plan_wakes(
         read_at,
         reads,
         flows,
-        graphs: PinnedGraphs::new(),
+        shared: BatchReads::default(),
         decisions: DecisionBuffer::default(),
         lists: ListCounts::default(),
     })
@@ -551,9 +552,11 @@ struct Walk<'a> {
     now: OffsetDateTime,
     /// The job and its attempt, for the decisions it makes.
     job: (Uuid, i32),
-    /// What the loaded catalog and the input freshness cost to read are read at most once.
-    catalog: Option<(Catalog, TraitStorage)>,
+    /// What the loaded catalog and the input freshness cost to read are read at most once, and a
+    /// batch's wakes share them through `reads`.
+    catalog: Option<Arc<(Catalog, TraitStorage)>>,
     freshness: Option<&'static str>,
+    reads: Option<&'a mut BatchReads>,
     /// The step execution of each node this job has run.
     steps: HashMap<String, Uuid>,
     /// Where the decisions of the walk go, in the order they were made: the job's own, appended
@@ -603,17 +606,45 @@ impl Walk<'_> {
         conn: &mut PgConnection,
     ) -> Result<&(Catalog, TraitStorage), JobError> {
         if self.catalog.is_none() {
-            let snapshot = segment_catalog(conn, self.workspace).await?;
-            self.catalog = Some(catalog_of(snapshot));
+            let shared = self
+                .reads
+                .as_deref()
+                .and_then(|reads| reads.catalog.clone());
+            let loaded = match shared {
+                Some(loaded) => loaded,
+                None => {
+                    let snapshot = segment_catalog(conn, self.workspace).await?;
+                    let loaded = Arc::new(catalog_of(snapshot));
+                    if let Some(reads) = self.reads.as_deref_mut() {
+                        reads.catalog = Some(Arc::clone(&loaded));
+                    }
+                    loaded
+                }
+            };
+            self.catalog = Some(loaded);
         }
         self.catalog
-            .as_ref()
+            .as_deref()
             .ok_or_else(|| JobError::new("the catalog could not be read"))
     }
 }
 
 /// The pinned versions a batch has read, by flow and version.
 type PinnedGraphs = HashMap<(Uuid, i32), FlowGraph>;
+
+/// What the wakes of a batch read once for all of them, as a job alone reads it for its one
+/// walk. The batch has one transaction and one `now`, and the catalog is the workspace's, so a
+/// wake's answer is the one the wake before it got, and the reads are read-only, so a wake
+/// that rolled back to its savepoint leaves them valid.
+#[derive(Debug, Default)]
+struct BatchReads {
+    /// The pinned versions read so far.
+    graphs: PinnedGraphs,
+    /// The workspace's catalog, once a wake that needs it has read it.
+    catalog: Option<Arc<(Catalog, TraitStorage)>>,
+    /// The input freshness label of each flow version a wake has read it for.
+    freshness: HashMap<(Uuid, i32), &'static str>,
+}
 
 /// The graph of the version an enrollment is pinned to. A version row never changes: the store
 /// refuses an update, and a delete while its flow exists, and the step holds its flow
@@ -649,11 +680,12 @@ async fn advance(
     run: &StepRun<'_>,
     enrollment: &Enrollment,
     (workspace_zone, person_zone): (String, Option<String>),
-    graphs: Option<&mut PinnedGraphs>,
+    mut reads: Option<&mut BatchReads>,
     decisions: &mut DecisionBuffer,
     lists: &mut ListCounts,
 ) -> Result<(), StepFailure> {
     let job = run.job;
+    let graphs = reads.as_deref_mut().map(|reads| &mut reads.graphs);
     let graph = pinned_graph(&mut *conn, graphs, job.workspace, enrollment).await?;
     let zones = Zones {
         now: to_chrono(run.now).ok_or_else(|| JobError::new("the time does not fit the engine"))?,
@@ -669,6 +701,7 @@ async fn advance(
         job: run.at,
         catalog: None,
         freshness: None,
+        reads,
         steps: HashMap::new(),
         decisions,
         lists,
@@ -1158,6 +1191,16 @@ async fn input_freshness(
     if let Some(label) = walk.freshness {
         return Ok(label);
     }
+    let version = (walk.enrollment.flow_id, walk.enrollment.flow_version);
+    if let Some(label) = walk
+        .reads
+        .as_deref()
+        .and_then(|reads| reads.freshness.get(&version))
+        .copied()
+    {
+        walk.freshness = Some(label);
+        return Ok(label);
+    }
     let reads = flow_reads(conn, walk).await?;
     let now = walk.now;
     let unhealthy = unhealthy_inputs(conn, walk.workspace, &reads, now).await?;
@@ -1172,6 +1215,9 @@ async fn input_freshness(
         Freshness::Failing => "inputs_failing",
     };
     walk.freshness = Some(label);
+    if let Some(reads) = walk.reads.as_deref_mut() {
+        reads.freshness.insert(version, label);
+    }
     Ok(label)
 }
 
@@ -5225,6 +5271,134 @@ pub(super) mod tests {
                 0,
                 "no wake failed"
             );
+        })
+        .await;
+    }
+
+    /// What `tracing` writes, to count the statements `sqlx` logs.
+    #[derive(Clone, Default)]
+    struct Logged(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Logged {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logged {
+        type Writer = Logged;
+
+        fn make_writer(&'a self) -> Logged {
+            self.clone()
+        }
+    }
+
+    /// A wait, a branch on `plan` and a webhook: every wake reads the catalog (the branch) and
+    /// the input freshness (the webhook).
+    fn branch_hook_graph() -> Value {
+        json!({"v": 1, "nodes": [
+            {"id": "w", "type": "wait.duration", "seconds": 60},
+            {"id": "b", "type": "branch",
+             "conditions": [{"trait": "plan", "op": "eq", "value": "pro"}]},
+            {"id": "hook", "type": "action.webhook",
+             "url": "https://hooks.example.com/pro", "trait_keys": ["plan"]},
+            {"id": "end", "type": "exit"},
+            {"id": "other", "type": "exit"}
+        ], "edges": [
+            edge("e1", "w", "next", "b"),
+            edge("e2", "b", "case_0", "hook"),
+            edge("e3", "b", "else", "other"),
+            edge("e4", "hook", "next", "end")
+        ]})
+    }
+
+    /// How many times the catalog and the input freshness were read, by the statements `sqlx`
+    /// logged while `people` wakes of each of `flows` flows (one pinned version each) ran in one
+    /// batch (#703).
+    async fn reads_of_a_batch(pool: PgPool, flows: usize, people: usize) -> (usize, usize) {
+        let env = Env::new(pool).await;
+        env.define_trait("plan", TraitType::String).await;
+        let mut enrolled = Vec::new();
+        for flow in 0..flows {
+            let mut ids = Vec::new();
+            for n in 0..people {
+                let email = format!("hook{flow}x{n}@example.com");
+                ids.push(env.person(&email, json!({"plan": "pro"})).await);
+            }
+            let flow = env.flow(&format!("Hook{flow}"), branch_hook_graph()).await;
+            enrolled.extend(env.enroll(flow, 1, &ids).await.enrolled);
+        }
+        // Every flow sleeps on its wait before the one clock step that wakes them all.
+        env.run_due().await;
+        env.advance(61);
+        env.hold_others(Some("wake"), None).await;
+        let jobs = claim_wakes(&env, flows * people).await;
+        let logged = Logged::default();
+        let outcomes = {
+            let _logging = tracing::subscriber::set_default(
+                tracing_subscriber::fmt()
+                    .with_max_level(tracing::Level::DEBUG)
+                    .with_ansi(false)
+                    .with_writer(logged.clone())
+                    .finish(),
+            );
+            crate::worker::run_wakes(&env.pool, batch_config(&env), env.ws, jobs.clone()).await
+        };
+        assert!(
+            outcomes
+                .iter()
+                .all(|(_, outcome)| *outcome == crate::metrics::Outcome::Completed),
+            "{outcomes:?}"
+        );
+        for enrolled in &enrolled {
+            let (reason, _) = webhook_outcome(&env, enrolled.enrollment).await;
+            assert_eq!(reason.as_deref(), Some("inputs_fresh"));
+        }
+        let output = String::from_utf8(logged.0.lock().unwrap().clone()).unwrap();
+        let statements: Vec<&str> = output
+            .lines()
+            .filter(|line| line.contains("sqlx::query"))
+            .collect();
+        let reads = |needle: &str| {
+            statements
+                .iter()
+                .filter(|line| line.contains(needle))
+                .count()
+        };
+        // The freshness read is the stream age statement `unhealthy_inputs` starts with.
+        (reads("FROM event_schemas s"), reads("FROM streams st"))
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_batch_reads_the_catalog_and_the_input_freshness_once_for_all_its_wakes(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let (catalog, freshness) = reads_of_a_batch(pool.clone(), 1, 6).await;
+
+            assert_eq!(catalog, 1, "the catalog is read once, not once per wake");
+            assert_eq!(
+                freshness, 1,
+                "the input freshness is read once for the version, not once per wake"
+            );
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_batch_reads_the_input_freshness_once_per_flow_version(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let (catalog, freshness) = reads_of_a_batch(pool, 2, 3).await;
+
+            assert_eq!(catalog, 1, "the catalog is shared by the whole batch");
+            assert_eq!(freshness, 2, "once for each of the two versions");
         })
         .await;
     }

@@ -216,7 +216,7 @@ impl World {
             .unwrap_or(0),
         ) / 1000.0;
         let backoff = backoff(
-            u32::try_from(claimed.attempts).unwrap_or(u32::MAX),
+            u32::try_from(claimed.attempts.saturating_sub(1)).unwrap_or(u32::MAX),
             config.backoff_base,
             config.backoff_cap,
             unit,

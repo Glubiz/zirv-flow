@@ -8,6 +8,14 @@
 //! never grants: the bucket stays authoritative, and a stale hold only delays a take by at most
 //! the wait it recorded.
 //!
+//! A sync job that finds the bucket empty is queued again for the instant a token will be there.
+//! Left alone, every one of them would be queued for the same instant and wake together, one of
+//! them taking the token and the rest queueing again. So the waits are *reserved*: each job asks
+//! for the next free release instant of the destination's ladder, one token interval after the
+//! last one handed out, and wakes once, at its own token. The bucket stays authoritative: a job
+//! that wakes to an empty bucket (a 429 halved the rate, another kind took the token) reserves
+//! again.
+//!
 //! The token bucket itself lives in the store, shared by every worker of every process
 //! (`destination_rate_buckets`); this only holds the process's view of it. A gate is created on
 //! the first send to a destination and dropped when the destination is archived.
@@ -26,6 +34,9 @@ pub struct RateGates {
     gates: Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<RateGate>>>>,
     /// Per destination, the instant its bucket was last found empty until.
     held: Mutex<HashMap<Uuid, OffsetDateTime>>,
+    /// Per destination, the instant after the last release instant [`reserve`](Self::reserve)
+    /// handed out: the earliest the next waiter is released.
+    ladder: Mutex<HashMap<Uuid, OffsetDateTime>>,
 }
 
 impl fmt::Debug for RateGates {
@@ -102,6 +113,36 @@ impl RateGates {
         }
     }
 
+    /// Reserves a place on the destination's ladder for a job that found its bucket empty and was
+    /// told to `wait`: the job wakes when the bucket holds a token, and no sooner than one
+    /// token `interval` after the job reserved before it, so queued jobs wake one per token
+    /// instead of all at once. Returns how long from `now` (the job's clock) the job waits, at
+    /// most `cap`. The ladder is this process's: a destination's other processes have their own,
+    /// and the bucket decides who gets the token.
+    pub(crate) fn reserve(
+        &self,
+        destination: Uuid,
+        now: OffsetDateTime,
+        wait: std::time::Duration,
+        interval: std::time::Duration,
+        cap: std::time::Duration,
+    ) -> std::time::Duration {
+        let mut ladder = self.ladder.lock().unwrap_or_else(PoisonError::into_inner);
+        // A rung that has passed holds nobody back.
+        ladder.retain(|_, next| *next > now);
+        let span = |duration: std::time::Duration| {
+            time::Duration::try_from(duration).unwrap_or(time::Duration::MAX)
+        };
+        let cap = span(cap);
+        let earliest = now.saturating_add(span(wait));
+        let at = ladder
+            .get(&destination)
+            .map_or(earliest, |next| earliest.max(*next))
+            .min(now.saturating_add(cap));
+        ladder.insert(destination, at.saturating_add(span(interval)));
+        (at - now).try_into().unwrap_or(std::time::Duration::ZERO)
+    }
+
     /// How many destinations the process holds a gate for.
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
@@ -148,6 +189,81 @@ mod tests {
             gates.held(destination, now),
             None,
             "an expired hold is gone"
+        );
+    }
+
+    #[test]
+    fn waiting_jobs_are_released_one_token_apart_and_a_bucket_that_is_free_waits_its_own_time() {
+        let gates = RateGates::default();
+        let destination = Uuid::from_u128(1);
+        let now = time::macros::datetime!(2031-05-06 07:08:09 UTC);
+        let cap = Duration::from_secs(3600);
+        let token = Duration::from_millis(500);
+        let second = Duration::from_secs(1);
+
+        let waits: Vec<Duration> = (0..4)
+            .map(|_| gates.reserve(destination, now, second, token, cap))
+            .collect();
+
+        assert_eq!(
+            waits,
+            [
+                Duration::from_millis(1000),
+                Duration::from_millis(1500),
+                Duration::from_millis(2000),
+                Duration::from_millis(2500)
+            ],
+            "the first waits for the token, each next one a token later"
+        );
+        assert_eq!(
+            gates.reserve(Uuid::from_u128(2), now, second, token, cap),
+            second,
+            "another destination has its own ladder"
+        );
+        let later = now + time::Duration::seconds(10);
+        assert_eq!(
+            gates.reserve(destination, later, second, token, cap),
+            second,
+            "a ladder that has passed holds nobody back"
+        );
+    }
+
+    #[test]
+    fn a_reserved_wait_never_passes_the_cap_and_a_job_that_wakes_early_reserves_again() {
+        let gates = RateGates::default();
+        let destination = Uuid::from_u128(1);
+        let now = time::macros::datetime!(2031-05-06 07:08:09 UTC);
+        let cap = Duration::from_secs(3);
+
+        let waits: Vec<Duration> = (0..5)
+            .map(|_| {
+                gates.reserve(
+                    destination,
+                    now,
+                    Duration::from_secs(1),
+                    Duration::from_secs(1),
+                    cap,
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            waits,
+            [1, 2, 3, 3, 3].map(Duration::from_secs),
+            "the ladder stops at the cap"
+        );
+        // The bucket said wait again, 250 ms after the job's turn came: a new place, behind the rest.
+        let woke = now + time::Duration::seconds(1);
+        assert_eq!(
+            gates.reserve(
+                destination,
+                woke,
+                Duration::from_millis(250),
+                Duration::from_secs(1),
+                cap
+            ),
+            Duration::from_secs(3),
+            "behind the jobs already waiting, which the new clock's cap reaches"
         );
     }
 
