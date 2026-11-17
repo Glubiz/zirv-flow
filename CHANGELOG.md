@@ -15,3 +15,16 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v1.0.17 (2026-11-17)
+
+### Fixes
+
+- review round 2 finding for the flow probe guard (#721)
+- review round 1 findings for the warm-up audit and the probe guard (#721, #722)
+- flow signing, validation cost, probe guard, warm-up and resume review findings (#717-#723)
+
+### Chores
+
+- ignore the chrono and chrono-tz unmaintained advisories (#830)
+- one extend per fact map and the lifecycle doc comment back in place (#719, #723)
+
