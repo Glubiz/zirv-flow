@@ -103,7 +103,8 @@ pub(crate) struct Checked {
     /// The merged dependency summary of every condition, event match and reference in the flow,
     /// in the shape of a segment version's `deps`.
     pub(crate) reads: Value,
-    /// The root of every condition and event match that compiled, for the personal-value guard.
+    /// The root of every condition and event match that compiled, for the personal-value guard. One
+    /// that did not compile is already an issue and never runs, so it is not judged.
     pub(crate) probe_roots: Vec<segment::Node>,
 }
 
@@ -343,9 +344,6 @@ impl Checker<'_> {
     /// it does not parse, which the structural validation has already reported.
     fn compile(&mut self, wire: &Value) -> Option<Vec<segment::Issue>> {
         let definition = segment::parse(wire).ok()?;
-        // Every parsed root is probed, also one that fails to compile: its personal part must
-        // still be refused to a caller who may not see personal values.
-        self.probe_roots.push(definition.root.clone());
         match compile(
             &definition,
             self.environment.catalog,
@@ -353,6 +351,7 @@ impl Checker<'_> {
             self.environment.now,
         ) {
             Ok(compiled) => {
+                self.probe_roots.push(definition.root.clone());
                 self.reads.absorb(&compiled.deps.to_value());
                 None
             }

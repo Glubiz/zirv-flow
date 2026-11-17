@@ -912,43 +912,58 @@ mod tests {
                 );
             }
 
-            // A personal probe beside a reference that does not exist is refused all the same.
-            let unknown = f
+            // A condition that does not compile never runs, so it is an ordinary issue, as in
+            // segments, and not a refusal: an unknown trait is reported to everyone.
+            let typo = f
                 .create(
-                    "personal probe beside an unknown trait",
-                    branch(json!({"all": [
-                        {"trait": "email_addr", "op": "starts_with", "value": "a"},
-                        {"trait": "no_such_trait", "op": "eq", "value": "x"}
-                    ]})),
+                    "prefix on an unknown trait",
+                    branch(json!({"trait": "no_such_trait", "op": "starts_with", "value": "a"})),
                     manual(),
                 )
                 .await;
-            for (what, uri, auth) in [
-                (
-                    "validate",
-                    format!("/{unknown}/validate"),
+            let reply = f
+                .call(
+                    "POST",
+                    &f.flows(&format!("/{typo}/validate")),
+                    None,
                     Auth::Key(&f.write),
-                ),
-                (
-                    "dry run",
-                    format!("/{unknown}/publish?dry_run=true"),
+                )
+                .await;
+            assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+            assert_eq!(reply.body["valid"], false, "{:?}", reply.body);
+            let codes: Vec<&str> = reply.body["issues"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|issue| issue["code"].as_str())
+                .collect();
+            assert!(codes.contains(&"unknown_trait"), "{codes:?}");
+            let reply = f
+                .call(
+                    "POST",
+                    &f.flows(&format!("/{typo}/publish?dry_run=true")),
+                    None,
                     Auth::Key(&f.publish),
-                ),
-                (
-                    "publish",
-                    format!("/{unknown}/publish"),
+                )
+                .await;
+            assert_eq!(reply.status, StatusCode::OK, "dry run: {:?}", reply.body);
+            assert_eq!(reply.body["valid"], false, "dry run: {:?}", reply.body);
+            assert_eq!(reply.body["issues"][0]["code"], "unknown_trait");
+            let reply = f
+                .call(
+                    "POST",
+                    &f.flows(&format!("/{typo}/publish")),
+                    None,
                     Auth::Key(&f.publish),
-                ),
-            ] {
-                let reply = f.call("POST", &f.flows(&uri), None, auth).await;
-                assert_eq!(
-                    reply.status,
-                    StatusCode::FORBIDDEN,
-                    "unknown {what}: {:?}",
-                    reply.body
-                );
-                assert_eq!(reply.body["code"], "pii_trait_not_searchable", "{what}");
-            }
+                )
+                .await;
+            assert_eq!(
+                reply.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "publish: {:?}",
+                reply.body
+            );
+            assert_eq!(reply.body["code"], "flow_invalid");
 
             // Equality on a personal trait is allowed to everyone who may publish.
             let equal = f
