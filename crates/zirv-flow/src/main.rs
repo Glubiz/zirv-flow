@@ -346,16 +346,12 @@ fn generate_master_key(
             }
             let text = fs::read_to_string(out);
             if text.as_ref().is_ok_and(|text| text.trim().is_empty()) {
-                match fs::rename(&temporary, out) {
-                    Ok(()) => {
-                        let _ = writeln!(stdout, "master key written: {}", key.key_id());
-                        return 0;
-                    }
-                    Err(error) => {
-                        let _ = fs::remove_file(&temporary);
-                        return fail(format!("could not write {}: {error}", out.display()));
-                    }
+                if let Err(error) = fs::rename(&temporary, out) {
+                    let _ = fs::remove_file(&temporary);
+                    return fail(format!("could not write {}: {error}", out.display()));
                 }
+                let _ = writeln!(stdout, "master key written: {}", key.key_id());
+                return 0;
             }
             let _ = fs::remove_file(&temporary);
             let existing = text
