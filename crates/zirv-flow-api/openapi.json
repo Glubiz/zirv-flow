@@ -30476,6 +30476,16 @@
               }
             }
           },
+          "422": {
+            "description": "The stored hook has equal signature and timestamp headers; change one first",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
           "503": {
             "description": "The server has no master key to seal the secret",
             "content": {

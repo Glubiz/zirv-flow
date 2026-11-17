@@ -32649,6 +32649,15 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
+            /** @description The stored hook has equal signature and timestamp headers; change one first */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description The server has no master key to seal the secret */
             503: {
                 headers: {

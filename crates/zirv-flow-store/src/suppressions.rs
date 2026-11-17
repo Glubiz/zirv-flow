@@ -940,4 +940,28 @@ mod tests {
             std::collections::BTreeSet::from([1, 2, 10, 11, 12, 100, 200])
         );
     }
+
+    /// The snapshot is fixed as `begin_suppression_export` returns, not at the export's first
+    /// read: a row committed on another connection between the two is not in the file.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_export_snapshot_is_fixed_when_it_begins_not_at_its_first_read(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        add_suppression(&pool, ws, &manual([1; 32])).await.unwrap();
+        let mut export = begin_suppression_export(&pool).await.unwrap();
+        add_suppression(&pool, ws, &manual([2; 32])).await.unwrap();
+
+        let (rows, more) = list_suppressions(&mut *export, ws, 50, None, None)
+            .await
+            .unwrap();
+        drop(export);
+
+        assert_eq!(
+            rows.iter()
+                .map(|s| s.identifier_hash[0])
+                .collect::<Vec<_>>(),
+            [1]
+        );
+        assert!(!more);
+    }
 }

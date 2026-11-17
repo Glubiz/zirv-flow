@@ -6760,6 +6760,10 @@ mod tests {
         assert!(later.text.contains(&"09".repeat(32)));
     }
 
+    /// The handler path: a row committed after the export response is returned is not in the
+    /// body. It does not guard the snapshot statement in the store, which races the first page
+    /// query here; `an_export_snapshot_is_fixed_when_it_begins_not_at_its_first_read` in the
+    /// store does.
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_export_snapshot_is_taken_when_the_request_begins_not_at_the_first_read(
