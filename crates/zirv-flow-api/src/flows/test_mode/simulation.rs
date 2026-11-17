@@ -13,15 +13,15 @@ use serde_json::{Map, Value};
 use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
-use zirv_flow_core::flow::{FlowGraph, FlowSettings, NodeKind};
+use zirv_flow_core::flow::{FlowGraph, FlowSettings, MAX_DURATION_SECONDS, MAX_NODES, NodeKind};
 use zirv_flow_segments::{Catalog, PersonSnapshot, SnapshotEvent};
 use zirv_flow_store::EXPLAIN_EVENT_CAP;
 
 use super::walk::{MAX_STEPS, Refusal, Step, Subject, Walk, Walked, to_chrono, to_time, walk};
 
-/// How far past the start the virtual clock is advanced, so every timer of a flow fires: a single
-/// wait is at most a year.
-const WINDOW_DAYS: i64 = 400;
+/// How far past the start the virtual clock is advanced, so every timer of a flow fires: waits
+/// chain, and a valid graph is acyclic with at most [`MAX_NODES`] nodes of at most a year each.
+const WINDOW_DAYS: i64 = MAX_NODES as i64 * (MAX_DURATION_SECONDS / 86_400) as i64;
 /// The most events one synthetic person gets for a count condition.
 const MAX_SYNTHETIC_EVENTS: u64 = 5;
 
@@ -360,6 +360,60 @@ mod tests {
             Uuid::nil(),
             START,
         )
+    }
+
+    /// A chain of `waits` year-long waits ending in an exit named `end`.
+    fn waiting_chain(waits: usize, seconds: u64) -> FlowGraph {
+        let mut nodes = Vec::new();
+        let mut edges = Vec::new();
+        for index in 0..waits {
+            nodes.push(
+                json!({"id": format!("w{index}"), "type": "wait.duration", "seconds": seconds}),
+            );
+            let to = if index + 1 == waits {
+                "end".to_owned()
+            } else {
+                format!("w{}", index + 1)
+            };
+            edges.push(
+                json!({"id": format!("e{index}"), "from": format!("w{index}"),
+                "port": "next", "to": to}),
+            );
+        }
+        nodes.push(json!({"id": "end", "type": "exit"}));
+        FlowGraph::from_value(json!({"v": 1, "nodes": nodes, "edges": edges})).unwrap()
+    }
+
+    fn simulated(graph: &FlowGraph) -> SimulationBody {
+        simulate(graph, &settings(), &catalog(), Tz::UTC, Uuid::nil(), START)
+    }
+
+    #[test]
+    fn chained_waits_longer_than_the_old_window_still_reach_the_end() {
+        // Two 300-day waits: 600 days, past a 400-day window.
+        let simulation = simulated(&waiting_chain(2, 25_920_000));
+
+        assert!(simulation.unreached_nodes.is_empty());
+        assert!(
+            simulation
+                .people
+                .iter()
+                .all(|body| body.final_status.as_deref() != Some("waiting"))
+        );
+    }
+
+    #[test]
+    fn the_longest_chain_a_valid_graph_holds_reaches_its_end() {
+        // 199 waits of the longest allowed length and the exit: the 200-node limit.
+        let simulation = simulated(&waiting_chain(199, MAX_DURATION_SECONDS));
+
+        assert!(simulation.unreached_nodes.is_empty());
+        assert!(
+            simulation
+                .people
+                .iter()
+                .all(|body| body.final_status.as_deref() != Some("waiting"))
+        );
     }
 
     #[test]

@@ -76,7 +76,7 @@ pub use triggers::{
 };
 pub use warmup::{
     DEFAULT_WARMUP_SECONDS, MAX_WARMUP_SECONDS, MIN_WARMUP_SECONDS, Warmup, WarmupCounts,
-    open_warmup, set_warmup, warmup_counts,
+    open_warmup, set_warmup, set_warmup_counted, warmup_counts,
 };
 
 #[cfg(test)]

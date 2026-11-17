@@ -4,7 +4,7 @@
 use axum::Json;
 use axum::extract::{Path, RawQuery, State};
 use axum::http::StatusCode;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -15,9 +15,11 @@ use utoipa::openapi::{Ref, RefOr, Schema};
 use uuid::Uuid;
 use zirv_flow_connectors::destinations::{Registry, provider_profile_support};
 use zirv_flow_core::consent::Channel;
-use zirv_flow_core::flow::{FlowGraph, FlowSettings, NodeKind};
+use zirv_flow_core::flow::{FlowGraph, FlowSettings, MAX_NODES, NodeKind};
 use zirv_flow_core::{ValidationError, WorkspaceId};
-use zirv_flow_store::{Flow, FlowPatch, FlowState, FlowVersion, NewFlow, Warmup, WarmupCounts};
+use zirv_flow_store::{
+    Destination, Flow, FlowPatch, FlowState, FlowVersion, NewFlow, Template, Warmup, WarmupCounts,
+};
 
 use super::schema::{GRAPH, ISSUE, SETTINGS};
 use super::validation::{Environment, SendFacts, SyncFacts, check};
@@ -27,7 +29,7 @@ use super::{
 };
 use crate::AppState;
 use crate::admin;
-use crate::auth::{Need, Principal, authorize, path_id};
+use crate::auth::{Need, Principal, authorize, may_view_pii, path_id};
 use crate::consent::bool_param;
 use crate::json::ApiJson;
 use crate::problem::{ApiError, FlowIssueProblem, Problem};
@@ -263,6 +265,25 @@ fn check_name(name: &str) -> Result<&str, ApiError> {
     }
 }
 
+/// Refuses a flow that probes personal values for a caller who may not see them: a condition or
+/// event match that orders, prefixes or aggregates a personal trait or event property, the same
+/// rule segments apply at save. Every condition the check compiled is judged; one that did not
+/// compile is already an issue.
+pub(super) async fn refuse_flow_probes(
+    connection: &mut zirv_flow_store::PgConnection,
+    workspace: zirv_flow_core::WorkspaceId,
+    checked: &super::validation::Checked,
+    reveal: bool,
+) -> Result<(), ApiError> {
+    crate::segments::refuse_personal_probe_roots(
+        connection,
+        workspace,
+        &checked.probe_roots,
+        reveal,
+    )
+    .await
+}
+
 /// Reads the workspace facts the checks need on `connection` and checks the draft of `flow`.
 pub(super) async fn check_flow(
     state: &AppState,
@@ -276,6 +297,10 @@ pub(super) async fn check_flow(
 
 /// Reads the workspace facts the checks need on `connection` and checks a graph and settings as a
 /// publish would. It writes nothing.
+///
+/// The facts of the nodes are read in a constant number of statements, whatever the node count. A
+/// graph over [`MAX_NODES`] reads none of them: the check answers `too_many_nodes` and stops, so
+/// the facts are never looked at.
 pub(crate) async fn check_document(
     state: &AppState,
     connection: &mut zirv_flow_store::PgConnection,
@@ -287,9 +312,11 @@ pub(crate) async fn check_document(
         catalog_of(zirv_flow_store::segment_catalog(connection, workspace).await?);
     let now = zirv_flow_store::database_now(&mut *connection).await?;
     let signing_secret = zirv_flow_store::has_webhook_signing_secret(connection, workspace).await?;
-    let webhook_templates = usable_webhook_templates(connection, workspace, graph).await?;
-    let send = send_facts(connection, workspace, graph).await?;
-    let sync = sync_facts(connection, workspace, graph).await?;
+    let (webhook_templates, send, sync) = if graph.nodes.len() > MAX_NODES {
+        Default::default()
+    } else {
+        node_facts(connection, workspace, graph).await?
+    };
     let environment = Environment {
         catalog: &catalog,
         storage: &storage,
@@ -303,25 +330,60 @@ pub(crate) async fn check_document(
     Ok((check(graph, settings, &environment), now))
 }
 
-/// The profile operations of the destinations the sync nodes of `graph` name: those of the
-/// workspace that are not archived, from the manifest of each.
-async fn sync_facts(
+/// The facts the send, webhook and sync nodes of `graph` need: the templates and destinations they
+/// name are read once each, and the topics and dimension values once for all the send nodes.
+async fn node_facts(
     connection: &mut zirv_flow_store::PgConnection,
     workspace: zirv_flow_core::WorkspaceId,
     graph: &FlowGraph,
-) -> Result<SyncFacts, ApiError> {
+) -> Result<(BTreeSet<Uuid>, SendFacts, SyncFacts), ApiError> {
+    let mut template_ids = BTreeSet::new();
+    let mut destination_ids = BTreeSet::new();
+    for node in &graph.nodes {
+        match &node.kind {
+            NodeKind::ActionSend {
+                template,
+                destination,
+                ..
+            } => {
+                template_ids.insert(*template);
+                destination_ids.insert(*destination);
+            }
+            NodeKind::ActionWebhook { template, .. } => template_ids.extend(*template),
+            NodeKind::ActionSync { destination, .. } => {
+                destination_ids.insert(*destination);
+            }
+            _ => {}
+        }
+    }
+    let mut templates = BTreeMap::new();
+    if !template_ids.is_empty() {
+        let ids: Vec<Uuid> = template_ids.into_iter().collect();
+        let found = zirv_flow_store::find_templates(&mut *connection, workspace, &ids).await?;
+        templates.extend(found.into_iter().map(|template| (template.id, template)));
+    }
+    let mut destinations = BTreeMap::new();
+    if !destination_ids.is_empty() {
+        let ids: Vec<Uuid> = destination_ids.into_iter().collect();
+        let found = zirv_flow_store::find_destinations(&mut *connection, workspace, &ids).await?;
+        destinations.extend(found.into_iter().map(|d| (d.id, d)));
+    }
+    let webhook = usable_webhook_templates(&templates, graph);
+    let send = send_facts(connection, workspace, graph, &templates, &destinations).await?;
+    let sync = sync_facts(&destinations, graph);
+    Ok((webhook, send, sync))
+}
+
+/// The profile operations of the destinations the sync nodes of `graph` name: those of the
+/// workspace that are not archived, from the manifest of each.
+fn sync_facts(destinations: &BTreeMap<Uuid, Destination>, graph: &FlowGraph) -> SyncFacts {
     let registry = Registry::built_in();
     let mut facts = SyncFacts::default();
     for node in &graph.nodes {
         let NodeKind::ActionSync { destination, .. } = &node.kind else {
             continue;
         };
-        if facts.destinations.contains_key(destination) {
-            continue;
-        }
-        let found =
-            zirv_flow_store::find_destination(&mut *connection, workspace, *destination).await?;
-        if let Some(found) = found.filter(|found| {
+        if let Some(found) = destinations.get(destination).filter(|found| {
             found.archived_at.is_none()
                 // A provider stays in the facts even when its manifest has no profile operation:
                 // the operation check then answers `operation_unsupported`.
@@ -334,36 +396,30 @@ async fn sync_facts(
                 .insert(*destination, provider_profile_support(&found.config));
         }
     }
-    Ok(facts)
+    facts
 }
 
 /// The templates `graph` names that a webhook node may send: of the workspace, not archived, of the
 /// `webhook` channel and with a published version.
-async fn usable_webhook_templates(
-    connection: &mut zirv_flow_store::PgConnection,
-    workspace: zirv_flow_core::WorkspaceId,
+fn usable_webhook_templates(
+    templates: &BTreeMap<Uuid, Template>,
     graph: &FlowGraph,
-) -> Result<BTreeSet<Uuid>, ApiError> {
-    let mut usable = BTreeSet::new();
-    let named: BTreeSet<Uuid> = graph
+) -> BTreeSet<Uuid> {
+    graph
         .nodes
         .iter()
         .filter_map(|node| match &node.kind {
             NodeKind::ActionWebhook { template, .. } => *template,
             _ => None,
         })
-        .collect();
-    for id in named {
-        let found = zirv_flow_store::find_template(&mut *connection, workspace, id).await?;
-        if found.is_some_and(|template| {
-            template.channel == "webhook"
-                && template.archived_at.is_none()
-                && template.current_version.is_some()
-        }) {
-            usable.insert(id);
-        }
-    }
-    Ok(usable)
+        .filter(|id| {
+            templates.get(id).is_some_and(|template| {
+                template.channel == "webhook"
+                    && template.archived_at.is_none()
+                    && template.current_version.is_some()
+            })
+        })
+        .collect()
 }
 
 /// What the workspace holds of the templates, destinations, topics and dimension values the send
@@ -374,9 +430,13 @@ async fn send_facts(
     connection: &mut zirv_flow_store::PgConnection,
     workspace: zirv_flow_core::WorkspaceId,
     graph: &FlowGraph,
+    templates: &BTreeMap<Uuid, Template>,
+    destinations: &BTreeMap<Uuid, Destination>,
 ) -> Result<SendFacts, ApiError> {
     let registry = Registry::built_in();
     let mut facts = SendFacts::default();
+    let mut topic_ids = BTreeSet::new();
+    let mut entries = BTreeSet::new();
     for node in &graph.nodes {
         let NodeKind::ActionSend {
             template,
@@ -387,17 +447,14 @@ async fn send_facts(
         else {
             continue;
         };
-        let found = zirv_flow_store::find_template(&mut *connection, workspace, *template).await?;
-        if found.is_some_and(|template| {
+        if templates.get(template).is_some_and(|template| {
             template.channel == "email"
                 && template.archived_at.is_none()
                 && template.current_version.is_some()
         }) {
             facts.templates.insert(*template);
         }
-        let found =
-            zirv_flow_store::find_destination(&mut *connection, workspace, *destination).await?;
-        if found.is_some_and(|destination| {
+        if destinations.get(destination).is_some_and(|destination| {
             destination.archived_at.is_none()
                 && registry
                     .get(&destination.kind)
@@ -405,17 +462,38 @@ async fn send_facts(
         }) {
             facts.destinations.insert(*destination);
         }
-        if let Some(topic) = topic {
-            let found = zirv_flow_store::find_topic(&mut *connection, workspace, *topic).await?;
-            if found.is_some_and(|topic| topic.channel == Channel::Email) {
-                facts.topics.insert(*topic);
+        topic_ids.extend(*topic);
+        entries.extend(
+            dimensions
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
+    }
+    if !topic_ids.is_empty() {
+        let ids: Vec<Uuid> = topic_ids.into_iter().collect();
+        for topic in zirv_flow_store::find_topics(&mut *connection, workspace, &ids).await? {
+            if topic.channel == Channel::Email {
+                facts.topics.insert(topic.id);
             }
         }
-        if zirv_flow_store::unknown_dimension_entry(connection, workspace, dimensions)
-            .await?
-            .is_some()
-        {
-            facts.unknown_dimensions.insert(node.id.clone());
+    }
+    if !entries.is_empty() {
+        let entries: Vec<(String, String)> = entries.into_iter().collect();
+        let unknown: BTreeSet<(String, String)> =
+            zirv_flow_store::unknown_dimension_entries(connection, workspace, &entries)
+                .await?
+                .into_iter()
+                .collect();
+        if !unknown.is_empty() {
+            for node in &graph.nodes {
+                if let NodeKind::ActionSend { dimensions, .. } = &node.kind
+                    && dimensions
+                        .iter()
+                        .any(|(key, value)| unknown.contains(&(key.clone(), value.clone())))
+                {
+                    facts.unknown_dimensions.insert(node.id.clone());
+                }
+            }
         }
     }
     Ok(facts)
@@ -652,7 +730,7 @@ pub(crate) async fn update(
     responses(
         (status = 200, description = "The issues; none means the draft can be published", body = ValidationBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
-        (status = 403, description = "A key without the write scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "A key without the write scope, a missing CSRF token, or a condition that orders, prefixes or aggregates a personal trait or event property for a caller without access to personal values (`pii_trait_not_searchable`, `pii_property_not_explorable`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or flow, or no access", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
@@ -663,11 +741,13 @@ pub(crate) async fn validate(
     Path((ws, id)): Path<(String, String)>,
 ) -> Result<Json<ValidationBody>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
+    let reveal = may_view_pii(&state, &principal, workspace.id).await;
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
     let flow = zirv_flow_store::find_flow(&mut *tx, workspace.id, path_id(&id)?)
         .await?
         .ok_or_else(ApiError::not_found)?;
     let (checked, _) = check_flow(&state, &mut tx, workspace.id, &flow).await?;
+    refuse_flow_probes(&mut tx, workspace.id, &checked, reveal).await?;
     drop(tx);
     Ok(Json(ValidationBody {
         valid: checked.issues.is_empty(),

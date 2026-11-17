@@ -515,6 +515,558 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn turning_the_warmup_off_needs_an_admin_and_audits_how_many_it_released(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let f = fixture(&pool).await;
+            let flow = published(&f, "Welcome").await;
+            let setting = f.flows(&format!("/{flow}/warmup"));
+            let person = Uuid::now_v7();
+            sqlx::query("INSERT INTO people (id, workspace_id) VALUES ($1, $2)")
+                .bind(person)
+                .bind(f.ws.as_uuid())
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO flow_warmup_waiting (workspace_id, flow_id, person_id, occurrence_id, \
+                     flow_version, trigger, admission_offset, trace_id, cause_kind, cause_id) \
+                 SELECT $1, id, $3, gen_random_uuid(), 1, 'manual', 5, gen_random_uuid(), 'api', 't' \
+                 FROM flows WHERE id::text = $2",
+            )
+            .bind(f.ws.as_uuid())
+            .bind(&flow)
+            .bind(person)
+            .execute(&pool)
+            .await
+            .unwrap();
+            let opened_jobs = || async {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM jobs WHERE kind = 'flow.enroll' \
+                     AND unique_key LIKE '%:open:%'",
+                )
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            };
+            let off = Some(json!({"enabled": false, "seconds": 60}));
+
+            let refused = f
+                .call("PUT", &setting, off.clone(), Auth::Key(&f.publish))
+                .await;
+            assert_eq!((refused.status, opened_jobs().await), (StatusCode::FORBIDDEN, 0));
+
+            // A publisher may still turn it on or change its length.
+            let longer = Some(json!({"enabled": true, "seconds": 900}));
+            let changed = f.call("PUT", &setting, longer, Auth::Key(&f.publish)).await;
+            assert_eq!(changed.status, StatusCode::OK, "{:?}", changed.body);
+
+            let released = f.call("PUT", &setting, off, Auth::Key(&f.admin)).await;
+            assert_eq!(released.status, StatusCode::OK, "{:?}", released.body);
+            assert_eq!(opened_jobs().await, 1);
+            let audited: Vec<Value> = sqlx::query_scalar(
+                "SELECT summary FROM audit_log WHERE action = 'flow.warmup_changed' ORDER BY id",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            // The resize queued the waiting person again for a new time and released nobody.
+            assert_eq!(audited.first().unwrap()["released"], 0);
+            assert_eq!(audited.last().unwrap()["released"], 1);
+        })
+        .await;
+    }
+
+    /// Counts the statements sqlx runs while `run` is polled.
+    struct StatementCounter(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    impl tracing::Subscriber for StatementCounter {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            metadata.target() == "sqlx::query"
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            if event.metadata().target() == "sqlx::query" {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    async fn statements_of<F: std::future::Future>(run: F) -> (F::Output, usize) {
+        use tracing::instrument::WithSubscriber;
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // A second live dispatch keeps tracing from caching the sqlx callsite as never interested.
+        let _keep = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        let output = run
+            .with_subscriber(tracing::Dispatch::new(StatementCounter(seen.clone())))
+            .await;
+        (output, seen.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    /// `send_graph`'s send node cloned `count` times under distinct ids, one exit after the last.
+    fn many_sends(graph: &Value, count: usize) -> Value {
+        let node = graph["nodes"][0].clone();
+        let mut nodes = Vec::new();
+        let mut edges = Vec::new();
+        for index in 0..count {
+            let mut clone = node.clone();
+            clone["id"] = json!(format!("send{index}"));
+            nodes.push(clone);
+            let to = if index + 1 == count {
+                "end".to_owned()
+            } else {
+                format!("send{}", index + 1)
+            };
+            edges.push(
+                json!({"id": format!("e{index}"), "from": format!("send{index}"),
+                "port": "next", "to": to}),
+            );
+        }
+        nodes.push(json!({"id": "end", "type": "exit"}));
+        json!({"v": 1, "nodes": nodes, "edges": edges})
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_graph_over_the_node_limit_is_refused_without_reading_facts_per_node(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let f = fixture(&pool).await;
+            let (_, graph) = send_graph(&f, &pool).await;
+
+            let mut counts = Vec::new();
+            for (nodes, over) in [(200, false), (201, true), (1500, true)] {
+                let id = f
+                    .create(
+                        &format!("Big{nodes}"),
+                        many_sends(&graph, nodes - 1),
+                        manual(),
+                    )
+                    .await;
+                let (reply, statements) =
+                    statements_of(f.lead("POST", &format!("/{id}/validate"), None)).await;
+                assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+                let codes: Vec<&str> = reply.body["issues"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|issue| issue["code"].as_str())
+                    .collect();
+                assert_eq!(
+                    codes.contains(&"too_many_nodes"),
+                    over,
+                    "{nodes}: {codes:?}"
+                );
+                counts.push((nodes, statements));
+            }
+
+            // Past the limit the answer is the one issue, and no fact is read for any node.
+            let (_, within) = counts[0];
+            let (_, over) = counts[1];
+            assert!(counts[2].1 < 50 && over < 50, "{counts:?}");
+            assert_eq!(over, counts[2].1, "{counts:?}");
+            assert!(within <= over + 10, "{counts:?}");
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_facts_of_send_nodes_cost_the_same_statements_for_one_node_or_a_hundred(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let f = fixture(&pool).await;
+            let (_, graph) = send_graph(&f, &pool).await;
+
+            let mut counts = Vec::new();
+            for nodes in [1, 100] {
+                let id = f
+                    .create(
+                        &format!("Sends{nodes}"),
+                        many_sends(&graph, nodes),
+                        manual(),
+                    )
+                    .await;
+                let (reply, statements) =
+                    statements_of(f.lead("POST", &format!("/{id}/validate"), None)).await;
+                assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+                assert_eq!(reply.body["issues"], json!([]), "{nodes} nodes");
+                counts.push(statements);
+            }
+
+            assert_eq!(counts[0], counts[1], "{counts:?}");
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn each_send_node_is_judged_by_what_it_names_when_the_facts_are_read_together(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let f = fixture(&pool).await;
+            let (_, graph) = send_graph(&f, &pool).await;
+            let template = graph["nodes"][0]["template"].clone();
+            let mut sound = graph["nodes"][0].clone();
+            sound["id"] = json!("sound");
+            let mut broken = sound.clone();
+            broken["id"] = json!("broken");
+            broken["template"] = json!(Uuid::now_v7());
+            broken["destination"] = json!(Uuid::now_v7());
+            broken["topic"] = json!(Uuid::now_v7());
+            broken["dimensions"] = json!({"brand": "nowhere"});
+            let draft = json!({"v": 1, "nodes": [sound, broken, {"id": "end", "type": "exit"}],
+                "edges": [
+                    {"id": "e1", "from": "sound", "port": "next", "to": "broken"},
+                    {"id": "e2", "from": "broken", "port": "next", "to": "end"}]});
+            let id = f.create("Mixed", draft, manual()).await;
+            let codes = |reply: &Reply| -> Vec<(String, String)> {
+                reply.body["issues"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|issue| {
+                        (
+                            issue["node"].as_str().unwrap_or_default().to_owned(),
+                            issue["code"].as_str().unwrap().to_owned(),
+                        )
+                    })
+                    .collect()
+            };
+
+            let reply = f.lead("POST", &format!("/{id}/validate"), None).await;
+            let mut found = codes(&reply);
+            found.sort();
+            let expected: Vec<(String, String)> = [
+                "send_destination_unusable",
+                "send_template_unusable",
+                "unknown_dimension",
+                "unknown_topic",
+            ]
+            .map(|code| ("broken".to_owned(), code.to_owned()))
+            .to_vec();
+            assert_eq!(found, expected, "{:?}", reply.body);
+
+            // An archived template, and one of the wrong channel, make the node that names it
+            // unusable; the other node is judged by what it names.
+            sqlx::query("UPDATE templates SET archived_at = now() WHERE id::text = $1")
+                .bind(template.as_str().unwrap())
+                .execute(&pool)
+                .await
+                .unwrap();
+            let reply = f.lead("POST", &format!("/{id}/validate"), None).await;
+            assert!(
+                codes(&reply).contains(&("sound".to_owned(), "send_template_unusable".to_owned())),
+                "{:?}",
+                reply.body
+            );
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_flow_that_probes_personal_values_is_refused_to_a_caller_without_access_to_them(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let f = fixture(&pool).await;
+            for (key, trait_type) in [
+                ("email_addr", TraitType::String),
+                ("born", TraitType::Timestamp),
+            ] {
+                zirv_flow_store::create_trait_definition(
+                    &pool,
+                    f.ws,
+                    &NewTraitDefinition {
+                        key: key.into(),
+                        trait_type,
+                        precedence: Precedence::Latest,
+                        source_order: Vec::new(),
+                        pii: true,
+                        channel_address: false,
+                        inferred: false,
+                        description: String::new(),
+                    },
+                )
+                .await
+                .unwrap();
+            }
+            zirv_flow_store::create_event_schema(
+                &pool,
+                f.ws,
+                &zirv_flow_store::NewEventSchema {
+                    name: "order".into(),
+                    mode: zirv_flow_core::events::EventMode::Warn,
+                    description: String::new(),
+                    properties: serde_json::from_value(json!([
+                        {"name": "total", "type": "number", "pii": true}
+                    ]))
+                    .unwrap(),
+                },
+            )
+            .await
+            .unwrap();
+            let mut connection = pool.acquire().await.unwrap();
+            zirv_flow_store::publish_schema_draft(&mut connection, f.ws, "order", None)
+                .await
+                .unwrap();
+            drop(connection);
+
+            let branch = |condition: Value| {
+                json!({"v": 1, "nodes": [
+                    {"id": "check", "type": "branch", "conditions": [condition]},
+                    {"id": "yes", "type": "exit"},
+                    {"id": "no", "type": "exit"}
+                ], "edges": [
+                    {"id": "e1", "from": "check", "port": "case_0", "to": "yes"},
+                    {"id": "e2", "from": "check", "port": "else", "to": "no"}
+                ]})
+            };
+            let wait_for_order = |filters: Value| {
+                json!({"v": 1, "nodes": [
+                    {"id": "wait", "type": "wait.until_event", "event": "order",
+                     "filters": filters, "timeout_seconds": 3600},
+                    {"id": "got", "type": "exit"},
+                    {"id": "late", "type": "exit"}
+                ], "edges": [
+                    {"id": "e1", "from": "wait", "port": "event", "to": "got"},
+                    {"id": "e2", "from": "wait", "port": "timeout", "to": "late"}
+                ]})
+            };
+            let over_total = json!([{"prop": "total", "op": "gt", "value": 1}]);
+            let goal_on_total = json!({"trigger": {"type": "manual"}, "reentry": {"mode": "once"},
+                "goal": {"type": "event", "event": "order", "filters": over_total}});
+            let probes = [
+                (
+                    "trait prefix",
+                    branch(json!({"trait": "email_addr", "op": "starts_with", "value": "a"})),
+                    manual(),
+                    "pii_trait_not_searchable",
+                ),
+                (
+                    "window from a personal date",
+                    branch(json!({"event": "order", "window": {"since_trait": "born"}})),
+                    manual(),
+                    "pii_trait_not_searchable",
+                ),
+                (
+                    "wait-until-event range",
+                    wait_for_order(over_total.clone()),
+                    manual(),
+                    "pii_property_not_explorable",
+                ),
+                (
+                    "goal range",
+                    simple_graph(),
+                    goal_on_total,
+                    "pii_property_not_explorable",
+                ),
+            ];
+            for (label, graph, settings, code) in probes {
+                let id = f.create(label, graph, settings).await;
+                for (what, uri, auth) in [
+                    ("validate", format!("/{id}/validate"), Auth::Key(&f.write)),
+                    (
+                        "dry run",
+                        format!("/{id}/publish?dry_run=true"),
+                        Auth::Key(&f.publish),
+                    ),
+                    ("publish", format!("/{id}/publish"), Auth::Key(&f.publish)),
+                ] {
+                    let reply = f.call("POST", &f.flows(&uri), None, auth).await;
+                    assert_eq!(
+                        reply.status,
+                        StatusCode::FORBIDDEN,
+                        "{label} {what}: {:?}",
+                        reply.body
+                    );
+                    assert_eq!(reply.body["code"], code, "{label} {what}");
+                }
+                let state: String =
+                    sqlx::query_scalar("SELECT state FROM flows WHERE id::text = $1")
+                        .bind(&id)
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                assert_eq!(state, "draft", "{label} stays a draft");
+                // An admin may see the values, so the same flow publishes.
+                let published = f.lead("POST", &format!("/{id}/publish"), None).await;
+                assert_eq!(
+                    published.status,
+                    StatusCode::CREATED,
+                    "{label}: {:?}",
+                    published.body
+                );
+            }
+
+            // A condition that does not compile never runs, so it is an ordinary issue, as in
+            // segments, and not a refusal: an unknown trait is reported to everyone.
+            let typo = f
+                .create(
+                    "prefix on an unknown trait",
+                    branch(json!({"trait": "no_such_trait", "op": "starts_with", "value": "a"})),
+                    manual(),
+                )
+                .await;
+            let reply = f
+                .call(
+                    "POST",
+                    &f.flows(&format!("/{typo}/validate")),
+                    None,
+                    Auth::Key(&f.write),
+                )
+                .await;
+            assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+            assert_eq!(reply.body["valid"], false, "{:?}", reply.body);
+            let codes: Vec<&str> = reply.body["issues"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|issue| issue["code"].as_str())
+                .collect();
+            assert!(codes.contains(&"unknown_trait"), "{codes:?}");
+            let reply = f
+                .call(
+                    "POST",
+                    &f.flows(&format!("/{typo}/publish?dry_run=true")),
+                    None,
+                    Auth::Key(&f.publish),
+                )
+                .await;
+            assert_eq!(reply.status, StatusCode::OK, "dry run: {:?}", reply.body);
+            assert_eq!(reply.body["valid"], false, "dry run: {:?}", reply.body);
+            assert_eq!(reply.body["issues"][0]["code"], "unknown_trait");
+            let reply = f
+                .call(
+                    "POST",
+                    &f.flows(&format!("/{typo}/publish")),
+                    None,
+                    Auth::Key(&f.publish),
+                )
+                .await;
+            assert_eq!(
+                reply.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "publish: {:?}",
+                reply.body
+            );
+            assert_eq!(reply.body["code"], "flow_invalid");
+
+            // Equality on a personal trait is allowed to everyone who may publish.
+            let equal = f
+                .create(
+                    "equality",
+                    branch(json!({"trait": "email_addr", "op": "eq", "value": "a@example.com"})),
+                    manual(),
+                )
+                .await;
+            let reply = f
+                .call(
+                    "POST",
+                    &f.flows(&format!("/{equal}/publish")),
+                    None,
+                    Auth::Key(&f.publish),
+                )
+                .await;
+            assert_eq!(reply.status, StatusCode::CREATED, "{:?}", reply.body);
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_paused_flow_does_not_resume_once_a_template_or_destination_it_sends_is_archived(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let f = fixture(&pool).await;
+
+            // A webhook template archived while the flow is paused.
+            let (hook, template) = flow_sending_a_webhook_template(&f, &pool).await;
+            let reply = f.lead("POST", &format!("/{hook}/publish"), None).await;
+            assert_eq!(reply.status, StatusCode::CREATED, "{:?}", reply.body);
+            let paused = f.lead("POST", &format!("/{hook}/pause"), None).await;
+            assert_eq!(paused.status, StatusCode::OK, "{:?}", paused.body);
+            let mut connection = pool.acquire().await.unwrap();
+            zirv_flow_store::archive_template(&mut connection, f.ws, template)
+                .await
+                .unwrap();
+            drop(connection);
+
+            let refused = f.lead("POST", &format!("/{hook}/resume"), None).await;
+
+            assert_eq!(
+                refused.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{:?}",
+                refused.body
+            );
+            assert_eq!(refused.body["code"], "flow_invalid");
+            assert_eq!(
+                issue_tuples(&refused.body["flow_issues"]),
+                [(
+                    "webhook_template_unusable".to_owned(),
+                    "hook".to_owned(),
+                    "/template".to_owned()
+                )]
+            );
+            let read = f.lead("GET", &format!("/{hook}"), None).await;
+            assert_eq!(read.body["state"], "paused");
+
+            // A destination archived while the flow is paused.
+            let (destination, graph) = send_graph(&f, &pool).await;
+            let sends = publish_flow_named(&f, "Sends", graph).await;
+            let paused = f.lead("POST", &format!("/{sends}/pause"), None).await;
+            assert_eq!(paused.status, StatusCode::OK, "{:?}", paused.body);
+            let untouched = f.lead("POST", &format!("/{sends}/resume"), None).await;
+            assert_eq!(untouched.status, StatusCode::OK, "{:?}", untouched.body);
+            let paused = f.lead("POST", &format!("/{sends}/pause"), None).await;
+            assert_eq!(paused.status, StatusCode::OK, "{:?}", paused.body);
+            let archived = archive_destination_request(&f, destination).await;
+            assert_eq!(
+                archived.status,
+                StatusCode::NO_CONTENT,
+                "{:?}",
+                archived.body
+            );
+
+            let refused = f.lead("POST", &format!("/{sends}/resume"), None).await;
+
+            assert_eq!(
+                refused.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{:?}",
+                refused.body
+            );
+            assert_eq!(
+                issue_tuples(&refused.body["flow_issues"]),
+                [(
+                    "send_destination_unusable".to_owned(),
+                    "send".to_owned(),
+                    "/destination".to_owned()
+                )]
+            );
+            let read = f.lead("GET", &format!("/{sends}"), None).await;
+            assert_eq!(read.body["state"], "paused");
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn open_now_on_a_paused_flow_is_a_conflict(pool: PgPool) {
         zirv_flow_store::decision_testing::checked(pool, |pool| async move {
             let f = fixture(&pool).await;
