@@ -18,5 +18,20 @@
 --     CREATE INDEX CONCURRENTLY IF NOT EXISTS audit_log_workspace_kind_idx
 --         ON audit_log (workspace_id, object_kind, id);
 --
--- A failed concurrent build leaves an INVALID index; drop it and build again.
+-- The migration keeps an index of that name only when it is valid and is this index; one a failed
+-- or cancelled build left invalid, or a different index under the name, is dropped and built
+-- again here.
+DO $$
+BEGIN
+    IF to_regclass('audit_log_workspace_kind_idx') IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM pg_index
+        WHERE indexrelid = to_regclass('audit_log_workspace_kind_idx')
+          AND indisvalid AND NOT indisunique AND indrelid = 'audit_log'::regclass
+          AND split_part(pg_get_indexdef(indexrelid), ' USING ', 2)
+              = 'btree (workspace_id, object_kind, id)'
+    ) THEN
+        DROP INDEX audit_log_workspace_kind_idx;
+    END IF;
+END
+$$;
 CREATE INDEX IF NOT EXISTS audit_log_workspace_kind_idx ON audit_log (workspace_id, object_kind, id);

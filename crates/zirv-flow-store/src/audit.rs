@@ -269,8 +269,9 @@ const COLUMNS: &str = "id, workspace_id, actor_kind, actor_id, action, object_ki
                        request_id, trace_id, summary, occurred_at";
 
 /// The catalogue's actions an area filter (`flow.`) stands for. Every stored action is in the
-/// catalogue (the write refuses others), so this is exactly the area's rows; none for an exact
-/// action or no action.
+/// catalogue: it has never lost one. The write does not refuse others (`append_audit` and
+/// `append_audit_once_in` only `debug_assert!` it), and the e2e catalogue test keeps new actions
+/// listed. So this is exactly the area's rows; none for an exact action or no action.
 fn area_actions(filter: &AuditFilter) -> Option<Vec<String>> {
     let area = filter
         .action
@@ -782,6 +783,85 @@ mod tests {
                 .any(|line| line.contains("audit_log_workspace_kind_idx")),
             "{plan:?}"
         );
+    }
+
+    /// Puts the table in its state before 0113: a pre-built kind index (the one the migration's
+    /// header tells an operator to build) that is valid or is what a failed concurrent build
+    /// leaves.
+    async fn before_0113(pool: &PgPool, prebuilt_is_valid: bool) {
+        for statement in [
+            "DROP INDEX audit_log_workspace_kind_idx",
+            "CREATE INDEX audit_log_workspace_kind_idx \
+             ON audit_log (workspace_id, object_kind, id)",
+        ] {
+            sqlx::query(statement).execute(pool).await.unwrap();
+        }
+        if !prebuilt_is_valid {
+            sqlx::query(
+                "UPDATE pg_index SET indisvalid = false \
+                 WHERE indexrelid = 'audit_log_workspace_kind_idx'::regclass",
+            )
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+    }
+
+    /// Whether the index is valid, its definition and its oid; `None` when it does not exist.
+    async fn kind_index_state(pool: &PgPool) -> Option<(bool, String, i64)> {
+        sqlx::query_as(
+            "SELECT indisvalid, pg_get_indexdef(indexrelid), indexrelid::oid::bigint \
+             FROM pg_index WHERE indexrelid = to_regclass('audit_log_workspace_kind_idx')",
+        )
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_kind_migration_replaces_an_invalid_prebuilt_index_and_never_keeps_it(
+        pool: PgPool,
+    ) {
+        before_0113(&pool, false).await;
+
+        sqlx::raw_sql(include_str!(
+            "../migrations/0113_audit_log_object_kind_idx.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let (valid, definition, _) = kind_index_state(&pool)
+            .await
+            .expect("the kind index exists");
+        assert!(valid, "the kind index is invalid: {definition}");
+        assert!(
+            definition.contains("USING btree (workspace_id, object_kind, id)"),
+            "{definition}"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_kind_migration_keeps_a_valid_prebuilt_index_without_a_rebuild(pool: PgPool) {
+        before_0113(&pool, true).await;
+        let (_, _, prebuilt) = kind_index_state(&pool).await.unwrap();
+
+        sqlx::raw_sql(include_str!(
+            "../migrations/0113_audit_log_object_kind_idx.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let (valid, definition, kept) = kind_index_state(&pool).await.unwrap();
+        assert!(valid);
+        assert!(
+            definition.contains("USING btree (workspace_id, object_kind, id)"),
+            "{definition}"
+        );
+        assert_eq!(kept, prebuilt, "the pre-built index was built again");
     }
 
     #[sqlx::test]
