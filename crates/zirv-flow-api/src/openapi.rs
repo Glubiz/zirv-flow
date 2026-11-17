@@ -837,7 +837,7 @@ impl Modify for SecuritySchemes {
         let components = openapi.components.get_or_insert_with(Default::default);
         let session = ApiKey::Cookie(ApiKeyValue::with_description(
             "zf_session",
-            "Session cookie set by POST /api/v1/session. Every POST, PUT, PATCH and DELETE              made with it must also send the CSRF token in the x-csrf-token header.",
+            "Session cookie set by POST /api/v1/session. Every POST, PUT, PATCH and DELETE made with it must also send the CSRF token in the x-csrf-token header.",
         ));
         components.add_security_scheme("session", SecurityScheme::ApiKey(session));
         let mut bearer = Http::new(HttpAuthScheme::Bearer);
@@ -969,6 +969,23 @@ mod tests {
     use super::*;
 
     const COMMITTED: &str = include_str!("../openapi.json");
+
+    fn find_double_space(v: &serde_json::Value, out: &mut Vec<String>) {
+        match v {
+            serde_json::Value::String(s) if s.contains("  ") => out.push(s.clone()),
+            serde_json::Value::Array(a) => a.iter().for_each(|x| find_double_space(x, out)),
+            serde_json::Value::Object(o) => o.values().for_each(|x| find_double_space(x, out)),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn openapi_strings_have_no_runs_of_spaces() {
+        let value = serde_json::to_value(openapi()).unwrap();
+        let mut out = Vec::new();
+        find_double_space(&value, &mut out);
+        assert!(out.is_empty(), "strings with stray spaces: {out:?}");
+    }
 
     #[test]
     fn the_committed_openapi_document_matches_the_code() {

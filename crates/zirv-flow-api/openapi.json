@@ -48094,7 +48094,7 @@
         "type": "apiKey",
         "in": "cookie",
         "name": "zf_session",
-        "description": "Session cookie set by POST /api/v1/session. Every POST, PUT, PATCH and DELETE              made with it must also send the CSRF token in the x-csrf-token header."
+        "description": "Session cookie set by POST /api/v1/session. Every POST, PUT, PATCH and DELETE made with it must also send the CSRF token in the x-csrf-token header."
       }
     }
   },

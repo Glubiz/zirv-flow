@@ -21,8 +21,8 @@ pub use crud::import_secret_as_credential;
 pub use crud::{
     ArchiveOutcome, CredentialUpdate, NewWorkspaceCredential, WorkspaceCredential,
     archive_credential, create_credential, find_credential, find_credential_for_update,
-    list_credentials, lock_credential_for_use, record_credential_test, swap_credential_secret,
-    update_credential,
+    list_credentials, lock_credential_creates, lock_credential_for_use, record_credential_test,
+    swap_credential_secret, update_credential,
 };
 pub use open::{OpenedCredential, open_credential};
 pub use usage::{

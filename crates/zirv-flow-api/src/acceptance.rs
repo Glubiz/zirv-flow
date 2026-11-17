@@ -946,6 +946,37 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_unknown_email_past_the_audit_budget_answers_alike_and_leaves_no_row(pool: PgPool) {
+        let (router, state) = app_with_state(&pool).await;
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        // Stamped an hour ahead, so no refill happens while the request runs.
+        let now = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+        let burst = crate::session::UNATTRIBUTED_AUDIT_BURST as usize;
+        state
+            .unattributed_audit
+            .take(uuid::Uuid::nil(), burst, now)
+            .unwrap();
+
+        let unknown = sign_in(&router, "nobody@example.com", PASSWORD).await;
+
+        assert_eq!(unknown.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(unknown.body["detail"], "invalid email or password");
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM audit_log WHERE action = 'session.sign_in_failed'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows, 0, "the spent budget writes no audit row");
+        let output = handle.render();
+        let skipped = "zirv_flow_sign_in_audit_skipped_total{reason=\"invalid_credentials\"} 1";
+        assert!(output.contains(skipped), "{skipped} in {output}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn five_failures_lock_the_account_with_the_same_response_and_a_success_resets(
         pool: PgPool,
     ) {
@@ -981,6 +1012,53 @@ mod tests {
             .unwrap();
         let after = sign_in(&router, OWNER_EMAIL, PASSWORD).await;
         assert_eq!(after.status, StatusCode::OK);
+        let (failures, until): (i32, Option<time::OffsetDateTime>) =
+            sqlx::query_as("SELECT failed_sign_ins, locked_until FROM users")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(failures, 0);
+        assert!(until.is_none());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_concurrent_burst_of_wrong_passwords_is_limited_by_the_lockout(pool: PgPool) {
+        let router = app(&pool).await;
+        owner(&pool, &router).await;
+        let passwords: Vec<String> = (0..30).map(|i| format!("wrong password {i}")).collect();
+        let replies = futures_util::future::join_all(
+            passwords.iter().map(|p| sign_in(&router, OWNER_EMAIL, p)),
+        )
+        .await;
+        assert!(replies.iter().all(|r| r.status == StatusCode::UNAUTHORIZED));
+        let verified: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM audit_log \
+                WHERE action = 'session.sign_in_failed' AND summary->>'reason' = 'invalid_credentials'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            verified <= 5,
+            "{verified} of 30 concurrent guesses were verified despite the 5-failure lockout"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_correct_password_as_the_fifth_attempt_signs_in_and_resets_the_counter(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        owner(&pool, &router).await;
+        for _ in 0..4 {
+            sign_in(&router, OWNER_EMAIL, "not the right password").await;
+        }
+
+        let reply = sign_in(&router, OWNER_EMAIL, PASSWORD).await;
+
+        assert_eq!(reply.status, StatusCode::OK);
         let (failures, until): (i32, Option<time::OffsetDateTime>) =
             sqlx::query_as("SELECT failed_sign_ins, locked_until FROM users")
                 .fetch_one(&pool)
