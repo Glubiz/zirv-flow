@@ -90,6 +90,15 @@ pub async fn rotate_signing_key(
     fresh: SecretId,
     now: OffsetDateTime,
 ) -> Result<Option<Rotation>, StoreError> {
+    // One rotation at a time per workspace: a row lock alone would let a second rotation skip the
+    // row the first retired without seeing the row it inserted, and answer that no secret exists.
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(hashtextextended('webhook_signing:' || $1::text, 0))",
+    )
+    .bind(workspace.as_uuid())
+    .execute(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
     let current: Option<Uuid> = sqlx::query_scalar(
         "SELECT secret_id FROM webhook_signing_keys \
          WHERE workspace_id = $1 AND retired_at IS NULL FOR UPDATE",
@@ -338,5 +347,51 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rows, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn two_concurrent_rotations_both_succeed_and_leave_one_current_secret(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let first = stored(&pool, ws).await;
+        let mut seed = pool.acquire().await.unwrap();
+        create_signing_key(&mut seed, ws, first, now())
+            .await
+            .unwrap();
+        drop(seed);
+        let second = stored(&pool, ws).await;
+        let third = stored(&pool, ws).await;
+
+        let mut one = pool.begin().await.unwrap();
+        let rotated = rotate_signing_key(&mut one, ws, second, now())
+            .await
+            .unwrap();
+        assert!(rotated.is_some());
+        let other = pool.clone();
+        let waiting = tokio::spawn(async move {
+            let mut two = other.begin().await.unwrap();
+            let rotation = rotate_signing_key(&mut two, ws, third, now())
+                .await
+                .unwrap();
+            two.commit().await.unwrap();
+            rotation
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        one.commit().await.unwrap();
+
+        let rotation = waiting
+            .await
+            .unwrap()
+            .expect("second concurrent rotation returned None although a secret exists");
+        assert_eq!(rotation.retired.secret_id, second);
+        let current: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM webhook_signing_keys \
+             WHERE workspace_id = $1 AND retired_at IS NULL",
+        )
+        .bind(ws.as_uuid())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(current, 1);
     }
 }

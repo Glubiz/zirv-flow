@@ -11179,7 +11179,7 @@
             }
           },
           "403": {
-            "description": "Not a publisher, a key without the publish scope, or a missing CSRF token",
+            "description": "Not a publisher, a key without the publish scope, a missing CSRF token, or a condition that orders, prefixes or aggregates a personal trait or event property for a caller without access to personal values (`pii_trait_not_searchable`, `pii_property_not_explorable`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -11234,7 +11234,7 @@
         "tags": [
           "flows"
         ],
-        "summary": "Resumes a paused flow. Records a `flow.resume` decision and is audited as `flow.resumed`.",
+        "summary": "Resumes a paused flow. A template or destination its running version sends through that was\narchived while it was paused is a 422 `flow_invalid` that names the node. Records a\n`flow.resume` decision and is audited as `flow.resumed`.",
         "operationId": "resume_flow",
         "parameters": [
           {
@@ -11301,6 +11301,16 @@
           },
           "409": {
             "description": "The flow is not paused (`code` is `flow_state`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A template or destination the flow sends through was archived or removed while it was paused (`code` is `flow_invalid`, with `flow_issues` naming the nodes)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -11634,7 +11644,7 @@
             }
           },
           "403": {
-            "description": "A key without the write scope, or a missing CSRF token",
+            "description": "A key without the write scope, a missing CSRF token, or a condition that orders, prefixes or aggregates a personal trait or event property for a caller without access to personal values (`pii_trait_not_searchable`, `pii_property_not_explorable`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -12046,7 +12056,7 @@
         "tags": [
           "flows"
         ],
-        "summary": "Turns the warm-up of a flow on or off and sets its length. A window already running keeps its\nstart and counts the new length from it; turning it off lets everyone waiting in at once.\nNeeds the publisher role and is audited as `flow.warmup_changed`.",
+        "summary": "Turns the warm-up of a flow on or off and sets its length. A window already running keeps its\nstart and counts the new length from it; turning it off lets everyone waiting in at once.\nTurning it on or changing its length needs the publisher role; turning it off needs the admin\nrole, like ending the window early. Audited as `flow.warmup_changed`, with how many were\nreleased.",
         "operationId": "set_flow_warmup",
         "parameters": [
           {
@@ -12112,7 +12122,7 @@
             }
           },
           "403": {
-            "description": "Not a publisher, a key without the publish scope, or a missing CSRF token",
+            "description": "Not a publisher, or not an admin when turning the warm-up off, a key without the publish (or admin) scope, or a missing CSRF token",
             "content": {
               "application/problem+json": {
                 "schema": {

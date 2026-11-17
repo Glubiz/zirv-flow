@@ -142,6 +142,25 @@ pub async fn find_destination<'e>(
     .map_err(StoreError::query)
 }
 
+/// The workspace's destinations among `ids`, archived or not, in one read; an id it does not have
+/// is left out.
+pub async fn find_destinations<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    ids: &[Uuid],
+) -> Result<Vec<Destination>, StoreError> {
+    sqlx::query_as(concat!(
+        "SELECT ",
+        destination_columns!(),
+        " FROM destinations WHERE workspace_id = $1 AND id = ANY($2)"
+    ))
+    .bind(workspace.as_uuid())
+    .bind(ids)
+    .fetch_all(executor)
+    .await
+    .map_err(StoreError::query)
+}
+
 /// The workspace of the destination with this id, whichever workspace it is in. For the one
 /// public route that receives a provider's webhook by the destination's id; the id only locates
 /// the destination, and a signature authorizes. Archived destinations are found too.

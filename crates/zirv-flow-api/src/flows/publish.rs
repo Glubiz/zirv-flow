@@ -13,16 +13,20 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
 
-use zirv_flow_core::flow::{FlowGraph, FlowSettings, NodeKind, Trigger, segment_uses_lenient};
-use zirv_flow_store::{Flow, FlowAction, FlowVersion};
+use zirv_flow_core::flow::{
+    FlowGraph, FlowSettings, Issue, NodeKind, Trigger, segment_uses_lenient,
+};
+use zirv_flow_store::{Flow, FlowAction, FlowState, FlowVersion};
 
 use super::crud::{
     FlowBody, FlowDetailBody, FlowVersionBody, check_flow, flow_detail, issues_schema,
+    refuse_flow_probes,
 };
+use super::validation::code;
 use super::{draft_of, flow_error, issue_problems, operator_trace};
 use crate::AppState;
 use crate::admin;
-use crate::auth::{Need, Principal, authorize, path_id};
+use crate::auth::{Need, Principal, authorize, may_view_pii, path_id};
 use crate::problem::{ApiError, FlowIssueProblem, Problem};
 use crate::trace::request_trace;
 
@@ -132,6 +136,7 @@ async fn impact(
     state: &AppState,
     workspace: WorkspaceId,
     id: Uuid,
+    reveal: bool,
 ) -> Result<ImpactBody, ApiError> {
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
     let flow = zirv_flow_store::find_flow(&mut *tx, workspace, id)
@@ -140,6 +145,7 @@ async fn impact(
     refuse_if_not_allowed(&flow, FlowAction::Publish)?;
     let (_, settings) = draft_of(&flow)?;
     let (checked, now) = check_flow(state, &mut tx, workspace, &flow).await?;
+    refuse_flow_probes(&mut tx, workspace, &checked, reveal).await?;
     let audience = audience_of(&mut tx, workspace, &settings).await?;
     let unhealthy =
         zirv_flow_store::unhealthy_inputs(&mut tx, workspace, &checked.reads, now).await?;
@@ -199,6 +205,7 @@ async fn publish_now(
     principal: &Principal,
     workspace: WorkspaceId,
     id: Uuid,
+    reveal: bool,
 ) -> Result<(Flow, FlowVersion), ApiError> {
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
     let locked = zirv_flow_store::lock_flow(&mut tx, workspace, id)
@@ -219,6 +226,8 @@ async fn publish_now(
             .collect();
     zirv_flow_store::lock_segments_shared(&mut tx, workspace, &segments).await?;
     let (checked, _) = check_flow(state, &mut tx, workspace, locked.flow()).await?;
+    // Every publish re-checks, so a trait flagged personal after the draft was saved is caught.
+    refuse_flow_probes(&mut tx, workspace, &checked, reveal).await?;
     if !checked.issues.is_empty() {
         // Dropping the transaction writes nothing.
         return Err(ApiError::flow_invalid(issue_problems(&checked.issues)));
@@ -267,7 +276,7 @@ async fn publish_now(
         (status = 201, description = "The flow and its new version", body = PublishedBody),
         (status = 400, description = "dry_run is not true or false", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
-        (status = 403, description = "Not a publisher, a key without the publish scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "Not a publisher, a key without the publish scope, a missing CSRF token, or a condition that orders, prefixes or aggregates a personal trait or event property for a caller without access to personal values (`pii_trait_not_searchable`, `pii_property_not_explorable`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or flow, or no access", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "The flow is archived (`code` is `flow_state`)", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "The draft has issues (`code` is `flow_invalid`, with `flow_issues`)", body = Problem, content_type = "application/problem+json")
@@ -282,11 +291,12 @@ pub(crate) async fn publish(
 ) -> Result<Response, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Publish).await?;
     let id = path_id(&id)?;
+    let reveal = may_view_pii(&state, &principal, workspace.id).await;
     if dry_run_param(query.as_deref())? {
-        let body = impact(&state, workspace.id, id).await?;
+        let body = impact(&state, workspace.id, id, reveal).await?;
         return Ok(Json(body).into_response());
     }
-    let (flow, version) = publish_now(&state, &principal, workspace.id, id).await?;
+    let (flow, version) = publish_now(&state, &principal, workspace.id, id, reveal).await?;
     let body = PublishedBody {
         flow: FlowBody::from(&flow),
         version: FlowVersionBody::from(&version),
@@ -295,6 +305,93 @@ pub(crate) async fn publish(
 }
 
 /// Runs a lifecycle action and audits it.
+/// Refuses to resume a paused flow whose running version names a template or destination that is
+/// missing or archived: archiving one is allowed while the flow is paused, and a resumed flow would
+/// fail every send. It takes publish's locks in publish's order (the flow, then the templates and
+/// destinations shared), so an archive either sees the resumed flow and answers `template_in_use`
+/// or commits first and this refuses. Nothing else is judged: a resume must not fail for an
+/// unrelated catalog reason.
+async fn refuse_unusable_inputs(
+    connection: &mut zirv_flow_store::PgConnection,
+    workspace: WorkspaceId,
+    id: Uuid,
+) -> Result<(), ApiError> {
+    let locked = zirv_flow_store::lock_flow(connection, workspace, id)
+        .await
+        .map_err(flow_error)?;
+    let flow = locked.flow();
+    let Some(current) = flow
+        .current_version
+        .filter(|_| flow.state == FlowState::Paused)
+    else {
+        // Not resumable: the transition names why.
+        return Ok(());
+    };
+    let version = zirv_flow_store::find_flow_version(&mut *connection, workspace, id, current)
+        .await?
+        .ok_or_else(ApiError::internal)?;
+    let graph = FlowGraph::from_value(version.graph).map_err(|_| ApiError::internal())?;
+    let (template_ids, destination_ids) = (named_templates(&graph), named_destinations(&graph));
+    zirv_flow_store::lock_templates_shared(connection, workspace, &template_ids).await?;
+    zirv_flow_store::lock_destinations_shared(connection, workspace, &destination_ids).await?;
+    let live_templates: BTreeSet<Uuid> =
+        zirv_flow_store::find_templates(&mut *connection, workspace, &template_ids)
+            .await?
+            .into_iter()
+            .filter(|template| template.archived_at.is_none())
+            .map(|template| template.id)
+            .collect();
+    let live_destinations: BTreeSet<Uuid> =
+        zirv_flow_store::find_destinations(&mut *connection, workspace, &destination_ids)
+            .await?
+            .into_iter()
+            .filter(|destination| destination.archived_at.is_none())
+            .map(|destination| destination.id)
+            .collect();
+    let mut issues = Vec::new();
+    for node in &graph.nodes {
+        let mut unusable = |code: &'static str, at: &str| {
+            issues.push(Issue {
+                code,
+                node: Some(node.id.clone()),
+                edge: None,
+                at: Some(at.to_owned()),
+            });
+        };
+        match &node.kind {
+            NodeKind::ActionSend {
+                template,
+                destination,
+                ..
+            } => {
+                if !live_templates.contains(template) {
+                    unusable(code::SEND_TEMPLATE_UNUSABLE, "/template");
+                }
+                if !live_destinations.contains(destination) {
+                    unusable(code::SEND_DESTINATION_UNUSABLE, "/destination");
+                }
+            }
+            NodeKind::ActionWebhook {
+                template: Some(template),
+                ..
+            } if !live_templates.contains(template) => {
+                unusable(code::WEBHOOK_TEMPLATE_UNUSABLE, "/template");
+            }
+            NodeKind::ActionSync { destination, .. }
+                if !live_destinations.contains(destination) =>
+            {
+                unusable(code::SYNC_DESTINATION_UNUSABLE, "/destination");
+            }
+            _ => {}
+        }
+    }
+    if issues.is_empty() {
+        Ok(())
+    } else {
+        Err(ApiError::flow_invalid(issue_problems(&issues)))
+    }
+}
+
 async fn lifecycle(
     state: &AppState,
     principal: &Principal,
@@ -309,10 +406,13 @@ async fn lifecycle(
             zirv_flow_store::pause_flow(&mut tx, workspace, id, &trace).await,
             "flow.paused",
         ),
-        FlowAction::Resume => (
-            zirv_flow_store::resume_flow(&mut tx, &state.clock, workspace, id, &trace).await,
-            "flow.resumed",
-        ),
+        FlowAction::Resume => {
+            refuse_unusable_inputs(&mut tx, workspace, id).await?;
+            (
+                zirv_flow_store::resume_flow(&mut tx, &state.clock, workspace, id, &trace).await,
+                "flow.resumed",
+            )
+        }
         FlowAction::Archive => (
             zirv_flow_store::archive_flow(&mut tx, workspace, id, &trace).await,
             "flow.archived",
@@ -370,7 +470,9 @@ pub(crate) async fn pause(
     Ok(Json(flow_detail(&state, workspace.id, &flow).await?))
 }
 
-/// Resumes a paused flow. Records a `flow.resume` decision and is audited as `flow.resumed`.
+/// Resumes a paused flow. A template or destination its running version sends through that was
+/// archived while it was paused is a 422 `flow_invalid` that names the node. Records a
+/// `flow.resume` decision and is audited as `flow.resumed`.
 #[utoipa::path(
     post,
     operation_id = "resume_flow",
@@ -385,7 +487,8 @@ pub(crate) async fn pause(
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a publisher, a key without the publish scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or flow, or no access", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "The flow is not paused (`code` is `flow_state`)", body = Problem, content_type = "application/problem+json")
+        (status = 409, description = "The flow is not paused (`code` is `flow_state`)", body = Problem, content_type = "application/problem+json"),
+        (status = 422, description = "A template or destination the flow sends through was archived or removed while it was paused (`code` is `flow_invalid`, with `flow_issues` naming the nodes)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]

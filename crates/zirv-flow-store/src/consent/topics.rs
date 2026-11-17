@@ -127,6 +127,25 @@ pub async fn find_topic<'e>(
     row.map(TopicRow::into_topic).transpose()
 }
 
+/// The workspace's topics among `ids`, in one read; an id it does not have is left out.
+pub async fn find_topics<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    ids: &[Uuid],
+) -> Result<Vec<Topic>, StoreError> {
+    let rows: Vec<TopicRow> = sqlx::query_as(concat!(
+        "SELECT ",
+        topic_columns!(),
+        " FROM topics WHERE workspace_id = $1 AND id = ANY($2)"
+    ))
+    .bind(workspace.as_uuid())
+    .bind(ids)
+    .fetch_all(executor)
+    .await
+    .map_err(StoreError::query)?;
+    rows.into_iter().map(TopicRow::into_topic).collect()
+}
+
 pub async fn find_topic_by_key<'e>(
     executor: impl PgExecutor<'e>,
     workspace: WorkspaceId,

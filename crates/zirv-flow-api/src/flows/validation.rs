@@ -103,6 +103,8 @@ pub(crate) struct Checked {
     /// The merged dependency summary of every condition, event match and reference in the flow,
     /// in the shape of a segment version's `deps`.
     pub(crate) reads: Value,
+    /// The root of every condition and event match that compiled, for the personal-value guard.
+    pub(crate) probe_roots: Vec<segment::Node>,
 }
 
 /// Validates the flow: the structure first, then the catalog and the rest.
@@ -115,6 +117,7 @@ pub(crate) fn check(
         environment,
         issues: validate(graph, settings),
         reads: Reads::default(),
+        probe_roots: Vec::new(),
     };
     checker.nodes(graph);
     checker.settings(settings);
@@ -122,6 +125,7 @@ pub(crate) fn check(
     Checked {
         issues: checker.issues,
         reads: checker.reads.to_value(),
+        probe_roots: checker.probe_roots,
     }
 }
 
@@ -166,6 +170,7 @@ struct Checker<'a> {
     environment: &'a Environment<'a>,
     issues: Vec<Issue>,
     reads: Reads,
+    probe_roots: Vec<segment::Node>,
 }
 
 /// The flow code for a segment issue that names something the workspace does not have.
@@ -346,6 +351,7 @@ impl Checker<'_> {
         ) {
             Ok(compiled) => {
                 self.reads.absorb(&compiled.deps.to_value());
+                self.probe_roots.push(definition.root);
                 None
             }
             Err(problems) => Some(problems),

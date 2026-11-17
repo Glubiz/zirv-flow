@@ -295,6 +295,20 @@ pub(in crate::rbac) mod tests {
                 code: "contact_key_not_searchable",
             })];
         }
+        if row.method == Method::Put && row.path.ends_with("/flows/{id}/warmup") {
+            // Turning the warm-up on or resizing it is the publisher's; turning it off releases
+            // everyone waiting, which is the admin's.
+            return ["true", "false"]
+                .map(|enabled| Case {
+                    patch: Some(json!({ "enabled": enabled == "true" })),
+                    rule: Rule::Need(if enabled == "true" {
+                        Need::Publish
+                    } else {
+                        Need::Admin
+                    }),
+                })
+                .to_vec();
+        }
         if names_a_person(row) {
             let (code, admin_passes) = if row.path.ends_with("/flows/{id}/test") {
                 ("flow_test_values_forbidden", false)

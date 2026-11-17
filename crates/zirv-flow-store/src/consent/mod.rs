@@ -9,8 +9,8 @@ mod topics;
 
 pub use dimensions::{
     Dimension, DimensionUpdate, DimensionValue, NewDimension, create_dimension,
-    create_dimension_value, find_dimension, list_dimensions, unknown_dimension_entry,
-    update_dimension, update_dimension_value,
+    create_dimension_value, find_dimension, list_dimensions, unknown_dimension_entries,
+    unknown_dimension_entry, update_dimension, update_dimension_value,
 };
 pub(crate) use merge::move_on_merge;
 pub use policy::{
@@ -25,6 +25,6 @@ pub use state::{
     dimensions_of, set_consent,
 };
 pub use topics::{
-    NewTopic, Topic, TopicUpdate, create_topic, find_topic, find_topic_by_key, list_topics,
-    update_topic,
+    NewTopic, Topic, TopicUpdate, create_topic, find_topic, find_topic_by_key, find_topics,
+    list_topics, update_topic,
 };
