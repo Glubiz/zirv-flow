@@ -163,7 +163,8 @@ pub(super) fn preferences(token: &str, groups: &[Group], saved: bool) -> Respons
         body.push_str(&format!("<fieldset><legend>{}</legend>", esc(&group.title)));
         for choice in &group.choices {
             body.push_str(&format!(
-                "<label><input type=\"checkbox\" name=\"{}\" value=\"{}\"{}> {}</label>                 <input type=\"hidden\" name=\"shown\" value=\"{}\">",
+                "<label><input type=\"checkbox\" name=\"{}\" value=\"{}\"{}> {}</label>\
+                 <input type=\"hidden\" name=\"shown\" value=\"{}\">",
                 choice.field,
                 esc(&choice.value),
                 if choice.checked { " checked" } else { "" },
