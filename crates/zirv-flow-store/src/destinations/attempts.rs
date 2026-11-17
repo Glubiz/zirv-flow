@@ -596,6 +596,98 @@ mod tests {
         assert_eq!(purge_attempts(&pool, cutoff, 2).await.unwrap(), 0);
     }
 
+    /// Puts the table in its state before 0112: the plain destination index, and a pre-built
+    /// stats index (the one the migration's header tells an operator to build) that is valid or
+    /// is what a failed concurrent build leaves.
+    async fn before_0112(pool: &PgPool, prebuilt_is_valid: bool) {
+        for statement in [
+            "DROP INDEX delivery_attempts_destination_idx",
+            "CREATE INDEX delivery_attempts_destination_idx \
+             ON delivery_attempts (workspace_id, destination_id, attempted_at)",
+            "CREATE INDEX delivery_attempts_destination_stats_idx \
+             ON delivery_attempts (workspace_id, destination_id, attempted_at) \
+             INCLUDE (outcome, status_class)",
+        ] {
+            sqlx::query(statement).execute(pool).await.unwrap();
+        }
+        if !prebuilt_is_valid {
+            sqlx::query(
+                "UPDATE pg_index SET indisvalid = false \
+                 WHERE indexrelid = 'delivery_attempts_destination_stats_idx'::regclass",
+            )
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+    }
+
+    /// Whether the index is valid, its definition and its oid; `None` when it does not exist.
+    async fn index_state(pool: &PgPool, name: &str) -> Option<(bool, String, i64)> {
+        sqlx::query_as(
+            "SELECT indisvalid, pg_get_indexdef(indexrelid), indexrelid::oid::bigint \
+             FROM pg_index WHERE indexrelid = to_regclass($1)",
+        )
+        .bind(name)
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_covering_migration_replaces_an_invalid_prebuilt_index_and_never_keeps_it(
+        pool: PgPool,
+    ) {
+        before_0112(&pool, false).await;
+
+        sqlx::raw_sql(include_str!(
+            "../../migrations/0112_delivery_attempts_destination_covering_idx.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let (valid, definition, _) = index_state(&pool, "delivery_attempts_destination_idx")
+            .await
+            .expect("the destination index exists");
+        assert!(valid, "the destination index is invalid: {definition}");
+        assert!(
+            definition.contains("INCLUDE (outcome, status_class)"),
+            "{definition}"
+        );
+        assert!(
+            index_state(&pool, "delivery_attempts_destination_stats_idx")
+                .await
+                .is_none()
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_covering_migration_keeps_a_valid_prebuilt_index_without_a_rebuild(pool: PgPool) {
+        before_0112(&pool, true).await;
+        let (_, _, prebuilt) = index_state(&pool, "delivery_attempts_destination_stats_idx")
+            .await
+            .unwrap();
+
+        sqlx::raw_sql(include_str!(
+            "../../migrations/0112_delivery_attempts_destination_covering_idx.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let (valid, definition, kept) = index_state(&pool, "delivery_attempts_destination_idx")
+            .await
+            .unwrap();
+        assert!(valid);
+        assert!(
+            definition.contains("INCLUDE (outcome, status_class)"),
+            "{definition}"
+        );
+        assert_eq!(kept, prebuilt, "the pre-built index was built again");
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_age_predicate_of_the_purge_uses_the_attempted_at_index(pool: PgPool) {

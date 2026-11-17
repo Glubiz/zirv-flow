@@ -6762,6 +6762,50 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_export_snapshot_is_taken_when_the_request_begins_not_at_the_first_read(
+        pool: PgPool,
+    ) {
+        let router = keyed_app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let request = with_auth(
+            Request::builder()
+                .method("GET")
+                .uri(suppressions_uri(&ws, "/export")),
+            Auth::Session(&owner),
+        )
+        .body(Body::empty())
+        .unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        // Committed after the handler returned, before any of the body is read.
+        zirv_flow_store::add_suppression(
+            &pool,
+            ws.parse().unwrap(),
+            &zirv_flow_store::NewSuppression {
+                identifier_hash: [7; 32],
+                kind: "email",
+                reason: zirv_flow_core::consent::SuppressionReason::Manual,
+                source: "api",
+                note: None,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+
+        assert_eq!(
+            std::str::from_utf8(&bytes).unwrap(),
+            "hash,kind,reason,source,created_at
+",
+            "a suppression committed after the export began is in the file"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_export_is_csv_of_hashes_only(pool: PgPool) {
         let router = keyed_app(&pool).await;
         let owner = owner(&pool, &router).await;

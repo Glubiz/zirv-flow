@@ -22,9 +22,24 @@
 --     CREATE INDEX CONCURRENTLY IF NOT EXISTS delivery_attempts_destination_stats_idx
 --         ON delivery_attempts (workspace_id, destination_id, attempted_at)
 --         INCLUDE (outcome, status_class);
--- (drop an invalid index a failed concurrent build leaves, then run it again). The migration then
--- only drops the old index and renames the new one, which takes ACCESS EXCLUSIVE on the table for
--- an instant.
+-- The migration keeps an index of that name only when it is valid and is this index; one a failed
+-- or cancelled build left invalid, or a different index under the name, is dropped and built again
+-- here, so a failed pre-build never replaces the old index with an unusable one. The migration
+-- then only drops the old index and renames the new one, which takes ACCESS EXCLUSIVE on the
+-- table for an instant.
+DO $$
+BEGIN
+    IF to_regclass('delivery_attempts_destination_stats_idx') IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM pg_index
+        WHERE indexrelid = to_regclass('delivery_attempts_destination_stats_idx')
+          AND indisvalid AND NOT indisunique AND indrelid = 'delivery_attempts'::regclass
+          AND split_part(pg_get_indexdef(indexrelid), ' USING ', 2)
+              = 'btree (workspace_id, destination_id, attempted_at) INCLUDE (outcome, status_class)'
+    ) THEN
+        DROP INDEX delivery_attempts_destination_stats_idx;
+    END IF;
+END
+$$;
 CREATE INDEX IF NOT EXISTS delivery_attempts_destination_stats_idx
     ON delivery_attempts (workspace_id, destination_id, attempted_at)
     INCLUDE (outcome, status_class);

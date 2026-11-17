@@ -369,14 +369,21 @@ pub type SuppressionCursor = (OffsetDateTime, Uuid);
 const EXPORT_PAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Starts the transaction an export pages through, read-only at `REPEATABLE READ`: every page
-/// sees the rows committed when the first page ran, so the file holds each of them once.
+/// sees the rows committed when this function returned, so the file holds each of them once.
 /// `created_at` is the start of the writing transaction, not its commit, so a writer that began
 /// before the export and commits while it pages sorts behind the cursor; without the snapshot
-/// the export would miss that row. A row committed after the first page is not in the file.
+/// the export would miss that row. A row committed after this returns is not in the file.
+/// PostgreSQL fixes a `REPEATABLE READ` snapshot at the first statement that needs one, not at
+/// `BEGIN`, so one cheap statement here takes it.
 /// The transaction holds a connection and a snapshot until it is dropped, so the caller bounds
 /// its life.
 pub async fn begin_suppression_export(pool: &PgPool) -> Result<Tx, StoreError> {
-    crate::bounded::begin_snapshot_for(pool, EXPORT_PAGE_TIMEOUT).await
+    let mut tx = crate::bounded::begin_snapshot_for(pool, EXPORT_PAGE_TIMEOUT).await?;
+    sqlx::query("SELECT 1")
+        .execute(&mut *tx)
+        .await
+        .map_err(StoreError::query)?;
+    Ok(tx)
 }
 
 /// A page of suppressions, newest first by `(created_at, id)`, at most `limit`, after the
