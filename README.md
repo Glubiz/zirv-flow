@@ -102,7 +102,7 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `database.url` | URL, secret | required | scheme `postgres` or `postgresql` |
 | `database.max_connections` | u32 | 10 | at least 1 |
 | `database.migrate_on_start` | bool | false | none |
-| `worker.concurrency` | u32 | 4 | at least 1; `worker.drain_slots` (default `ingest.drain_shards`, 0 to 64) adds slots that each run one `ingest.drain` shard job, and 0 leaves it to these |
+| `worker.concurrency` | u32 | 4 | at least 1; `worker.drain_slots` (default `ingest.drain_shards`, 0 to 64) adds slots that each run one `ingest.drain` shard job, and 0 leaves it to these; `worker.webhook_slots` (default 2, 0 to 64) does the same for `webhook.call` |
 | `worker.lease_seconds` | u32 | 30 | at least 1 |
 | `worker.max_running_per_workspace` | u32 | unlimited | at least 1 when set |
 | `events.retention_days` | u32 | 760 | at least 1; within the two bounds below; see [Retention windows](docs/people.md#retention-windows) |

@@ -223,7 +223,7 @@ pub(crate) const ROUTES: &[Route] = table! {
     Post   "/api/v1/workspaces/{ws}/flows/{id}/pause" => PUBLISH @ audited("flow.paused");
     Post   "/api/v1/workspaces/{ws}/flows/{id}/resume" => PUBLISH @ audited("flow.resumed");
     Post   "/api/v1/workspaces/{ws}/flows/{id}/archive" => PUBLISH @ audited("flow.archived");
-    Put    "/api/v1/workspaces/{ws}/flows/{id}/warmup" => PUBLISH @ audited("flow.warmup_changed");
+    Put    "/api/v1/workspaces/{ws}/flows/{id}/warmup" => PUBLISH, "Publish; turning the warm-up off needs Admin, as it releases everyone waiting" @ audited("flow.warmup_changed");
     Post   "/api/v1/workspaces/{ws}/flows/{id}/warmup/open" => ADMIN @ audited("flow.warmup_opened");
     Get    "/api/v1/workspaces/{ws}/flows/{id}/enrollments" => READ;
     Post   "/api/v1/workspaces/{ws}/flows/{id}/enrollments" => EDIT @ not_audited("the enrollment is the record");
@@ -918,6 +918,15 @@ mod tests {
             return (
                 "editor (also view_pii or admin when person_id is set)",
                 "write (also pii or admin when person_id is set)",
+            );
+        }
+        if row
+            .note
+            .starts_with("Publish; turning the warm-up off needs Admin")
+        {
+            return (
+                "publisher (admin to turn it off)",
+                "publish (admin to turn it off)",
             );
         }
         if row.class == Class::Instance && row.note.starts_with("any authenticated principal") {

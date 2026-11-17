@@ -503,7 +503,7 @@ values.
 | POST | `/api/v1/workspaces/{ws}/flows/{id}/pause` | publisher | publish |
 | POST | `/api/v1/workspaces/{ws}/flows/{id}/resume` | publisher | publish |
 | POST | `/api/v1/workspaces/{ws}/flows/{id}/archive` | publisher | publish |
-| PUT | `/api/v1/workspaces/{ws}/flows/{id}/warmup` | publisher | publish |
+| PUT | `/api/v1/workspaces/{ws}/flows/{id}/warmup` | publisher (admin to turn it off) | publish (admin to turn it off) |
 | POST | `/api/v1/workspaces/{ws}/flows/{id}/warmup/open` | admin | admin |
 | GET | `/api/v1/workspaces/{ws}/flows/{id}/enrollments` | member | read |
 | POST | `/api/v1/workspaces/{ws}/flows/{id}/enrollments` | editor | write |

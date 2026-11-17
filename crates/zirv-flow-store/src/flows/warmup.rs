@@ -365,6 +365,23 @@ pub async fn set_warmup(
     enabled: bool,
     seconds: i32,
 ) -> Result<Warmup, FlowError> {
+    Ok(
+        set_warmup_counted(connection, workspace, flow, enabled, seconds)
+            .await?
+            .0,
+    )
+}
+
+/// [`set_warmup`], also returning how many waiting entries it queued again. Only when `enabled` is
+/// false is that the number released: a resize or an enable queues the waiting entries for new
+/// admission times and releases nobody.
+pub async fn set_warmup_counted(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    flow: Uuid,
+    enabled: bool,
+    seconds: i32,
+) -> Result<(Warmup, u64), FlowError> {
     if !(MIN_WARMUP_SECONDS..=MAX_WARMUP_SECONDS).contains(&seconds) {
         return Err(FlowError::WarmupOutOfBounds);
     }
@@ -389,12 +406,14 @@ pub async fn set_warmup(
     };
     // A new length moves every place in the window, so the waiting entries are queued again for
     // their new admission times. Turning it off lets them in now.
-    if !enabled {
-        queue_waiting(connection, workspace, flow, None).await?;
+    let queued = if !enabled {
+        queue_waiting(connection, workspace, flow, None).await?
     } else if let (Some(started), None) = (changed.started_at, changed.opened_at) {
-        queue_waiting(connection, workspace, flow, Some((started, seconds))).await?;
-    }
-    Ok(changed)
+        queue_waiting(connection, workspace, flow, Some((started, seconds))).await?
+    } else {
+        0
+    };
+    Ok((changed, queued))
 }
 
 /// Ends the window early and queues every waiting entry to run now. Returns how many waited.

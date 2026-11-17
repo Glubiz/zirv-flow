@@ -3,10 +3,12 @@
 //! returns together share one transaction, a savepoint each (#397).
 
 use std::collections::VecDeque;
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use futures_util::FutureExt;
 use hashbrown::HashMap;
 use sqlx::Connection;
 use tokio::sync::{Notify, oneshot, watch};
@@ -23,9 +25,9 @@ use zirv_flow_render::RenderPool;
 use zirv_flow_store::{
     ClaimFloors, ClaimedJob, Clock, DRAIN_JOB_KIND, DecisionRetention, EventRetention, FailOutcome,
     Heard, HmacKey, Keyring, MessageRetention, PgConnection, PgPool, RetentionSettings,
-    STEP_JOB_KIND, begin, cache_change_readers, claim_jobs_from, complete_job, complete_jobs,
-    confirm_lease, enqueue_drain_if_pending, fail_job, heartbeat_job, listen_for_jobs, lock_lease,
-    observe_pool, payload_shard, release_jobs, sized_like,
+    STEP_JOB_KIND, WEBHOOK_JOB_KIND, begin, cache_change_readers, claim_jobs_from, complete_job,
+    complete_jobs, confirm_lease, enqueue_drain_if_pending, fail_job, heartbeat_job,
+    listen_for_jobs, lock_lease, observe_pool, payload_shard, release_jobs, sized_like,
 };
 
 use crate::JobError;
@@ -61,6 +63,10 @@ pub struct WorkerConfig {
     /// then leave alone, so a drain never waits behind the other kinds in the queue. None keeps
     /// the drain with the general slots.
     pub drain_slots: usize,
+    /// Slots beside `concurrency` that claim only `webhook.call` jobs, which the general slots
+    /// then leave alone: a receiver that never answers holds these slots for its call, and no other
+    /// kind waits behind it. None keeps `webhook.call` with the general slots.
+    pub webhook_slots: usize,
     /// How long a claim lasts without a heartbeat.
     pub lease: Duration,
     /// How long an idle worker waits before looking again, when no notification arrives.
@@ -132,6 +138,7 @@ impl WorkerConfig {
         Self {
             concurrency: concurrency.max(1),
             drain_slots: 1,
+            webhook_slots: DEFAULT_WEBHOOK_SLOTS,
             lease: Duration::from_secs(30),
             poll_interval: Duration::from_secs(1),
             max_running_per_workspace: None,
@@ -193,19 +200,26 @@ struct Shared {
     listener_pool: PgPool,
     registry: Registry,
     config: WorkerConfig,
-    /// What the general slots claim: every kind, less `ingest.drain` while drain slots run.
+    /// What the general slots claim: every kind, less `ingest.drain` and `webhook.call` while
+    /// their slots run.
     kinds: Vec<&'static str>,
     /// How many slots claim only `ingest.drain`; none when the registry has no such kind.
     drain_slots: usize,
+    /// How many slots claim only `webhook.call`; none when the registry has no such kind.
+    webhook_slots: usize,
     /// Woken when a job of a kind the general slots claim is enqueued: one idle slot per
     /// notification. Polling covers a missed wake-up.
     wake_general: Notify,
     /// The same for the drain slots.
     wake_drain: Notify,
+    /// The same for the webhook slots.
+    wake_webhook: Notify,
     /// Where the general slots' claims start in each band, past the jobs claimed before.
     general_floors: ClaimFloors,
     /// The same for the drain slots.
     drain_floors: ClaimFloors,
+    /// The same for the webhook slots.
+    webhook_floors: ClaimFloors,
     /// Claim statements run, for tests that count them.
     #[cfg(test)]
     claims: std::sync::atomic::AtomicU64,
@@ -228,9 +242,14 @@ impl Shared {
         if drain_slots > 0 {
             kinds.retain(|kind| *kind != DRAIN_JOB_KIND);
         }
+        let webhook_slots = effective_webhook_slots(&registry, &config);
+        if webhook_slots > 0 {
+            kinds.retain(|kind| *kind != WEBHOOK_JOB_KIND);
+        }
         Self {
             kinds,
             drain_slots,
+            webhook_slots,
             pool,
             heartbeat_pool,
             listener_pool,
@@ -238,8 +257,10 @@ impl Shared {
             config,
             wake_general: Notify::new(),
             wake_drain: Notify::new(),
+            wake_webhook: Notify::new(),
             general_floors: ClaimFloors::default(),
             drain_floors: ClaimFloors::default(),
+            webhook_floors: ClaimFloors::default(),
             #[cfg(test)]
             claims: std::sync::atomic::AtomicU64::new(0),
             room: Notify::new(),
@@ -256,7 +277,7 @@ impl Shared {
     /// can stand for many jobs, so a slot whose claim comes back full wakes the next (see
     /// [`work`]). A kind no lane of this worker claims wakes nobody.
     fn wake_for(&self, kind: &str) {
-        for lane in [Lane::General, Lane::Drain] {
+        for lane in [Lane::General, Lane::Drain, Lane::Webhook] {
             if lane.kinds(self).contains(&kind) && self.slots_in(lane) > 0 {
                 lane.wake(self).notify_one();
             }
@@ -267,12 +288,14 @@ impl Shared {
     fn wake_all(&self) {
         self.wake_general.notify_waiters();
         self.wake_drain.notify_waiters();
+        self.wake_webhook.notify_waiters();
     }
 
     fn slots_in(&self, lane: Lane) -> usize {
         match lane {
             Lane::General => self.config.concurrency,
             Lane::Drain => self.drain_slots,
+            Lane::Webhook => self.webhook_slots,
         }
     }
 
@@ -300,8 +323,14 @@ impl Worker {
     /// dropped is cancelled and left to the reaper.
     pub async fn run(self, stop: watch::Receiver<bool>) {
         let drain_slots = effective_drain_slots(&self.registry, &self.config);
-        let slots =
-            u32::try_from(self.config.concurrency.saturating_add(drain_slots)).unwrap_or(u32::MAX);
+        let webhook_slots = effective_webhook_slots(&self.registry, &self.config);
+        let slots = u32::try_from(
+            self.config
+                .concurrency
+                .saturating_add(drain_slots)
+                .saturating_add(webhook_slots),
+        )
+        .unwrap_or(u32::MAX);
         let shared = Arc::new(Shared::new(
             sized_like(&self.pool, pool_size(slots), 0, ACQUIRE_TIMEOUT),
             // A warm pool keeps connecting off the heartbeat's path; a beat may wait one
@@ -322,6 +351,10 @@ impl Worker {
             let slot = shared.config.concurrency + slot;
             slots.spawn(work(Arc::clone(&shared), slot, Lane::Drain, stop.clone()));
         }
+        for slot in 0..shared.webhook_slots {
+            let slot = shared.config.concurrency + shared.drain_slots + slot;
+            slots.spawn(work(Arc::clone(&shared), slot, Lane::Webhook, stop.clone()));
+        }
         while slots.join_next().await.is_some() {}
         drop(listener);
         drop(sampler);
@@ -337,13 +370,26 @@ fn effective_drain_slots(registry: &Registry, config: &WorkerConfig) -> usize {
     }
 }
 
+/// The webhook slots a worker runs: those configured, when the registry has the kind they claim.
+fn effective_webhook_slots(registry: &Registry, config: &WorkerConfig) -> usize {
+    if registry.get(WEBHOOK_JOB_KIND).is_some() {
+        config.webhook_slots
+    } else {
+        0
+    }
+}
+
 /// What a slot claims.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Lane {
-    /// Every kind the worker runs, less `ingest.drain` when the worker has drain slots.
+    /// Every kind the worker runs, less `ingest.drain` and `webhook.call` when the worker has
+    /// slots for them.
     General,
     /// Only `ingest.drain`: a drain slot never waits behind another kind.
     Drain,
+    /// Only `webhook.call`: a call to a receiver that does not answer holds one of these slots
+    /// and no other kind's.
+    Webhook,
 }
 
 impl Lane {
@@ -352,6 +398,7 @@ impl Lane {
         match self {
             Self::General => &shared.kinds,
             Self::Drain => &DRAIN_KINDS,
+            Self::Webhook => &WEBHOOK_KINDS,
         }
     }
 
@@ -360,6 +407,7 @@ impl Lane {
         match self {
             Self::General => &shared.wake_general,
             Self::Drain => &shared.wake_drain,
+            Self::Webhook => &shared.wake_webhook,
         }
     }
 
@@ -368,20 +416,26 @@ impl Lane {
         match self {
             Self::General => &shared.general_floors,
             Self::Drain => &shared.drain_floors,
+            Self::Webhook => &shared.webhook_floors,
         }
     }
 
-    /// How many jobs a claim takes: a drain slot runs one drain at a time, so the rest stay
-    /// ready for the other drain slots instead of being held behind a long run.
+    /// How many jobs a claim takes: a drain slot runs one drain at a time, and a webhook slot one
+    /// call, so the rest stay ready for the other slots of the lane instead of being held behind
+    /// a long run.
     fn batch(self) -> u32 {
         match self {
             Self::General => CLAIM_BATCH,
-            Self::Drain => 1,
+            Self::Drain | Self::Webhook => 1,
         }
     }
 }
 
 const DRAIN_KINDS: [&str; 1] = [DRAIN_JOB_KIND];
+const WEBHOOK_KINDS: [&str; 1] = [WEBHOOK_JOB_KIND];
+
+/// The webhook slots a worker runs unless told otherwise.
+const DEFAULT_WEBHOOK_SLOTS: usize = 2;
 
 /// The shared pool's size: each slot holds its job transaction plus one drain-batch
 /// transaction, and one connection is kept for failures.
@@ -823,7 +877,7 @@ pub(crate) fn retry_delay(backoff: Duration, asked: Option<Duration>, cap: Durat
 fn failure_delay(shared: &Shared, job: &ClaimedJob, retry_after: Option<Duration>) -> Duration {
     retry_delay(
         backoff(
-            u32::try_from(job.attempts).unwrap_or(u32::MAX),
+            u32::try_from(job.attempts.saturating_sub(1)).unwrap_or(u32::MAX),
             shared.config.backoff_base,
             shared.config.backoff_cap,
             random_unit(),
@@ -1064,8 +1118,8 @@ async fn process_wakes(shared: &Arc<Shared>, wakes: Wakes) -> Vec<(Uuid, Outcome
     ));
     let ran = match (&mut task.0).await {
         Ok(ran) => ran,
-        // A panicking handler fails every wake begun, as it fails a job alone: the transaction
-        // rolled back with the task.
+        // A panic outside a wake's handler (each is caught beside its savepoint) fails every wake
+        // begun: the transaction rolled back with the task.
         Err(_) => queue
             .begun()
             .into_iter()
@@ -1334,7 +1388,8 @@ async fn attempt_wake(
     )));
     let result = {
         let mut ctx = configured(shared, JobContext::new(&mut *connection, job)).with_wakes(batch);
-        let handler = kind.run(&mut ctx, job.payload.clone());
+        // A panic fails this wake alone: the others of the batch keep their savepoints.
+        let handler = AssertUnwindSafe(kind.run(&mut ctx, job.payload.clone())).catch_unwind();
         tokio::select! {
             result = handler => Some(result),
             // Dropping the handler cancels it; its savepoint rolls back.
@@ -1343,12 +1398,28 @@ async fn attempt_wake(
     };
     match result {
         None => (Attempt::LeaseLost, None),
-        Some(Err(error)) => (
+        Some(Err(panic)) => {
+            warn!(panic = %panic_text(&*panic), "a wake's job handler panicked");
+            (
+                Attempt::Failed("the job handler panicked".into(), None),
+                None,
+            )
+        }
+        Some(Ok(Err(error))) => (
             Attempt::Failed(error.to_string(), error.retry_after()),
             None,
         ),
-        Some(Ok(())) => (Attempt::Completed, Some(heartbeat)),
+        Some(Ok(Ok(()))) => (Attempt::Completed, Some(heartbeat)),
     }
+}
+
+/// The message a panic carried, when it was a string.
+fn panic_text(panic: &(dyn std::any::Any + Send)) -> &str {
+    panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("not a string")
 }
 
 /// Runs `jobs`, the `flow.step` jobs of `workspace` that one claim returned, in one batch
@@ -1435,7 +1506,9 @@ mod tests {
     use zirv_flow_core::{
         Cause, HmacPurpose, HmacRoot, MasterKey, Slug, TraceContext, WorkspaceName,
     };
-    use zirv_flow_store::{NewJob, QueueCounts, claim_job, enqueue, find_job, queue_counts};
+    use zirv_flow_store::{
+        NewJob, QueueCounts, claim_job, claim_jobs, enqueue, find_job, queue_counts,
+    };
 
     use super::*;
     use crate::{JobError, JobKind};
@@ -1631,6 +1704,7 @@ mod tests {
         WorkerConfig {
             concurrency,
             drain_slots: 0,
+            webhook_slots: 0,
             lease: Duration::from_secs(30),
             poll_interval: Duration::from_millis(20),
             max_running_per_workspace: None,
@@ -1761,6 +1835,37 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_first_failure_waits_the_backoff_base_not_twice_it() {
+        let pool = PgPool::connect_lazy("postgres://localhost/none").unwrap();
+        let mut config = test_config(1);
+        config.backoff_base = Duration::from_secs(5);
+        config.backoff_cap = Duration::from_secs(3600);
+        let shared = Shared::new(
+            pool.clone(),
+            pool.clone(),
+            pool,
+            Registry::built_in(),
+            config,
+        );
+
+        // `attempts` is already counted at claim, so the first failure has attempts == 1.
+        let mut job = claimed("test.fails", None, 1);
+        assert_eq!(job.attempts, 1);
+        let delay = failure_delay(&shared, &job, None);
+        assert!(
+            delay <= Duration::from_secs(5),
+            "the first retry waits the base (jittered down), got {delay:?}"
+        );
+
+        job.attempts = 2;
+        let delay = failure_delay(&shared, &job, None);
+        assert!(
+            (Duration::from_secs(5)..=Duration::from_secs(10)).contains(&delay),
+            "the second retry waits twice the base (jittered down), got {delay:?}"
+        );
     }
 
     #[test]
@@ -3294,6 +3399,96 @@ mod tests {
         assert_eq!(Lane::General.batch(), CLAIM_BATCH);
     }
 
+    #[tokio::test]
+    async fn webhook_slots_default_to_two_and_a_webhook_lane_claims_one_call_at_a_time() {
+        let pool = PgPool::connect_lazy("postgres://localhost/none").unwrap();
+        assert_eq!(WorkerConfig::new(4).webhook_slots, 2);
+        assert_eq!(
+            effective_webhook_slots(&Registry::built_in(), &WorkerConfig::new(4)),
+            2
+        );
+        assert_eq!(Lane::Webhook.batch(), 1);
+
+        let with = |slots| {
+            let mut config = test_config(2);
+            config.webhook_slots = slots;
+            Shared::new(pool.clone(), pool.clone(), pool.clone(), registry(), config)
+        };
+        let lane = with(2);
+        assert!(
+            !lane.kinds.contains(&WEBHOOK_JOB_KIND),
+            "the general slots leave it"
+        );
+        assert_eq!(Lane::Webhook.kinds(&lane), [WEBHOOK_JOB_KIND]);
+        assert_eq!(
+            (lane.slots_in(Lane::General), lane.slots_in(Lane::Webhook)),
+            (2, 2)
+        );
+        let none = with(0);
+        assert!(
+            none.kinds.contains(&WEBHOOK_JOB_KIND),
+            "no slots: the general slots claim it"
+        );
+        assert_eq!(none.slots_in(Lane::Webhook), 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_webhook_slot_claims_only_calls_and_a_general_slot_never_does(pool: PgPool) {
+        migrated(&pool).await;
+        let mut config = test_config(1);
+        config.webhook_slots = 1;
+        let shared = Arc::new(Shared::new(
+            pool.clone(),
+            pool.clone(),
+            pool.clone(),
+            registry(),
+            config,
+        ));
+        let call = new_job(WEBHOOK_JOB_KIND);
+        enqueue(&pool, &call).await.unwrap();
+        let mut effect = new_job("test.effect");
+        effect.payload = json!({"index": 1});
+        enqueue(&pool, &effect).await.unwrap();
+        let attempts = || async {
+            sqlx::query_scalar::<_, i32>("SELECT attempts FROM jobs WHERE kind = 'webhook.call'")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        };
+
+        // A general slot runs the effect and leaves the call.
+        let (stop, stopped) = watch::channel(false);
+        let general = tokio::spawn(work(Arc::clone(&shared), 0, Lane::General, stopped));
+        eventually("the effect to run", || async {
+            effect_count(&pool).await == 1
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            attempts().await,
+            0,
+            "the general slot never claimed the call"
+        );
+        stop.send(true).unwrap();
+        general.await.unwrap();
+
+        // A webhook slot claims the call (its payload is no call, so it fails and is retried).
+        let (stop, stopped) = watch::channel(false);
+        let webhook = tokio::spawn(work(Arc::clone(&shared), 1, Lane::Webhook, stopped));
+        eventually("the webhook slot to claim the call", || async {
+            let claimed: Option<i32> =
+                sqlx::query_scalar("SELECT attempts FROM jobs WHERE kind = 'webhook.call'")
+                    .fetch_optional(&pool)
+                    .await
+                    .unwrap();
+            claimed.is_none_or(|attempts| attempts > 0)
+        })
+        .await;
+        stop.send(true).unwrap();
+        webhook.await.unwrap();
+    }
+
     /// A job a slot gives back keeps its `run_at`, below the floor the claim that took it moved
     /// to, so giving it back expires the floors: the lane's next claim walks from the start and
     /// takes it again, oldest first.
@@ -3346,6 +3541,112 @@ mod tests {
             again.iter().map(|job| job.id).collect::<Vec<_>>(),
             [ids[0]],
             "the job given back is claimed again"
+        );
+    }
+
+    /// A `flow.step` stand-in that panics on a payload with `boom`.
+    struct PanickingStep;
+
+    impl JobKind for PanickingStep {
+        const KIND: &'static str = STEP_JOB_KIND;
+
+        async fn run(&self, _ctx: &mut JobContext<'_>, payload: Value) -> Result<(), JobError> {
+            if payload["boom"] == true {
+                panic!("poison wake");
+            }
+            Ok(())
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_panicking_wake_fails_alone_and_the_healthy_wakes_of_its_batch_complete(
+        pool: PgPool,
+    ) {
+        migrated(&pool).await;
+        let workspace = workspace(&pool).await;
+        let shared = Arc::new(Shared::new(
+            pool.clone(),
+            pool.clone(),
+            pool.clone(),
+            Registry::only(&PanickingStep),
+            test_config(1),
+        ));
+        let enqueue_wake = |boom: bool, age: i64| {
+            let mut job = new_job(STEP_JOB_KIND);
+            job.workspace_id = Some(workspace);
+            job.payload = json!({ "boom": boom });
+            job.run_at = Some(time::OffsetDateTime::now_utc() - time::Duration::seconds(age));
+            job.max_attempts = 2;
+            let pool = pool.clone();
+            async move { enqueue(&pool, &job).await }
+        };
+        let run = |claimed: Vec<ClaimedJob>| {
+            let shared = Arc::clone(&shared);
+            async move {
+                let now = tokio::time::Instant::now();
+                let (_running, stop) = watch::channel(false);
+                process_wakes(
+                    &shared,
+                    Wakes {
+                        workspace,
+                        queue: Arc::new(Queue::new(claimed)),
+                        claimed: now,
+                        deadline: now + Duration::from_secs(3600),
+                        stop,
+                    },
+                )
+                .await
+            }
+        };
+        let claim = || {
+            claim_jobs(
+                &pool,
+                "w",
+                &[STEP_JOB_KIND],
+                Duration::from_secs(30),
+                None,
+                10,
+            )
+        };
+        let remaining = || async {
+            sqlx::query_as::<_, (i32, Option<String>)>(
+                "SELECT attempts, last_error FROM jobs ORDER BY run_at",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+        };
+
+        for (boom, age) in [(false, 40), (false, 30), (false, 20), (true, 10)] {
+            enqueue_wake(boom, age).await.unwrap();
+        }
+        run(claim().await.unwrap()).await;
+
+        // Only the panicking wake is left, with its one attempt counted.
+        assert_eq!(
+            remaining().await,
+            [(1, Some("the job handler panicked".to_owned()))],
+            "the healthy wakes completed in their savepoints"
+        );
+
+        // Its last attempt buries it, and healthy wakes of its batches never lose an attempt.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        enqueue_wake(false, 30).await.unwrap();
+        enqueue_wake(false, 20).await.unwrap();
+        run(claim().await.unwrap()).await;
+
+        assert_eq!(
+            queue_counts(&pool).await.unwrap(),
+            QueueCounts {
+                ready: 0,
+                running: 0,
+                dead: 1
+            }
+        );
+        assert_eq!(
+            remaining().await,
+            [(2, Some("the job handler panicked".to_owned()))]
         );
     }
 }

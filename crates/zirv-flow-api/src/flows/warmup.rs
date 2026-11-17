@@ -29,7 +29,9 @@ pub(crate) struct WarmupRequest {
 
 /// Turns the warm-up of a flow on or off and sets its length. A window already running keeps its
 /// start and counts the new length from it; turning it off lets everyone waiting in at once.
-/// Needs the publisher role and is audited as `flow.warmup_changed`.
+/// Turning it on or changing its length needs the publisher role; turning it off needs the admin
+/// role, like ending the window early. Audited as `flow.warmup_changed`, with how many were
+/// released.
 #[utoipa::path(
     put,
     operation_id = "set_flow_warmup",
@@ -43,7 +45,7 @@ pub(crate) struct WarmupRequest {
     responses(
         (status = 200, description = "The flow with its new warm-up", body = FlowDetailBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
-        (status = 403, description = "Not a publisher, a key without the publish scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "Not a publisher, or not an admin when turning the warm-up off, a key without the publish (or admin) scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or flow, or no access", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "The flow is archived (`code` is `flow_archived`)", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "A length outside 60 to 86400 seconds", body = Problem, content_type = "application/problem+json")
@@ -56,20 +58,29 @@ pub(crate) async fn set(
     Path((ws, id)): Path<(String, String)>,
     ApiJson(body): ApiJson<WarmupRequest>,
 ) -> Result<Json<FlowDetailBody>, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Publish).await?;
+    // Turning it off admits everyone held back, which is what `open` does, so it needs the same role.
+    let need = if body.enabled {
+        Need::Publish
+    } else {
+        Need::Admin
+    };
+    let workspace = authorize(&state, &principal, path_id(&ws)?, need).await?;
     let id = path_id(&id)?;
     check_seconds(body.seconds)?;
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
-    zirv_flow_store::set_warmup(&mut tx, workspace.id, id, body.enabled, body.seconds)
-        .await
-        .map_err(flow_error)?;
+    let (_, queued) =
+        zirv_flow_store::set_warmup_counted(&mut tx, workspace.id, id, body.enabled, body.seconds)
+            .await
+            .map_err(flow_error)?;
+    // Only turning it off admits the people waiting; a resize queues them again for new times.
+    let released = if body.enabled { 0 } else { queued };
     admin::audit(
         &mut tx,
         &principal.context(),
         Some(workspace.id),
         "flow.warmup_changed",
         Some(("flow", id)),
-        json!({ "enabled": body.enabled, "seconds": body.seconds }),
+        json!({ "enabled": body.enabled, "seconds": body.seconds, "released": released }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
