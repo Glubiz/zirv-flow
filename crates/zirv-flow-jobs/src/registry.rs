@@ -95,6 +95,12 @@ impl Registry {
         self
     }
 
+    /// Only `kind`: a test kind that stands in for a built-in one (`get` takes the first match).
+    #[cfg(test)]
+    pub(crate) fn only(kind: &'static dyn ErasedKind) -> Self {
+        Self { kinds: vec![kind] }
+    }
+
     pub fn get(&self, kind: &str) -> Option<&'static dyn ErasedKind> {
         self.kinds.iter().copied().find(|k| k.kind() == kind)
     }
@@ -197,6 +203,7 @@ mod tests {
                 "kafka.consume",
                 "messages.retention",
                 "sync.run",
+                "webhook.call",
             ]
         );
         assert!(

@@ -167,7 +167,7 @@ use it:
 
 | Command | What it does |
 |---------|--------------|
-| `zirv-flow worker` | Claims and runs jobs, `worker.concurrency` at a time, plus `worker.drain_slots` slots that run only `ingest.drain`. Run as many as you like. |
+| `zirv-flow worker` | Claims and runs jobs, `worker.concurrency` at a time, plus `worker.drain_slots` slots that run only `ingest.drain` and `worker.webhook_slots` slots that run only `webhook.call`. Run as many as you like. |
 | `zirv-flow scheduler` | Elected leader (an advisory lock; the others stand by and take over within seconds): enqueues due cron schedules, returns jobs with expired leases to the queue, keeps the decision log and event partitions for this and next month, expires person exports hourly, deletes import files and rejects past their retention (see [CSV import](../guide/sources.md#csv-import)), and exports queue gauges. |
 | `zirv-flow all` | `serve`, `worker` and `scheduler` in one process (the default). |
 
@@ -186,7 +186,12 @@ means `ingest.drain_shards`, so one worker runs every shard at once; with severa
 so the slots of all workers together are at least `ingest.drain_shards` (for example 8 shards over
 3 workers: 3 slots each). A drain slot that completes a run enqueues the same shard's next drain at once
 when its buckets still hold rows. With `worker.drain_slots` at 0 the general slots claim the
-drain, and a batch holds at most one, so due drains spread over the slots. A running job holds a lease of
+drain, and a batch holds at most one, so due drains spread over the slots.
+The worker likewise keeps `worker.webhook_slots` slots (default 2, 0 to 64) that claim only `webhook.call`,
+one call at a time, which the general slots then leave alone: a receiver that never answers holds
+a webhook slot for its call (30 s a hop) and no other kind waits behind it. A webhook call holds its
+connection but no open job transaction with an id while the receiver answers. With
+`worker.webhook_slots` at 0 the general slots claim the calls. A running job holds a lease of
 `worker.lease_seconds`, which its worker extends every third of that while the
 handler runs. A claimed job waits for its turn on the lease from its claim: the
 slot gives the jobs it has not started back to the queue a sixth of the lease (at

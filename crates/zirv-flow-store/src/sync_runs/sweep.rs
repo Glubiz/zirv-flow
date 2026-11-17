@@ -15,7 +15,7 @@ use zirv_flow_core::decision_actions;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use super::batch::{DELETE_BY_SWEEP, Unfenced, fence_run};
-use crate::people::remove_contribution_in;
+use crate::people::remove_contributions_in;
 use crate::{NewDecision, PgPool, StoreError, append_decisions, begin, commit};
 
 /// The most records one sweep unit removes.
@@ -94,29 +94,28 @@ pub async fn sweep_unreached(
     .await
     .map_err(StoreError::query)?;
 
-    let mut decisions = Vec::new();
-    for (_, key) in &unreached {
-        let removed = remove_contribution_in(
-            &mut tx,
-            unit.workspace,
-            unit.source,
-            unit.stream,
-            key,
-            unit.trace,
-        )
-        .await?;
-        if let Some(removed) = removed {
-            decisions.push(NewDecision {
-                graph: None,
-                workspace_id: unit.workspace,
-                trace: unit.trace.clone(),
-                spec: &decision_actions::SYNC_RECORD_DELETED,
-                detail: Some(DELETE_BY_SWEEP),
-                subject_ids: vec![("source_record", removed.record_id)],
-                job: Some((unit.job_id, unit.attempt)),
-            });
-        }
-    }
+    let keys: Vec<String> = unreached.iter().map(|(_, key)| key.clone()).collect();
+    let removed = remove_contributions_in(
+        &mut tx,
+        unit.workspace,
+        unit.source,
+        unit.stream,
+        &keys,
+        unit.trace,
+    )
+    .await?;
+    let decisions: Vec<NewDecision> = removed
+        .into_iter()
+        .map(|(_, removed)| NewDecision {
+            graph: None,
+            workspace_id: unit.workspace,
+            trace: unit.trace.clone(),
+            spec: &decision_actions::SYNC_RECORD_DELETED,
+            detail: Some(DELETE_BY_SWEEP),
+            subject_ids: vec![("source_record", removed.record_id)],
+            job: Some((unit.job_id, unit.attempt)),
+        })
+        .collect();
     let removed = i64::try_from(decisions.len()).unwrap_or(i64::MAX);
     append_decisions(&mut tx, &decisions).await?;
     if removed > 0 {
@@ -743,5 +742,33 @@ mod tests {
         )
         .await;
         assert_eq!(jobs, 1);
+    }
+
+    /// The statements `sweep_unreached` runs for `n` unreached records.
+    async fn sweep_statements(pool: &PgPool, n: usize) -> Vec<String> {
+        let fx = second_run(pool, n).await;
+        let source = fx.source_id.to_string();
+        let (swept, statements) =
+            crate::people::statements_of(sweep_unreached(pool, &unit(&fx, &source, None))).await;
+        let SweepOutcome::Swept { removed, .. } = swept.unwrap() else {
+            panic!("the sweep did not sweep");
+        };
+        assert_eq!(removed, i64::try_from(n).unwrap());
+        statements
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_sweep_removes_its_records_in_statements_that_do_not_grow_with_their_number(
+        pool: PgPool,
+    ) {
+        let statements = sweep_statements(&pool, 50).await;
+
+        eprintln!("MEASURE705 statements={}", statements.len());
+        let ran = |needle: &str| statements.iter().filter(|sql| sql.contains(needle)).count();
+        assert_eq!(ran("UPDATE source_records s SET deleted_at"), 1);
+        assert_eq!(ran("FROM identities i"), 1);
+        assert_eq!(ran("DELETE FROM events"), 1);
+        assert!(statements.len() < 40, "{} statements", statements.len());
     }
 }

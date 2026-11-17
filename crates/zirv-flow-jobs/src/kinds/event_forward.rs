@@ -99,7 +99,7 @@ fn plan(verdict: &Verdict, attempts: i32, now: OffsetDateTime, unit: f64) -> Pla
             }
             let delay = retry_delay(
                 backoff(
-                    u32::try_from(attempts).unwrap_or(u32::MAX),
+                    u32::try_from(attempts.saturating_sub(1)).unwrap_or(u32::MAX),
                     BACKOFF_BASE,
                     BACKOFF_CAP,
                     unit,
@@ -429,7 +429,9 @@ mod tests {
             .collect();
 
         assert!(waits.windows(2).all(|pair| pair[0] < pair[1]), "{waits:?}");
-        assert_eq!(waits[0], Duration::from_secs(10));
+        // The first retry waits the base, then it doubles.
+        assert_eq!(waits[0], BACKOFF_BASE);
+        assert_eq!(waits[1], BACKOFF_BASE * 2);
         assert_eq!(
             plan(&retry("http_5xx", None), MAX_ATTEMPTS, NOW, 1.0),
             Plan::Dead { reason: "http_5xx" }
@@ -444,7 +446,7 @@ mod tests {
         };
 
         assert_eq!(at(Duration::from_secs(120)), Duration::from_secs(120));
-        assert_eq!(at(Duration::from_secs(1)), Duration::from_secs(10));
+        assert_eq!(at(Duration::from_secs(1)), BACKOFF_BASE);
         assert_eq!(at(Duration::from_secs(86_400)), BACKOFF_CAP);
     }
 

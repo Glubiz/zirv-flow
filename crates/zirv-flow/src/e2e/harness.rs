@@ -270,6 +270,9 @@ impl World {
 
         let mut config = WorkerConfig::new(1).with_egress(loopback);
         config.poll_interval = Duration::from_millis(50);
+        // A first retry waits 5 to 10 s, past `settle`'s 3 s horizon, so a scenario's retries run
+        // only when it makes them due.
+        config.backoff_base = Duration::from_secs(10);
         config.clock = clock;
         config.render_pool = Some(render.clone());
         config.dns = Some(Arc::new(dns.clone()));

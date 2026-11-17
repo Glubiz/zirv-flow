@@ -131,6 +131,13 @@ enum Prepared {
 impl JobKind for WebhookCall {
     const KIND: &'static str = WEBHOOK_JOB_KIND;
 
+    /// Before the call the handler only reads, so its lease is confirmed with a plain read and the
+    /// job transaction takes no id while the call runs (#708). The outcome and the completion are
+    /// written after it, in this transaction, which a late attempt that lost its lease rolls back.
+    /// A heartbeat that fails can let the reaper run the job again, which calls again under the
+    /// same idempotency key, as a lost lease always did.
+    const LOCKS_LEASE: bool = false;
+
     async fn run(&self, ctx: &mut JobContext<'_>, payload: Value) -> Result<(), JobError> {
         let call = Call::parse(&payload)
             .ok_or_else(|| JobError::new("the payload is not a webhook call"))?;
@@ -2066,5 +2073,62 @@ mod tests {
         assert_eq!(hits.len(), 1);
         let body: Value = serde_json::from_slice(&hits[0].body).unwrap();
         assert_eq!(body, json!({"order": "A-77"}));
+    }
+
+    /// A receiver that does not answer holds one webhook slot and no other work: the next call goes
+    /// out on another webhook slot of a pool whose only general slot is free, and the call in
+    /// flight holds no open job transaction that has an id (#708).
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_slow_receiver_does_not_hold_the_only_worker_slot_or_an_open_job_transaction(
+        pool: PgPool,
+    ) {
+        let mut env = Env::new(pool).await;
+        env.sign_with_a_secret().await;
+        let (ada, first) = env.enrolled().await;
+        let bob = env.person("bob@example.com", json!({"plan": "pro"})).await;
+        let second = env
+            .enroll(hook_graph(&env.url(), json!(["plan", "age"])), bob)
+            .await;
+        env.queue(&first, ada, 5).await;
+        let gate = env.mock.hold();
+        let mut config = WorkerConfig::new(1).with_egress(env.egress.clone());
+        config.poll_interval = Duration::from_millis(20);
+        config.keyring = Some(env.keyring.clone());
+        let (stop, stopped) = watch::channel(false);
+        // Only this kind runs: the enrollments' own steps would queue their calls too.
+        let handle = tokio::spawn(
+            Worker::new(env.pool.clone(), Registry::only(&WebhookCall), config).run(stopped),
+        );
+        gate.entered.notified().await;
+        env.queue(&second, bob, 5).await;
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        // The second call answered and its job ended; only the first is out.
+        while (env.mock.hits().len() < 2 || env.jobs_left().await > 1) && Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let hits = env.mock.hits().len();
+        let open_with_an_id = env
+            .count(
+                "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() \
+                 AND state = 'idle in transaction' AND backend_xid IS NOT NULL",
+            )
+            .await;
+        gate.release.notify_one();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while env.jobs_left().await > 0 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        stop.send(true).unwrap();
+        handle.await.unwrap();
+
+        assert_eq!(hits, 2, "the second call was made while the first was out");
+        assert_eq!(
+            open_with_an_id, 0,
+            "no job transaction holds an id for the call"
+        );
+        assert_eq!(env.jobs_left().await, 0);
     }
 }
