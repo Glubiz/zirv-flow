@@ -15,3 +15,15 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v1.0.18 (2026-11-17)
+
+### Fixes
+
+- guard the export snapshot in the store and answer 422 on rotating an equal-header hook
+- review round 1 findings for the export, the covering index and the header check (#737, #739, #740)
+- contacts, webhooks, preferences, export, stats, debugger and stream review findings (#734-#740, #754, #755)
+
+### Chores
+
+- restore a line continuation in the preference page markup
+
