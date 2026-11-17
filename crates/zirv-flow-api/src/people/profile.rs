@@ -185,6 +185,7 @@ pub(crate) async fn get(
         .await?
         .ok_or_else(ApiError::not_found)?;
     let reveal = may_view_pii(&state, &principal, workspace.id).await;
+    // Consent and lists are separate reads of the survivor, and may be newer than the profile.
     let consent = zirv_flow_store::consent_for(&state.pool, workspace.id, profile.id)
         .await?
         .unwrap_or_default();

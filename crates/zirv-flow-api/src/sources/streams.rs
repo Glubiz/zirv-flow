@@ -17,15 +17,15 @@ use zirv_flow_connectors::sources::{
 use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::mapping::{self, Header, Mapping, MappingError, TraitState};
 use zirv_flow_store::{
-    PartitionLag, RunKind, RunTrigger, Source, Stream, StreamFreshness, StreamSettings,
-    cancel_consumer_runs, queue_run, stream_lag,
+    PartitionLag, PgConnection, RunKind, RunTrigger, Source, Stream, StreamFreshness,
+    StreamSettings, cancel_consumer_runs, queue_run, stream_lag,
 };
 
 use super::crud::SCHEDULE_TIMEZONE;
 use super::problems;
 use crate::AppState;
 use crate::admin::{self, Context};
-use crate::auth::{Need, Principal, authorize, may_view_pii, path_id};
+use crate::auth::{Need, Principal, authorize, is_admin, path_id};
 use crate::imports::MappingBody;
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
@@ -696,24 +696,22 @@ pub(crate) async fn configure(
     .await?;
     // A stream-mode stream that is enabled and mapped has a consumer: enabling it starts one, and
     // anything else that stops it cancels the one it had.
-    let run_started =
-        if mode == SyncMode::Stream && source.enabled && stream.enabled && stream.mapping.is_some()
-        {
-            queue_run(
-                &mut tx,
-                workspace,
-                source_id,
-                stream.id,
-                RunKind::Sync,
-                RunTrigger::Manual,
-                None,
-            )
-            .await?
-            .is_some()
-        } else {
-            cancel_consumer_runs(&mut tx, workspace, source_id, Some(stream.id)).await?;
-            false
-        };
+    let run_started = if has_consumer(&source, &stream, mode) {
+        queue_run(
+            &mut tx,
+            workspace,
+            source_id,
+            stream.id,
+            RunKind::Sync,
+            RunTrigger::Manual,
+            None,
+        )
+        .await?
+        .is_some()
+    } else {
+        cancel_consumer_runs(&mut tx, workspace, source_id, Some(stream.id)).await?;
+        false
+    };
     admin::audit(
         &mut tx,
         context,
@@ -769,10 +767,46 @@ pub(crate) async fn list(
         .await?
         .ok_or_else(ApiError::not_found)?;
     let streams = zirv_flow_store::list_streams(&state.pool, workspace.id, source).await?;
-    let admin = may_view_pii(&state, &principal, workspace.id).await;
+    let admin = is_admin(&state, &principal, workspace.id).await;
     Ok(Json(
         bodies(&state, workspace.id, source, &streams, admin).await?,
     ))
+}
+
+/// Whether the stream has a consumer: it is in stream mode, enabled and mapped, and so is its
+/// source. A pull stream is started by its cron, never here.
+pub(super) fn has_consumer(source: &Source, stream: &Stream, mode: SyncMode) -> bool {
+    mode == SyncMode::Stream && source.enabled && stream.enabled && stream.mapping.is_some()
+}
+
+/// Starts the consumer of every stream of `source` that should have one, after the source was
+/// enabled again (disabling it cancelled them). A stream that already has an active run keeps
+/// it. Returns how many were started.
+pub(super) async fn restart_consumers(
+    tx: &mut PgConnection,
+    workspace: WorkspaceId,
+    source: &Source,
+) -> Result<usize, ApiError> {
+    let mut started = 0;
+    for stream in zirv_flow_store::list_streams(&mut *tx, workspace, source.id).await? {
+        let mode = SyncMode::parse(&stream.sync_mode);
+        if mode.is_some_and(|mode| has_consumer(source, &stream, mode))
+            && queue_run(
+                &mut *tx,
+                workspace,
+                source.id,
+                stream.id,
+                RunKind::Sync,
+                RunTrigger::Manual,
+                None,
+            )
+            .await?
+            .is_some()
+        {
+            started += 1;
+        }
+    }
+    Ok(started)
 }
 
 /// Sets whether a stream is read and how: sync mode, cursor field, primary key and staleness

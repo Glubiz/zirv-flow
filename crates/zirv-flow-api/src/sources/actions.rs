@@ -46,7 +46,22 @@ pub(crate) struct Prepared {
     pub(crate) source: Source,
     pub(crate) driver: &'static dyn ErasedSource,
     pub(crate) credential: Credential,
+    /// The version of the linked credential the call opened or an older one, to tell whether it
+    /// changed during the call: `None` for a source with no credential.
+    pub(crate) credential_version: Option<CredentialVersion>,
     pub(crate) context: SourceContext,
+}
+
+/// What changes when a credential is rotated or edited in place: its sealed secret, its rotation
+/// time and its update time. The id stays.
+pub(crate) type CredentialVersion = (Uuid, time::OffsetDateTime, time::OffsetDateTime);
+
+fn version_of(credential: &zirv_flow_store::WorkspaceCredential) -> CredentialVersion {
+    (
+        credential.secret_id,
+        credential.rotated_at,
+        credential.updated_at,
+    )
 }
 
 /// The network context of a call for source `id` of type `kind`. Its requests are counted by the
@@ -80,6 +95,14 @@ pub(crate) async fn prepare(
         .await?
         .ok_or_else(ApiError::not_found)?;
     let driver = registry().get(&source.kind).ok_or_else(kind_unavailable)?;
+    // Read before the credential is opened, so a change in between shows as a different version
+    // at the end of the call, never as a version the call did not use.
+    let credential_version = match source.credential_id {
+        Some(credential) => zirv_flow_store::find_credential(&state.pool, workspace, credential)
+            .await?
+            .map(|credential| version_of(&credential)),
+        None => None,
+    };
     let mut credential = resolve::load(state, workspace, source.credential_id).await?;
     let context = network_context(
         state,
@@ -93,6 +116,7 @@ pub(crate) async fn prepare(
         source,
         driver,
         credential,
+        credential_version,
         context,
     })
 }
@@ -263,6 +287,33 @@ pub(crate) async fn discover_source(
         })
         .collect();
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
+    // The descriptors describe what the source was when it was called: a save that replaced its
+    // settings or credential during the call (it takes this lock too) makes them stale.
+    let locked = zirv_flow_store::find_source_for_update(&mut tx, workspace, id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    // The credential keeps its id when it is rotated or edited, and different credentials can
+    // expose different streams: the one the call opened must still be the live one. Its share
+    // lock holds a rotation or an edit off until this commits.
+    let credential_changed = match locked.credential_id {
+        Some(credential) => {
+            zirv_flow_store::lock_credential_for_use(&mut tx, workspace, credential)
+                .await?
+                .map(|credential| version_of(&credential))
+                != call.credential_version
+        }
+        None => call.credential_version.is_some(),
+    };
+    if locked.config != call.source.config
+        || locked.credential_id != call.source.credential_id
+        || credential_changed
+    {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "the source was changed while it was being read; run discovery again",
+        )
+        .with_code("source_changed"));
+    }
     let streams = zirv_flow_store::upsert_discovered_streams(&mut tx, workspace, id, &discovered)
         .await?
         .ok_or_else(ApiError::not_found)?;
@@ -415,7 +466,7 @@ pub(crate) async fn test(
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a missing scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or source, or no access", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "The source type is not in this build", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "The source type is not in this build, or the source was changed while it was being read (`code` is `source_changed`); run discovery again", body = Problem, content_type = "application/problem+json"),
         (status = 502, description = "The source refused or failed the request", body = Problem, content_type = "application/problem+json"),
         (status = 503, description = "The server has no master key to open the credential", body = Problem, content_type = "application/problem+json"),
         (status = 504, description = "The source did not answer in time", body = Problem, content_type = "application/problem+json")

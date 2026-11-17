@@ -266,16 +266,29 @@ pub async fn unknown_dimension_entry(
     workspace: WorkspaceId,
     dimensions: &Dimensions,
 ) -> Result<Option<(String, String)>, StoreError> {
+    unknown_dimension_entry_with(connection, workspace, dimensions, false).await
+}
+
+/// [`unknown_dimension_entry`], and with `include_archived` an archived dimension or value is
+/// known too: a state an import restores may be scoped to one. One that does not exist at all is
+/// still unknown.
+pub(super) async fn unknown_dimension_entry_with(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    dimensions: &Dimensions,
+    include_archived: bool,
+) -> Result<Option<(String, String)>, StoreError> {
     for (key, value) in dimensions {
         let known: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM consent_dimensions d \
                 JOIN consent_dimension_values v ON v.dimension_id = d.id \
                 WHERE d.workspace_id = $1 AND d.key = $2 AND v.key = $3 \
-                  AND d.archived_at IS NULL AND v.archived_at IS NULL)",
+                  AND ($4 OR (d.archived_at IS NULL AND v.archived_at IS NULL)))",
         )
         .bind(workspace.as_uuid())
         .bind(key)
         .bind(value)
+        .bind(include_archived)
         .fetch_one(&mut *connection)
         .await
         .map_err(StoreError::query)?;
@@ -286,18 +299,21 @@ pub async fn unknown_dimension_entry(
     Ok(None)
 }
 
-/// Whether the workspace has a live (not archived) declared dimension `key`.
+/// Whether the workspace has a live (not archived) declared dimension `key`, or with
+/// `include_archived` any declared dimension `key`.
 pub(super) async fn live_dimension(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     key: &str,
+    include_archived: bool,
 ) -> Result<bool, StoreError> {
     sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM consent_dimensions \
-         WHERE workspace_id = $1 AND key = $2 AND archived_at IS NULL)",
+         WHERE workspace_id = $1 AND key = $2 AND ($3 OR archived_at IS NULL))",
     )
     .bind(workspace.as_uuid())
     .bind(key)
+    .bind(include_archived)
     .fetch_one(connection)
     .await
     .map_err(StoreError::query)

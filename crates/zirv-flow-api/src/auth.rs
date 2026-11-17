@@ -391,6 +391,28 @@ pub(crate) async fn may_view_pii(
     }
 }
 
+/// Whether the caller is a workspace admin: the owner, an admin member, or a key with the `admin`
+/// scope. Unlike [`may_view_pii`], a `view_pii` grant or the `pii` scope does not count.
+pub(crate) async fn is_admin(
+    state: &AppState,
+    principal: &Principal,
+    workspace: WorkspaceId,
+) -> bool {
+    match principal {
+        Principal::Key(key) => {
+            key.key.workspace_id == workspace && scopes_allow(&key.key.scopes, Need::Admin)
+        }
+        Principal::Session(session) if session.user.is_owner => true,
+        Principal::Session(session) => {
+            zirv_flow_store::membership_role(&state.pool, workspace, session.user.id)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|role| role_allows(role, Need::Admin))
+        }
+    }
+}
+
 /// Parses an id from a path segment; a malformed id is a plain 404.
 pub(crate) fn path_id<T: FromStr>(segment: &str) -> Result<T, ApiError> {
     segment.parse().map_err(|_| ApiError::not_found())
