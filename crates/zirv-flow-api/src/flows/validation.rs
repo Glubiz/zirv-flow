@@ -343,6 +343,9 @@ impl Checker<'_> {
     /// it does not parse, which the structural validation has already reported.
     fn compile(&mut self, wire: &Value) -> Option<Vec<segment::Issue>> {
         let definition = segment::parse(wire).ok()?;
+        // Every parsed root is probed, also one that fails to compile: its personal part must
+        // still be refused to a caller who may not see personal values.
+        self.probe_roots.push(definition.root.clone());
         match compile(
             &definition,
             self.environment.catalog,
@@ -351,7 +354,6 @@ impl Checker<'_> {
         ) {
             Ok(compiled) => {
                 self.reads.absorb(&compiled.deps.to_value());
-                self.probe_roots.push(definition.root);
                 None
             }
             Err(problems) => Some(problems),

@@ -68,10 +68,12 @@ pub(crate) async fn set(
     let id = path_id(&id)?;
     check_seconds(body.seconds)?;
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
-    let (_, released) =
+    let (_, queued) =
         zirv_flow_store::set_warmup_counted(&mut tx, workspace.id, id, body.enabled, body.seconds)
             .await
             .map_err(flow_error)?;
+    // Only turning it off admits the people waiting; a resize queues them again for new times.
+    let released = if body.enabled { 0 } else { queued };
     admin::audit(
         &mut tx,
         &principal.context(),

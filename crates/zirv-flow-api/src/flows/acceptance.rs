@@ -569,6 +569,8 @@ mod tests {
             .fetch_all(&pool)
             .await
             .unwrap();
+            // The resize queued the waiting person again for a new time and released nobody.
+            assert_eq!(audited.first().unwrap()["released"], 0);
             assert_eq!(audited.last().unwrap()["released"], 1);
         })
         .await;
@@ -908,6 +910,44 @@ mod tests {
                     "{label}: {:?}",
                     published.body
                 );
+            }
+
+            // A personal probe beside a reference that does not exist is refused all the same.
+            let unknown = f
+                .create(
+                    "personal probe beside an unknown trait",
+                    branch(json!({"all": [
+                        {"trait": "email_addr", "op": "starts_with", "value": "a"},
+                        {"trait": "no_such_trait", "op": "eq", "value": "x"}
+                    ]})),
+                    manual(),
+                )
+                .await;
+            for (what, uri, auth) in [
+                (
+                    "validate",
+                    format!("/{unknown}/validate"),
+                    Auth::Key(&f.write),
+                ),
+                (
+                    "dry run",
+                    format!("/{unknown}/publish?dry_run=true"),
+                    Auth::Key(&f.publish),
+                ),
+                (
+                    "publish",
+                    format!("/{unknown}/publish"),
+                    Auth::Key(&f.publish),
+                ),
+            ] {
+                let reply = f.call("POST", &f.flows(&uri), None, auth).await;
+                assert_eq!(
+                    reply.status,
+                    StatusCode::FORBIDDEN,
+                    "unknown {what}: {:?}",
+                    reply.body
+                );
+                assert_eq!(reply.body["code"], "pii_trait_not_searchable", "{what}");
             }
 
             // Equality on a personal trait is allowed to everyone who may publish.

@@ -372,8 +372,9 @@ pub async fn set_warmup(
     )
 }
 
-/// [`set_warmup`], also returning how many waiting entries it queued: turning the window off
-/// admits everyone waiting at once, which the audit records.
+/// [`set_warmup`], also returning how many waiting entries it queued again. Only when `enabled` is
+/// false is that the number released: a resize or an enable queues the waiting entries for new
+/// admission times and releases nobody.
 pub async fn set_warmup_counted(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
