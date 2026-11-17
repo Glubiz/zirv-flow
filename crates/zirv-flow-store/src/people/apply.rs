@@ -437,11 +437,11 @@ pub(crate) async fn remove_contributions_in(
         let trait_changed = changed
             .get(&record.person_id)
             .is_some_and(|keys| record.trait_keys.iter().any(|key| keys.contains(key)));
-        let specs = [
-            (trait_changed, &decision_actions::TRAIT_CHANGED),
-            (true, &decision_actions::CONTRIBUTION_REMOVED),
-        ];
-        for (_, spec) in specs.into_iter().filter(|(wanted, _)| *wanted) {
+        let specs = trait_changed
+            .then_some(&decision_actions::TRAIT_CHANGED)
+            .into_iter()
+            .chain([&decision_actions::CONTRIBUTION_REMOVED]);
+        for spec in specs {
             decisions.push(NewDecision {
                 graph: None,
                 workspace_id: workspace,
