@@ -504,7 +504,7 @@ impl ApiError {
             code: Some("pii_property_not_explorable"),
             ..Self::new(
                 StatusCode::FORBIDDEN,
-                "only eq and exists apply to a PII or undeclared property without access to                  values, and it cannot be broken down",
+                "only eq and exists apply to a PII or undeclared property without access to values, and it cannot be broken down",
             )
         }
     }
@@ -1541,6 +1541,12 @@ pub(crate) async fn method_not_allowed() -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pii_not_explorable_detail_has_no_runs_of_spaces() {
+        let detail = ApiError::pii_property_not_explorable().detail;
+        assert!(!detail.contains("  "), "stray spaces in: {detail:?}");
+    }
 
     #[test]
     fn a_client_error_without_a_code_carries_the_generic_code_of_its_status() {

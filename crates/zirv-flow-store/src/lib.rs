@@ -55,8 +55,8 @@ use std::error::Error;
 use std::fmt;
 
 pub use accounts::{
-    User, count_owners, create_user, find_user, find_user_by_email, is_locked, list_users,
-    record_failed_sign_in, record_successful_sign_in, set_password,
+    User, count_owners, create_user, find_user, find_user_by_email, list_users,
+    record_failed_sign_in, record_successful_sign_in, reserve_sign_in_attempt, set_password,
 };
 pub use ai::{
     AiCall, AiDraft, AiSettings, AiSettingsUpdate, AiUsage, CallOutcome, DRAFT_PURGE_BATCH,
@@ -416,8 +416,8 @@ pub use workspace_credentials::{
     ArchiveOutcome, CredentialUpdate, CredentialUse, CredentialUser, NewWorkspaceCredential,
     OpenedCredential, WorkspaceCredential, archive_credential, create_credential,
     credential_use_counts, credential_users, credential_uses, find_credential,
-    find_credential_for_update, list_credentials, lock_credential_for_use, open_credential,
-    record_credential_test, swap_credential_secret, update_credential,
+    find_credential_for_update, list_credentials, lock_credential_creates, lock_credential_for_use,
+    open_credential, record_credential_test, swap_credential_secret, update_credential,
 };
 pub use workspaces::{
     Member, Membership, UtmSettings, Workspace, create_workspace, find_membership, find_workspace,

@@ -126,18 +126,6 @@ pub async fn find_user_by_email<'e>(
     Ok(row.map(Into::into))
 }
 
-/// Whether the account is locked, decided with the database clock (the one that stamped
-/// `locked_until`). A missing user is not locked.
-pub async fn is_locked<'e>(executor: impl PgExecutor<'e>, id: UserId) -> Result<bool, StoreError> {
-    let locked: Option<bool> =
-        sqlx::query_scalar("SELECT coalesce(locked_until > now(), false) FROM users WHERE id = $1")
-            .bind(id.as_uuid())
-            .fetch_optional(executor)
-            .await
-            .map_err(StoreError::query)?;
-    Ok(locked.unwrap_or(false))
-}
-
 pub async fn list_users<'e>(executor: impl PgExecutor<'e>) -> Result<Vec<User>, StoreError> {
     let rows: Vec<UserRow> = sqlx::query_as(concat!(
         "SELECT ",
@@ -185,10 +173,10 @@ pub async fn record_failed_sign_in<'e>(
         "UPDATE users SET \
             failed_sign_ins = failed_sign_ins + 1, \
             locked_until = CASE WHEN failed_sign_ins + 1 >= $2 \
-                THEN now() + make_interval(secs => LEAST( \
-                    power(2::float8, LEAST(failed_sign_ins + 1 - $2, 20)::float8), $3)) \
-                ELSE locked_until END \
-         WHERE id = $1",
+            THEN now() + make_interval(secs => LEAST( \
+            power(2::float8, LEAST(failed_sign_ins + 1 - $2, 20)::float8), $3)) \
+            ELSE locked_until END \
+            WHERE id = $1",
     )
     .bind(id.as_uuid())
     .bind(LOCK_THRESHOLD)
@@ -197,6 +185,35 @@ pub async fn record_failed_sign_in<'e>(
     .await
     .map_err(StoreError::query)?;
     Ok(())
+}
+
+/// Reserves one sign-in attempt before the password is checked: false while the account is
+/// locked (decided with the database clock that stamped `locked_until`) or missing, otherwise it
+/// counts the attempt as a failure, with the lock [`record_failed_sign_in`] would set, in the
+/// same statement. A concurrent burst therefore passes the gate at most up to the lock threshold,
+/// whatever the verification costs. A correct password then clears the count through
+/// [`record_successful_sign_in`]; a wrong one is not counted again.
+pub async fn reserve_sign_in_attempt<'e>(
+    executor: impl PgExecutor<'e>,
+    id: UserId,
+) -> Result<bool, StoreError> {
+    let reserved: Option<Uuid> = sqlx::query_scalar(
+        "UPDATE users SET \
+            failed_sign_ins = failed_sign_ins + 1, \
+            locked_until = CASE WHEN failed_sign_ins + 1 >= $2 \
+            THEN now() + make_interval(secs => LEAST( \
+            power(2::float8, LEAST(failed_sign_ins + 1 - $2, 20)::float8), $3)) \
+            ELSE locked_until END \
+            WHERE id = $1 AND (locked_until IS NULL OR locked_until <= now()) \
+            RETURNING id",
+    )
+    .bind(id.as_uuid())
+    .bind(LOCK_THRESHOLD)
+    .bind(MAX_LOCK_SECONDS)
+    .fetch_optional(executor)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(reserved.is_some())
 }
 
 /// Resets the failure counter and any lock.
@@ -362,26 +379,74 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn an_account_is_locked_only_while_the_database_clock_is_before_locked_until(
+    async fn an_attempt_is_reserved_only_while_the_database_clock_is_past_locked_until(
         pool: PgPool,
     ) {
         let user = create_user(&pool, &email("a@example.com"), Some("hash"), false)
             .await
             .unwrap();
-        assert!(!is_locked(&pool, user.id).await.unwrap());
+        let state = |pool: PgPool| async move {
+            sqlx::query_as::<_, (i32, Option<f64>)>(
+                "SELECT failed_sign_ins, extract(epoch FROM locked_until - now())::float8 \
+                    FROM users WHERE id = $1",
+            )
+            .bind(user.id.as_uuid())
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
 
-        for _ in 0..5 {
-            record_failed_sign_in(&pool, user.id).await.unwrap();
+        // Each reservation counts one failure; the fifth sets the one-second lock.
+        for count in 1..=4 {
+            assert!(reserve_sign_in_attempt(&pool, user.id).await.unwrap());
+            assert_eq!(state(pool.clone()).await, (count, None));
         }
-        assert!(is_locked(&pool, user.id).await.unwrap());
+        assert!(reserve_sign_in_attempt(&pool, user.id).await.unwrap());
+        let (count, locked) = state(pool.clone()).await;
+        assert_eq!(count, 5);
+        assert!(locked.unwrap() <= 1.0);
 
+        // While locked there is no reservation and nothing is counted.
+        sqlx::query("UPDATE users SET locked_until = now() + interval '1 hour' WHERE id = $1")
+            .bind(user.id.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(!reserve_sign_in_attempt(&pool, user.id).await.unwrap());
+        assert_eq!(state(pool.clone()).await.0, 5);
+
+        // Past the lock the sixth and seventh attempts lock for 2 and 4 seconds, as failures do.
         sqlx::query("UPDATE users SET locked_until = now() - interval '1 second' WHERE id = $1")
             .bind(user.id.as_uuid())
             .execute(&pool)
             .await
             .unwrap();
-        assert!(!is_locked(&pool, user.id).await.unwrap());
-        assert!(!is_locked(&pool, UserId::new()).await.unwrap());
+        assert!(reserve_sign_in_attempt(&pool, user.id).await.unwrap());
+        let sixth = state(pool.clone()).await.1.unwrap();
+        sqlx::query("UPDATE users SET locked_until = NULL WHERE id = $1")
+            .bind(user.id.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(reserve_sign_in_attempt(&pool, user.id).await.unwrap());
+        let seventh = state(pool.clone()).await.1.unwrap();
+        assert!((1.0..=2.0).contains(&sixth), "{sixth}");
+        assert!((3.0..=4.0).contains(&seventh), "{seventh}");
+        let twin = create_user(&pool, &email("b@example.com"), Some("hash"), false)
+            .await
+            .unwrap();
+        for _ in 0..7 {
+            record_failed_sign_in(&pool, twin.id).await.unwrap();
+        }
+        let twin_locked: f64 = sqlx::query_scalar(
+            "SELECT extract(epoch FROM locked_until - now())::float8 FROM users WHERE id = $1",
+        )
+        .bind(twin.id.as_uuid())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!((3.0..=4.0).contains(&twin_locked), "{twin_locked}");
+        assert!(!reserve_sign_in_attempt(&pool, UserId::new()).await.unwrap());
     }
 
     #[sqlx::test]

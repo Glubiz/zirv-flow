@@ -126,11 +126,17 @@ pub async fn find_ai_settings<'e>(
 }
 
 /// As [`find_ai_settings`], locking the row until the transaction ends, so two admins saving at
-/// once apply one after the other.
+/// once apply one after the other. A workspace that never saved has no row to lock, so a
+/// transaction-scoped advisory lock on the workspace goes first and covers that first save too.
 pub async fn lock_ai_settings(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
 ) -> Result<Option<AiSettings>, StoreError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('ai_settings:' || $1::text, 0))")
+        .bind(workspace.as_uuid())
+        .execute(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
     let row: Option<Row> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {COLUMNS} FROM ai_settings WHERE workspace_id = $1 FOR UPDATE"
     )))
@@ -286,6 +292,46 @@ mod tests {
         ] {
             assert!(put_ai_settings(&pool, ws, &bad).await.is_err());
         }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_second_lock_waits_for_the_first_when_no_row_exists_yet(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let mut first = pool.begin().await.unwrap();
+        assert!(lock_ai_settings(&mut first, ws).await.unwrap().is_none());
+
+        let second_pool = pool.clone();
+        let second = tokio::spawn(async move {
+            let mut tx = second_pool.begin().await.unwrap();
+            let found = lock_ai_settings(&mut tx, ws).await.unwrap();
+            tx.commit().await.unwrap();
+            found
+        });
+        let mut waited = false;
+        for _ in 0..100 {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity \
+                    WHERE datname = current_database() AND wait_event_type = 'Lock' \
+                    AND pid <> pg_backend_pid()",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting > 0 {
+                waited = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(
+            waited,
+            "the second lock did not wait for the open transaction"
+        );
+        put_ai_settings(&mut *first, ws, &update()).await.unwrap();
+        first.commit().await.unwrap();
+        // Released by the commit, the second writer now sees the first writer's row.
+        assert!(second.await.unwrap().is_some());
     }
 
     #[sqlx::test]

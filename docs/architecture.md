@@ -3363,8 +3363,8 @@ redaction HMAC of the sealed object, used only to warn that a secret was entered
 `last_tested_at` and the last test outcome. Rotation seals the new object, swaps `secret_id` and
 deletes the old `encrypted_secrets` row in one transaction; because `api` and `jobs` open the
 credential's current secret right before every use (the credential row and its secret are read in one
-statement, so a swap in between cannot leave a deleted id), nothing else changes and no cached copy
-exists. `admin rotate-master-key` re-wraps these rows like any other. Credentials a source or
+statement, so a swap in between cannot leave a deleted id), the swap also clears `last_tested_at` and the test
+outcome, which described the replaced secret, and no cached copy exists. `admin rotate-master-key` re-wraps these rows like any other. Credentials a source or
 destination had sealed itself before migration 0047 became `imported` credentials that point at the
 same `encrypted_secrets` row with its old purpose (`connector_credential` or
 `destination_credential`): nothing is re-sealed in SQL because the associated data binds the
@@ -4004,7 +4004,7 @@ they were ruled as their capabilities were added to the plan.
   stays in `jsonb`. `string_list` traits stay in `jsonb`. The promotion is built in the
   segment milestone (M4); until the slots exist the `jsonb_path_ops` index stays, and it is reconsidered once promoted
   traits cover the equality searches. The slots are live (#125): states `backfilling`, `ready` and `retiring`; writers take the shared slot lock before they read the assignments and assignment changes take the exclusive one, so a backfill never leaves a stale value (`people/slots.rs`); the routes are `POST` and `DELETE /traits/{key}/index`.
-  Known limitation and upgrade decision: keep released migration 0033 and its checksum. Its initial `ALTER TABLE` holds ACCESS EXCLUSIVE on `people` through all 30 partial index builds, blocking reads and writes. Populated upgrades stop all roles and budget the full build when upgrading from before 0033; `v0.187.0` already contains it. No populated build timing is recorded. Rehearse at the installation's row counts before setting the downtime window; see the [lock review](operations/upgrade.md#lock-review-through-0110). This supports stopped upgrades only; online and mixed-version upgrades remain OQ-17.
+  Known limitation and upgrade decision: keep released migration 0033 and its checksum. Its initial `ALTER TABLE` holds ACCESS EXCLUSIVE on `people` through all 30 partial index builds, blocking reads and writes. Populated upgrades stop all roles and budget the full build when upgrading from before 0033; `v0.187.0` already contains it. No populated build timing is recorded. Rehearse at the installation's row counts before setting the downtime window; see the [lock review](operations/upgrade.md#lock-review-through-0113). This supports stopped upgrades only; online and mixed-version upgrades remain OQ-17.
   Details in [docs/benchmarks/m2-ingestion.md](benchmarks/m2-ingestion.md).
 
 - **OQ-8:** A per-workspace running cap in the claim query
