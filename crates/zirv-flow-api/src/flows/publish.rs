@@ -304,7 +304,6 @@ pub(crate) async fn publish(
     Ok((StatusCode::CREATED, Json(body)).into_response())
 }
 
-/// Runs a lifecycle action and audits it.
 /// Refuses to resume a paused flow whose running version names a template or destination that is
 /// missing or archived: archiving one is allowed while the flow is paused, and a resumed flow would
 /// fail every send. It takes publish's locks in publish's order (the flow, then the templates and
@@ -392,6 +391,7 @@ async fn refuse_unusable_inputs(
     }
 }
 
+/// Runs a lifecycle action and audits it.
 async fn lifecycle(
     state: &AppState,
     principal: &Principal,

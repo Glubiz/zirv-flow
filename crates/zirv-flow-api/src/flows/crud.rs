@@ -359,18 +359,14 @@ async fn node_facts(
     let mut templates = BTreeMap::new();
     if !template_ids.is_empty() {
         let ids: Vec<Uuid> = template_ids.into_iter().collect();
-        for template in zirv_flow_store::find_templates(&mut *connection, workspace, &ids).await? {
-            templates.insert(template.id, template);
-        }
+        let found = zirv_flow_store::find_templates(&mut *connection, workspace, &ids).await?;
+        templates.extend(found.into_iter().map(|template| (template.id, template)));
     }
     let mut destinations = BTreeMap::new();
     if !destination_ids.is_empty() {
         let ids: Vec<Uuid> = destination_ids.into_iter().collect();
-        for destination in
-            zirv_flow_store::find_destinations(&mut *connection, workspace, &ids).await?
-        {
-            destinations.insert(destination.id, destination);
-        }
+        let found = zirv_flow_store::find_destinations(&mut *connection, workspace, &ids).await?;
+        destinations.extend(found.into_iter().map(|d| (d.id, d)));
     }
     let webhook = usable_webhook_templates(&templates, graph);
     let send = send_facts(connection, workspace, graph, &templates, &destinations).await?;
