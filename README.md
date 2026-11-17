@@ -72,16 +72,16 @@ address; supply `ZIRV_FLOW_DATABASE__URL` at run time.
 
 The image declares a health check, `zirv-flow healthcheck`, which requests
 `/readyz` on `server.bind` and exits 0 only on a 200. A container that runs only
-the `worker` or `scheduler` role has no HTTP listener yet, so give it
-`healthcheck: { disable: true }` in compose (or `--no-healthcheck` with
-`docker run`), or it will be reported unhealthy.
+the `worker` or `scheduler` role has no listener there, so the check probes
+`ops.bind` when `server.bind` refuses the connection. Without `ops.bind`, give it
+`healthcheck: { disable: true }` in compose (or `--no-healthcheck` with `docker run`).
 
 ## Configuration
 
 Pass an optional TOML file with `zirv-flow --config <path>`, or set
 `ZIRV_FLOW_CONFIG`. Environment overrides use the case-insensitive form
 `ZIRV_FLOW_<SECTION>__<KEY>` and take precedence over the file, for example
-`ZIRV_FLOW_DATABASE__MAX_CONNECTIONS=20`. See [sizing and PostgreSQL tuning](docs/operations/sizing.md) for capacity, pool budgets and maintenance.
+`ZIRV_FLOW_DATABASE__MAX_CONNECTIONS=20` (a single-underscore near-miss is an error). See [sizing and PostgreSQL tuning](docs/operations/sizing.md) for capacity, pool budgets and maintenance.
 
 | Key | Type | Default | Rule |
 |-----|------|---------|------|

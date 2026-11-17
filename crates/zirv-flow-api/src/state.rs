@@ -27,10 +27,15 @@ pub(crate) type SchemaCheck = Arc<
         + Sync,
 >;
 
+/// Why the roles of the process are not ready, or `None` when they are.
+pub type RoleReadiness = Arc<dyn Fn() -> Option<&'static str> + Send + Sync>;
+
 /// Shared state for every handler.
 #[derive(Clone)]
 pub struct AppState {
     pub(crate) pool: PgPool,
+    /// What `/readyz` asks of the roles of the process before the database; absent means nothing.
+    pub(crate) role_readiness: Option<RoleReadiness>,
     pub(crate) render_metrics: Arc<dyn Fn() -> String + Send + Sync>,
     pub(crate) schema_check: SchemaCheck,
     pub(crate) cookie_secure: bool,
@@ -132,6 +137,7 @@ impl AppState {
             keyring: None,
             explorer: ExplorerLimits::default(),
             explorer_pool: None,
+            role_readiness: None,
             export_permits: Arc::new(tokio::sync::Semaphore::new(1)),
             preview_callers: Arc::default(),
             max_previews_per_caller: crate::segments::MAX_PREVIEWS_PER_CALLER,
@@ -216,6 +222,13 @@ impl AppState {
     /// The request-rate buckets of this process's sources.
     pub fn rate_limits(&self) -> &Arc<RateLimits> {
         &self.rate_limits
+    }
+
+    /// Makes `/readyz` answer 503 with the reason `role_readiness` returns, such as a stopped
+    /// role loop, before it checks the database.
+    pub fn with_role_readiness(mut self, role_readiness: RoleReadiness) -> Self {
+        self.role_readiness = Some(role_readiness);
+        self
     }
 
     /// The pool of render-host children that preview renders through (architecture 11.9).

@@ -42,7 +42,8 @@ pub(crate) async fn healthz() -> Json<StatusBody> {
         (status = 200, description = "Ready to serve", body = StatusBody),
         (
             status = 503,
-            description = "The database is unreachable or its schema is not up to date",
+            description = "The database is unreachable or its schema is not up to date, \
+                or a role loop has stopped or shutdown has begun",
             body = Problem,
             content_type = "application/problem+json"
         )
@@ -50,6 +51,9 @@ pub(crate) async fn healthz() -> Json<StatusBody> {
     security(())
 )]
 pub(crate) async fn readyz(State(state): State<AppState>) -> Result<Json<StatusBody>, ApiError> {
+    if let Some(reason) = state.role_readiness.as_ref().and_then(|ready| ready()) {
+        return Err(ApiError::new(StatusCode::SERVICE_UNAVAILABLE, reason));
+    }
     check_database(state.pool.clone(), &state.schema_check).await?;
     Ok(ready())
 }
@@ -87,6 +91,46 @@ mod tests {
     use zirv_flow_store::PgPool;
 
     use crate::{AppState, router};
+
+    fn unreachable_pool() -> PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(500))
+            .connect_lazy("postgres://postgres@127.0.0.1:1/zirv_flow")
+            .unwrap()
+    }
+
+    async fn readyz_body(state: AppState) -> (StatusCode, String) {
+        use http_body_util::BodyExt;
+        let response = router(state)
+            .oneshot(Request::get("/readyz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn readyz_names_a_role_reason_before_it_checks_the_database() {
+        let state = AppState::new(unreachable_pool(), Arc::new(String::new))
+            .with_role_readiness(Arc::new(|| Some("the scheduler loop has stopped")));
+
+        let (status, body) = readyz_body(state).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(body.contains("the scheduler loop has stopped"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn readyz_falls_through_to_the_database_when_the_roles_are_ready() {
+        let state = AppState::new(unreachable_pool(), Arc::new(String::new))
+            .with_role_readiness(Arc::new(|| None));
+
+        let (status, body) = readyz_body(state).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(body.contains("database"), "{body}");
+    }
 
     async fn status(pool: PgPool) -> StatusCode {
         let state = AppState::new(pool, Arc::new(String::new));

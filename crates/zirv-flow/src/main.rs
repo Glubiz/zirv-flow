@@ -120,7 +120,7 @@ async fn run(
     }
 
     if matches!(command, Command::Healthcheck) {
-        return healthcheck::run(config.server_bind(), stderr).await;
+        return healthcheck::run(config.server_bind(), config.ops_bind(), stderr).await;
     }
 
     if matches!(command, Command::Migrate) {
@@ -283,7 +283,12 @@ async fn run(
 }
 
 /// Creates `out` holding a new master key, never overwriting a file. With `if_missing`, an
-/// existing file that holds a valid key is kept. Prints the key id, never the key.
+/// existing file that holds a valid key is kept, and an empty or whitespace-only one (left by
+/// an older version or a crash) is repaired. Prints the key id, never the key.
+///
+/// The key is written to a temporary file beside `out`, synced, then hard-linked into place,
+/// so `out` only ever appears complete. Two runs repairing the same empty file at once both
+/// succeed, but the later rename wins and the earlier run may have printed another key id.
 fn generate_master_key(
     out: &Path,
     if_missing: bool,
@@ -300,28 +305,60 @@ fn generate_master_key(
         return fail(format!("could not create {}: {error}", parent.display()));
     }
     let key = zirv_flow_store::MasterKey::generate();
+    static NEXT_TEMPORARY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let temporary = out.with_file_name(format!(
+        ".{}.tmp.{}.{}",
+        out.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id(),
+        NEXT_TEMPORARY.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    ));
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    match options.open(out) {
-        Ok(mut file) => {
-            if let Err(error) = writeln!(file, "{}", key.to_base64()) {
-                drop(file);
-                let _ = fs::remove_file(out);
-                return fail(format!("could not write {}: {error}", out.display()));
+    let written = options.open(&temporary).and_then(|mut file| {
+        writeln!(file, "{}", key.to_base64())?;
+        file.sync_all()
+    });
+    if let Err(error) = written {
+        let _ = fs::remove_file(&temporary);
+        return fail(format!("could not write {}: {error}", out.display()));
+    }
+    match fs::hard_link(&temporary, out) {
+        Ok(()) => {
+            let _ = fs::remove_file(&temporary);
+            #[cfg(unix)]
+            if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty())
+                && let Ok(directory) = fs::File::open(parent)
+            {
+                let _ = directory.sync_all();
             }
             let _ = writeln!(stdout, "master key written: {}", key.key_id());
             0
         }
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
             if !if_missing {
+                let _ = fs::remove_file(&temporary);
                 return fail(format!(
                     "{} already exists; it is never overwritten",
                     out.display()
                 ));
             }
-            let existing = fs::read_to_string(out)
+            let text = fs::read_to_string(out);
+            if text.as_ref().is_ok_and(|text| text.trim().is_empty()) {
+                match fs::rename(&temporary, out) {
+                    Ok(()) => {
+                        let _ = writeln!(stdout, "master key written: {}", key.key_id());
+                        return 0;
+                    }
+                    Err(error) => {
+                        let _ = fs::remove_file(&temporary);
+                        return fail(format!("could not write {}: {error}", out.display()));
+                    }
+                }
+            }
+            let _ = fs::remove_file(&temporary);
+            let existing = text
                 .map_err(|_| "not readable".to_owned())
                 .and_then(|text| {
                     zirv_flow_store::MasterKey::parse(&text).map_err(|error| error.to_string())
@@ -334,7 +371,10 @@ fn generate_master_key(
                 Err(reason) => fail(format!("{}: {reason}", out.display())),
             }
         }
-        Err(error) => fail(format!("could not create {}: {error}", out.display())),
+        Err(error) => {
+            let _ = fs::remove_file(&temporary);
+            fail(format!("could not create {}: {error}", out.display()))
+        }
     }
 }
 
@@ -412,7 +452,8 @@ async fn run_roles_reporting(
     {
         return code;
     }
-    // A bad server configuration or a taken ops address stops the process before any role starts.
+    // A bad server configuration or a taken server or ops address stops the process before any
+    // role starts.
     let render_pool = if roles.serve || roles.worker {
         match start_render_pool(config).await {
             Ok(pool) => Some(pool),
@@ -429,13 +470,18 @@ async fn run_roles_reporting(
     } else {
         None
     };
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let liveness = Arc::new(RoleLiveness::default());
     let state = match (roles.serve, &render) {
         (true, Some(render)) => {
             match http_state(config, pool.clone(), Arc::clone(render), secrets.as_ref()) {
-                Ok(state) => Some(match &render_pool {
-                    Some(render_pool) => state.with_render_pool(render_pool.clone()),
-                    None => state,
-                }),
+                Ok(state) => Some(
+                    match &render_pool {
+                        Some(render_pool) => state.with_render_pool(render_pool.clone()),
+                        None => state,
+                    }
+                    .with_role_readiness(role_readiness(stopped.clone(), Arc::clone(&liveness))),
+                ),
                 Err(code) => return code,
             }
         }
@@ -459,9 +505,15 @@ async fn run_roles_reporting(
     {
         return code;
     }
+    let server_listener = if state.is_some() {
+        match bind_server(config.server_bind()).await {
+            Ok(listener) => Some(listener),
+            Err(code) => return code,
+        }
+    } else {
+        None
+    };
 
-    let (stop, stopped) = tokio::sync::watch::channel(false);
-    let liveness = Arc::new(RoleLiveness::default());
     let ops = match (ops_bind, render) {
         (Some(addr), Some(render)) => {
             let state = zirv_flow_api::OpsState::new(
@@ -560,9 +612,9 @@ async fn run_roles_reporting(
         info!(role = "scheduler", "scheduler standing for leadership");
     }
 
-    let code = if let Some(state) = state {
+    let code = if let (Some(state), Some(listener)) = (state, server_listener) {
         let mut draining = stopped.clone();
-        let code = serve_http(state, config.server_bind(), &deadline, async move {
+        let code = serve_http(state, listener, &deadline, async move {
             let _ = draining.wait_for(|stopped| *stopped).await;
         })
         .await;
@@ -701,21 +753,37 @@ struct RoleLiveness {
     scheduler_stopped: std::sync::atomic::AtomicBool,
 }
 
+/// Records that a role loop ended, however it ended: it returned, panicked or was aborted.
+struct StoppedFlag {
+    liveness: Arc<RoleLiveness>,
+    role: Role,
+}
+
+impl Drop for StoppedFlag {
+    fn drop(&mut self) {
+        let flag = match self.role {
+            Role::Worker => &self.liveness.worker_stopped,
+            Role::Scheduler => &self.liveness.scheduler_stopped,
+        };
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 impl RoleLiveness {
-    /// Runs `role` and records that it returned.
+    /// Runs `role` and records that it ended.
     fn track<F: Future<Output = ()>>(
         self: &Arc<Self>,
         role: Role,
         future: F,
     ) -> impl Future<Output = ()> + use<F> {
-        let liveness = Arc::clone(self);
+        let stopped = StoppedFlag {
+            liveness: Arc::clone(self),
+            role,
+        };
         async move {
+            // The flag is set when this drops, so a panic of the role sets it too.
+            let _stopped = stopped;
             future.await;
-            let flag = match role {
-                Role::Worker => &liveness.worker_stopped,
-                Role::Scheduler => &liveness.scheduler_stopped,
-            };
-            flag.store(true, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
@@ -898,21 +966,24 @@ async fn drain(mut background: tokio::task::JoinSet<()>, deadline: tokio::time::
     }
 }
 
-/// Binds `addr` and serves the API until `shutdown` completes.
+/// Binds the server address, before any role starts, so a taken port stops the process first.
+async fn bind_server(addr: SocketAddr) -> Result<TcpListener, u8> {
+    TcpListener::bind(addr).await.map_err(|error| {
+        error!(address = %addr, %error, "could not bind the server address");
+        1_u8
+    })
+}
+
+/// Serves the API on `listener` until `shutdown` completes.
 async fn serve_http(
     state: zirv_flow_api::AppState,
-    addr: SocketAddr,
+    listener: TcpListener,
     deadline: &ShutdownDeadline,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> u8 {
-    let listener = match TcpListener::bind(addr).await {
-        Ok(listener) => listener,
-        Err(error) => {
-            error!(address = %addr, %error, "could not bind the server address");
-            return 1;
-        }
-    };
-    let bound = listener.local_addr().unwrap_or(addr);
+    let bound = listener
+        .local_addr()
+        .map_or_else(|_| "the server address".to_owned(), |addr| addr.to_string());
     info!(address = %bound, "listening on {bound}");
 
     let (drain, draining) = tokio::sync::watch::channel(false);
@@ -1340,6 +1411,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn healthcheck_probes_ops_bind_when_server_bind_has_no_listener() {
+        let unused = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap()
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ops = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut request).await;
+            let _ =
+                tokio::io::AsyncWriteExt::write_all(&mut stream, b"HTTP/1.1 200 OK\r\n\r\n").await;
+        });
+        let mut env = database_env("postgres://localhost/database");
+        env.push(("ZIRV_FLOW_SERVER__BIND".into(), unused.to_string().into()));
+        env.push(("ZIRV_FLOW_OPS__BIND".into(), ops.to_string().into()));
+        let cli = Cli {
+            config: None,
+            command: Some(Command::Healthcheck),
+        };
+        let mut stderr = Vec::new();
+
+        let code = run(cli, env, &mut io::empty(), &mut Vec::new(), &mut stderr).await;
+
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&stderr));
+    }
+
+    #[tokio::test]
     async fn config_check_shows_the_log_section_with_its_overrides() {
         let cli = Cli {
             config: None,
@@ -1483,6 +1583,111 @@ endpoint = \"http://collector:4318/\""
             String::from_utf8(stdout).unwrap(),
             String::from_utf8(stderr).unwrap(),
         )
+    }
+
+    fn key_files_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn if_missing_does_not_fail_on_an_empty_key_file() {
+        let dir = TempDir::new();
+        fs::create_dir_all(&dir.0).unwrap();
+        let out = dir.0.join("master.key");
+        fs::write(&out, "").unwrap();
+
+        let (code, stdout, stderr) = generate(&out, true);
+
+        assert_eq!(code, 0, "{stderr}");
+        let key = zirv_flow_store::MasterKey::parse(&fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(stdout, format!("master key written: {}\n", key.key_id()));
+        assert_eq!(key_files_in(&dir.0), ["master.key"]);
+    }
+
+    #[test]
+    fn if_missing_repairs_a_whitespace_only_key_file() {
+        let dir = TempDir::new();
+        fs::create_dir_all(&dir.0).unwrap();
+        let out = dir.0.join("master.key");
+        fs::write(&out, " \n\r\n").unwrap();
+
+        let (code, _stdout, stderr) = generate(&out, true);
+
+        assert_eq!(code, 0, "{stderr}");
+        assert!(zirv_flow_store::MasterKey::parse(&fs::read_to_string(&out).unwrap()).is_ok());
+        assert_eq!(key_files_in(&dir.0), ["master.key"]);
+    }
+
+    #[test]
+    fn an_empty_key_file_is_still_refused_without_if_missing() {
+        let dir = TempDir::new();
+        fs::create_dir_all(&dir.0).unwrap();
+        let out = dir.0.join("master.key");
+        fs::write(&out, "").unwrap();
+
+        let (code, _stdout, stderr) = generate(&out, false);
+
+        assert_eq!(code, 1, "{stderr}");
+        assert_eq!(fs::read_to_string(&out).unwrap(), "");
+        assert_eq!(key_files_in(&dir.0), ["master.key"]);
+    }
+
+    #[test]
+    fn if_missing_keeps_a_garbage_key_file_and_exits_1() {
+        let dir = TempDir::new();
+        fs::create_dir_all(&dir.0).unwrap();
+        let out = dir.0.join("master.key");
+        fs::write(&out, "not a key").unwrap();
+
+        let (code, _stdout, stderr) = generate(&out, true);
+
+        assert_eq!(code, 1, "{stderr}");
+        assert_eq!(fs::read_to_string(&out).unwrap(), "not a key");
+        assert_eq!(key_files_in(&dir.0), ["master.key"]);
+    }
+
+    #[test]
+    fn if_missing_keeps_a_valid_key_and_leaves_no_temporary_file() {
+        let dir = TempDir::new();
+        let out = dir.0.join("master.key");
+        let (code, first, stderr) = generate(&out, false);
+        assert_eq!(code, 0, "{stderr}");
+        let before = fs::read_to_string(&out).unwrap();
+
+        let (code, again, stderr) = generate(&out, true);
+
+        assert_eq!(code, 0, "{stderr}");
+        assert_eq!(first.replace("written", "exists"), again);
+        assert_eq!(fs::read_to_string(&out).unwrap(), before);
+        assert_eq!(key_files_in(&dir.0), ["master.key"]);
+    }
+
+    #[test]
+    fn two_if_missing_runs_on_one_path_both_succeed_with_one_key() {
+        let dir = TempDir::new();
+        let out = dir.0.join("master.key");
+        let runs: Vec<_> = (0..2)
+            .map(|_| {
+                let out = out.clone();
+                std::thread::spawn(move || generate(&out, true))
+            })
+            .collect();
+        let ids: Vec<String> = runs
+            .into_iter()
+            .map(|run| {
+                let (code, stdout, stderr) = run.join().unwrap();
+                assert_eq!(code, 0, "{stderr}");
+                stdout.rsplit(' ').next().unwrap().to_owned()
+            })
+            .collect();
+
+        assert_eq!(ids[0], ids[1]);
+        assert_eq!(key_files_in(&dir.0), ["master.key"]);
     }
 
     #[test]
@@ -2549,15 +2754,9 @@ endpoint = \"http://collector:4318/\""
         let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = occupied.local_addr().unwrap();
 
-        let code = serve_http(
-            state(),
-            addr,
-            &ShutdownDeadline::default(),
-            std::future::ready(()),
-        )
-        .await;
+        let code = bind_server(addr).await.err();
 
-        assert_eq!(code, 1);
+        assert_eq!(code, Some(1));
         let lines = logs.json_lines();
         assert_eq!(lines.len(), 1, "{}", logs.text());
         assert_eq!(lines[0]["level"], "ERROR");
@@ -2572,9 +2771,10 @@ endpoint = \"http://collector:4318/\""
     async fn the_server_binds_and_exits_cleanly_on_shutdown() {
         let (logs, _guard) = capture_logs();
 
+        let listener = bind_server("127.0.0.1:0".parse().unwrap()).await.unwrap();
         let code = serve_http(
             state(),
-            "127.0.0.1:0".parse().unwrap(),
+            listener,
             &ShutdownDeadline::default(),
             std::future::ready(()),
         )
@@ -2739,6 +2939,35 @@ endpoint = \"http://collector:4318/\""
         assert_eq!(code, 0, "{}", logs.text());
     }
 
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_taken_server_port_stops_all_before_any_role_starts(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut env = database_env("postgres://localhost/database");
+        env.push((
+            "ZIRV_FLOW_SERVER__BIND".into(),
+            occupied.local_addr().unwrap().to_string().into(),
+        ));
+        let config = Config::load(None, env).unwrap();
+        let (logs, _guard) = capture_logs();
+        let roles = Roles {
+            serve: true,
+            worker: true,
+            scheduler: true,
+        };
+
+        let code = run_roles(roles, &config, pool, None, std::future::pending()).await;
+
+        assert_eq!(code, 1, "{}", logs.text());
+        let text = logs.text();
+        assert!(
+            !text.contains("worker started") && !text.contains("scheduler standing"),
+            "roles started before the bind failed: {text}"
+        );
+        assert!(text.contains("could not bind the server address"), "{text}");
+    }
+
     fn ops_config(bind: Option<&str>) -> Config {
         let mut env = database_env("postgres://localhost/database");
         if let Some(bind) = bind {
@@ -2791,6 +3020,40 @@ endpoint = \"http://collector:4318/\""
         assert!(status.contains("503"), "{status}");
         assert!(body.contains("shutting down"), "{body}");
         ops.stop().await;
+    }
+
+    #[tokio::test]
+    async fn a_panicking_role_makes_the_process_not_ready() {
+        let liveness = Arc::new(RoleLiveness::default());
+        let task = tokio::spawn(liveness.track(Role::Scheduler, async {
+            panic!("scheduler blew up");
+        }));
+        assert!(task.await.is_err());
+        assert_eq!(liveness.not_ready(), Some("the scheduler loop has stopped"));
+    }
+
+    #[tokio::test]
+    async fn the_serve_state_reports_a_stopped_role_through_readyz() {
+        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        let liveness = Arc::new(RoleLiveness::default());
+        let render: Arc<dyn Fn() -> String + Send + Sync> = Arc::new(String::new);
+        let config = Config::load(None, database_env("postgres://localhost/database")).unwrap();
+        let state = http_state(&config, lazy_pool(), render, None)
+            .unwrap()
+            .with_role_readiness(role_readiness(stopped, Arc::clone(&liveness)));
+        let listener = bind_server("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(zirv_flow_api::serve(
+            listener,
+            state,
+            std::future::pending(),
+        ));
+        liveness.track(Role::Worker, async {}).await;
+
+        let (status, body) = fetch(address, "/readyz").await.unwrap();
+
+        assert!(status.contains("503"), "{status}");
+        assert!(body.contains("the worker loop has stopped"), "{body}");
     }
 
     #[tokio::test]

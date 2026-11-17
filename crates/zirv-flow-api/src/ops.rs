@@ -17,10 +17,7 @@ use zirv_flow_store::PgPool;
 use crate::health::{self, StatusBody};
 use crate::problem::{self, ApiError};
 use crate::request_id;
-use crate::state::SchemaCheck;
-
-/// Why the roles of the process are not ready, or `None` when they are.
-type RoleReadiness = Arc<dyn Fn() -> Option<&'static str> + Send + Sync>;
+use crate::state::{RoleReadiness, SchemaCheck};
 
 /// State of the ops listener.
 #[derive(Clone)]
@@ -77,9 +74,13 @@ pub async fn serve_ops(
     state: OpsState,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
-    axum::serve(listener, ops_router(state))
-        .with_graceful_shutdown(shutdown)
-        .await
+    crate::server::serve_router(
+        listener,
+        ops_router(state),
+        shutdown,
+        crate::server::Limits::default(),
+    )
+    .await
 }
 
 async fn readyz(State(state): State<OpsState>) -> Result<Json<StatusBody>, ApiError> {

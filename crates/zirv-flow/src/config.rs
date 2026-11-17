@@ -736,6 +736,9 @@ impl Config {
         for (name, value) in env {
             let name = name.to_string_lossy();
             let Some(key) = env_key(&name) else {
+                if let Some(error) = single_underscore_error(&name) {
+                    return Err(error);
+                }
                 continue;
             };
             if !CONFIG_KEYS.contains(&key.as_str()) {
@@ -1599,6 +1602,45 @@ fn read_file(path: &Path) -> Result<String, ConfigError> {
         return Err(ConfigError::new("config", reason, source));
     }
     Ok(contents)
+}
+
+/// The error for a `ZIRV_FLOW_` name without the `__` separator that is plainly meant as a
+/// config key: the dotted key with `.` written as `_`, or a name that starts with a section
+/// name. Other single-underscore names (`ZIRV_FLOW_CONFIG`, the test and bench variables) are
+/// not config and pass.
+fn single_underscore_error(name: &str) -> Option<ConfigError> {
+    let lowercase = name.to_ascii_lowercase();
+    let remainder = lowercase.strip_prefix(&ENV_PREFIX.to_ascii_lowercase())?;
+    let near_miss = CONFIG_KEYS
+        .iter()
+        .find(|key| key.replace('.', "_") == remainder);
+    let section = CONFIG_KEYS.iter().find_map(|key| {
+        let (section, _) = key.split_once('.')?;
+        remainder
+            .strip_prefix(section)
+            .is_some_and(|rest| rest.starts_with('_'))
+            .then_some(section)
+    });
+    let (key, hint) = match (near_miss, section) {
+        (Some(key), _) => (
+            (*key).to_owned(),
+            format!(
+                "{}{}",
+                ENV_PREFIX,
+                key.replace('.', "__").to_ascii_uppercase()
+            ),
+        ),
+        (None, Some(section)) => (
+            remainder.to_owned(),
+            format!("{}{}__", ENV_PREFIX, section.to_ascii_uppercase()),
+        ),
+        (None, None) => return None,
+    };
+    Some(ConfigError::new(
+        key,
+        format!("unknown key; write the section and the key with two underscores, as {hint}"),
+        name,
+    ))
 }
 
 fn env_key(name: &str) -> Option<String> {
@@ -3200,6 +3242,44 @@ output_price_per_mtok = 15000000
             error.contains("ZIRV_FLOW_AI__RATE_LIMIT_PER_USER_PER_MINUTE"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_single_underscore_environment_variable_is_rejected_not_ignored() {
+        for (name, suggestion) in [
+            (
+                "ZIRV_FLOW_WORKER_CONCURRENCY",
+                "ZIRV_FLOW_WORKER__CONCURRENCY",
+            ),
+            (
+                "ZIRV_FLOW_SERVER_COOKIE_SECURE",
+                "ZIRV_FLOW_SERVER__COOKIE_SECURE",
+            ),
+            ("ZIRV_FLOW_EGRESS_ALLOW", "ZIRV_FLOW_EGRESS__ALLOW"),
+            ("ZIRV_FLOW_WORKER_CONCURENCY", "ZIRV_FLOW_WORKER__"),
+        ] {
+            let mut env = database_env("postgres://localhost/database");
+            env.push((name.into(), "16".into()));
+            let error = Config::load(None, env).expect_err(name).to_string();
+            assert!(error.contains("unknown key"), "{error}");
+            assert!(error.contains(name), "{error}");
+            assert!(error.contains(suggestion), "{error}");
+        }
+    }
+
+    #[test]
+    fn single_underscore_names_that_are_not_config_still_load() {
+        let mut env = database_env("postgres://localhost/database");
+        for name in [
+            "ZIRV_FLOW_CONFIG",
+            "ZIRV_FLOW_BLESS",
+            "ZIRV_FLOW_TEST_RENDER_HOST",
+            "ZIRV_FLOW_BENCH_ROWS",
+            "ZIRV_FLOW_KEY",
+        ] {
+            env.push((name.into(), "x".into()));
+        }
+        assert!(Config::load(None, env).is_ok());
     }
 
     #[test]

@@ -14040,7 +14040,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No byte arrived for 60 seconds */
+            /** @description No byte arrived for 60 seconds, or the upload took longer than 15 minutes */
             408: {
                 headers: {
                     [name: string]: unknown;
@@ -21117,7 +21117,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No byte arrived for 60 seconds; the upload was abandoned and nothing was kept */
+            /** @description No byte arrived for 60 seconds, or the upload took longer than 15 minutes; the upload was abandoned and nothing was kept */
             408: {
                 headers: {
                     [name: string]: unknown;
@@ -32813,7 +32813,7 @@ export interface operations {
                     "application/json": components["schemas"]["StatusBody"];
                 };
             };
-            /** @description The database is unreachable or its schema is not up to date */
+            /** @description The database is unreachable or its schema is not up to date, or a role loop has stopped or shutdown has begun */
             503: {
                 headers: {
                     [name: string]: unknown;

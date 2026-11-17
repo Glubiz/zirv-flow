@@ -39,6 +39,7 @@ mod retention;
 mod segments;
 mod sending;
 mod series;
+mod server;
 mod session;
 mod setup;
 mod snippets;
@@ -69,7 +70,7 @@ use std::io;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
-use axum::middleware::from_fn;
+use axum::middleware::{from_fn, from_fn_with_state};
 use axum::routing::{delete, get, patch, post, put};
 use tokio::net::TcpListener;
 
@@ -917,7 +918,11 @@ fn routes() -> Router<AppState> {
             "/api/v1/workspaces/{ws}/assets",
             get(assets::crud::list)
                 .post(assets::upload::upload)
-                .layer(DefaultBodyLimit::disable()),
+                .layer(DefaultBodyLimit::disable())
+                .layer(from_fn_with_state(
+                    server::UPLOAD_DEADLINE,
+                    server::upload_deadline,
+                )),
         )
         .route(
             "/api/v1/workspaces/{ws}/assets/{id}",
@@ -927,7 +932,11 @@ fn routes() -> Router<AppState> {
             "/api/v1/workspaces/{ws}/imports",
             get(imports::crud::list)
                 .post(imports::upload::upload)
-                .layer(DefaultBodyLimit::disable()),
+                .layer(DefaultBodyLimit::disable())
+                .layer(from_fn_with_state(
+                    server::UPLOAD_DEADLINE,
+                    server::upload_deadline,
+                )),
         )
         .route(
             "/api/v1/workspaces/{ws}/imports/{id}",
@@ -984,12 +993,16 @@ pub async fn serve(
     // A debugger stream never ends by itself, so it must be told, or the drain would wait on it.
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let state = state.with_stop(stopped);
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(async move {
+    server::serve_router(
+        listener,
+        router(state),
+        async move {
             shutdown.await;
             let _ = stop.send(true);
-        })
-        .await
+        },
+        server::Limits::default(),
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -1017,6 +1030,59 @@ mod tests {
 
     fn state() -> AppState {
         AppState::new(unreachable_pool(), Arc::new(String::new))
+    }
+
+    #[tokio::test]
+    async fn a_stalled_header_connection_is_closed_by_the_server() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve(listener, state(), std::future::pending()));
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET /readyz HTTP/1.1\r\nHost: x\r\n")
+            .await
+            .unwrap();
+        let mut buf = [0u8; 64];
+
+        let read = tokio::time::timeout(Duration::from_secs(40), stream.read(&mut buf)).await;
+
+        assert!(
+            read.is_ok(),
+            "server kept an incomplete-header connection open for 40s"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_served_router_answers_a_get_and_a_json_post_through_the_loop() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve(listener, state(), std::future::pending()));
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let body = br#"{"user_id":"u"}"#;
+        let request = format!(
+            "POST /api/v1/ingest/identify HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        stream.write_all(body).await.unwrap();
+        let mut buf = [0u8; 256];
+        let read = stream.read(&mut buf).await.unwrap();
+        // A problem answer: no API key, so the request was routed and refused.
+        assert!(
+            String::from_utf8_lossy(&buf[..read]).starts_with("HTTP/1.1 401"),
+            "{}",
+            String::from_utf8_lossy(&buf[..read])
+        );
+
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        let read = stream.read(&mut buf).await.unwrap();
+        assert!(String::from_utf8_lossy(&buf[..read]).starts_with("HTTP/1.1 200"));
     }
 
     async fn get(state: AppState, uri: &str) -> Response<Body> {

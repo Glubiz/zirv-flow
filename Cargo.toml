@@ -3,7 +3,7 @@ members = ["crates/*", "tools/loadgen", "tools/renderbench"]
 resolver = "3"
 
 [workspace.package]
-version = "1.0.17"
+version = "1.0.20"
 edition = "2024"
 authors = ["Jonathan Solskov <josj@zirv.io>"]
 license = "MIT"
@@ -33,6 +33,9 @@ hickory-resolver = { version = "=0.26.3", default-features = false, features = [
 hkdf = "0.13.0"
 hmac = "0.13.0"
 http-body-util = "0.1.5"
+# The listeners bound header reads and connections themselves (#753); axum already depends on both.
+hyper = { version = "1.12.0", default-features = false, features = ["http1", "server"] }
+hyper-util = { version = "0.1.21", default-features = false, features = ["tokio", "service"] }
 ipnet = "2.12.2"
 metrics = "0.24.6"
 minijinja = { version = "2.24.0", default-features = false, features = ["builtins", "macros", "multi_template", "serde", "fuel"] }

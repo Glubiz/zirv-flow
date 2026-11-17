@@ -3183,7 +3183,7 @@
             }
           },
           "408": {
-            "description": "No byte arrived for 60 seconds",
+            "description": "No byte arrived for 60 seconds, or the upload took longer than 15 minutes",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -13602,7 +13602,7 @@
             }
           },
           "408": {
-            "description": "No byte arrived for 60 seconds; the upload was abandoned and nothing was kept",
+            "description": "No byte arrived for 60 seconds, or the upload took longer than 15 minutes; the upload was abandoned and nothing was kept",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -30686,7 +30686,7 @@
             }
           },
           "503": {
-            "description": "The database is unreachable or its schema is not up to date",
+            "description": "The database is unreachable or its schema is not up to date, or a role loop has stopped or shutdown has begun",
             "content": {
               "application/problem+json": {
                 "schema": {
