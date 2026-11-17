@@ -5317,18 +5317,27 @@ pub(super) mod tests {
         ]})
     }
 
-    /// How many times the catalog was read, by the statements `sqlx` logged while `people` wakes
-    /// of one flow ran in one batch (#703).
-    async fn catalog_reads_of_a_batch(pool: PgPool, people: usize) -> usize {
+    /// How many times the catalog and the input freshness were read, by the statements `sqlx`
+    /// logged while `people` wakes of each of `flows` flows (one pinned version each) ran in one
+    /// batch (#703).
+    async fn reads_of_a_batch(pool: PgPool, flows: usize, people: usize) -> (usize, usize) {
         let env = Env::new(pool).await;
         env.define_trait("plan", TraitType::String).await;
-        let mut ids = Vec::new();
-        for n in 0..people {
-            let email = format!("hook{n}@example.com");
-            ids.push(env.person(&email, json!({"plan": "pro"})).await);
+        let mut enrolled = Vec::new();
+        for flow in 0..flows {
+            let mut ids = Vec::new();
+            for n in 0..people {
+                let email = format!("hook{flow}x{n}@example.com");
+                ids.push(env.person(&email, json!({"plan": "pro"})).await);
+            }
+            let flow = env.flow(&format!("Hook{flow}"), branch_hook_graph()).await;
+            enrolled.extend(env.enroll(flow, 1, &ids).await.enrolled);
         }
-        let enrolled = enroll_asleep(&env, "Hook", branch_hook_graph(), &ids).await;
-        let jobs = claim_wakes(&env, people).await;
+        // Every flow sleeps on its wait before the one clock step that wakes them all.
+        env.run_due().await;
+        env.advance(61);
+        env.hold_others(Some("wake"), None).await;
+        let jobs = claim_wakes(&env, flows * people).await;
         let logged = Logged::default();
         let outcomes = {
             let _logging = tracing::subscriber::set_default(
@@ -5355,10 +5364,14 @@ pub(super) mod tests {
             .lines()
             .filter(|line| line.contains("sqlx::query"))
             .collect();
-        statements
-            .iter()
-            .filter(|line| line.contains("FROM event_schemas s"))
-            .count()
+        let reads = |needle: &str| {
+            statements
+                .iter()
+                .filter(|line| line.contains(needle))
+                .count()
+        };
+        // The freshness read is the stream age statement `unhealthy_inputs` starts with.
+        (reads("FROM event_schemas s"), reads("FROM streams st"))
     }
 
     #[sqlx::test]
@@ -5367,9 +5380,25 @@ pub(super) mod tests {
         pool: PgPool,
     ) {
         zirv_flow_store::decision_testing::checked(pool, |pool| async move {
-            let catalog = catalog_reads_of_a_batch(pool, 6).await;
+            let (catalog, freshness) = reads_of_a_batch(pool.clone(), 1, 6).await;
 
             assert_eq!(catalog, 1, "the catalog is read once, not once per wake");
+            assert_eq!(
+                freshness, 1,
+                "the input freshness is read once for the version, not once per wake"
+            );
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_batch_reads_the_input_freshness_once_per_flow_version(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let (catalog, freshness) = reads_of_a_batch(pool, 2, 3).await;
+
+            assert_eq!(catalog, 1, "the catalog is shared by the whole batch");
+            assert_eq!(freshness, 2, "once for each of the two versions");
         })
         .await;
     }

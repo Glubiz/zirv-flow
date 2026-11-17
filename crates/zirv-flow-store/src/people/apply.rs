@@ -333,6 +333,9 @@ struct Tombstoned {
 /// Returns each key that matched a live record, in the order of `keys`, with its ledger row; a key
 /// that matched none, or that repeats, is left out. A person's `trait.change` decision is
 /// recorded with each removed record of theirs that contributed one of the keys that changed.
+/// Those decisions are attribution within one removal: the traits are recomputed once for the
+/// whole set, so a `trait.change` on a record says the removal changed a key it contributed, not
+/// that the record would have changed the trait on its own, or in the order the keys were asked.
 pub(crate) async fn remove_contributions_in(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -3850,6 +3853,150 @@ mod tests {
             plan,
             Some(json!("s9")),
             "recomputed from the live shop record"
+        );
+    }
+
+    /// The `(record_key, action)` pairs of the decisions that name `ws`'s source records, sorted.
+    async fn record_decisions(pool: &PgPool, ws: WorkspaceId, action: &str) -> Vec<String> {
+        let mut keys: Vec<String> = sqlx::query_scalar(
+            "SELECT r.record_key FROM decision_records d \
+             JOIN source_records r ON r.id = (d.subject_ids ->> 'source_record')::uuid \
+             WHERE d.workspace_id = $1 AND d.action = $2 AND d.subject_ids ? 'person' \
+             ORDER BY r.record_key",
+        )
+        .bind(ws.as_uuid())
+        .bind(action)
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        keys.sort();
+        keys
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn removing_two_records_that_changed_a_trait_together_records_the_change_with_both(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "net").await;
+        define(&pool, ws, "plan", Precedence::Latest, &[]).await;
+        let records = [
+            record(
+                "shop",
+                "s",
+                "a@example.com",
+                json!({"plan": "shop"}),
+                datetime!(2031-01-01 00:00 UTC),
+            ),
+            record(
+                "crm",
+                "1",
+                "a@example.com",
+                json!({"plan": "a1"}),
+                datetime!(2031-02-01 00:00 UTC),
+            ),
+            record(
+                "crm",
+                "2",
+                "a@example.com",
+                json!({"plan": "a2"}),
+                datetime!(2031-03-01 00:00 UTC),
+            ),
+        ];
+        let outcomes = apply_profile_batch(&pool, ws, &records).await.unwrap();
+        let person = person_of(&outcomes[0]);
+        assert_eq!(trait_of(&pool, ws, person, "plan").await, Some(json!("a2")));
+        let mut expected = record_decisions(&pool, ws, "trait.change").await;
+
+        let mut tx = begin(&pool).await.unwrap();
+        let removed = remove_contributions_in(
+            &mut tx,
+            ws,
+            "crm",
+            "contacts",
+            &["1".to_owned(), "2".to_owned()],
+            &trace(),
+        )
+        .await
+        .unwrap();
+        commit(tx).await.unwrap();
+
+        assert_eq!(removed.len(), 2);
+        assert_eq!(
+            trait_of(&pool, ws, person, "plan").await,
+            Some(json!("shop"))
+        );
+        assert_eq!(
+            record_decisions(&pool, ws, "contribution.removed").await,
+            ["1", "2"]
+        );
+        // What the applies recorded stays, and both removed records add the net change.
+        expected.extend(["1".to_owned(), "2".to_owned()]);
+        expected.sort();
+        assert_eq!(
+            record_decisions(&pool, ws, "trait.change").await,
+            expected,
+            "both removed records carry the net change"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn removing_records_whose_trait_keeps_its_value_records_no_change(pool: PgPool) {
+        let ws = workspace(&pool, "net").await;
+        define(&pool, ws, "plan", Precedence::Latest, &[]).await;
+        let records = [
+            record(
+                "crm",
+                "1",
+                "a@example.com",
+                json!({"plan": "old1"}),
+                datetime!(2031-01-01 00:00 UTC),
+            ),
+            record(
+                "crm",
+                "2",
+                "a@example.com",
+                json!({"plan": "old2"}),
+                datetime!(2031-02-01 00:00 UTC),
+            ),
+            record(
+                "shop",
+                "9",
+                "a@example.com",
+                json!({"plan": "win"}),
+                datetime!(2031-03-01 00:00 UTC),
+            ),
+        ];
+        let outcomes = apply_profile_batch(&pool, ws, &records).await.unwrap();
+        let person = person_of(&outcomes[0]);
+        let before = plan_change_decisions(&pool).await;
+
+        let mut tx = begin(&pool).await.unwrap();
+        remove_contributions_in(
+            &mut tx,
+            ws,
+            "crm",
+            "contacts",
+            &["1".to_owned(), "2".to_owned()],
+            &trace(),
+        )
+        .await
+        .unwrap();
+        commit(tx).await.unwrap();
+
+        assert_eq!(
+            trait_of(&pool, ws, person, "plan").await,
+            Some(json!("win"))
+        );
+        assert_eq!(
+            plan_change_decisions(&pool).await,
+            before,
+            "the winning value stayed, so the removal changed no trait"
+        );
+        assert_eq!(
+            record_decisions(&pool, ws, "contribution.removed").await,
+            ["1", "2"]
         );
     }
 }

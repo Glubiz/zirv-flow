@@ -182,7 +182,8 @@ latency was waiting for a connection. A `serve` process taking 2,000 events/s
 needs D of about 24 to 32.
 
 Worked budget for that topology, with D = 32 on `serve` and 10 on `scheduler` and
-`worker`: 32 + 10 + 10 + 41 = **93**. That leaves 7 of PostgreSQL's default
+`worker`: 32 + 10 + 10 + 47 = **99**, the 47 being the extra worker budget of
+43 plus E = 4. That leaves 1 of PostgreSQL's default
 `max_connections` of 100, less than the reserved slots and headroom above
 require, so raise PostgreSQL's `max_connections` above 100, for example to 150.
 
