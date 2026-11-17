@@ -163,27 +163,37 @@ pub async fn set_password<'e>(
     Ok(result.rows_affected() == 1)
 }
 
+/// The statement that counts one failed sign-in and sets the lock the count reaches, ending in
+/// `WHERE id = $1` plus the `$tail` the caller adds. Binds `$1` the user, `$2` the lock threshold
+/// and `$3` the longest lock in seconds.
+macro_rules! count_failure_sql {
+    ($tail:literal) => {
+        concat!(
+            "UPDATE users SET \
+                failed_sign_ins = failed_sign_ins + 1, \
+                locked_until = CASE WHEN failed_sign_ins + 1 >= $2 \
+                THEN now() + make_interval(secs => LEAST( \
+                power(2::float8, LEAST(failed_sign_ins + 1 - $2, 20)::float8), $3)) \
+                ELSE locked_until END \
+                WHERE id = $1",
+            $tail
+        )
+    };
+}
+
 /// Counts a failed sign-in atomically. From the fifth consecutive failure the account is
 /// locked for `min(2^(failures - 5) seconds, 15 minutes)`.
 pub async fn record_failed_sign_in<'e>(
     executor: impl PgExecutor<'e>,
     id: UserId,
 ) -> Result<(), StoreError> {
-    sqlx::query(
-        "UPDATE users SET \
-            failed_sign_ins = failed_sign_ins + 1, \
-            locked_until = CASE WHEN failed_sign_ins + 1 >= $2 \
-            THEN now() + make_interval(secs => LEAST( \
-            power(2::float8, LEAST(failed_sign_ins + 1 - $2, 20)::float8), $3)) \
-            ELSE locked_until END \
-            WHERE id = $1",
-    )
-    .bind(id.as_uuid())
-    .bind(LOCK_THRESHOLD)
-    .bind(MAX_LOCK_SECONDS)
-    .execute(executor)
-    .await
-    .map_err(StoreError::query)?;
+    sqlx::query(count_failure_sql!(""))
+        .bind(id.as_uuid())
+        .bind(LOCK_THRESHOLD)
+        .bind(MAX_LOCK_SECONDS)
+        .execute(executor)
+        .await
+        .map_err(StoreError::query)?;
     Ok(())
 }
 
@@ -197,16 +207,10 @@ pub async fn reserve_sign_in_attempt<'e>(
     executor: impl PgExecutor<'e>,
     id: UserId,
 ) -> Result<bool, StoreError> {
-    let reserved: Option<Uuid> = sqlx::query_scalar(
-        "UPDATE users SET \
-            failed_sign_ins = failed_sign_ins + 1, \
-            locked_until = CASE WHEN failed_sign_ins + 1 >= $2 \
-            THEN now() + make_interval(secs => LEAST( \
-            power(2::float8, LEAST(failed_sign_ins + 1 - $2, 20)::float8), $3)) \
-            ELSE locked_until END \
-            WHERE id = $1 AND (locked_until IS NULL OR locked_until <= now()) \
-            RETURNING id",
-    )
+    let reserved: Option<Uuid> = sqlx::query_scalar(count_failure_sql!(
+        " AND (locked_until IS NULL OR locked_until <= now()) \
+            RETURNING id"
+    ))
     .bind(id.as_uuid())
     .bind(LOCK_THRESHOLD)
     .bind(MAX_LOCK_SECONDS)
