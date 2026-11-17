@@ -9,7 +9,7 @@
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::response::Response;
-use hashbrown::HashSet;
+use hashbrown::{HashMap, HashSet};
 use tracing::warn;
 use uuid::Uuid;
 use zirv_flow_core::consent::{Channel, Dimensions};
@@ -132,7 +132,27 @@ fn checked_boxes(body: &[u8]) -> HashSet<String> {
         .collect()
 }
 
-/// `POST /u/{token}/preferences`: records every choice that differs from what is held, together.
+/// What the page showed: each `shown` field is `field=value=state` with state `1` when the box
+/// was ticked and `0` when it was not, as `field=value` against its state. The value may hold
+/// `=` or `/`, so the state is split off the end.
+fn shown_boxes(body: &[u8]) -> HashMap<String, bool> {
+    url::form_urlencoded::parse(body)
+        .filter(|(name, _)| name == "shown")
+        .filter_map(|(_, value)| {
+            let (choice, state) = value.rsplit_once('=')?;
+            match state {
+                "1" => Some((choice.to_owned(), true)),
+                "0" => Some((choice.to_owned(), false)),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// `POST /u/{token}/preferences`: records the choices the person changed on the page they were
+/// shown, together. A choice the page did not show (a topic created since) and a box left as it
+/// was shown are not touched, so a stale form cannot undo a newer change. A form without its
+/// `shown` fields changes nothing.
 pub(crate) async fn preferences_save(
     State(state): State<AppState>,
     Path(token): Path<String>,
@@ -145,11 +165,16 @@ pub(crate) async fn preferences_save(
     let result = async {
         let loaded = load(&state, &message).await?;
         let checked = checked_boxes(&body);
+        let shown = shown_boxes(&body);
         let mut changes = Vec::new();
         for (group, scopes) in loaded.groups.iter().zip(&loaded.scopes) {
             for (choice, (topic, dimensions)) in group.choices.iter().zip(scopes) {
-                let wanted = checked.contains(&format!("{}={}", choice.field, choice.value));
-                if wanted != choice.checked {
+                let name = format!("{}={}", choice.field, choice.value);
+                let Some(rendered) = shown.get(&name) else {
+                    continue;
+                };
+                let wanted = checked.contains(&name);
+                if wanted != *rendered && wanted != choice.checked {
                     changes.push(PreferenceChange {
                         topic: *topic,
                         dimensions: dimensions.clone(),
@@ -183,6 +208,17 @@ pub(crate) async fn preferences_save(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_shown_state_is_split_off_the_end_of_a_value_that_holds_equals_signs() {
+        let shown = shown_boxes(
+            b"shown=topic%3Dnews%3D1&shown=dim%3Dv%2Fa%3Db%3D0&shown=topic%3Dx%3D2&shown=topic%3Dy&topic=news",
+        );
+
+        assert_eq!(shown.len(), 2);
+        assert!(shown["topic=news"]);
+        assert!(!shown["dim=v/a=b"]);
+    }
 
     #[test]
     fn only_the_topic_and_dim_fields_count_as_checked_boxes() {

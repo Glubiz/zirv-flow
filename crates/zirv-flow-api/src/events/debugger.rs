@@ -66,7 +66,7 @@ use zirv_flow_store::{
 };
 
 use crate::AppState;
-use crate::auth::{Need, Principal, authorize, may_view_pii, path_id};
+use crate::auth::{Access, Need, Principal, authorize, may_view_pii, path_id, recheck};
 use crate::consent::bool_param;
 use crate::problem::{ApiError, Problem};
 
@@ -95,6 +95,11 @@ const MAX_BEHIND: i64 = 5000;
 /// A viewer that hears nothing still polls this often, as a safety net for a missed
 /// notification and the only way it learns of new rows while the listener is down.
 const POLL: Duration = Duration::from_secs(5);
+
+/// How long one stream lives. The client reconnects (with `Last-Event-ID`, so no frame is lost)
+/// and the stream is authorized again, so access withdrawn while it was open ends here at the
+/// latest, even when a re-check could not read.
+const MAX_LIFETIME: Duration = Duration::from_secs(3600);
 
 /// How often the watch is renewed for workspaces with a viewer.
 const HEARTBEAT: Duration = Duration::from_secs(10);
@@ -127,6 +132,10 @@ struct HubInner {
     degraded: AtomicBool,
     /// [`PATIENCE`] in milliseconds; tests shorten it.
     patience_ms: AtomicU64,
+    /// [`POLL`] in milliseconds; tests shorten it.
+    poll_ms: AtomicU64,
+    /// [`MAX_LIFETIME`] in milliseconds; tests shorten it.
+    lifetime_ms: AtomicU64,
 }
 
 struct Slot {
@@ -176,6 +185,10 @@ impl DebuggerHub {
                 patience_ms: AtomicU64::new(
                     u64::try_from(PATIENCE.as_millis()).unwrap_or(u64::MAX),
                 ),
+                poll_ms: AtomicU64::new(u64::try_from(POLL.as_millis()).unwrap_or(u64::MAX)),
+                lifetime_ms: AtomicU64::new(
+                    u64::try_from(MAX_LIFETIME.as_millis()).unwrap_or(u64::MAX),
+                ),
             }),
         }
     }
@@ -214,6 +227,28 @@ impl DebuggerHub {
 
     fn patience(&self) -> Duration {
         Duration::from_millis(self.inner.patience_ms.load(Ordering::Relaxed))
+    }
+
+    fn poll(&self) -> Duration {
+        Duration::from_millis(self.inner.poll_ms.load(Ordering::Relaxed))
+    }
+
+    fn lifetime(&self) -> Duration {
+        Duration::from_millis(self.inner.lifetime_ms.load(Ordering::Relaxed))
+    }
+
+    /// Shortens the poll, and with it the access re-check, so a test need not wait five seconds.
+    #[cfg(test)]
+    pub(crate) fn set_poll_for_test(&self, poll: Duration) {
+        let millis = u64::try_from(poll.as_millis()).unwrap_or(u64::MAX);
+        self.inner.poll_ms.store(millis, Ordering::Relaxed);
+    }
+
+    /// Shortens the lifetime of the streams opened after it, so a test need not wait an hour.
+    #[cfg(test)]
+    pub(crate) fn set_lifetime_for_test(&self, lifetime: Duration) {
+        let millis = u64::try_from(lifetime.as_millis()).unwrap_or(u64::MAX);
+        self.inner.lifetime_ms.store(millis, Ordering::Relaxed);
     }
 
     /// Shortens the patience, and with it the lookback, so a test need not wait ten seconds.
@@ -580,6 +615,14 @@ struct Viewer {
     workspace: WorkspaceId,
     filter: Filter,
     reveal: bool,
+    /// Who opened the stream, asked again every poll for what they may still see.
+    principal: Principal,
+    /// Whether the client asked to see values; it sees them while it also may.
+    asked: bool,
+    /// How often the feed and the access are read without a notification.
+    poll: Duration,
+    /// When the stream ends whatever happens.
+    until: tokio::time::Instant,
     /// The feed's epoch, in every frame id.
     epoch: String,
     /// The base of the lookback window.
@@ -607,15 +650,30 @@ async fn stopped(stop: &mut Option<watch::Receiver<bool>>) {
 /// One viewer's reader: sends the rows it has not sent whenever woken, and ends when the
 /// client is gone or the server shuts down. `cursor` is where to begin; `reset` says
 /// the client's position belonged to another life of the feed, so it is told with a gap frame.
-/// Every [`POLL`] it also checks that a crash did not reset the feed under it.
+/// Every poll it also checks that a crash did not reset the feed under it, and that the
+/// principal still has access: a revoked key, an ended session or a removed member gets an
+/// `end` frame and the stream closes; a lost `view_pii` stops the values from being shown. A
+/// read that fails keeps what was known until the next poll. The stream ends at its lifetime.
 async fn pump(mut viewer: Viewer, mut cursor: Cursor, reset: bool) {
     let mut skipped = 0_u64;
     let mut told_degraded = false;
     let mut reset_pending = reset;
-    let mut next_poll = tokio::time::Instant::now() + POLL;
+    let mut next_poll = tokio::time::Instant::now() + viewer.poll;
     loop {
+        if tokio::time::Instant::now() >= viewer.until {
+            end(&viewer, "max_lifetime");
+            return;
+        }
         if tokio::time::Instant::now() >= next_poll {
-            next_poll = tokio::time::Instant::now() + POLL;
+            next_poll = tokio::time::Instant::now() + viewer.poll;
+            match recheck(&viewer.pool, &viewer.principal, viewer.workspace).await {
+                Ok(Access::Ended) => {
+                    end(&viewer, "access_revoked");
+                    return;
+                }
+                Ok(Access::Kept { reveals_pii }) => viewer.reveal = viewer.asked && reveals_pii,
+                Err(error) => warn!(%error, "the access of an open debugger stream was not read"),
+            }
             if feed_was_reset(&viewer, cursor.watermark).await
                 && let Ok(epoch) = debugger_epoch(&viewer.pool).await
             {
@@ -664,11 +722,21 @@ async fn pump(mut viewer: Viewer, mut cursor: Cursor, reset: bool) {
                     return;
                 }
             }
-            () = tokio::time::sleep_until(next_poll) => {}
+            () = tokio::time::sleep_until(next_poll.min(viewer.until)) => {}
             () = viewer.frames.closed() => return,
             () = stopped(&mut viewer.stop) => return,
         }
     }
+}
+
+/// Tells the client why its stream is ending. The frame is dropped when the client is not
+/// reading, which is no loss: the stream closes either way.
+fn end(viewer: &Viewer, reason: &str) {
+    let frame = Event::default()
+        .event("end")
+        .json_data(json!({ "reason": reason }))
+        .unwrap_or_else(|_| Event::default().event("end").data("{}"));
+    let _ = viewer.frames.try_send(frame);
 }
 
 /// Records `zirv_flow_debugger_delivery_seconds`: from the feed row's `at` to the frame write.
@@ -827,7 +895,9 @@ async fn read_new(viewer: &mut Viewer, cursor: &mut Cursor, skipped: &mut u64) -
 /// timeline; `reveal=true` shows the stored (redacted) values to a viewer who may see values
 /// (owner, workspace admin or `admin` key) and is ignored for anyone else. A workspace has at
 /// most 20 streams per server process; more get 429 with `Retry-After`. Streams end when the
-/// server shuts down.
+/// server shuts down, when access is withdrawn (the key revoked, the session ended or the member
+/// removed, checked every few seconds; a lost `view_pii` stops the values from being shown) with
+/// an `event: end` frame naming the reason, and after one hour (reconnect with `Last-Event-ID`).
 #[utoipa::path(
     get,
     operation_id = "stream_event_debugger",
@@ -893,6 +963,10 @@ pub(crate) async fn stream(
         workspace: workspace.id,
         filter,
         reveal,
+        principal,
+        asked,
+        poll: state.debugger.poll(),
+        until: tokio::time::Instant::now() + state.debugger.lifetime(),
         epoch,
         patience,
         subscription,
@@ -1448,5 +1522,329 @@ mod tests {
         assert_eq!(held.len(), MAX_VIEWERS_TOTAL - 1);
         assert!(refused.is_none());
         assert!(after_leaving.is_some());
+    }
+
+    /// An open stream and the means to feed it events.
+    struct Watch {
+        pool: PgPool,
+        workspace: WorkspaceId,
+        root: zirv_flow_core::HmacRoot,
+        key: zirv_flow_store::ApiKey,
+        frames: Frames,
+        fed: u32,
+    }
+
+    /// The frames of an open stream, whole.
+    struct Frames {
+        body: axum::body::Body,
+        buffer: String,
+        ended: bool,
+    }
+
+    impl Frames {
+        /// The next frame that is not a keep-alive comment, or `None` once the stream ended.
+        async fn next(&mut self) -> Option<String> {
+            tokio::time::timeout(Duration::from_secs(20), async {
+                loop {
+                    while let Some(end) = self.buffer.find("\n\n") {
+                        let frame: String = self.buffer.drain(..end + 2).collect();
+                        if !frame.trim_start().starts_with(':') {
+                            return Some(frame);
+                        }
+                    }
+                    if self.ended {
+                        return None;
+                    }
+                    match self.body.frame().await {
+                        Some(frame) => {
+                            if let Ok(data) = frame.unwrap().into_data() {
+                                self.buffer.push_str(std::str::from_utf8(&data).unwrap());
+                            }
+                        }
+                        None => {
+                            self.ended = true;
+                            return None;
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("a frame or the end of the stream within 20 seconds")
+        }
+
+        /// Reads to the end of the stream and returns every frame.
+        async fn read_to_end(&mut self) -> Vec<String> {
+            let mut frames = Vec::new();
+            while let Some(frame) = self.next().await {
+                frames.push(frame);
+            }
+            frames
+        }
+
+        /// The next `item` frame, skipping status and gap frames.
+        async fn next_item(&mut self) -> String {
+            loop {
+                let frame = self.next().await.expect("the stream ended before an item");
+                if frame.lines().any(|line| line == "event: item") {
+                    return frame;
+                }
+                assert!(
+                    !frame.lines().any(|line| line == "event: end"),
+                    "the stream ended: {frame}"
+                );
+            }
+        }
+    }
+
+    /// A user who is an editor of the workspace with the `view_pii` grant, signed in with a
+    /// session whose token hash is all zeros.
+    async fn grant_editor(pool: &PgPool, workspace: WorkspaceId) -> zirv_flow_store::User {
+        use crate::admin::{self, Context};
+        use zirv_flow_core::Role;
+
+        let user = admin::create_user(
+            pool,
+            &Context::system(),
+            "m@example.com",
+            "correct horse battery",
+        )
+        .await
+        .unwrap();
+        admin::set_member_grant(
+            pool,
+            &Context::system(),
+            workspace,
+            user.id,
+            Role::Editor,
+            Some(true),
+        )
+        .await
+        .unwrap();
+        zirv_flow_store::create_session(pool, &[0; 32], user.id, &[], 3600)
+            .await
+            .unwrap();
+        user
+    }
+
+    impl Watch {
+        /// Opens a stream with `reveal=true` as the workspace's API key (`None`) or as the
+        /// editor `grant_editor` makes (`Some`), polling every 100 ms and living `lifetime`.
+        async fn open(
+            pool: PgPool,
+            as_member: bool,
+            lifetime: Option<Duration>,
+        ) -> (Self, Option<zirv_flow_core::UserId>) {
+            use zirv_flow_core::{ApiKeyId, HmacRoot, MasterKey, Scope, Slug, WorkspaceName};
+
+            zirv_flow_store::migrate(&pool).await.unwrap();
+            let workspace = zirv_flow_store::create_workspace(
+                &pool,
+                &WorkspaceName::parse("Watched").unwrap(),
+                &Slug::parse("watched").unwrap(),
+            )
+            .await
+            .unwrap();
+            let key = zirv_flow_store::create_api_key(
+                &pool,
+                ApiKeyId::new(),
+                workspace.id,
+                "watcher",
+                &[0; 32],
+                &[Scope::Read, Scope::Ingest, Scope::Pii],
+                None,
+            )
+            .await
+            .unwrap();
+            let root = HmacRoot::bootstrap_from(&MasterKey::generate());
+            let state = AppState::new(pool.clone(), Arc::new(String::new)).with_hmac_root(&root);
+            state.debugger.set_poll_for_test(Duration::from_millis(100));
+            if let Some(lifetime) = lifetime {
+                state.debugger.set_lifetime_for_test(lifetime);
+            }
+            let (principal, member) = if as_member {
+                let user = grant_editor(&pool, workspace.id).await;
+                let id = user.id;
+                (Principal::session_for_tests(user), Some(id))
+            } else {
+                (
+                    Principal::Key(crate::auth::KeyPrincipal { key: key.clone() }),
+                    None,
+                )
+            };
+            let response = stream(
+                State(state),
+                principal,
+                Path(workspace.id.to_string()),
+                RawQuery(Some("source=api&reveal=true".into())),
+                HeaderMap::new(),
+            )
+            .await
+            .unwrap();
+            let watch = Self {
+                pool,
+                workspace: workspace.id,
+                root,
+                key,
+                frames: Frames {
+                    body: response.into_body(),
+                    buffer: String::new(),
+                    ended: false,
+                },
+                fed: 0,
+            };
+            (watch, member)
+        }
+
+        /// Decides one event whose property `secretfield` is `secret`.
+        async fn feed(&mut self, secret: &str) {
+            use zirv_flow_core::{Cause, HmacPurpose, TraceContext};
+            use zirv_flow_store::{IngestItem, IngestPayload, Shard};
+
+            self.fed += 1;
+            let identifiers = vec![("external:user_id".into(), format!("person-{}", self.fed))];
+            let items = [
+                IngestItem {
+                    identifiers: identifiers.clone(),
+                    timestamp: None,
+                    message_id: Some(format!("identify-{}", self.fed)),
+                    payload: IngestPayload::Identify { traits: Map::new() },
+                },
+                IngestItem {
+                    identifiers,
+                    timestamp: None,
+                    message_id: Some(format!("track-{}", self.fed)),
+                    payload: IngestPayload::Track {
+                        event: "seen".into(),
+                        properties: json!({ "secretfield": secret })
+                            .as_object()
+                            .cloned()
+                            .unwrap(),
+                    },
+                },
+            ];
+            zirv_flow_store::append_inbox(
+                &self.pool,
+                self.workspace,
+                self.key.id.as_uuid(),
+                &TraceContext::root(Cause::api("watched")),
+                &items,
+            )
+            .await
+            .unwrap();
+            zirv_flow_store::drain_batch(
+                &self.pool,
+                self.workspace,
+                Shard::ALL,
+                &self.root.hmac_key(HmacPurpose::Redaction),
+                10,
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_stream_of_a_revoked_key_ends_and_reveals_nothing_more(pool: PgPool) {
+        let (mut watch, _) = Watch::open(pool.clone(), false, None).await;
+        watch.feed("VISIBLE-BEFORE").await;
+        assert!(watch.frames.next_item().await.contains("VISIBLE-BEFORE"));
+
+        assert!(
+            zirv_flow_store::revoke_api_key(&pool, watch.workspace, watch.key.id)
+                .await
+                .unwrap()
+        );
+        let frames = tokio::time::timeout(Duration::from_secs(10), watch.frames.read_to_end())
+            .await
+            .expect("the stream of a revoked key did not end");
+
+        let last = frames.last().unwrap();
+        assert!(last.contains("event: end"), "{frames:?}");
+        assert!(last.contains("access_revoked"), "{last}");
+        watch.feed("LEAKED-AFTER-REVOKE").await;
+        assert!(watch.frames.next().await.is_none());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_stream_of_a_removed_member_ends(pool: PgPool) {
+        let (mut watch, member) = Watch::open(pool.clone(), true, None).await;
+        watch.feed("VISIBLE-BEFORE").await;
+        assert!(watch.frames.next_item().await.contains("VISIBLE-BEFORE"));
+
+        crate::admin::remove_member(
+            &pool,
+            &crate::admin::Context::system(),
+            watch.workspace,
+            member.unwrap(),
+        )
+        .await
+        .unwrap();
+        let frames = tokio::time::timeout(Duration::from_secs(10), watch.frames.read_to_end())
+            .await
+            .expect("the stream of a removed member did not end");
+
+        assert!(
+            frames.last().unwrap().contains("access_revoked"),
+            "{frames:?}"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_member_who_loses_view_pii_keeps_the_stream_but_it_stops_revealing(pool: PgPool) {
+        let (mut watch, member) = Watch::open(pool.clone(), true, None).await;
+        watch.feed("VISIBLE-BEFORE").await;
+        assert!(watch.frames.next_item().await.contains("VISIBLE-BEFORE"));
+
+        crate::admin::set_member_grant(
+            &pool,
+            &crate::admin::Context::system(),
+            watch.workspace,
+            member.unwrap(),
+            zirv_flow_core::Role::Editor,
+            Some(false),
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        watch.feed("HIDDEN-AFTER").await;
+
+        let frame = watch.frames.next_item().await;
+        assert!(!frame.contains("HIDDEN-AFTER"), "{frame}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_stream_ends_at_its_lifetime(pool: PgPool) {
+        let (mut watch, _) = Watch::open(pool, false, Some(Duration::from_millis(300))).await;
+
+        let frames = watch.frames.read_to_end().await;
+
+        assert!(
+            frames.last().unwrap().contains("max_lifetime"),
+            "{frames:?}"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_failed_access_read_keeps_the_stream_until_the_next_poll(pool: PgPool) {
+        let (mut watch, _) = Watch::open(pool.clone(), false, None).await;
+        sqlx::query("ALTER TABLE api_keys RENAME TO api_keys_x")
+            .execute(&pool)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        sqlx::query("ALTER TABLE api_keys_x RENAME TO api_keys")
+            .execute(&pool)
+            .await
+            .unwrap();
+        watch.feed("STILL-HERE").await;
+
+        let frame = watch.frames.next_item().await;
+
+        assert!(frame.contains("STILL-HERE"), "{frame}");
     }
 }

@@ -22,7 +22,7 @@ use zirv_flow_core::people::{Identifier, identifier_hash};
 use zirv_flow_core::{HmacKey, ValidationError, WorkspaceId};
 use zirv_flow_store::{
     AddOutcome, BatchEntry, NewSuppression, PgPool, RemoveOutcome, SUPPRESSION_KINDS, Suppression,
-    SuppressionCursor,
+    SuppressionCursor, Tx,
 };
 
 use super::{bool_param, csv, hex, origin};
@@ -41,6 +41,10 @@ const IMPORT_CHUNK: usize = 1000;
 /// Suppressions per page of the export.
 pub(super) const EXPORT_PAGE: u32 = 1000;
 const EXPORT_HEADER: &str = "hash,kind,reason,source,created_at\n";
+
+/// How long an export may run in all. Its producer task drops the transaction, and with it the
+/// connection and the snapshot, at this deadline even when the client has stopped reading.
+const EXPORT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 #[derive(Serialize, ToSchema)]
 pub(crate) struct SuppressionBody {
@@ -662,10 +666,101 @@ pub(crate) async fn import_handler(
     Ok(Json(result))
 }
 
-enum Export {
-    Header,
-    Page(Option<SuppressionCursor>),
-    Done,
+/// What the producer task hands the body: a chunk, or `None` after the last page.
+type Chunk = Result<Option<Bytes>, io::Error>;
+
+/// Reads the pages of one snapshot and sends them, header first. It owns `tx` and drops it
+/// (rollback) as soon as the last page is read, the deadline passes or the body is gone, so a
+/// client that stops reading cannot hold the connection and the snapshot. Each send is raced
+/// against the deadline for the same reason. A stop before the last page sends no `None`, so the
+/// body ends with an error and never looks complete.
+async fn produce_export(
+    mut tx: Tx,
+    workspace: WorkspaceId,
+    deadline: tokio::time::Instant,
+    out: tokio::sync::mpsc::Sender<Chunk>,
+) {
+    let header = Bytes::from_static(EXPORT_HEADER.as_bytes());
+    if !send_before(&out, deadline, Ok(Some(header))).await {
+        return;
+    }
+    let mut cursor: Option<SuppressionCursor> = None;
+    loop {
+        let page = tokio::time::timeout_at(
+            deadline,
+            zirv_flow_store::list_suppressions(&mut *tx, workspace, EXPORT_PAGE, cursor, None),
+        )
+        .await;
+        let (page, more) = match page {
+            Ok(Ok(page)) => page,
+            Ok(Err(error)) => {
+                tracing::error!(%error, "the suppression export failed");
+                drop(tx);
+                let _ = out.try_send(Err(io::Error::other("the export failed")));
+                return;
+            }
+            Err(_) => {
+                tracing::error!("the suppression export ran past its deadline");
+                return;
+            }
+        };
+        let next = match page.last() {
+            Some(last) if more => Some((last.created_at, last.id)),
+            _ => None,
+        };
+        let chunk = Bytes::from(export_lines(&page));
+        let Some(next) = next else {
+            // The last page: end the transaction before the client is given the rest.
+            drop(tx);
+            if send_before(&out, deadline, Ok(Some(chunk))).await {
+                let _ = send_before(&out, deadline, Ok(None)).await;
+            }
+            return;
+        };
+        if !send_before(&out, deadline, Ok(Some(chunk))).await {
+            return;
+        }
+        cursor = Some(next);
+    }
+}
+
+/// Sends one chunk unless the deadline passes first or the body is gone; false means stop.
+async fn send_before(
+    out: &tokio::sync::mpsc::Sender<Chunk>,
+    deadline: tokio::time::Instant,
+    chunk: Chunk,
+) -> bool {
+    match tokio::time::timeout_at(deadline, out.send(chunk)).await {
+        Ok(sent) => sent.is_ok(),
+        Err(_) => {
+            tracing::error!("the suppression export ran past its deadline");
+            false
+        }
+    }
+}
+
+/// The CSV body: the header, then the pages of one snapshot, newest first. The snapshot is the
+/// state when `tx` began, so every suppression committed before then is in the file exactly once
+/// and none committed after. A spawned task owns `tx` and ends it at `lifetime` whether or not
+/// the client reads; a body cut short that way, or by a failed page, ends with an error.
+fn export_body(
+    tx: Tx,
+    workspace: WorkspaceId,
+    lifetime: std::time::Duration,
+) -> impl futures_util::Stream<Item = Result<Bytes, io::Error>> {
+    let (send, receive) = tokio::sync::mpsc::channel(1);
+    let deadline = tokio::time::Instant::now() + lifetime;
+    tokio::spawn(produce_export(tx, workspace, deadline, send));
+    stream::unfold(Some(receive), |state| async move {
+        let mut receive = state?;
+        match receive.recv().await {
+            Some(Ok(Some(bytes))) => Some((Ok(bytes), Some(receive))),
+            Some(Ok(None)) => None,
+            Some(Err(error)) => Some((Err(error), None)),
+            // The producer stopped before the last page.
+            None => Some((Err(io::Error::other("the export took too long")), None)),
+        }
+    })
 }
 
 fn export_lines(page: &[Suppression]) -> String {
@@ -694,7 +789,7 @@ fn export_lines(page: &[Suppression]) -> String {
     tag = "consent",
     params(("ws" = Uuid, Path, description = "Workspace id")),
     responses(
-        (status = 200, description = "The suppressions as CSV, newest first", body = String, content_type = "text/csv"),
+        (status = 200, description = "The suppressions as CSV, newest first, as they were when the export started: one that commits while the file streams is not in it, and the stream ends with an error after 15 minutes", body = String, content_type = "text/csv"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, or a key without the admin scope", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json")
@@ -707,44 +802,8 @@ pub(crate) async fn export(
     Path(ws): Path<String>,
 ) -> Result<Response, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
-    let (pool, workspace) = (state.pool.clone(), workspace.id);
-    let body = stream::unfold(Export::Header, move |phase| {
-        let pool = pool.clone();
-        async move {
-            match phase {
-                Export::Header => Some((
-                    Ok(Bytes::from_static(EXPORT_HEADER.as_bytes())),
-                    Export::Page(None),
-                )),
-                Export::Page(cursor) => {
-                    let page = zirv_flow_store::list_suppressions(
-                        &pool,
-                        workspace,
-                        EXPORT_PAGE,
-                        cursor,
-                        None,
-                    )
-                    .await;
-                    match page {
-                        Ok((page, more)) => {
-                            let next = match page.last() {
-                                Some(last) if more => {
-                                    Export::Page(Some((last.created_at, last.id)))
-                                }
-                                _ => Export::Done,
-                            };
-                            Some((Ok(Bytes::from(export_lines(&page))), next))
-                        }
-                        Err(error) => {
-                            tracing::error!(%error, "the suppression export failed");
-                            Some((Err(io::Error::other("the export failed")), Export::Done))
-                        }
-                    }
-                }
-                Export::Done => None,
-            }
-        }
-    });
+    let tx = zirv_flow_store::begin_suppression_export(&state.pool).await?;
+    let body = export_body(tx, workspace.id, EXPORT_DEADLINE);
     Ok(csv::download(Body::from_stream(body), "suppressions.csv"))
 }
 
@@ -766,6 +825,81 @@ mod tests {
 
     fn hash_of(value: &str) -> [u8; 32] {
         identifier_hash(&key(), &Identifier::parse("email", value).unwrap())
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_export_past_its_deadline_fails_like_a_failed_page(pool: sqlx::PgPool) {
+        use futures_util::StreamExt;
+
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let tx = zirv_flow_store::begin_suppression_export(&pool)
+            .await
+            .unwrap();
+        let mut body = Box::pin(export_body(
+            tx,
+            WorkspaceId::new(),
+            std::time::Duration::ZERO,
+        ));
+
+        assert_eq!(
+            body.next().await.unwrap().unwrap(),
+            EXPORT_HEADER.as_bytes()
+        );
+        assert!(body.next().await.unwrap().is_err());
+        assert!(body.next().await.is_none());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_stalled_export_gives_up_its_transaction_at_the_deadline(pool: sqlx::PgPool) {
+        use futures_util::StreamExt;
+
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let workspace = WorkspaceId::new();
+        sqlx::query("INSERT INTO workspaces (id, name, slug) VALUES ($1, 'w', 'w')")
+            .bind(workspace.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+        // More than one page, so the producer is still holding the snapshot when it stalls.
+        sqlx::query(
+            "INSERT INTO suppressions (id, workspace_id, identifier_hash, kind, reason, source) \
+             SELECT gen_random_uuid(), $1, sha256(i::text::bytea), 'email', 'manual', 'api' \
+             FROM generate_series(1, 2500) AS i",
+        )
+        .bind(workspace.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let tx = zirv_flow_store::begin_suppression_export(&pool)
+            .await
+            .unwrap();
+        let lifetime = std::time::Duration::from_millis(300);
+        let mut body = Box::pin(export_body(tx, workspace, lifetime));
+
+        // Read the header, then stop reading without dropping the body.
+        assert_eq!(
+            body.next().await.unwrap().unwrap(),
+            EXPORT_HEADER.as_bytes()
+        );
+        tokio::time::sleep(lifetime * 5).await;
+
+        let open: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity \
+             WHERE datname = current_database() AND state LIKE 'idle in transaction%'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(open, 0, "the export kept its transaction open");
+
+        // What was buffered may still be read, but the body ends with an error, not cleanly.
+        let mut last = None;
+        while let Some(item) = body.next().await {
+            last = Some(item);
+        }
+        assert!(last.unwrap().is_err());
     }
 
     #[test]

@@ -380,6 +380,20 @@ pub async fn append_inbox(
     trace: &TraceContext,
     items: &[IngestItem],
 ) -> Result<usize, StoreError> {
+    let mut connection = pool.acquire().await.map_err(StoreError::query)?;
+    append_inbox_in(&mut connection, workspace, api_key_id, trace, items).await
+}
+
+/// [`append_inbox`] on the caller's connection. In a transaction the rows and the drain wake-ups
+/// commit or roll back with the caller's other writes, so a caller that audits the append fails
+/// or succeeds as one.
+pub async fn append_inbox_in(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    api_key_id: Uuid,
+    trace: &TraceContext,
+    items: &[IngestItem],
+) -> Result<usize, StoreError> {
     let kinds: Vec<&str> = items.iter().map(|item| item.payload.kind()).collect();
     let stored: Vec<Value> = items.iter().map(stored_json).collect();
     let message_ids: Vec<String> = items
@@ -392,7 +406,7 @@ pub async fn append_inbox(
         .collect();
 
     let people = known_people(
-        pool,
+        &mut *connection,
         workspace,
         items.iter().map(|item| item.identifiers.as_slice()),
     )
@@ -462,7 +476,7 @@ pub async fn append_inbox(
     .bind(&stored)
     .bind(&message_ids)
     .bind(&affinities)
-    .fetch_one(pool)
+    .fetch_one(&mut *connection)
     .await
     .map_err(StoreError::query)?;
     let inserted: i64 = row.try_get(0).map_err(StoreError::query)?;

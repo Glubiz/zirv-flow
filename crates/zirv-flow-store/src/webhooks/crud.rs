@@ -237,6 +237,99 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn equal_signature_and_timestamp_headers_are_refused_in_any_case(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let created = hook(&pool, ws, "orders", None).await;
+        let mut connection = pool.acquire().await.unwrap();
+        update_webhook(
+            &mut connection,
+            ws,
+            created.id,
+            &WebhookUpdate {
+                timestamp_header: Some(Some("X-C")),
+                ..WebhookUpdate::default()
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        // Two PATCHes that each passed the API's check against the old row meet here.
+        let same = update_webhook(
+            &mut connection,
+            ws,
+            created.id,
+            &WebhookUpdate {
+                signature_header: Some("X-C"),
+                ..WebhookUpdate::default()
+            },
+        )
+        .await;
+        let other_case = update_webhook(
+            &mut connection,
+            ws,
+            created.id,
+            &WebhookUpdate {
+                signature_header: Some("x-c"),
+                ..WebhookUpdate::default()
+            },
+        )
+        .await;
+
+        let same = same.expect_err("stored equal headers");
+        assert!(same.is_check_violation("webhooks_headers_differ_check"));
+        assert!(
+            other_case
+                .expect_err("stored headers that differ in case only")
+                .is_check_violation("webhooks_headers_differ_check")
+        );
+        let stored = find_webhook(&pool, ws, created.id).await.unwrap().unwrap();
+        assert_eq!(stored.signature_header, created.signature_header);
+        assert_eq!(stored.timestamp_header.as_deref(), Some("X-C"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_migration_runs_over_a_stored_row_with_equal_headers_and_still_guards_it(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let created = hook(&pool, ws, "orders", None).await;
+        // An install that stored equal headers before the constraint existed.
+        sqlx::query("ALTER TABLE webhooks DROP CONSTRAINT webhooks_headers_differ_check")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE webhooks SET timestamp_header = upper(signature_header) WHERE id = $1")
+            .bind(created.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        sqlx::raw_sql(include_str!(
+            "../../migrations/0111_webhooks_headers_differ.sql"
+        ))
+        .execute(&pool)
+        .await
+        .expect("the migration must not fail on an existing row");
+
+        let mut connection = pool.acquire().await.unwrap();
+        let refused = update_webhook(
+            &mut connection,
+            ws,
+            created.id,
+            &WebhookUpdate {
+                dedupe_field: Some("other"),
+                ..WebhookUpdate::default()
+            },
+        )
+        .await
+        .expect_err("a change to the row stores equal headers again");
+        assert!(refused.is_check_violation("webhooks_headers_differ_check"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_hook_is_invisible_and_unchangeable_from_another_workspace(pool: PgPool) {
         let one = workspace(&pool, "one").await;
         let two = workspace(&pool, "two").await;

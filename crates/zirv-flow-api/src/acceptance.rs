@@ -6681,6 +6681,135 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_export_is_the_suppressions_as_of_its_start_and_never_half_includes_a_commit(
+        pool: PgPool,
+    ) {
+        let router = keyed_app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        // An import that began before the rest and commits while the file streams.
+        let mut importing = zirv_flow_store::begin(&pool).await.unwrap();
+        zirv_flow_store::add_suppression(
+            &mut *importing,
+            ws.parse().unwrap(),
+            &zirv_flow_store::NewSuppression {
+                identifier_hash: [9; 32],
+                kind: "email",
+                reason: zirv_flow_core::consent::SuppressionReason::Manual,
+                source: "import",
+                note: None,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+        // One more than a page, so the file takes two pages.
+        sqlx::query(
+            "INSERT INTO suppressions (id, workspace_id, identifier_hash, kind, reason, source) \
+             SELECT gen_random_uuid(), $1, sha256(convert_to(g::text, 'UTF8')), 'email', \
+                    'manual', 'api' \
+             FROM generate_series(1, 1001) g",
+        )
+        .bind(ws.parse::<uuid::Uuid>().unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let request = with_auth(
+            Request::builder()
+                .method("GET")
+                .uri(suppressions_uri(&ws, "/export")),
+            Auth::Session(&owner),
+        )
+        .body(Body::empty())
+        .unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body();
+        let mut text = String::new();
+        for _ in 0..2 {
+            let frame = body.frame().await.unwrap().unwrap();
+            text.push_str(std::str::from_utf8(&frame.into_data().unwrap()).unwrap());
+        }
+        zirv_flow_store::commit(importing).await.unwrap();
+        while let Some(frame) = body.frame().await {
+            text.push_str(std::str::from_utf8(&frame.unwrap().into_data().unwrap()).unwrap());
+        }
+
+        let rows: Vec<&str> = text.lines().skip(1).collect();
+        let hashes: hashbrown::HashSet<&str> = rows
+            .iter()
+            .map(|row| row.split(',').next().unwrap())
+            .collect();
+        assert_eq!(rows.len(), 1001, "{} rows", rows.len());
+        assert_eq!(hashes.len(), 1001, "a row repeats");
+        assert!(
+            !hashes.contains("09".repeat(32).as_str()),
+            "a commit made while the file streamed is half in it"
+        );
+        let later = call_text(
+            &router,
+            "GET",
+            &suppressions_uri(&ws, "/export"),
+            None,
+            String::new(),
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(later.text.lines().count(), 1 + 1002);
+        assert!(later.text.contains(&"09".repeat(32)));
+    }
+
+    /// The handler path: a row committed after the export response is returned is not in the
+    /// body. It does not guard the snapshot statement in the store, which races the first page
+    /// query here; `an_export_snapshot_is_fixed_when_it_begins_not_at_its_first_read` in the
+    /// store does.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_export_snapshot_is_taken_when_the_request_begins_not_at_the_first_read(
+        pool: PgPool,
+    ) {
+        let router = keyed_app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let request = with_auth(
+            Request::builder()
+                .method("GET")
+                .uri(suppressions_uri(&ws, "/export")),
+            Auth::Session(&owner),
+        )
+        .body(Body::empty())
+        .unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        // Committed after the handler returned, before any of the body is read.
+        zirv_flow_store::add_suppression(
+            &pool,
+            ws.parse().unwrap(),
+            &zirv_flow_store::NewSuppression {
+                identifier_hash: [7; 32],
+                kind: "email",
+                reason: zirv_flow_core::consent::SuppressionReason::Manual,
+                source: "api",
+                note: None,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+
+        assert_eq!(
+            std::str::from_utf8(&bytes).unwrap(),
+            "hash,kind,reason,source,created_at
+",
+            "a suppression committed after the export began is in the file"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_export_is_csv_of_hashes_only(pool: PgPool) {
         let router = keyed_app(&pool).await;
         let owner = owner(&pool, &router).await;

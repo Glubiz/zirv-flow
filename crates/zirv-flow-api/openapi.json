@@ -7228,7 +7228,7 @@
           "events"
         ],
         "summary": "Watches the workspace's events as they are decided: one `item` frame per outcome\n(`accepted`, `flagged`, `unplanned`, `rejected` or `duplicate`), live, with no\nhistory beyond the last few seconds before it connected (so a batch that was still\ncommitting is not missed). Each frame's `id` is `<epoch>:<position>`, a position that is\nsafe to resume from: send it back as `Last-Event-ID` and the stream continues after it,\npossibly repeating a few rows the client already has (their `seq` identifies them). A row\nwhose writer commits late is sent when it does, so frames may arrive out of order by `seq`;\na row that commits more than twice the 10 s patience after a later row was sent can still\nbe missed, and a resumed stream does not deliver a late row below its resume point whose\nwriter committed while the client was away. The epoch names the life of the feed, which is\nunlogged and starts over after a crash: a position from another epoch, or an older bare\nnumber, is answered with a `gap` frame whose `reset` is true, and the stream starts at the\ncurrent position; an open stream that notices the crash on its poll does the same. A viewer that\ncannot keep up gets an `event: gap` frame with the number of rows skipped (an upper bound\nwhen filters apply). While the server's notifier is down, an `event: status` frame says\n`degraded` and the stream polls every few seconds instead of reacting at once; another says\nit recovered.",
-        "description": "While at least one viewer watches a workspace, ingestion writes a feed row per event;\nwhen none does, it writes nothing extra. Values are masked per viewer as in the person\ntimeline; `reveal=true` shows the stored (redacted) values to a viewer who may see values\n(owner, workspace admin or `admin` key) and is ignored for anyone else. A workspace has at\nmost 20 streams per server process; more get 429 with `Retry-After`. Streams end when the\nserver shuts down.",
+        "description": "While at least one viewer watches a workspace, ingestion writes a feed row per event;\nwhen none does, it writes nothing extra. Values are masked per viewer as in the person\ntimeline; `reveal=true` shows the stored (redacted) values to a viewer who may see values\n(owner, workspace admin or `admin` key) and is ignored for anyone else. A workspace has at\nmost 20 streams per server process; more get 429 with `Retry-After`. Streams end when the\nserver shuts down, when access is withdrawn (the key revoked, the session ended or the member\nremoved, checked every few seconds; a lost `view_pii` stops the values from being shown) with\nan `event: end` frame naming the reason, and after one hour (reconnect with `Last-Event-ID`).",
         "operationId": "stream_event_debugger",
         "parameters": [
           {
@@ -24444,7 +24444,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The suppressions as CSV, newest first",
+            "description": "The suppressions as CSV, newest first, as they were when the export started: one that commits while the file streams is not in it, and the stream ends with an error after 15 minutes",
             "content": {
               "text/csv": {
                 "schema": {
@@ -30478,6 +30478,16 @@
           },
           "404": {
             "description": "No such workspace or webhook, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The stored hook has equal signature and timestamp headers; change one first",
             "content": {
               "application/problem+json": {
                 "schema": {
