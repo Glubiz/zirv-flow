@@ -22,7 +22,7 @@ use zirv_flow_core::people::{Identifier, identifier_hash};
 use zirv_flow_core::{HmacKey, ValidationError, WorkspaceId};
 use zirv_flow_store::{
     AddOutcome, BatchEntry, NewSuppression, PgPool, RemoveOutcome, SUPPRESSION_KINDS, Suppression,
-    SuppressionCursor,
+    SuppressionCursor, Tx,
 };
 
 use super::{bool_param, csv, hex, origin};
@@ -41,6 +41,10 @@ const IMPORT_CHUNK: usize = 1000;
 /// Suppressions per page of the export.
 pub(super) const EXPORT_PAGE: u32 = 1000;
 const EXPORT_HEADER: &str = "hash,kind,reason,source,created_at\n";
+
+/// How long an export may run in all. It holds a connection and a snapshot while the client
+/// reads, so a client that stalls cannot keep them for good.
+const EXPORT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 #[derive(Serialize, ToSchema)]
 pub(crate) struct SuppressionBody {
@@ -662,10 +666,74 @@ pub(crate) async fn import_handler(
     Ok(Json(result))
 }
 
+/// Where an export is: its snapshot, the cursor and when it must stop.
+struct Paging {
+    tx: Tx,
+    cursor: Option<SuppressionCursor>,
+    deadline: tokio::time::Instant,
+}
+
 enum Export {
-    Header,
-    Page(Option<SuppressionCursor>),
+    Header(Paging),
+    Page(Paging),
     Done,
+}
+
+/// The CSV body: the header, then the pages of one snapshot, newest first. The snapshot is the
+/// state when `tx` began, so every suppression committed before then is in the file exactly once
+/// and none committed after; a stream that outlives `lifetime` fails like a failed page.
+fn export_body(
+    tx: Tx,
+    workspace: WorkspaceId,
+    lifetime: std::time::Duration,
+) -> impl futures_util::Stream<Item = Result<Bytes, io::Error>> {
+    let paging = Paging {
+        tx,
+        cursor: None,
+        deadline: tokio::time::Instant::now() + lifetime,
+    };
+    stream::unfold(Export::Header(paging), move |phase| async move {
+        match phase {
+            Export::Header(paging) => Some((
+                Ok(Bytes::from_static(EXPORT_HEADER.as_bytes())),
+                Export::Page(paging),
+            )),
+            Export::Page(mut paging) => {
+                if tokio::time::Instant::now() >= paging.deadline {
+                    tracing::error!("the suppression export ran past its deadline");
+                    return Some((
+                        Err(io::Error::other("the export took too long")),
+                        Export::Done,
+                    ));
+                }
+                let page = zirv_flow_store::list_suppressions(
+                    &mut *paging.tx,
+                    workspace,
+                    EXPORT_PAGE,
+                    paging.cursor,
+                    None,
+                )
+                .await;
+                match page {
+                    Ok((page, more)) => {
+                        let next = match page.last() {
+                            Some(last) if more => {
+                                paging.cursor = Some((last.created_at, last.id));
+                                Export::Page(paging)
+                            }
+                            _ => Export::Done,
+                        };
+                        Some((Ok(Bytes::from(export_lines(&page))), next))
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "the suppression export failed");
+                        Some((Err(io::Error::other("the export failed")), Export::Done))
+                    }
+                }
+            }
+            Export::Done => None,
+        }
+    })
 }
 
 fn export_lines(page: &[Suppression]) -> String {
@@ -694,7 +762,7 @@ fn export_lines(page: &[Suppression]) -> String {
     tag = "consent",
     params(("ws" = Uuid, Path, description = "Workspace id")),
     responses(
-        (status = 200, description = "The suppressions as CSV, newest first", body = String, content_type = "text/csv"),
+        (status = 200, description = "The suppressions as CSV, newest first, as they were when the export started: one that commits while the file streams is not in it, and the stream ends with an error after 15 minutes", body = String, content_type = "text/csv"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, or a key without the admin scope", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json")
@@ -707,44 +775,8 @@ pub(crate) async fn export(
     Path(ws): Path<String>,
 ) -> Result<Response, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
-    let (pool, workspace) = (state.pool.clone(), workspace.id);
-    let body = stream::unfold(Export::Header, move |phase| {
-        let pool = pool.clone();
-        async move {
-            match phase {
-                Export::Header => Some((
-                    Ok(Bytes::from_static(EXPORT_HEADER.as_bytes())),
-                    Export::Page(None),
-                )),
-                Export::Page(cursor) => {
-                    let page = zirv_flow_store::list_suppressions(
-                        &pool,
-                        workspace,
-                        EXPORT_PAGE,
-                        cursor,
-                        None,
-                    )
-                    .await;
-                    match page {
-                        Ok((page, more)) => {
-                            let next = match page.last() {
-                                Some(last) if more => {
-                                    Export::Page(Some((last.created_at, last.id)))
-                                }
-                                _ => Export::Done,
-                            };
-                            Some((Ok(Bytes::from(export_lines(&page))), next))
-                        }
-                        Err(error) => {
-                            tracing::error!(%error, "the suppression export failed");
-                            Some((Err(io::Error::other("the export failed")), Export::Done))
-                        }
-                    }
-                }
-                Export::Done => None,
-            }
-        }
-    });
+    let tx = zirv_flow_store::begin_suppression_export(&state.pool).await?;
+    let body = export_body(tx, workspace.id, EXPORT_DEADLINE);
     Ok(csv::download(Body::from_stream(body), "suppressions.csv"))
 }
 
@@ -766,6 +798,29 @@ mod tests {
 
     fn hash_of(value: &str) -> [u8; 32] {
         identifier_hash(&key(), &Identifier::parse("email", value).unwrap())
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_export_past_its_deadline_fails_like_a_failed_page(pool: sqlx::PgPool) {
+        use futures_util::StreamExt;
+
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let tx = zirv_flow_store::begin_suppression_export(&pool)
+            .await
+            .unwrap();
+        let mut body = Box::pin(export_body(
+            tx,
+            WorkspaceId::new(),
+            std::time::Duration::ZERO,
+        ));
+
+        assert_eq!(
+            body.next().await.unwrap().unwrap(),
+            EXPORT_HEADER.as_bytes()
+        );
+        assert!(body.next().await.unwrap().is_err());
+        assert!(body.next().await.is_none());
     }
 
     #[test]

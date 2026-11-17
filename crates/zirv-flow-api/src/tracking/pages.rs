@@ -141,6 +141,8 @@ pub(super) struct Group {
 }
 
 /// The preference center: the groups with the person's current choices, and a note after a save.
+/// Each choice carries a hidden `shown` field (`field=value=1` when it was ticked, `=0` when not)
+/// so a save can tell what the person saw and changed.
 pub(super) fn preferences(token: &str, groups: &[Group], saved: bool) -> Response {
     let token = esc(token);
     let mut body = String::from("<h1>Email preferences</h1>");
@@ -161,11 +163,17 @@ pub(super) fn preferences(token: &str, groups: &[Group], saved: bool) -> Respons
         body.push_str(&format!("<fieldset><legend>{}</legend>", esc(&group.title)));
         for choice in &group.choices {
             body.push_str(&format!(
-                "<label><input type=\"checkbox\" name=\"{}\" value=\"{}\"{}> {}</label>",
+                "<label><input type=\"checkbox\" name=\"{}\" value=\"{}\"{}> {}</label>                 <input type=\"hidden\" name=\"shown\" value=\"{}\">",
                 choice.field,
                 esc(&choice.value),
                 if choice.checked { " checked" } else { "" },
-                esc(&choice.label)
+                esc(&choice.label),
+                esc(&format!(
+                    "{}={}={}",
+                    choice.field,
+                    choice.value,
+                    u8::from(choice.checked)
+                ))
             ));
         }
         body.push_str("</fieldset>");

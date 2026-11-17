@@ -20,7 +20,8 @@ use zirv_flow_core::signature::{
 };
 use zirv_flow_core::{SecretBytes, SecretId, SecretPurpose, SecretString, UserId, WorkspaceId};
 use zirv_flow_store::{
-    DiscoveredStream, NewSource, NewWebhook, SourceUpdate, StreamSettings, Webhook, WebhookUpdate,
+    DiscoveredStream, NewSource, NewWebhook, SourceUpdate, StoreError, StreamSettings, Webhook,
+    WebhookUpdate,
 };
 
 use crate::AppState;
@@ -210,6 +211,19 @@ fn check_scheme(scheme: &Scheme<'_>) -> Result<(), ApiError> {
     }
 }
 
+/// The 422 `check_scheme` gives for equal headers, for a write the table's own check refused: a
+/// concurrent PATCH changed the other header after this one's check read the row.
+fn headers_differ(error: StoreError) -> ApiError {
+    if error.is_check_violation("webhooks_headers_differ_check") {
+        problems(vec![(
+            "timestamp_header".to_owned(),
+            "must differ from signature_header".to_owned(),
+        )])
+    } else {
+        error.into()
+    }
+}
+
 fn keyring(state: &AppState) -> Result<&std::sync::Arc<zirv_flow_core::Keyring>, ApiError> {
     state.keyring().ok_or_else(|| {
         ApiError::new(
@@ -354,7 +368,8 @@ pub(crate) async fn create_webhook(
             created_by,
         },
     )
-    .await?;
+    .await
+    .map_err(headers_differ)?;
     admin::audit(
         &mut tx,
         context,
@@ -459,7 +474,8 @@ pub(crate) async fn update_webhook(
             dedupe_field: request.dedupe_field.as_deref(),
         },
     )
-    .await?
+    .await
+    .map_err(headers_differ)?
     .ok_or_else(ApiError::not_found)?;
     admin::audit(
         &mut tx,

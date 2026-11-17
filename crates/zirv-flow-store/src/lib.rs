@@ -206,9 +206,9 @@ pub use imports::{
 };
 pub use ingest::{
     DRAIN_JOB_KIND, DrainOutcome, InboxHead, IngestItem, IngestPayload, Shard, append_inbox,
-    backfill_affinity, drain_batch, drain_batch_singly, drain_shards, enqueue_drain_if_pending,
-    enqueue_drain_shard, enqueue_pending_drains, inbox_heads, payload_shard, set_drain_shards,
-    shard_pending,
+    append_inbox_in, backfill_affinity, drain_batch, drain_batch_singly, drain_shards,
+    enqueue_drain_if_pending, enqueue_drain_shard, enqueue_pending_drains, inbox_heads,
+    payload_shard, set_drain_shards, shard_pending,
 };
 pub use jobs::{
     ClaimFloors, ClaimedJob, DEFAULT_MAX_ATTEMPTS, DeadCursor, FailOutcome, Heard, Job,
@@ -351,8 +351,8 @@ pub use summary::{
 pub use suppressions::{
     AddOutcome, BatchEntry, NewSuppression, RemoveOutcome, SUPPRESSION_KINDS, Suppression,
     SuppressionCursor, SuppressionScope, add_organization_suppression, add_suppression,
-    add_suppressions, count_suppressed, find_suppressing, find_suppression, is_suppressed,
-    list_suppressions, remove_suppression, suppressing_scope,
+    add_suppressions, begin_suppression_export, count_suppressed, find_suppressing,
+    find_suppression, is_suppressed, list_suppressions, remove_suppression, suppressing_scope,
 };
 pub use sync_runs::{
     BatchOutcome as SyncBatchOutcome, BatchProgress as SyncBatchProgress,
@@ -575,6 +575,19 @@ impl StoreError {
     /// A change the stream's active sync run would undo: it was refused and nothing was written.
     pub(crate) fn run_active() -> Self {
         Self::new(StoreErrorKind::RunActive)
+    }
+
+    /// Whether PostgreSQL refused the write because it breaks the check constraint `name`
+    /// (SQLSTATE 23514). The input is at fault, so running it again cannot help.
+    pub fn is_check_violation(&self, name: &str) -> bool {
+        self.source
+            .as_deref()
+            .and_then(|source| source.downcast_ref::<sqlx::Error>())
+            .and_then(sqlx::Error::as_database_error)
+            .is_some_and(|error| {
+                error.code().is_some_and(|code| code.as_ref() == "23514")
+                    && error.constraint() == Some(name)
+            })
     }
 
     /// Whether PostgreSQL refused a value it cannot store: a NUL in `text` (22021), or as an

@@ -1176,7 +1176,9 @@ export interface paths {
          *     timeline; `reveal=true` shows the stored (redacted) values to a viewer who may see values
          *     (owner, workspace admin or `admin` key) and is ignored for anyone else. A workspace has at
          *     most 20 streams per server process; more get 429 with `Retry-After`. Streams end when the
-         *     server shuts down.
+         *     server shuts down, when access is withdrawn (the key revoked, the session ended or the member
+         *     removed, checked every few seconds; a lost `view_pii` stops the values from being shown) with
+         *     an `event: end` frame naming the reason, and after one hour (reconnect with `Last-Event-ID`).
          */
         get: operations["stream_event_debugger"];
         put?: never;
@@ -28461,7 +28463,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The suppressions as CSV, newest first */
+            /** @description The suppressions as CSV, newest first, as they were when the export started: one that commits while the file streams is not in it, and the stream ends with an error after 15 minutes */
             200: {
                 headers: {
                     [name: string]: unknown;

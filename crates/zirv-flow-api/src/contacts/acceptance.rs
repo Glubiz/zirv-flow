@@ -1197,4 +1197,139 @@ mod tests {
         assert_eq!(single.status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(count(&pool, "ingest_inbox").await, before);
     }
+
+    /// A trigger that refuses the audit row of `action`, so the request fails after the write.
+    async fn refuse_audit(pool: &PgPool, action: &str) {
+        sqlx::query(
+            "CREATE FUNCTION zz_fail() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN RAISE EXCEPTION 'audit refused'; END $$",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CREATE TRIGGER zz_t BEFORE INSERT ON audit_log FOR EACH ROW \
+             WHEN (NEW.action = '{action}') EXECUTE FUNCTION zz_fail()"
+        )))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_bulk_whose_audit_fails_is_a_5xx_that_appended_nothing(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        fx.define().await;
+        let before = count(&pool, "ingest_inbox").await;
+        let body = json!({"contacts": [{"key": "b-1", "fields": {"email": "a@example.com"}}]});
+        refuse_audit(&pool, "contact.bulk_upserted").await;
+
+        let reply = fx
+            .send("POST", "/contacts/bulk", Some(body.clone()), &fx.write, &[])
+            .await;
+
+        let inbox = count(&pool, "ingest_inbox").await - before;
+        assert!(
+            reply.status.is_success() || inbox == 0,
+            "status {} but {inbox} inbox rows are durable",
+            reply.status
+        );
+        assert!(reply.status.is_server_error(), "{:?}", reply.body);
+
+        sqlx::query("DROP TRIGGER zz_t ON audit_log")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let retried = fx
+            .send("POST", "/contacts/bulk", Some(body), &fx.write, &[])
+            .await;
+        assert_eq!(retried.status, StatusCode::ACCEPTED, "{:?}", retried.body);
+        assert_eq!(count(&pool, "ingest_inbox").await - before, 1);
+        assert_eq!(
+            audited(&pool).await.last().map(String::as_str),
+            Some("contact.bulk_upserted")
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_contact_write_is_not_a_5xx_when_the_masking_lookup_fails_at_the_commit(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        fx.define().await;
+        // The table the masking lookup reads goes away when the write commits, so a lookup
+        // that runs after the commit fails with the contact already stored.
+        sqlx::query(
+            "CREATE FUNCTION zz_rename() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN ALTER TABLE trait_definitions RENAME TO trait_definitions_x; \
+             RETURN NULL; END $$",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE CONSTRAINT TRIGGER zz_t AFTER INSERT ON audit_log DEFERRABLE INITIALLY \
+             DEFERRED FOR EACH ROW WHEN (NEW.action = 'contact.created') \
+             EXECUTE FUNCTION zz_rename()",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let reply = fx.create("c-1", json!({"email": "a@example.com"})).await;
+
+        sqlx::query("ALTER TABLE trait_definitions_x RENAME TO trait_definitions")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let exists = fx.send("GET", "/contacts/c-1", None, &fx.admin, &[]).await;
+        assert!(
+            reply.status.is_success() || exists.status == StatusCode::NOT_FOUND,
+            "create answered {} but the contact exists ({})",
+            reply.status,
+            exists.status
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_exact_email_owner_survives_when_key_prefix_hits_fill_the_limit(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        fx.define().await;
+        for (n, key) in ["a@b.co-1", "a@b.co-2", "a@b.co-3"].into_iter().enumerate() {
+            let reply = fx
+                .create(key, json!({"email": format!("m{n}@x.test")}))
+                .await;
+            assert_eq!(reply.status, StatusCode::CREATED, "{:?}", reply.body);
+        }
+        fx.create("z-owner", json!({"email": "a@b.co"})).await;
+        // A contact whose key is its own email is one hit, not two.
+        fx.create("c@d.co", json!({"email": "c@d.co"})).await;
+
+        let found = fx
+            .send(
+                "POST",
+                "/contacts/search",
+                Some(json!({"q": "a@b.co", "limit": 2})),
+                &fx.admin,
+                &[],
+            )
+            .await;
+        let own = fx
+            .send("GET", "/contacts/search?q=c%40d.co", None, &fx.admin, &[])
+            .await;
+
+        let keys = |reply: &Reply| -> Vec<String> {
+            reply.body["contacts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["key"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        assert_eq!(keys(&found), ["a@b.co-1", "z-owner"], "{:?}", found.body);
+        assert_eq!(keys(&own), ["c@d.co"]);
+    }
 }

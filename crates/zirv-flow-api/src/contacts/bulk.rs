@@ -12,7 +12,6 @@ use utoipa::ToSchema;
 use zirv_flow_core::contacts::{FieldProblem, RegistryKey, TypedField, plan, validate_contact_key};
 use zirv_flow_store::{IngestItem, IngestPayload};
 
-use super::store_error;
 use crate::AppState;
 use crate::admin;
 use crate::auth::{Need, Principal, authorize, path_id};
@@ -195,14 +194,14 @@ pub(crate) async fn bulk(
     drop(connection);
     let items = items(&body, definition.as_deref(), &registry).map_err(invalid)?;
 
-    zirv_flow_store::append_inbox(&state.pool, workspace.id, sender, &request_trace(), &items)
-        .await
-        .map_err(|_| unavailable())?;
-    metrics::counter!("zirv_flow_ingest_items_total", "kind" => "contact")
-        .increment(items.len() as u64);
+    // The append and the audit entry commit together: a failure at any step stores nothing, so
+    // the 503 is true and a retry of the batch cannot apply it twice.
     let mut tx = zirv_flow_store::begin(&state.pool)
         .await
-        .map_err(store_error)?;
+        .map_err(|_| unavailable())?;
+    zirv_flow_store::append_inbox_in(&mut tx, workspace.id, sender, &request_trace(), &items)
+        .await
+        .map_err(|_| unavailable())?;
     admin::audit(
         &mut tx,
         &principal.context(),
@@ -212,8 +211,12 @@ pub(crate) async fn bulk(
         json!({ "count": items.len() }),
     )
     .await
-    .map_err(store_error)?;
-    zirv_flow_store::commit(tx).await.map_err(store_error)?;
+    .map_err(|_| unavailable())?;
+    zirv_flow_store::commit(tx)
+        .await
+        .map_err(|_| unavailable())?;
+    metrics::counter!("zirv_flow_ingest_items_total", "kind" => "contact")
+        .increment(items.len() as u64);
     Ok((
         StatusCode::ACCEPTED,
         Json(BulkAcceptedBody {

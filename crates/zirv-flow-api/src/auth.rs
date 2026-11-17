@@ -22,7 +22,7 @@ use axum::http::{HeaderMap, Method};
 use hashbrown::HashMap;
 use zirv_flow_core::token::{hash_matches, sha256};
 use zirv_flow_core::{ApiKeyId, Capability, Role, Scope, UserId, WorkspaceId};
-use zirv_flow_store::{ApiKey, User, Workspace};
+use zirv_flow_store::{ApiKey, PgPool, StoreError, User, Workspace};
 
 use crate::problem::ApiError;
 use crate::{AppState, admin, cookies, credentials, request_id};
@@ -387,6 +387,70 @@ pub(crate) async fn may_view_pii(
                         view_pii: member.view_pii,
                     })
                 })
+        }
+    }
+}
+
+/// What a long-lived stream still allows its principal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Access {
+    /// The key was revoked, the session ended or the membership was removed: the stream ends.
+    Ended,
+    /// Read access stands; `reveals_pii` says whether personal values may still be shown.
+    Kept { reveals_pii: bool },
+}
+
+/// Decides again what `principal` may do in `workspace`, with the rules of a request, for a
+/// stream that was authorized when it opened and has been open since. A session is read without
+/// being touched, so the stream does not keep it from going idle.
+pub(crate) async fn recheck(
+    pool: &PgPool,
+    principal: &Principal,
+    workspace: WorkspaceId,
+) -> Result<Access, StoreError> {
+    match principal {
+        Principal::Key(key) => {
+            let Some(stored) = zirv_flow_store::find_api_key_for_auth(pool, key.key.id).await?
+            else {
+                return Ok(Access::Ended);
+            };
+            let key = stored.key;
+            if key.revoked_at.is_some()
+                || key.workspace_id != workspace
+                || !scopes_allow(&key.scopes, Need::Read)
+            {
+                return Ok(Access::Ended);
+            }
+            Ok(Access::Kept {
+                reveals_pii: reveals_pii(PiiHolder::Key(&key.scopes)),
+            })
+        }
+        Principal::Session(session) => {
+            let Some(active) = zirv_flow_store::find_active_session(
+                pool,
+                &session.token_hash,
+                SESSION_IDLE_SECONDS,
+            )
+            .await?
+            else {
+                return Ok(Access::Ended);
+            };
+            if active.user.is_owner {
+                return Ok(Access::Kept {
+                    reveals_pii: reveals_pii(PiiHolder::Owner),
+                });
+            }
+            let Some(member) =
+                zirv_flow_store::find_membership(pool, workspace, session.user.id).await?
+            else {
+                return Ok(Access::Ended);
+            };
+            Ok(Access::Kept {
+                reveals_pii: reveals_pii(PiiHolder::Member {
+                    role: member.role,
+                    view_pii: member.view_pii,
+                }),
+            })
         }
     }
 }
