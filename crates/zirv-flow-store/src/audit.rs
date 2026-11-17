@@ -866,6 +866,39 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_kind_migration_replaces_a_valid_prebuilt_index_with_another_definition(
+        pool: PgPool,
+    ) {
+        before_0113(&pool, true).await;
+        for statement in [
+            "DROP INDEX audit_log_workspace_kind_idx",
+            "CREATE INDEX audit_log_workspace_kind_idx \
+             ON audit_log (workspace_id, object_kind, id) WHERE object_kind IS NOT NULL",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+        let (valid, definition, prebuilt) = kind_index_state(&pool).await.unwrap();
+        assert!(valid && definition.contains("WHERE"), "{definition}");
+
+        sqlx::raw_sql(include_str!(
+            "../migrations/0113_audit_log_object_kind_idx.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let (valid, definition, rebuilt) = kind_index_state(&pool).await.unwrap();
+        assert!(valid, "the kind index is invalid: {definition}");
+        assert_eq!(
+            definition.split_once(" USING ").map(|(_, rest)| rest),
+            Some("btree (workspace_id, object_kind, id)"),
+            "{definition}"
+        );
+        assert_ne!(rebuilt, prebuilt, "the different index was kept");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_area_pages_across_its_actions_like_the_prefix_filter_without_loss_or_repeat(
         pool: PgPool,
     ) {
