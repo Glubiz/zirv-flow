@@ -97,11 +97,11 @@ pub use consent::{
     NewDimension, NewTopic, PolicyVersion, ReadOutcome, RuleCheck, RuleToCheck, Topic, TopicUpdate,
     consent_export_page, consent_for, consent_history, consent_policy_draft, consent_read,
     create_dimension, create_dimension_value, create_topic, dimensions_of, evaluate_consent_policy,
-    find_consent_policy, find_dimension, find_topic, find_topic_by_key,
+    find_consent_policy, find_dimension, find_topic, find_topic_by_key, find_topics,
     list_consent_policy_versions, list_dimensions, list_topics, lock_consent_policy,
     publish_consent_policy, published_consent_policy, save_consent_policy_draft,
-    save_consent_policy_draft_at, set_consent, unknown_dimension_entry, update_dimension,
-    update_dimension_value, update_topic,
+    save_consent_policy_draft_at, set_consent, unknown_dimension_entries, unknown_dimension_entry,
+    update_dimension, update_dimension_value, update_topic,
 };
 pub use contacts::{
     Contact, ContactChange, ContactDefinition, ContactPage, ContactSearch, ContactSearchError,
@@ -126,8 +126,8 @@ pub use destinations::{
     archive_destination, bucket_state, count_delivery_attempt,
     count_delivery_attempt_record_failure, create_destination, destination_attempt_stats,
     destination_report, find_destination, find_destination_for_update, find_destination_workspace,
-    list_delivery_attempts, list_destinations, lock_destinations_shared, purge_attempts,
-    record_delivery_attempt, throttle_bucket, update_destination,
+    find_destinations, list_delivery_attempts, list_destinations, lock_destinations_shared,
+    purge_attempts, record_delivery_attempt, throttle_bucket, update_destination,
 };
 pub use events::{
     BREAKDOWN_VALUES, Breakdown, Bucket, CountResult, DEBUGGER_CHANNEL, DebuggerListener,
@@ -178,8 +178,9 @@ pub use flows::{
     record_steps, record_sync_evidence, record_webhook_outcome, register_wait, release_enrollment,
     reopen_failed_step, resolve_survivors, resume_batch, resume_failed, resume_flow,
     rotate_signing_key, sample_enrollments, save_enrollment, segment_is_watched,
-    segment_trigger_flows, set_warmup, settle_wait_step, step_zones, unhealthy_inputs,
-    update_flow_draft, update_flow_draft_checked, version_node_counts, wait_filters, warmup_counts,
+    segment_trigger_flows, set_warmup, set_warmup_counted, settle_wait_step, step_zones,
+    unhealthy_inputs, update_flow_draft, update_flow_draft_checked, version_node_counts,
+    wait_filters, warmup_counts,
 };
 pub use forwarding::{
     ClaimedRow, DELIVERED_RETENTION, DeadLetter, FORWARD_JOB_KIND, FORWARDING_COUNT_CAP,
@@ -206,9 +207,9 @@ pub use imports::{
 };
 pub use ingest::{
     DRAIN_JOB_KIND, DrainOutcome, InboxHead, IngestItem, IngestPayload, Shard, append_inbox,
-    backfill_affinity, drain_batch, drain_batch_singly, drain_shards, enqueue_drain_if_pending,
-    enqueue_drain_shard, enqueue_pending_drains, inbox_heads, payload_shard, set_drain_shards,
-    shard_pending,
+    append_inbox_in, backfill_affinity, drain_batch, drain_batch_singly, drain_shards,
+    enqueue_drain_if_pending, enqueue_drain_shard, enqueue_pending_drains, inbox_heads,
+    payload_shard, set_drain_shards, shard_pending,
 };
 pub use jobs::{
     ClaimFloors, ClaimedJob, DEFAULT_MAX_ATTEMPTS, DeadCursor, FailOutcome, Heard, Job,
@@ -351,8 +352,8 @@ pub use summary::{
 pub use suppressions::{
     AddOutcome, BatchEntry, NewSuppression, RemoveOutcome, SUPPRESSION_KINDS, Suppression,
     SuppressionCursor, SuppressionScope, add_organization_suppression, add_suppression,
-    add_suppressions, count_suppressed, find_suppressing, find_suppression, is_suppressed,
-    list_suppressions, remove_suppression, suppressing_scope,
+    add_suppressions, begin_suppression_export, count_suppressed, find_suppressing,
+    find_suppression, is_suppressed, list_suppressions, remove_suppression, suppressing_scope,
 };
 pub use sync_runs::{
     BatchOutcome as SyncBatchOutcome, BatchProgress as SyncBatchProgress,
@@ -376,9 +377,9 @@ pub use templates::{
     TemplateVersion, TemplateVersionStats, TemplateVersionSummary, ThemeRequest, VersionRender,
     active_flows_using, active_published_flows, add_preview_person, archive_template,
     create_template, document_sender, find_template, find_template_draft, find_template_version,
-    list_preview_people, list_template_versions, list_templates, load_render_inputs,
-    load_render_inputs_with, lock_template, lock_templates_shared, publish_template,
-    read_template_field_catalog, remove_preview_person, save_template_draft,
+    find_templates, list_preview_people, list_template_versions, list_templates,
+    load_render_inputs, load_render_inputs_with, lock_template, lock_templates_shared,
+    publish_template, read_template_field_catalog, remove_preview_person, save_template_draft,
     set_template_draft_checks, template_active_flow_counts, template_send_volume,
     template_version_stats, template_where_used, update_template,
 };
@@ -575,6 +576,19 @@ impl StoreError {
     /// A change the stream's active sync run would undo: it was refused and nothing was written.
     pub(crate) fn run_active() -> Self {
         Self::new(StoreErrorKind::RunActive)
+    }
+
+    /// Whether PostgreSQL refused the write because it breaks the check constraint `name`
+    /// (SQLSTATE 23514). The input is at fault, so running it again cannot help.
+    pub fn is_check_violation(&self, name: &str) -> bool {
+        self.source
+            .as_deref()
+            .and_then(|source| source.downcast_ref::<sqlx::Error>())
+            .and_then(sqlx::Error::as_database_error)
+            .is_some_and(|error| {
+                error.code().is_some_and(|code| code.as_ref() == "23514")
+                    && error.constraint() == Some(name)
+            })
     }
 
     /// Whether PostgreSQL refused a value it cannot store: a NUL in `text` (22021), or as an

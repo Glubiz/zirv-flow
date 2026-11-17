@@ -3,6 +3,7 @@
 
 use axum::Json;
 use axum::extract::{Path, RawQuery, State};
+use hashbrown::HashSet;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use zirv_flow_core::WorkspaceId;
@@ -61,8 +62,9 @@ fn search_error(error: ContactSearchError) -> ApiError {
     }
 }
 
-/// The contacts whose key starts with `q`, plus those of the person that holds `q` as an email
-/// or a phone number, in key order.
+/// The contacts of the person that holds `q` as an email or a phone number, then those whose key
+/// starts with `q`, cut to `limit`, in key order. The exact owner is the most relevant hit, so it
+/// is kept when the key-prefix hits alone would fill the limit.
 async fn find(
     state: &AppState,
     workspace: WorkspaceId,
@@ -74,14 +76,7 @@ async fn find(
         .acquire()
         .await
         .map_err(|_| ApiError::internal())?;
-    let mut found = zirv_flow_store::search_contacts(
-        &mut connection,
-        workspace,
-        &ContactSearch::KeyPrefix(q.to_owned()),
-        limit,
-    )
-    .await
-    .map_err(search_error)?;
+    let mut found = Vec::new();
     for kind in ["email", "phone"] {
         if Identifier::parse(kind, q).is_err() {
             continue;
@@ -99,9 +94,20 @@ async fn find(
         .map_err(search_error)?;
         found.extend(by_identifier);
     }
-    found.sort_by(|a, b| a.key.cmp(&b.key));
-    found.dedup_by(|a, b| a.key == b.key);
+    found.extend(
+        zirv_flow_store::search_contacts(
+            &mut connection,
+            workspace,
+            &ContactSearch::KeyPrefix(q.to_owned()),
+            limit,
+        )
+        .await
+        .map_err(search_error)?,
+    );
+    let mut seen = HashSet::new();
+    found.retain(|contact| seen.insert(contact.key.clone()));
     found.truncate(limit as usize);
+    found.sort_by(|a, b| a.key.cmp(&b.key));
     Ok(found)
 }
 

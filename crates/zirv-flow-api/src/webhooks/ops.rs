@@ -20,7 +20,8 @@ use zirv_flow_core::signature::{
 };
 use zirv_flow_core::{SecretBytes, SecretId, SecretPurpose, SecretString, UserId, WorkspaceId};
 use zirv_flow_store::{
-    DiscoveredStream, NewSource, NewWebhook, SourceUpdate, StreamSettings, Webhook, WebhookUpdate,
+    DiscoveredStream, NewSource, NewWebhook, SourceUpdate, StoreError, StreamSettings, Webhook,
+    WebhookUpdate,
 };
 
 use crate::AppState;
@@ -210,6 +211,21 @@ fn check_scheme(scheme: &Scheme<'_>) -> Result<(), ApiError> {
     }
 }
 
+/// The 422 `check_scheme` gives for equal headers, for a write the table's own check refused: a
+/// concurrent PATCH changed the other header after this one's check read the row, or the row
+/// kept equal headers from before the check existed and any `UPDATE` of it, a secret rotation
+/// included, trips the check.
+fn headers_differ(error: StoreError) -> ApiError {
+    if error.is_check_violation("webhooks_headers_differ_check") {
+        problems(vec![(
+            "timestamp_header".to_owned(),
+            "must differ from signature_header".to_owned(),
+        )])
+    } else {
+        error.into()
+    }
+}
+
 fn keyring(state: &AppState) -> Result<&std::sync::Arc<zirv_flow_core::Keyring>, ApiError> {
     state.keyring().ok_or_else(|| {
         ApiError::new(
@@ -354,7 +370,8 @@ pub(crate) async fn create_webhook(
             created_by,
         },
     )
-    .await?;
+    .await
+    .map_err(headers_differ)?;
     admin::audit(
         &mut tx,
         context,
@@ -459,7 +476,8 @@ pub(crate) async fn update_webhook(
             dedupe_field: request.dedupe_field.as_deref(),
         },
     )
-    .await?
+    .await
+    .map_err(headers_differ)?
     .ok_or_else(ApiError::not_found)?;
     admin::audit(
         &mut tx,
@@ -497,7 +515,8 @@ pub(crate) async fn rotate_secret(
     )
     .await?;
     let old = zirv_flow_store::replace_webhook_secret(&mut tx, workspace, id, fresh)
-        .await?
+        .await
+        .map_err(headers_differ)?
         .ok_or_else(ApiError::not_found)?;
     zirv_flow_store::secrets::delete(&mut *tx, workspace, old).await?;
     admin::audit_secret_deleted(&mut tx, context, workspace, old).await?;
@@ -714,6 +733,7 @@ pub(crate) async fn update(
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a missing scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or webhook, or no access", body = Problem, content_type = "application/problem+json"),
+        (status = 422, description = "The stored hook has equal signature and timestamp headers; change one first", body = Problem, content_type = "application/problem+json"),
         (status = 503, description = "The server has no master key to seal the secret", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))

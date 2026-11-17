@@ -1334,6 +1334,149 @@ mod tests {
         assert_eq!(empty.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
+    /// A row stored with equal headers before the table's check existed keeps the check from
+    /// passing any `UPDATE` of it, a secret rotation included: the caller gets the 422 that names
+    /// the header to change, not a 5xx, and the old secret survives. Once a header differs the
+    /// rotation succeeds.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn rotating_the_secret_of_a_hook_with_equal_headers_is_a_422_until_a_header_changes(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        let hook = fx.hook("orders").await;
+        let id: Uuid = hook.id.parse().unwrap();
+        sqlx::query("ALTER TABLE webhooks DROP CONSTRAINT webhooks_headers_differ_check")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE webhooks SET timestamp_header = upper(signature_header) WHERE id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "ALTER TABLE webhooks ADD CONSTRAINT webhooks_headers_differ_check \
+             CHECK (timestamp_header IS NULL OR lower(timestamp_header) <> lower(signature_header)) \
+             NOT VALID",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let secret_before: Uuid =
+            sqlx::query_scalar("SELECT secret_id FROM webhooks WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let rotate_path = format!("/{}/rotate-secret", hook.id);
+
+        let refused = fx
+            .hooks("POST", &rotate_path, None, Auth::Key(&fx.admin))
+            .await;
+
+        assert_eq!(
+            refused.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{:?}",
+            refused.body
+        );
+        assert_eq!(
+            refused.body["detail"],
+            "timestamp_header must differ from signature_header"
+        );
+        let secret_after: Uuid = sqlx::query_scalar("SELECT secret_id FROM webhooks WHERE id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(secret_after, secret_before);
+
+        let patched = fx
+            .hooks(
+                "PATCH",
+                &format!("/{}", hook.id),
+                Some(json!({"timestamp_header": "X-Other"})),
+                Auth::Key(&fx.admin),
+            )
+            .await;
+        let rotated = fx
+            .hooks("POST", &rotate_path, None, Auth::Key(&fx.admin))
+            .await;
+
+        assert_eq!(patched.status, StatusCode::OK, "{:?}", patched.body);
+        assert_eq!(rotated.status, StatusCode::OK, "{:?}", rotated.body);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_patch_that_loses_a_race_to_equal_headers_is_a_422_and_stores_nothing(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let hook = fx.hook("orders").await;
+        let id: Uuid = hook.id.parse().unwrap();
+        let before = fx
+            .hooks("GET", &format!("/{}", hook.id), None, Auth::Key(&fx.admin))
+            .await;
+        // Another PATCH has set the signature header and not yet committed. This one read the
+        // old row, so its check passes, and its write waits for the other to finish.
+        let mut other = pool.begin().await.unwrap();
+        sqlx::query("UPDATE webhooks SET signature_header = 'X-C' WHERE id = $1")
+            .bind(id)
+            .execute(&mut *other)
+            .await
+            .unwrap();
+        let router = fx.router.clone();
+        let uri = fx.path(&format!("/webhooks/{}", hook.id));
+        let key = fx.admin.clone();
+        let patch = tokio::spawn(async move {
+            send(
+                &router,
+                "PATCH",
+                &uri,
+                Some(json!({"timestamp_header": "x-c"})),
+                Auth::Key(&key),
+            )
+            .await
+        });
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity \
+                 WHERE wait_event_type = 'Lock' AND query LIKE 'UPDATE webhooks SET%'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        other.commit().await.unwrap();
+
+        let reply = patch.await.unwrap();
+
+        assert_eq!(
+            reply.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{:?}",
+            reply.body
+        );
+        assert_eq!(
+            reply.body["detail"],
+            "timestamp_header must differ from signature_header"
+        );
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT timestamp_header FROM webhooks WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            stored,
+            before.body["timestamp_header"].as_str().map(str::to_owned)
+        );
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn deleting_a_hook_removes_its_source_stream_secret_and_queued_payloads(pool: PgPool) {

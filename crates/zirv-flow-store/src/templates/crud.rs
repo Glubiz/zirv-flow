@@ -188,6 +188,24 @@ pub async fn find_template<'e>(
     .map_err(StoreError::query)
 }
 
+/// The workspace's templates among `ids`, in one read; an id it does not have is left out.
+pub async fn find_templates<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    ids: &[Uuid],
+) -> Result<Vec<Template>, StoreError> {
+    sqlx::query_as(concat!(
+        "SELECT ",
+        template_columns!(),
+        " FROM templates WHERE workspace_id = $1 AND id = ANY($2)"
+    ))
+    .bind(workspace.as_uuid())
+    .bind(ids)
+    .fetch_all(executor)
+    .await
+    .map_err(StoreError::query)
+}
+
 /// The draft of a template of the workspace.
 pub async fn find_template_draft<'e>(
     executor: impl PgExecutor<'e>,

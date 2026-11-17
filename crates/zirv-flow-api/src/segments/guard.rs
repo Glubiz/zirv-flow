@@ -26,13 +26,24 @@ pub(crate) async fn refuse_personal_probes(
     node: &Node,
     reveal: bool,
 ) -> Result<(), ApiError> {
-    if reveal {
+    refuse_personal_probe_roots(connection, workspace, std::slice::from_ref(node), reveal).await
+}
+
+/// [`refuse_personal_probes`] for several conditions, reading what is personal once: a flow holds
+/// many.
+pub(crate) async fn refuse_personal_probe_roots(
+    connection: &mut zirv_flow_store::PgConnection,
+    workspace: zirv_flow_core::WorkspaceId,
+    roots: &[Node],
+    reveal: bool,
+) -> Result<(), ApiError> {
+    if reveal || roots.is_empty() {
         return Ok(());
     }
     let clear = zirv_flow_store::explain_clear_fields(connection, workspace)
         .await
         .map_err(super::preview::read_error)?;
-    check(node, &clear)
+    roots.iter().try_for_each(|root| check(root, &clear))
 }
 
 fn check(node: &Node, clear: &ClearFields) -> Result<(), ApiError> {

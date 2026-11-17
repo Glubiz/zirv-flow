@@ -659,6 +659,11 @@ pub(crate) async fn configure(
         ));
     }
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
+    // The source row is locked first, as `update_source` does, and `enabled` is read from it:
+    // the read above is from before a disable that may have committed since.
+    let source = zirv_flow_store::find_source_for_update(&mut tx, workspace, source_id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
     let stream = zirv_flow_store::configure_stream(
         &mut tx,
         workspace,

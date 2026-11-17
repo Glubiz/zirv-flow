@@ -474,6 +474,38 @@ mod tests {
             .unwrap();
             matches!(read, ReadOutcome::Read { verdict, .. } if verdict.allowed)
         }
+
+        /// The body a browser posts for the preference page `html`: its hidden `shown` fields
+        /// and the `ticked` boxes (`field=value`).
+        fn form(html: &str, ticked: &[&str]) -> String {
+            let mut body = url::form_urlencoded::Serializer::new(String::new());
+            for part in html.split("name=\"shown\" value=\"").skip(1) {
+                let value = part.split('"').next().unwrap();
+                body.append_pair("shown", &value.replace("&amp;", "&"));
+            }
+            for choice in ticked {
+                let (field, value) = choice.split_once('=').unwrap();
+                body.append_pair(field, value);
+            }
+            body.finish()
+        }
+
+        async fn topic(&self, key: &str) -> Uuid {
+            create_topic(
+                &self.pool,
+                self.ws,
+                &NewTopic {
+                    key: key.to_owned(),
+                    name: key.to_owned(),
+                    description: String::new(),
+                    channel: Channel::Email,
+                    policy: TopicPolicy::OptOut,
+                },
+            )
+            .await
+            .unwrap()
+            .id
+        }
     }
 
     #[sqlx::test]
@@ -992,9 +1024,8 @@ mod tests {
             "{html}"
         );
 
-        let saved = fixture
-            .call("POST", &uri, None, "topic=news&dim=vertical%2Fb2c")
-            .await;
+        let body = Fixture::form(&html, &["topic=news", "dim=vertical/b2c"]);
+        let saved = fixture.call("POST", &uri, None, &body).await;
 
         assert_eq!(saved.status, StatusCode::OK);
         assert!(saved.text().contains("Your preferences are saved."));
@@ -1015,6 +1046,108 @@ mod tests {
             )],
             "only the changed choice is recorded"
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_topic_created_after_the_page_was_shown_is_not_unsubscribed_by_a_save(pool: PgPool) {
+        let fixture = Fixture::new(pool, "prefs-new", "sent", 3600).await;
+        fixture.topic("a").await;
+        let uri = format!(
+            "/u/{}/preferences",
+            fixture.token(TokenKind::Unsubscribe, 0)
+        );
+        let page = fixture.call("GET", &uri, None, "").await.text();
+        let c = fixture.topic("c").await;
+
+        fixture
+            .call("POST", &uri, None, &Fixture::form(&page, &["topic=a"]))
+            .await;
+
+        assert!(
+            fixture.allowed(Some(c), &Dimensions::new()).await,
+            "topic c was never shown and is now denied"
+        );
+        assert_eq!(fixture.events("email.unsubscribed").await.len(), 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_stale_form_does_not_resubscribe_a_topic_left_elsewhere(pool: PgPool) {
+        let mut fixture = Fixture::new(pool, "prefs-stale", "sent", 3600).await;
+        let x = fixture.topic("x").await;
+        fixture.message = Uuid::now_v7();
+        fixture
+            .insert_message(fixture.message, "sent", 3600, Some(x), "{}")
+            .await;
+        let prefs = format!(
+            "/u/{}/preferences",
+            fixture.token(TokenKind::Unsubscribe, 0)
+        );
+        let page = fixture.call("GET", &prefs, None, "").await.text();
+        let unsubscribe = format!("/u/{}", fixture.token(TokenKind::Unsubscribe, 0));
+        fixture.call("POST", &unsubscribe, None, "").await;
+        assert!(!fixture.allowed(Some(x), &Dimensions::new()).await);
+
+        fixture
+            .call("POST", &prefs, None, &Fixture::form(&page, &["topic=x"]))
+            .await;
+
+        assert!(
+            !fixture.allowed(Some(x), &Dimensions::new()).await,
+            "the stale form re-subscribed x"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_save_changes_only_the_boxes_the_person_changed_on_the_page_shown(pool: PgPool) {
+        let mut fixture = Fixture::new(pool, "prefs-diff", "sent", 3600).await;
+        let a = fixture.topic("a").await;
+        let b = fixture.topic("b").await;
+        fixture.message = Uuid::now_v7();
+        fixture
+            .insert_message(fixture.message, "sent", 3600, Some(a), "{}")
+            .await;
+        let uri = format!(
+            "/u/{}/preferences",
+            fixture.token(TokenKind::Unsubscribe, 0)
+        );
+        let page = fixture.call("GET", &uri, None, "").await.text();
+        assert!(
+            page.contains("name=\"shown\" value=\"topic=a=1\""),
+            "{page}"
+        );
+
+        // Untick a, leave b ticked.
+        fixture
+            .call("POST", &uri, None, &Fixture::form(&page, &["topic=b"]))
+            .await;
+        assert!(!fixture.allowed(Some(a), &Dimensions::new()).await);
+        assert!(fixture.allowed(Some(b), &Dimensions::new()).await);
+        assert_eq!(fixture.events("email.unsubscribed").await.len(), 1);
+
+        // Tick a again on a page that showed it unticked.
+        let page = fixture.call("GET", &uri, None, "").await.text();
+        assert!(
+            page.contains("name=\"shown\" value=\"topic=a=0\""),
+            "{page}"
+        );
+        fixture
+            .call(
+                "POST",
+                &uri,
+                None,
+                &Fixture::form(&page, &["topic=a", "topic=b"]),
+            )
+            .await;
+        assert!(fixture.allowed(Some(a), &Dimensions::new()).await);
+        assert_eq!(fixture.events("email.unsubscribed").await.len(), 1);
+
+        // A form without its shown fields (an old cached page) changes nothing.
+        fixture.call("POST", &uri, None, "").await;
+        assert!(fixture.allowed(Some(a), &Dimensions::new()).await);
+        assert!(fixture.allowed(Some(b), &Dimensions::new()).await);
     }
 
     #[sqlx::test]

@@ -1176,7 +1176,9 @@ export interface paths {
          *     timeline; `reveal=true` shows the stored (redacted) values to a viewer who may see values
          *     (owner, workspace admin or `admin` key) and is ignored for anyone else. A workspace has at
          *     most 20 streams per server process; more get 429 with `Retry-After`. Streams end when the
-         *     server shuts down.
+         *     server shuts down, when access is withdrawn (the key revoked, the session ended or the member
+         *     removed, checked every few seconds; a lost `view_pii` stops the values from being shown) with
+         *     an `event: end` frame naming the reason, and after one hour (reconnect with `Last-Event-ID`).
          */
         get: operations["stream_event_debugger"];
         put?: never;
@@ -1737,7 +1739,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Resumes a paused flow. Records a `flow.resume` decision and is audited as `flow.resumed`. */
+        /**
+         * Resumes a paused flow. A template or destination its running version sends through that was
+         *     archived while it was paused is a 422 `flow_invalid` that names the node. Records a
+         *     `flow.resume` decision and is audited as `flow.resumed`.
+         */
         post: operations["resume_flow"];
         delete?: never;
         options?: never;
@@ -1909,7 +1915,9 @@ export interface paths {
         /**
          * Turns the warm-up of a flow on or off and sets its length. A window already running keeps its
          *     start and counts the new length from it; turning it off lets everyone waiting in at once.
-         *     Needs the publisher role and is audited as `flow.warmup_changed`.
+         *     Turning it on or changing its length needs the publisher role; turning it off needs the admin
+         *     role, like ending the window early. Audited as `flow.warmup_changed`, with how many were
+         *     released.
          */
         put: operations["set_flow_warmup"];
         post?: never;
@@ -19501,7 +19509,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not a publisher, a key without the publish scope, or a missing CSRF token */
+            /** @description Not a publisher, a key without the publish scope, a missing CSRF token, or a condition that orders, prefixes or aggregates a personal trait or event property for a caller without access to personal values (`pii_trait_not_searchable`, `pii_property_not_explorable`) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -19591,6 +19599,15 @@ export interface operations {
             };
             /** @description The flow is not paused (`code` is `flow_state`) */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A template or destination the flow sends through was archived or removed while it was paused (`code` is `flow_invalid`, with `flow_issues` naming the nodes) */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -19816,7 +19833,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description A key without the write scope, or a missing CSRF token */
+            /** @description A key without the write scope, a missing CSRF token, or a condition that orders, prefixes or aggregates a personal trait or event property for a caller without access to personal values (`pii_trait_not_searchable`, `pii_property_not_explorable`) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -20113,7 +20130,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not a publisher, a key without the publish scope, or a missing CSRF token */
+            /** @description Not a publisher, or not an admin when turning the warm-up off, a key without the publish (or admin) scope, or a missing CSRF token */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -28461,7 +28478,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The suppressions as CSV, newest first */
+            /** @description The suppressions as CSV, newest first, as they were when the export started: one that commits while the file streams is not in it, and the stream ends with an error after 15 minutes */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -32640,6 +32657,15 @@ export interface operations {
             };
             /** @description No such workspace or webhook, or no access */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The stored hook has equal signature and timestamp headers; change one first */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

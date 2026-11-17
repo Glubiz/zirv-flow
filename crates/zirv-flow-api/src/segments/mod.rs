@@ -16,7 +16,7 @@ use zirv_flow_store::{CatalogSnapshot, SegmentError, SegmentRef};
 
 use crate::problem::{ApiError, FlowRefProblem, SegmentIssueProblem, SegmentRefProblem};
 
-pub(crate) use guard::refuse_personal_probes;
+pub(crate) use guard::{refuse_personal_probe_roots, refuse_personal_probes};
 pub(crate) use schema::{
     NODE as SEGMENT_NODE_SCHEMA, PROPERTY_FILTER as SEGMENT_FILTER_SCHEMA, SegmentSchemas,
 };

@@ -222,16 +222,8 @@ pub struct AttemptStats {
     pub class_5xx: i64,
 }
 
-/// The attempts of a destination made in the last `hours` hours, counted by outcome and by status
-/// class. Reads through `delivery_attempts_destination_idx`.
-pub async fn destination_attempt_stats<'e>(
-    executor: impl PgExecutor<'e>,
-    workspace: WorkspaceId,
-    destination: Uuid,
-    hours: i32,
-) -> Result<AttemptStats, StoreError> {
-    sqlx::query_as(
-        "SELECT count(*) AS attempts, \
+/// The statement of [`destination_attempt_stats`]; a test explains it.
+const STATS_SQL: &str = "SELECT count(*) AS attempts, \
             count(*) FILTER (WHERE outcome = 'delivered') AS delivered, \
             count(*) FILTER (WHERE outcome = 'retryable') AS retryable, \
             count(*) FILTER (WHERE outcome = 'terminal') AS terminal, \
@@ -243,14 +235,24 @@ pub async fn destination_attempt_stats<'e>(
             count(*) FILTER (WHERE status_class = '5xx') AS class_5xx \
          FROM delivery_attempts \
          WHERE workspace_id = $1 AND destination_id = $2 \
-            AND attempted_at >= now() - make_interval(hours => $3)",
-    )
-    .bind(workspace.as_uuid())
-    .bind(destination)
-    .bind(hours)
-    .fetch_one(executor)
-    .await
-    .map_err(StoreError::query)
+            AND attempted_at >= now() - make_interval(hours => $3)";
+
+/// The attempts of a destination made in the last `hours` hours, counted by outcome and by status
+/// class. Reads through `delivery_attempts_destination_idx`, which carries both columns
+/// (`INCLUDE`), so on a vacuumed table it is an index-only scan that never visits the heap.
+pub async fn destination_attempt_stats<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    destination: Uuid,
+    hours: i32,
+) -> Result<AttemptStats, StoreError> {
+    sqlx::query_as(STATS_SQL)
+        .bind(workspace.as_uuid())
+        .bind(destination)
+        .bind(hours)
+        .fetch_one(executor)
+        .await
+        .map_err(StoreError::query)
 }
 
 /// Deletes the attempts recorded before `cutoff`, oldest first, `batch` rows to a statement that
@@ -409,6 +411,64 @@ mod tests {
         );
     }
 
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_stats_are_an_index_only_scan_of_the_destination_index(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let id = destination(&pool, ws, "hook").await;
+        let other = destination(&pool, ws, "other").await;
+        // The destination is a tenth of the table, so its index is the way to it.
+        for (destination, rows) in [(id, 3000), (other, 27_000)] {
+            sqlx::query(
+                "INSERT INTO delivery_attempts (id, workspace_id, destination_id, subject_kind, \
+                    subject_id, attempt, outcome, status_class, duration_ms) \
+                 SELECT gen_random_uuid(), $1, $2, 'message', gen_random_uuid(), 1, \
+                        'delivered', '2xx', 5 FROM generate_series(1, $3)",
+            )
+            .bind(ws.as_uuid())
+            .bind(destination)
+            .bind(rows)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query("VACUUM (PARALLEL 0, ANALYZE) delivery_attempts")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        sqlx::query("SET enable_seqscan = off")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query("SET enable_bitmapscan = off")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+
+        let plan: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) {}",
+            STATS_SQL
+                .replace("$1", &format!("'{}'", ws.as_uuid()))
+                .replace("$2", &format!("'{id}'"))
+                .replace("$3", "168")
+        )))
+        .fetch_all(&mut *connection)
+        .await
+        .unwrap();
+
+        let plan = plan.join("\n");
+        assert!(
+            plan.contains("Index Only Scan using delivery_attempts_destination_idx"),
+            "{plan}"
+        );
+        assert!(plan.contains("Heap Fetches: 0"), "{plan}");
+        let stats = destination_attempt_stats(&mut *connection, ws, id, 168)
+            .await
+            .unwrap();
+        assert_eq!((stats.attempts, stats.delivered), (3000, 3000));
+    }
+
     async fn destination(pool: &PgPool, ws: WorkspaceId, name: &str) -> Uuid {
         let config = json!({});
         create_destination(
@@ -534,6 +594,98 @@ mod tests {
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].subject_id, fresh);
         assert_eq!(purge_attempts(&pool, cutoff, 2).await.unwrap(), 0);
+    }
+
+    /// Puts the table in its state before 0112: the plain destination index, and a pre-built
+    /// stats index (the one the migration's header tells an operator to build) that is valid or
+    /// is what a failed concurrent build leaves.
+    async fn before_0112(pool: &PgPool, prebuilt_is_valid: bool) {
+        for statement in [
+            "DROP INDEX delivery_attempts_destination_idx",
+            "CREATE INDEX delivery_attempts_destination_idx \
+             ON delivery_attempts (workspace_id, destination_id, attempted_at)",
+            "CREATE INDEX delivery_attempts_destination_stats_idx \
+             ON delivery_attempts (workspace_id, destination_id, attempted_at) \
+             INCLUDE (outcome, status_class)",
+        ] {
+            sqlx::query(statement).execute(pool).await.unwrap();
+        }
+        if !prebuilt_is_valid {
+            sqlx::query(
+                "UPDATE pg_index SET indisvalid = false \
+                 WHERE indexrelid = 'delivery_attempts_destination_stats_idx'::regclass",
+            )
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+    }
+
+    /// Whether the index is valid, its definition and its oid; `None` when it does not exist.
+    async fn index_state(pool: &PgPool, name: &str) -> Option<(bool, String, i64)> {
+        sqlx::query_as(
+            "SELECT indisvalid, pg_get_indexdef(indexrelid), indexrelid::oid::bigint \
+             FROM pg_index WHERE indexrelid = to_regclass($1)",
+        )
+        .bind(name)
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_covering_migration_replaces_an_invalid_prebuilt_index_and_never_keeps_it(
+        pool: PgPool,
+    ) {
+        before_0112(&pool, false).await;
+
+        sqlx::raw_sql(include_str!(
+            "../../migrations/0112_delivery_attempts_destination_covering_idx.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let (valid, definition, _) = index_state(&pool, "delivery_attempts_destination_idx")
+            .await
+            .expect("the destination index exists");
+        assert!(valid, "the destination index is invalid: {definition}");
+        assert!(
+            definition.contains("INCLUDE (outcome, status_class)"),
+            "{definition}"
+        );
+        assert!(
+            index_state(&pool, "delivery_attempts_destination_stats_idx")
+                .await
+                .is_none()
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_covering_migration_keeps_a_valid_prebuilt_index_without_a_rebuild(pool: PgPool) {
+        before_0112(&pool, true).await;
+        let (_, _, prebuilt) = index_state(&pool, "delivery_attempts_destination_stats_idx")
+            .await
+            .unwrap();
+
+        sqlx::raw_sql(include_str!(
+            "../../migrations/0112_delivery_attempts_destination_covering_idx.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let (valid, definition, kept) = index_state(&pool, "delivery_attempts_destination_idx")
+            .await
+            .unwrap();
+        assert!(valid);
+        assert!(
+            definition.contains("INCLUDE (outcome, status_class)"),
+            "{definition}"
+        );
+        assert_eq!(kept, prebuilt, "the pre-built index was built again");
     }
 
     #[sqlx::test]

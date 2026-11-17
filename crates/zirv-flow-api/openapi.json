@@ -7228,7 +7228,7 @@
           "events"
         ],
         "summary": "Watches the workspace's events as they are decided: one `item` frame per outcome\n(`accepted`, `flagged`, `unplanned`, `rejected` or `duplicate`), live, with no\nhistory beyond the last few seconds before it connected (so a batch that was still\ncommitting is not missed). Each frame's `id` is `<epoch>:<position>`, a position that is\nsafe to resume from: send it back as `Last-Event-ID` and the stream continues after it,\npossibly repeating a few rows the client already has (their `seq` identifies them). A row\nwhose writer commits late is sent when it does, so frames may arrive out of order by `seq`;\na row that commits more than twice the 10 s patience after a later row was sent can still\nbe missed, and a resumed stream does not deliver a late row below its resume point whose\nwriter committed while the client was away. The epoch names the life of the feed, which is\nunlogged and starts over after a crash: a position from another epoch, or an older bare\nnumber, is answered with a `gap` frame whose `reset` is true, and the stream starts at the\ncurrent position; an open stream that notices the crash on its poll does the same. A viewer that\ncannot keep up gets an `event: gap` frame with the number of rows skipped (an upper bound\nwhen filters apply). While the server's notifier is down, an `event: status` frame says\n`degraded` and the stream polls every few seconds instead of reacting at once; another says\nit recovered.",
-        "description": "While at least one viewer watches a workspace, ingestion writes a feed row per event;\nwhen none does, it writes nothing extra. Values are masked per viewer as in the person\ntimeline; `reveal=true` shows the stored (redacted) values to a viewer who may see values\n(owner, workspace admin or `admin` key) and is ignored for anyone else. A workspace has at\nmost 20 streams per server process; more get 429 with `Retry-After`. Streams end when the\nserver shuts down.",
+        "description": "While at least one viewer watches a workspace, ingestion writes a feed row per event;\nwhen none does, it writes nothing extra. Values are masked per viewer as in the person\ntimeline; `reveal=true` shows the stored (redacted) values to a viewer who may see values\n(owner, workspace admin or `admin` key) and is ignored for anyone else. A workspace has at\nmost 20 streams per server process; more get 429 with `Retry-After`. Streams end when the\nserver shuts down, when access is withdrawn (the key revoked, the session ended or the member\nremoved, checked every few seconds; a lost `view_pii` stops the values from being shown) with\nan `event: end` frame naming the reason, and after one hour (reconnect with `Last-Event-ID`).",
         "operationId": "stream_event_debugger",
         "parameters": [
           {
@@ -11179,7 +11179,7 @@
             }
           },
           "403": {
-            "description": "Not a publisher, a key without the publish scope, or a missing CSRF token",
+            "description": "Not a publisher, a key without the publish scope, a missing CSRF token, or a condition that orders, prefixes or aggregates a personal trait or event property for a caller without access to personal values (`pii_trait_not_searchable`, `pii_property_not_explorable`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -11234,7 +11234,7 @@
         "tags": [
           "flows"
         ],
-        "summary": "Resumes a paused flow. Records a `flow.resume` decision and is audited as `flow.resumed`.",
+        "summary": "Resumes a paused flow. A template or destination its running version sends through that was\narchived while it was paused is a 422 `flow_invalid` that names the node. Records a\n`flow.resume` decision and is audited as `flow.resumed`.",
         "operationId": "resume_flow",
         "parameters": [
           {
@@ -11301,6 +11301,16 @@
           },
           "409": {
             "description": "The flow is not paused (`code` is `flow_state`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A template or destination the flow sends through was archived or removed while it was paused (`code` is `flow_invalid`, with `flow_issues` naming the nodes)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -11634,7 +11644,7 @@
             }
           },
           "403": {
-            "description": "A key without the write scope, or a missing CSRF token",
+            "description": "A key without the write scope, a missing CSRF token, or a condition that orders, prefixes or aggregates a personal trait or event property for a caller without access to personal values (`pii_trait_not_searchable`, `pii_property_not_explorable`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -12046,7 +12056,7 @@
         "tags": [
           "flows"
         ],
-        "summary": "Turns the warm-up of a flow on or off and sets its length. A window already running keeps its\nstart and counts the new length from it; turning it off lets everyone waiting in at once.\nNeeds the publisher role and is audited as `flow.warmup_changed`.",
+        "summary": "Turns the warm-up of a flow on or off and sets its length. A window already running keeps its\nstart and counts the new length from it; turning it off lets everyone waiting in at once.\nTurning it on or changing its length needs the publisher role; turning it off needs the admin\nrole, like ending the window early. Audited as `flow.warmup_changed`, with how many were\nreleased.",
         "operationId": "set_flow_warmup",
         "parameters": [
           {
@@ -12112,7 +12122,7 @@
             }
           },
           "403": {
-            "description": "Not a publisher, a key without the publish scope, or a missing CSRF token",
+            "description": "Not a publisher, or not an admin when turning the warm-up off, a key without the publish (or admin) scope, or a missing CSRF token",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -24434,7 +24444,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The suppressions as CSV, newest first",
+            "description": "The suppressions as CSV, newest first, as they were when the export started: one that commits while the file streams is not in it, and the stream ends with an error after 15 minutes",
             "content": {
               "text/csv": {
                 "schema": {
@@ -30468,6 +30478,16 @@
           },
           "404": {
             "description": "No such workspace or webhook, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The stored hook has equal signature and timestamp headers; change one first",
             "content": {
               "application/problem+json": {
                 "schema": {

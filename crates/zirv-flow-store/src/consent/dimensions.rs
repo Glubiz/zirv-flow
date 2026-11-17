@@ -269,6 +269,32 @@ pub async fn unknown_dimension_entry(
     unknown_dimension_entry_with(connection, workspace, dimensions, false).await
 }
 
+/// The entries among `entries` (`(dimension key, value key)`) that name no live dimension or value
+/// of the workspace, in one read: the same test as [`unknown_dimension_entry`] for many at once.
+pub async fn unknown_dimension_entries(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    entries: &[(String, String)],
+) -> Result<Vec<(String, String)>, StoreError> {
+    let (dimensions, values): (Vec<&str>, Vec<&str>) = entries
+        .iter()
+        .map(|(dimension, value)| (dimension.as_str(), value.as_str()))
+        .unzip();
+    sqlx::query_as(
+        "SELECT e.dimension, e.value FROM unnest($2::text[], $3::text[]) AS e(dimension, value) \
+         WHERE NOT EXISTS (SELECT 1 FROM consent_dimensions d \
+                JOIN consent_dimension_values v ON v.dimension_id = d.id \
+                WHERE d.workspace_id = $1 AND d.key = e.dimension AND v.key = e.value \
+                  AND d.archived_at IS NULL AND v.archived_at IS NULL)",
+    )
+    .bind(workspace.as_uuid())
+    .bind(dimensions)
+    .bind(values)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(StoreError::query)
+}
+
 /// [`unknown_dimension_entry`], and with `include_archived` an archived dimension or value is
 /// known too: a state an import restores may be scoped to one. One that does not exist at all is
 /// still unknown.
