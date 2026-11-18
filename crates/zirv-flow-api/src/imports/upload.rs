@@ -389,7 +389,7 @@ async fn drain(
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the write scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
-        (status = 408, description = "No byte arrived for 60 seconds; the upload was abandoned and nothing was kept", body = Problem, content_type = "application/problem+json"),
+        (status = 408, description = "No byte arrived for 60 seconds, or the upload took longer than 15 minutes; the upload was abandoned and nothing was kept", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "The Idempotency-Key is in use: `idempotency_key_in_flight` while the first request runs (see Retry-After), or `idempotency_key_replayed` once it uploaded the import, with resource_id as the import's id; the response is not kept; or `import_open_limit`: the workspace already has imports.max_open open imports", body = Problem, content_type = "application/problem+json"),
         (status = 413, description = "import_file_too_large: the file is over imports.max_file_bytes; import_quota_exceeded: the workspace's stored import files would pass imports.max_workspace_bytes", body = Problem, content_type = "application/problem+json"),
         (status = 415, description = "The content type is not text/csv", body = Problem, content_type = "application/problem+json"),
