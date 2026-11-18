@@ -833,6 +833,15 @@ mod tests {
         use futures_util::StreamExt;
 
         zirv_flow_store::migrate(&pool).await.unwrap();
+        // Another connection holds the table, so the first page cannot finish before the
+        // deadline however fast the database answers. The export's own `SELECT 1` does not
+        // touch the table, so it starts at once. Dropping the transaction, on a panic too,
+        // releases the lock.
+        let mut lock = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE suppressions IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *lock)
+            .await
+            .unwrap();
         let tx = zirv_flow_store::begin_suppression_export(&pool)
             .await
             .unwrap();
@@ -846,8 +855,14 @@ mod tests {
             body.next().await.unwrap().unwrap(),
             EXPORT_HEADER.as_bytes()
         );
-        assert!(body.next().await.unwrap().is_err());
+        // The page waits on the lock for up to its statement timeout, so a producer that
+        // ignored the deadline would answer only then; the wait is bounded to fail instead.
+        let second = tokio::time::timeout(std::time::Duration::from_secs(10), body.next())
+            .await
+            .expect("the export ignored its deadline");
+        assert!(second.unwrap().is_err());
         assert!(body.next().await.is_none());
+        lock.rollback().await.unwrap();
     }
 
     #[sqlx::test]
