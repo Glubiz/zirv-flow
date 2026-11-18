@@ -15,3 +15,15 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v1.0.20 (2026-11-18)
+
+### Fixes
+
+- take the key repair lock only for an empty key file, and name the upload deadline test for what it proves (#751, #753)
+- fall back only on a healthcheck connect error, lock the key repair, and test the real upload deadline (#751, #752, #753)
+- bind, readiness, config, master key, healthcheck and listener review findings (#748-#753)
+
+### Chores
+
+- flatten the empty-key repair in generate-master-key
+
