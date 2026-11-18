@@ -342,6 +342,42 @@ describe("dead letters", () => {
     expect(screen.getByRole("button", { name: "Show more" })).toBeEnabled();
   });
 
+  it("drops the Show more rows at once when a re-drive succeeds, before the reload lands", async () => {
+    let land: (response: Response) => void = () => undefined;
+    let reload: (response: Response) => void = () => undefined;
+    let firstCalls = 0;
+    mockApi(
+      base({
+        [`POST ${WS}/forwarding/re-drive`]: () => json({ redriven: 1 }),
+        [`GET ${WS}/forwarding/dead-letters`]: ((request: Request) => {
+          const q = new URL(request.url).searchParams;
+          if (q.get("cursor") === "c1") return json({ letters: [letter({ id: OTHER_LETTER_ID, error: "b1_error" })], next_cursor: "c2" });
+          if (q.get("cursor") === "c2") return new Promise<Response>((resolve) => (land = resolve));
+          firstCalls += 1;
+          if (firstCalls === 1) return json({ letters: [letter({ error: "a1_error" })], next_cursor: "c1" });
+          return new Promise<Response>((resolve) => (reload = resolve));
+        }) as never,
+      }),
+    );
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "Show more" }));
+    await screen.findByText("b1_error");
+    await user.click(screen.getByRole("button", { name: "Show more" }));
+    await user.click(screen.getByRole("button", { name: "Re-drive all dead letters" }));
+    await user.click(await screen.findByRole("button", { name: "Re-drive now" }));
+    expect(await screen.findByText("1 row put back in the queue.")).toBeInTheDocument();
+
+    expect(screen.queryByText("b1_error")).not.toBeInTheDocument();
+    act(() => land(json({ letters: [letter({ id: "cccccccc-0000-4000-8000-000000000009", error: "b2_error" })], next_cursor: null })));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(screen.queryByText("b2_error")).not.toBeInTheDocument();
+    expect(screen.queryByText("b1_error")).not.toBeInTheDocument();
+    act(() => reload(json({ letters: [letter({ error: "a3_error" })], next_cursor: null })));
+    expect(await screen.findByText("a3_error")).toBeInTheDocument();
+  });
+
   it("hides Show more when the next page is empty and has no further cursor", async () => {
     const calls = mockApi(
       base({

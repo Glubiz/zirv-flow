@@ -429,6 +429,10 @@ function DeadLettersPanel({ workspaceId, known, onRedriven }: { workspaceId: str
           onClose={() => setScope(null)}
           onDone={(count) => {
             setScope(null);
+            // Drop the extra rows now and ignore any Show more still in flight; the reload below
+            // may be slow and the old pages are stale.
+            current.current = null;
+            setPaged(null);
             setResult(`${plural(count, "row", "rows")} put back in the queue.`);
             first.reload();
             onRedriven();
