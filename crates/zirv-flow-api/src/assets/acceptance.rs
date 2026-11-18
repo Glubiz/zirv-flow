@@ -865,9 +865,13 @@ mod tests {
         Body::from_stream(pieces)
     }
 
+    /// Proves the upload deadline layer is attached to both real upload routes: the test fails if
+    /// either route loses it. It does not prove the trickle itself; under paused time the clock
+    /// auto-advances while the request waits on the API-key lookup, so the deadline may fire before
+    /// the body is read. The trickling body is covered by the server tests in `server.rs`.
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn the_real_upload_routes_end_a_trickling_upload_at_the_upload_deadline(pool: PgPool) {
+    async fn the_real_upload_routes_carry_the_upload_deadline(pool: PgPool) {
         let f = fixture(&pool).await;
         tokio::time::pause();
         for (uri, content_type) in [

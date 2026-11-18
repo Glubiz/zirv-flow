@@ -289,7 +289,8 @@ async fn run(
 /// The key is written to a temporary file beside `out`, synced, then hard-linked into place,
 /// so `out` only ever appears complete. Repairing an empty file takes an exclusive lock on a
 /// sibling `.<name>.lock` file (never removed) and re-reads `out` under it, so of two runs
-/// repairing at once one installs its key and the other keeps and prints that one.
+/// repairing at once one installs its key and the other keeps and prints that one. A file that
+/// already holds a key (or garbage) is judged without touching the lock.
 fn generate_master_key(
     out: &Path,
     if_missing: bool,
@@ -345,25 +346,31 @@ fn generate_master_key(
                     out.display()
                 ));
             }
-            let lock = match lock_beside(out) {
-                Ok(lock) => lock,
-                Err(error) => {
-                    let _ = fs::remove_file(&temporary);
-                    return fail(format!("could not lock {}: {error}", out.display()));
+            let first = fs::read_to_string(out);
+            let text = if first.as_ref().is_ok_and(|text| text.trim().is_empty()) {
+                let lock = match lock_beside(out) {
+                    Ok(lock) => lock,
+                    Err(error) => {
+                        let _ = fs::remove_file(&temporary);
+                        return fail(format!("could not lock {}: {error}", out.display()));
+                    }
+                };
+                let text = fs::read_to_string(out);
+                if text.as_ref().is_ok_and(|text| text.trim().is_empty()) {
+                    let renamed = fs::rename(&temporary, out);
+                    drop(lock);
+                    if let Err(error) = renamed {
+                        let _ = fs::remove_file(&temporary);
+                        return fail(format!("could not write {}: {error}", out.display()));
+                    }
+                    let _ = writeln!(stdout, "master key written: {}", key.key_id());
+                    return 0;
                 }
-            };
-            let text = fs::read_to_string(out);
-            if text.as_ref().is_ok_and(|text| text.trim().is_empty()) {
-                let renamed = fs::rename(&temporary, out);
                 drop(lock);
-                if let Err(error) = renamed {
-                    let _ = fs::remove_file(&temporary);
-                    return fail(format!("could not write {}: {error}", out.display()));
-                }
-                let _ = writeln!(stdout, "master key written: {}", key.key_id());
-                return 0;
-            }
-            drop(lock);
+                text
+            } else {
+                first
+            };
             let _ = fs::remove_file(&temporary);
             let existing = text
                 .map_err(|_| "not readable".to_owned())
@@ -1692,6 +1699,23 @@ endpoint = \"http://collector:4318/\""
         assert_eq!(first.replace("written", "exists"), again);
         assert_eq!(fs::read_to_string(&out).unwrap(), before);
         assert_eq!(key_files_in(&dir.0), ["master.key"]);
+    }
+
+    #[test]
+    fn if_missing_keeps_a_valid_key_without_touching_the_lock() {
+        let dir = TempDir::new();
+        let out = dir.0.join("master.key");
+        let (code, first, stderr) = generate(&out, false);
+        assert_eq!(code, 0, "{stderr}");
+        let before = fs::read(&out).unwrap();
+        // A directory at the lock path cannot be opened as a file on any platform.
+        fs::create_dir(dir.0.join(".master.key.lock")).unwrap();
+
+        let (code, again, stderr) = generate(&out, true);
+
+        assert_eq!(code, 0, "{stderr}");
+        assert_eq!(first.replace("written", "exists"), again);
+        assert_eq!(fs::read(&out).unwrap(), before);
     }
 
     #[test]
