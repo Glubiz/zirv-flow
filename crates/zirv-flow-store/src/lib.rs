@@ -55,8 +55,8 @@ use std::error::Error;
 use std::fmt;
 
 pub use accounts::{
-    User, count_owners, create_user, find_user, find_user_by_email, is_locked, list_users,
-    record_failed_sign_in, record_successful_sign_in, set_password,
+    User, count_owners, create_user, find_user, find_user_by_email, list_users,
+    record_failed_sign_in, record_successful_sign_in, reserve_sign_in_attempt, set_password,
 };
 pub use ai::{
     AiCall, AiDraft, AiSettings, AiSettingsUpdate, AiUsage, CallOutcome, DRAFT_PURGE_BATCH,
@@ -207,9 +207,9 @@ pub use imports::{
 };
 pub use ingest::{
     DRAIN_JOB_KIND, DrainOutcome, InboxHead, IngestItem, IngestPayload, Shard, append_inbox,
-    backfill_affinity, drain_batch, drain_batch_singly, drain_shards, enqueue_drain_if_pending,
-    enqueue_drain_shard, enqueue_pending_drains, inbox_heads, payload_shard, set_drain_shards,
-    shard_pending,
+    append_inbox_in, backfill_affinity, drain_batch, drain_batch_singly, drain_shards,
+    enqueue_drain_if_pending, enqueue_drain_shard, enqueue_pending_drains, inbox_heads,
+    payload_shard, set_drain_shards, shard_pending,
 };
 pub use jobs::{
     ClaimFloors, ClaimedJob, DEFAULT_MAX_ATTEMPTS, DeadCursor, FailOutcome, Heard, Job,
@@ -352,8 +352,8 @@ pub use summary::{
 pub use suppressions::{
     AddOutcome, BatchEntry, NewSuppression, RemoveOutcome, SUPPRESSION_KINDS, Suppression,
     SuppressionCursor, SuppressionScope, add_organization_suppression, add_suppression,
-    add_suppressions, count_suppressed, find_suppressing, find_suppression, is_suppressed,
-    list_suppressions, remove_suppression, suppressing_scope,
+    add_suppressions, begin_suppression_export, count_suppressed, find_suppressing,
+    find_suppression, is_suppressed, list_suppressions, remove_suppression, suppressing_scope,
 };
 pub use sync_runs::{
     BatchOutcome as SyncBatchOutcome, BatchProgress as SyncBatchProgress,
@@ -417,8 +417,8 @@ pub use workspace_credentials::{
     ArchiveOutcome, CredentialUpdate, CredentialUse, CredentialUser, NewWorkspaceCredential,
     OpenedCredential, WorkspaceCredential, archive_credential, create_credential,
     credential_use_counts, credential_users, credential_uses, find_credential,
-    find_credential_for_update, list_credentials, lock_credential_for_use, open_credential,
-    record_credential_test, swap_credential_secret, update_credential,
+    find_credential_for_update, list_credentials, lock_credential_creates, lock_credential_for_use,
+    open_credential, record_credential_test, swap_credential_secret, update_credential,
 };
 pub use workspaces::{
     Member, Membership, UtmSettings, Workspace, create_workspace, find_membership, find_workspace,
@@ -576,6 +576,19 @@ impl StoreError {
     /// A change the stream's active sync run would undo: it was refused and nothing was written.
     pub(crate) fn run_active() -> Self {
         Self::new(StoreErrorKind::RunActive)
+    }
+
+    /// Whether PostgreSQL refused the write because it breaks the check constraint `name`
+    /// (SQLSTATE 23514). The input is at fault, so running it again cannot help.
+    pub fn is_check_violation(&self, name: &str) -> bool {
+        self.source
+            .as_deref()
+            .and_then(|source| source.downcast_ref::<sqlx::Error>())
+            .and_then(sqlx::Error::as_database_error)
+            .is_some_and(|error| {
+                error.code().is_some_and(|code| code.as_ref() == "23514")
+                    && error.constraint() == Some(name)
+            })
     }
 
     /// Whether PostgreSQL refused a value it cannot store: a NUL in `text` (22021), or as an

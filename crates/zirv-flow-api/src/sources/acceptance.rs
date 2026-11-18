@@ -2774,6 +2774,160 @@ mod tests {
         assert_eq!(member.status, StatusCode::FORBIDDEN);
     }
 
+    /// Runs `PUT` of stream settings paused right after its first reads (it waits for a table
+    /// lock held here), lets `during` run, then lets the save go on.
+    async fn save_paused_while<F, Fut>(
+        fx: &Fixture,
+        pool: &PgPool,
+        uri: String,
+        body: Value,
+        during: F,
+    ) where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let mut holder = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE lists IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+        let router = fx.router.clone();
+        let key = fx.admin.clone();
+        let save =
+            tokio::spawn(
+                async move { call(&router, "PUT", &uri, Some(body), Auth::Key(&key)).await },
+            );
+        wait_for_lock_waiters(pool, 1).await;
+        during().await;
+        holder.commit().await.unwrap();
+        let saved = save.await.unwrap();
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+    }
+
+    async fn wait_for_lock_waiters(pool: &PgPool, count: i64) {
+        for _ in 0..500 {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock'",
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            if waiting >= count {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("no request waited for the lock");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_save_that_a_disable_overtakes_leaves_the_reconcile_schedule_disabled(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let id = fx.mapped_source(1).await;
+        let uri = fx.path(&format!("/sources/{id}/streams/stream_1"));
+        let settings = json!({"enabled": true, "sync_mode": "incremental",
+            "cursor_field": "updated_at", "reconcile_schedule": "0 3 * * *",
+            "mapping": mapping_body()});
+
+        save_paused_while(&fx, &pool, uri, settings, || async {
+            let off = fx
+                .as_admin(
+                    "PATCH",
+                    &format!("/sources/{id}"),
+                    Some(json!({"enabled": false})),
+                )
+                .await;
+            assert_eq!(off.status, StatusCode::OK, "{:?}", off.body);
+        })
+        .await;
+
+        let source: bool = sqlx::query_scalar("SELECT enabled FROM sources")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let rows: Vec<(String, bool)> =
+            sqlx::query_as("SELECT cron, enabled FROM schedules WHERE stream_id IS NOT NULL")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert!(!source);
+        assert!(
+            rows.iter().all(|row| !row.1),
+            "reconcile schedule enabled on a disabled source: {rows:?}"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_save_that_a_disable_overtakes_queues_no_consumer(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let id = fx.kafka_source().await;
+        let uri = fx.path(&format!("/sources/{id}/streams/orders"));
+
+        save_paused_while(
+            &fx,
+            &pool,
+            uri,
+            Fixture::consumer_settings(true),
+            || async {
+                let off = fx
+                    .as_admin(
+                        "PATCH",
+                        &format!("/sources/{id}"),
+                        Some(json!({"enabled": false})),
+                    )
+                    .await;
+                assert_eq!(off.status, StatusCode::OK, "{:?}", off.body);
+            },
+        )
+        .await;
+
+        assert_eq!(fx.consumer_runs().await, [], "a consumer was queued");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_settings_save_and_a_config_patch_lock_the_source_before_its_streams(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let id = fx.mapped_source(1).await;
+        let uri = fx.path(&format!("/sources/{id}/streams/stream_1"));
+        let patch_uri = fx.path(&format!("/sources/{id}"));
+        let settings = json!({"enabled": true, "sync_mode": "full_refresh",
+            "mapping": mapping_body()});
+        // Both requests queue behind a lock on the source row; they then run one after the
+        // other, in either order, and neither is chosen as a deadlock victim.
+        let mut holder = pool.begin().await.unwrap();
+        sqlx::query("SELECT id FROM sources FOR UPDATE")
+            .fetch_all(&mut *holder)
+            .await
+            .unwrap();
+        let (router, key) = (fx.router.clone(), fx.admin.clone());
+        let save = {
+            let (router, key) = (router.clone(), key.clone());
+            tokio::spawn(async move {
+                call(&router, "PUT", &uri, Some(settings), Auth::Key(&key)).await
+            })
+        };
+        let patch = tokio::spawn(async move {
+            call(
+                &router,
+                "PATCH",
+                &patch_uri,
+                Some(json!({"config": {"streams": 1}})),
+                Auth::Key(&key),
+            )
+            .await
+        });
+        wait_for_lock_waiters(&pool, 2).await;
+        holder.commit().await.unwrap();
+
+        let (save, patch) = (save.await.unwrap(), patch.await.unwrap());
+
+        assert_eq!(save.status, StatusCode::OK, "{:?}", save.body);
+        assert_eq!(patch.status, StatusCode::OK, "{:?}", patch.body);
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn enabling_or_disabling_a_source_re_mirrors_its_streams_reconcile_schedules(

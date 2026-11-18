@@ -178,7 +178,12 @@ pub(crate) async fn callback(
     match complete(&state, oidc, &headers, query).await {
         Ok(response) => Ok(response),
         Err(Failure::Reason(reason)) => {
-            record_failure(&state, reason).await?;
+            // A callback with a mismatched or unknown state is anonymous traffic anyone can send
+            // without limit; past the budget it answers the same but leaves no audit row.
+            let unattributable = matches!(reason, "state_mismatch" | "unknown_state");
+            if !unattributable || session::may_audit_unattributed(&state, reason) {
+                record_failure(&state, reason).await?;
+            }
             Ok(failed(&state))
         }
         Err(Failure::Conflict) => {
@@ -814,6 +819,42 @@ mod tests {
             ["state_mismatch", "state_mismatch", "state_mismatch"]
         );
         assert!(zirv_flow_store::list_users(&pool).await.unwrap().is_empty());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn anonymous_callbacks_without_state_stop_writing_audit_rows_past_the_budget(
+        pool: PgPool,
+    ) {
+        let setup = setup(&pool, false).await;
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let began = std::time::Instant::now();
+        let mut replies = Vec::new();
+        for _ in 0..200 {
+            replies.push(get(&setup.router, "/api/v1/session/oidc/callback", None).await);
+        }
+        let allowed = u64::from(crate::session::UNATTRIBUTED_AUDIT_BURST)
+            + u64::from(crate::session::UNATTRIBUTED_AUDIT_PER_SECOND)
+                * (began.elapsed().as_secs() + 1);
+
+        // Every request still answers the one generic 401; only the audit rows are capped.
+        for reply in &replies {
+            assert_generic_failure(reply);
+        }
+        let rows = failure_reasons(&pool).await.len() as u64;
+        assert!(
+            rows <= allowed,
+            "{rows} audit rows against a budget of {allowed}"
+        );
+        assert!(rows >= u64::from(crate::session::UNATTRIBUTED_AUDIT_BURST));
+        let skipped = format!(
+            "zirv_flow_sign_in_audit_skipped_total{{reason=\"state_mismatch\"}} {}",
+            200 - rows
+        );
+        let output = handle.render();
+        assert!(output.contains(&skipped), "{skipped} in {output}");
     }
 
     #[sqlx::test]

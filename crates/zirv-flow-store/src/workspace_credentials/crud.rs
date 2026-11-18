@@ -104,6 +104,21 @@ pub async fn create_credential<'e>(
     .map_err(StoreError::query)
 }
 
+/// Serialises the creators of a workspace's credentials until the transaction ends. A creator
+/// derives its key from the live list, so two that read the list apart could pick the same key;
+/// taking this lock before the read makes the second one see the first one's credential.
+pub async fn lock_credential_creates(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+) -> Result<(), StoreError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('credentials:' || $1::text, 0))")
+        .bind(workspace.as_uuid())
+        .execute(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
+    Ok(())
+}
+
 /// The workspace's credentials, ordered by name; archived ones only when asked for.
 pub async fn list_credentials<'e>(
     executor: impl PgExecutor<'e>,
@@ -207,7 +222,8 @@ pub async fn update_credential<'e>(
 /// Points a live credential at a new sealed secret and returns the secret it replaced; `None`
 /// when there is no live credential. The caller created the new secret and, in the same
 /// transaction, deletes the old row ([`secrets::delete`]), so a rotation is one atomic swap and no
-/// reader sees the old value after the commit.
+/// reader sees the old value after the commit. The stored test result described the replaced
+/// secret, so the swap clears it.
 pub async fn swap_credential_secret(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -223,7 +239,8 @@ pub async fn swap_credential_secret(
             WHERE workspace_id = $1 AND id = $2 AND archived_at IS NULL FOR UPDATE), \
          swapped AS ( \
             UPDATE credentials SET secret_id = $3, hints = $4, fingerprint = $5, \
-                rotated_at = now(), rotated_by = $6, updated_at = now() \
+                rotated_at = now(), rotated_by = $6, updated_at = now(), \
+                last_tested_at = NULL, last_test_outcome = NULL \
             WHERE workspace_id = $1 AND id = $2 AND archived_at IS NULL RETURNING id) \
          SELECT old.secret_id FROM old, swapped",
     )
@@ -559,6 +576,53 @@ mod tests {
                 .await
                 .unwrap(),
             ArchiveOutcome::NotFound
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn rotation_clears_the_test_result_of_the_replaced_secret(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let keys = Keyring::new(MasterKey::generate(), None).unwrap();
+        let before = credential(&pool, ws, "mail").await;
+        assert!(
+            record_credential_test(&pool, ws, before.id, true)
+                .await
+                .unwrap()
+        );
+        let renamed = update_credential(
+            &pool,
+            ws,
+            before.id,
+            &CredentialUpdate {
+                name: Some("Mail 2"),
+                fields: None,
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(renamed.last_test_outcome.as_deref(), Some("ok"));
+        let replacement = secret(&pool, &keys, ws, SecretPurpose::WorkspaceCredential, b"{}").await;
+
+        let mut tx = begin(&pool).await.unwrap();
+        swap_credential_secret(&mut tx, ws, before.id, replacement, &json!({}), None, None)
+            .await
+            .unwrap()
+            .unwrap();
+        commit(tx).await.unwrap();
+
+        let after = find_credential(&pool, ws, before.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (
+                after.last_test_outcome.clone(),
+                after.last_tested_at.is_some()
+            ),
+            (None, false),
+            "stale test result survived rotation"
         );
     }
 

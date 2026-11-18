@@ -1,5 +1,7 @@
 //! Sign-in, the current session, and sign-out.
 
+use std::time::Instant;
+
 use axum::Json;
 use axum::extract::State;
 use axum::http::{StatusCode, header};
@@ -13,6 +15,7 @@ use zirv_flow_core::{Email, UserId};
 use zirv_flow_store::User;
 
 use crate::auth::{Principal, SESSION_ABSOLUTE_SECONDS, SESSION_IDLE_SECONDS};
+use crate::ingest::RateLimiter;
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
 use crate::{AppState, admin, cookies, credentials, passwords, request_id};
@@ -21,6 +24,38 @@ use crate::{AppState, admin, cookies, credentials, passwords, request_id};
 /// password, and hashing it would only burn CPU.
 const MAX_PASSWORD_CHARS: usize = 1024;
 const INVALID_CREDENTIALS: &str = "invalid email or password";
+
+/// The audit rows a process writes for sign-in failures that name nobody: a password for an
+/// unknown email, an OIDC callback with a mismatched or unknown state. Anyone can send these
+/// without limit, so past this budget (a burst, then a steady rate per second) the request still
+/// answers exactly the same but leaves no row, and [`UNATTRIBUTED_SKIPPED`] counts it.
+pub(crate) const UNATTRIBUTED_AUDIT_BURST: u32 = 30;
+pub(crate) const UNATTRIBUTED_AUDIT_PER_SECOND: u32 = 2;
+/// The counter of unattributable failures whose audit row was skipped, by `reason`.
+const UNATTRIBUTED_SKIPPED: &str = "zirv_flow_sign_in_audit_skipped_total";
+
+/// The budget of [`UNATTRIBUTED_AUDIT_BURST`] rows, shared by every unattributable failure.
+pub(crate) fn unattributed_audit_limiter() -> RateLimiter {
+    RateLimiter::new(
+        UNATTRIBUTED_AUDIT_PER_SECOND,
+        UNATTRIBUTED_AUDIT_BURST,
+        Instant::now(),
+    )
+}
+
+/// Whether an unattributable sign-in failure may write its audit row now. It never refuses the
+/// request: when the budget is spent the caller answers as usual and skips the row, counted here.
+pub(crate) fn may_audit_unattributed(state: &AppState, reason: &'static str) -> bool {
+    if state
+        .unattributed_audit
+        .take(Uuid::nil(), 1, Instant::now())
+        .is_ok()
+    {
+        return true;
+    }
+    metrics::counter!(UNATTRIBUTED_SKIPPED, "reason" => reason).increment(1);
+    false
+}
 
 #[derive(Deserialize, ToSchema)]
 pub(crate) struct SignInRequest {
@@ -85,15 +120,18 @@ pub(crate) async fn sign_in(
 
     let Some(user) = zirv_flow_store::find_user_by_email(&state.pool, &email).await? else {
         passwords::dummy_verify().await;
-        record_failure(&state, &anonymous, None, "invalid_credentials").await?;
+        if may_audit_unattributed(&state, "invalid_credentials") {
+            record_failure(&state, &anonymous, None, "invalid_credentials").await?;
+        }
         return Err(invalid());
     };
 
-    // The database clock stamped `locked_until`, so it decides whether the lock still holds.
-    if zirv_flow_store::is_locked(&state.pool, user.id).await? {
+    // One statement checks the lock against the database clock that stamped `locked_until` and
+    // counts this attempt, so a concurrent burst gets at most five attempts past the gate.
+    if !zirv_flow_store::reserve_sign_in_attempt(&state.pool, user.id).await? {
         // No verification, but the same time spent, so a lock is not detectable by timing.
         passwords::dummy_verify().await;
-        record_failure(&state, &anonymous, Some((user.id, false)), "locked").await?;
+        record_failure(&state, &anonymous, Some(user.id), "locked").await?;
         return Err(invalid());
     }
 
@@ -109,13 +147,7 @@ pub(crate) async fn sign_in(
         }
     };
     if !verified {
-        record_failure(
-            &state,
-            &anonymous,
-            Some((user.id, true)),
-            "invalid_credentials",
-        )
-        .await?;
+        record_failure(&state, &anonymous, Some(user.id), "invalid_credentials").await?;
         return Err(invalid());
     }
     let new = start(&state, user.id, "password").await?;
@@ -185,25 +217,22 @@ pub(crate) async fn start(
     Ok(NewSession { token, csrf })
 }
 
-/// Audits a failed sign-in, and counts it against the account when `account` is
-/// `(id, true)`, atomically. The actor is the anonymous `context`: nobody has proved who
-/// they are, so a known account is recorded only as the object.
+/// Audits a failed sign-in. The attempt was already counted against the account when it was
+/// reserved. The actor is the anonymous `context`: nobody has proved who they are, so a known
+/// account is recorded only as the object.
 async fn record_failure(
     state: &AppState,
     context: &admin::Context,
-    account: Option<(UserId, bool)>,
+    account: Option<UserId>,
     reason: &'static str,
 ) -> Result<(), ApiError> {
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
-    if let Some((user, true)) = account {
-        zirv_flow_store::record_failed_sign_in(&mut *tx, user).await?;
-    }
     admin::audit(
         &mut tx,
         context,
         None,
         "session.sign_in_failed",
-        account.map(|(user, _)| ("user", user.as_uuid())),
+        account.map(|user| ("user", user.as_uuid())),
         json!({ "reason": reason }),
     )
     .await?;

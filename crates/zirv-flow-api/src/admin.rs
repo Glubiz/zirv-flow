@@ -1631,6 +1631,47 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn concurrent_first_ai_saves_leave_one_provider_key_secret(pool: PgPool) {
+        migrated(&pool).await;
+        let context = Context::system();
+        let keys = keyring(&MasterKey::generate(), None);
+        seed_root(&pool, &keys).await;
+        let mut seen = Vec::new();
+        for round in 0..10 {
+            let ws = create_workspace(&pool, &context, &format!("Acme{round}"), None)
+                .await
+                .unwrap();
+            let (change_a, change_b) = (ai_change(), ai_change());
+            let (one, two) = tokio::join!(
+                save_ai_settings(&pool, &context, Some(&keys), ws.id, &change_a),
+                save_ai_settings(&pool, &context, Some(&keys), ws.id, &change_b),
+            );
+            let secrets: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM encrypted_secrets \
+                    WHERE workspace_id = $1 AND purpose = 'ai_provider_key'",
+            )
+            .bind(ws.id.as_uuid())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let audits: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM audit_log \
+                    WHERE workspace_id = $1 AND action = 'secret.created'",
+            )
+            .bind(ws.id.as_uuid())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            seen.push((one.is_ok(), two.is_ok(), secrets, audits));
+        }
+        assert!(
+            seen.iter().all(|row| *row == (true, true, 1, 1)),
+            "orphaned secret rows / audits (ok, ok, secrets, secret.created audits): {seen:?}"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn saving_ai_settings_seals_the_key_and_audits_the_changed_fields_without_it(
         pool: PgPool,
     ) {

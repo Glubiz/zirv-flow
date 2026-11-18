@@ -99,6 +99,12 @@ async fn run(
         key: &idempotency.key,
         request_hash: &idempotency.request_hash,
     });
+    // The masking reads run before the write: a lookup that fails after the commit would answer
+    // 5xx for a contact that is stored, and a retry of a create would then be a 409.
+    let masking = match action {
+        Action::Deleted => None,
+        _ => Some(Masking::of(state, principal, workspace).await?),
+    };
     let mut tx = zirv_flow_store::begin(&state.pool)
         .await
         .map_err(store_error)?;
@@ -138,12 +144,12 @@ async fn run(
     zirv_flow_store::commit(tx).await.map_err(store_error)?;
 
     let status = StatusCode::from_u16(written.status).unwrap_or(StatusCode::OK);
-    let mut response = if status == StatusCode::NO_CONTENT {
-        status.into_response()
-    } else {
-        let contact = written.contact.ok_or_else(ApiError::not_found)?;
-        let masking = Masking::of(state, principal, workspace).await?;
-        (status, Json(masking.body_for_key(contact))).into_response()
+    let mut response = match masking {
+        Some(masking) if status != StatusCode::NO_CONTENT => {
+            let contact = written.contact.ok_or_else(ApiError::not_found)?;
+            (status, Json(masking.body_for_key(contact))).into_response()
+        }
+        _ => status.into_response(),
     };
     if written.replayed {
         response

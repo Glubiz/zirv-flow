@@ -240,7 +240,8 @@ pub async fn list_audit<'e>(
 #[derive(Clone, Debug, Default)]
 pub struct AuditFilter {
     pub workspace: Option<WorkspaceId>,
-    /// An exact action, or an area prefix ending in a dot such as `flow.`.
+    /// An exact action, or an area prefix ending in a dot such as `flow.`, which selects the
+    /// catalogue's actions with that prefix.
     pub action: Option<String>,
     pub actor_kind: Option<String>,
     pub actor_id: Option<Uuid>,
@@ -267,9 +268,32 @@ pub const AUDIT_BATCH: i64 = 500;
 const COLUMNS: &str = "id, workspace_id, actor_kind, actor_id, action, object_kind, object_id, \
                        request_id, trace_id, summary, occurred_at";
 
-fn select(head: &str, filter: &AuditFilter, before: Option<i64>) -> QueryBuilder<Postgres> {
-    let mut query = QueryBuilder::new(head);
-    query.push(" FROM audit_log WHERE ");
+/// The catalogue's actions an area filter (`flow.`) stands for. Every stored action is in the
+/// catalogue: it has never lost one. The write does not refuse others (`append_audit` and
+/// `append_audit_once_in` only `debug_assert!` it), and the e2e catalogue test keeps new actions
+/// listed. So this is exactly the area's rows; none for an exact action or no action.
+fn area_actions(filter: &AuditFilter) -> Option<Vec<String>> {
+    let area = filter
+        .action
+        .as_ref()
+        .filter(|action| action.ends_with('.'))?;
+    Some(
+        audit::ACTIONS
+            .iter()
+            .filter(|known| known.starts_with(area.as_str()))
+            .map(|known| (*known).to_owned())
+            .collect(),
+    )
+}
+
+/// The conditions of a read, after `WHERE`. With `per_action` the action is taken from the
+/// `area.action` of the surrounding per-action join instead of the filter.
+fn push_conditions(
+    query: &mut QueryBuilder<Postgres>,
+    filter: &AuditFilter,
+    before: Option<i64>,
+    per_action: bool,
+) {
     match filter.workspace {
         Some(workspace) => {
             query.push("workspace_id = ").push_bind(workspace.as_uuid());
@@ -278,15 +302,13 @@ fn select(head: &str, filter: &AuditFilter, before: Option<i64>) -> QueryBuilder
             query.push("workspace_id IS NULL");
         }
     }
-    if let Some(action) = &filter.action {
-        if action.ends_with('.') {
-            query
-                .push(" AND starts_with(action, ")
-                .push_bind(action.clone())
-                .push(")");
-        } else {
-            query.push(" AND action = ").push_bind(action.clone());
-        }
+    if per_action {
+        query.push(" AND audit_log.action = area.action");
+    } else if let Some(area) = area_actions(filter) {
+        // An equality list is served by the action index; `starts_with` is not, and walks the log.
+        query.push(" AND action = ANY(").push_bind(area).push(")");
+    } else if let Some(action) = &filter.action {
+        query.push(" AND action = ").push_bind(action.clone());
     }
     if let Some(kind) = &filter.actor_kind {
         query.push(" AND actor_kind = ").push_bind(kind.clone());
@@ -312,10 +334,41 @@ fn select(head: &str, filter: &AuditFilter, before: Option<i64>) -> QueryBuilder
     if let Some(before) = before {
         query.push(" AND id < ").push_bind(before);
     }
+}
+
+fn select(head: &str, filter: &AuditFilter, before: Option<i64>) -> QueryBuilder<Postgres> {
+    let mut query = QueryBuilder::new(head);
+    query.push(" FROM audit_log WHERE ");
+    push_conditions(&mut query, filter, before, false);
     query
 }
 
-/// Up to `limit` rows matching `filter`, newest first, starting below the row id `cursor`. Rows
+/// One page query, newest first. An area filter reads each of its actions through the action
+/// index in id order (a lateral `LIMIT` per action) and merges them, because the planner cannot
+/// return an `= ANY(...)` list in id order from that index and, with few rows in the area, walks
+/// the whole log by id instead.
+fn page_query(filter: &AuditFilter, before: Option<i64>, limit: i64) -> QueryBuilder<Postgres> {
+    let fetch = limit.saturating_add(1);
+    let Some(area) = area_actions(filter) else {
+        let mut query = select(&format!("SELECT {COLUMNS}"), filter, before);
+        query.push(" ORDER BY id DESC LIMIT ").push_bind(fetch);
+        return query;
+    };
+    let mut query = QueryBuilder::new("SELECT hit.* FROM unnest(");
+    query
+        .push_bind(area)
+        .push("::text[]) AS area(action) CROSS JOIN LATERAL (SELECT ");
+    query.push(COLUMNS).push(" FROM audit_log WHERE ");
+    push_conditions(&mut query, filter, before, true);
+    query.push(" ORDER BY id DESC LIMIT ").push_bind(fetch);
+    query
+        .push(") AS hit ORDER BY hit.id DESC LIMIT ")
+        .push_bind(fetch);
+    query
+}
+
+/// Up to `limit` rows matching `filter`, newest first, starting below the row id `cursor` (an
+/// area filter pages by [`page_query`], a row set identical to the `starts_with` filter). Rows
 /// appended while a caller pages have higher ids than any cursor, so they never shift a page.
 ///
 /// Ids are not commit-ordered: a transaction that took a lower id and commits after a walk has
@@ -326,10 +379,7 @@ pub async fn list_audit_page<'e>(
     cursor: Option<i64>,
     limit: i64,
 ) -> Result<AuditPage, StoreError> {
-    let mut query = select(&format!("SELECT {COLUMNS}"), filter, cursor);
-    query
-        .push(" ORDER BY id DESC LIMIT ")
-        .push_bind(limit.saturating_add(1));
+    let mut query = page_query(filter, cursor, limit);
     let mut entries: Vec<AuditEntry> = query
         .build_query_as()
         .fetch_all(executor)
@@ -657,6 +707,293 @@ mod tests {
                 .await;
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn an_area_filter_binds_the_catalogue_actions_instead_of_scanning_by_prefix() {
+        let filter = AuditFilter {
+            workspace: Some(WorkspaceId::new()),
+            action: Some("flow.".into()),
+            ..AuditFilter::default()
+        };
+
+        let sql = select("SELECT id", &filter, None).sql().as_str().to_owned();
+
+        assert!(sql.contains("action = ANY("), "{sql}");
+        assert!(!sql.contains("starts_with"), "{sql}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_area_returns_exactly_its_actions_and_a_kind_filter_is_served_by_its_index(
+        pool: PgPool,
+    ) {
+        let ws = WorkspaceId::new();
+        let in_area: Vec<&str> = audit::ACTIONS
+            .iter()
+            .copied()
+            .filter(|action| action.starts_with("flow."))
+            .collect();
+        for action in audit::ACTIONS.iter().copied() {
+            let mut row = entry(Some(ws), action);
+            row.object_kind = Some(if action.starts_with("flow.") {
+                "flow"
+            } else {
+                "rare_kind"
+            });
+            append_audit(&pool, &row).await.unwrap();
+        }
+        let area = AuditFilter {
+            workspace: Some(ws),
+            action: Some("flow.".into()),
+            ..AuditFilter::default()
+        };
+        let mut found = page(&pool, &area).await;
+        found.sort();
+        assert_eq!(found, in_area);
+        let unknown = AuditFilter {
+            action: Some("nonesuch.".into()),
+            ..area.clone()
+        };
+        assert!(page(&pool, &unknown).await.is_empty());
+        let kind = AuditFilter {
+            workspace: Some(ws),
+            object_kind: Some("flow".into()),
+            ..AuditFilter::default()
+        };
+        assert_eq!(page(&pool, &kind).await.len(), in_area.len());
+
+        // The planner may still pick a scan on a table this small, so forbid it and read the
+        // plan: the kind filter must be answerable from `audit_log_workspace_kind_idx`.
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("SET LOCAL enable_seqscan = off")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let plan: Vec<String> = sqlx::query_scalar(
+            "EXPLAIN SELECT id FROM audit_log \
+             WHERE workspace_id = $1 AND object_kind = 'rare_kind' ORDER BY id DESC LIMIT 51",
+        )
+        .bind(ws.as_uuid())
+        .fetch_all(&mut *tx)
+        .await
+        .unwrap();
+        assert!(
+            plan.iter()
+                .any(|line| line.contains("audit_log_workspace_kind_idx")),
+            "{plan:?}"
+        );
+    }
+
+    /// Puts the table in its state before 0113: a pre-built kind index (the one the migration's
+    /// header tells an operator to build) that is valid or is what a failed concurrent build
+    /// leaves.
+    async fn before_0113(pool: &PgPool, prebuilt_is_valid: bool) {
+        for statement in [
+            "DROP INDEX audit_log_workspace_kind_idx",
+            "CREATE INDEX audit_log_workspace_kind_idx \
+             ON audit_log (workspace_id, object_kind, id)",
+        ] {
+            sqlx::query(statement).execute(pool).await.unwrap();
+        }
+        if !prebuilt_is_valid {
+            sqlx::query(
+                "UPDATE pg_index SET indisvalid = false \
+                 WHERE indexrelid = 'audit_log_workspace_kind_idx'::regclass",
+            )
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+    }
+
+    /// Whether the index is valid, its definition and its oid; `None` when it does not exist.
+    async fn kind_index_state(pool: &PgPool) -> Option<(bool, String, i64)> {
+        sqlx::query_as(
+            "SELECT indisvalid, pg_get_indexdef(indexrelid), indexrelid::oid::bigint \
+             FROM pg_index WHERE indexrelid = to_regclass('audit_log_workspace_kind_idx')",
+        )
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_kind_migration_replaces_an_invalid_prebuilt_index_and_never_keeps_it(
+        pool: PgPool,
+    ) {
+        before_0113(&pool, false).await;
+
+        sqlx::raw_sql(include_str!(
+            "../migrations/0113_audit_log_object_kind_idx.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let (valid, definition, _) = kind_index_state(&pool)
+            .await
+            .expect("the kind index exists");
+        assert!(valid, "the kind index is invalid: {definition}");
+        assert!(
+            definition.contains("USING btree (workspace_id, object_kind, id)"),
+            "{definition}"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_kind_migration_keeps_a_valid_prebuilt_index_without_a_rebuild(pool: PgPool) {
+        before_0113(&pool, true).await;
+        let (_, _, prebuilt) = kind_index_state(&pool).await.unwrap();
+
+        sqlx::raw_sql(include_str!(
+            "../migrations/0113_audit_log_object_kind_idx.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let (valid, definition, kept) = kind_index_state(&pool).await.unwrap();
+        assert!(valid);
+        assert!(
+            definition.contains("USING btree (workspace_id, object_kind, id)"),
+            "{definition}"
+        );
+        assert_eq!(kept, prebuilt, "the pre-built index was built again");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_kind_migration_replaces_a_valid_prebuilt_index_with_another_definition(
+        pool: PgPool,
+    ) {
+        before_0113(&pool, true).await;
+        for statement in [
+            "DROP INDEX audit_log_workspace_kind_idx",
+            "CREATE INDEX audit_log_workspace_kind_idx \
+             ON audit_log (workspace_id, object_kind, id) WHERE object_kind IS NOT NULL",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+        let (valid, definition, prebuilt) = kind_index_state(&pool).await.unwrap();
+        assert!(valid && definition.contains("WHERE"), "{definition}");
+
+        sqlx::raw_sql(include_str!(
+            "../migrations/0113_audit_log_object_kind_idx.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let (valid, definition, rebuilt) = kind_index_state(&pool).await.unwrap();
+        assert!(valid, "the kind index is invalid: {definition}");
+        assert_eq!(
+            definition.split_once(" USING ").map(|(_, rest)| rest),
+            Some("btree (workspace_id, object_kind, id)"),
+            "{definition}"
+        );
+        assert_ne!(rebuilt, prebuilt, "the different index was kept");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_area_pages_across_its_actions_like_the_prefix_filter_without_loss_or_repeat(
+        pool: PgPool,
+    ) {
+        let ws = WorkspaceId::new();
+        let (other, outside) = (WorkspaceId::new(), "list.created");
+        let actions = ["flow.created", "flow.paused", "flow.published", outside];
+        for round in 0..9 {
+            for action in actions {
+                append_audit(&pool, &entry(Some(ws), action)).await.unwrap();
+            }
+            append_audit(&pool, &entry(Some(other), "flow.created"))
+                .await
+                .unwrap();
+            if round % 2 == 0 {
+                append_audit(&pool, &entry(Some(ws), "flow.paused"))
+                    .await
+                    .unwrap();
+            }
+        }
+        let expected: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM audit_log \
+             WHERE workspace_id = $1 AND starts_with(action, 'flow.') ORDER BY id DESC",
+        )
+        .bind(ws.as_uuid())
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let area = AuditFilter {
+            workspace: Some(ws),
+            action: Some("flow.".into()),
+            ..AuditFilter::default()
+        };
+
+        // Pages of 4 cut the interleaved actions at every edge; the cursor carries on from there.
+        let (mut seen, mut cursor) = (Vec::new(), None);
+        loop {
+            let page = list_audit_page(&pool, &area, cursor, 4).await.unwrap();
+            assert!(page.entries.len() <= 4);
+            seen.extend(page.entries.iter().map(|entry| entry.id));
+            match page.next {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+
+        assert_eq!(seen, expected);
+        let streamed: Vec<i64> = stream_audit(pool.clone(), area.clone(), i64::MAX - 1)
+            .map_ok(|batch| batch.into_iter().map(|entry| entry.id).collect::<Vec<_>>())
+            .try_concat()
+            .await
+            .unwrap();
+        assert_eq!(streamed, expected);
+        let (count, newest) = count_audit(&pool, &area).await.unwrap();
+        assert_eq!(
+            (count, newest),
+            (expected.len() as i64, expected.first().copied())
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_area_page_reads_each_action_through_the_action_index(pool: PgPool) {
+        let ws = WorkspaceId::new();
+        for action in ["flow.created", "flow.paused", "list.created"] {
+            append_audit(&pool, &entry(Some(ws), action)).await.unwrap();
+        }
+        let area = AuditFilter {
+            workspace: Some(ws),
+            action: Some("flow.".into()),
+            ..AuditFilter::default()
+        };
+        let query = page_query(&area, None, 50);
+        let areas = area_actions(&area).unwrap();
+
+        // Bound in the order the query takes them: the area, the workspace and the two limits.
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("SET LOCAL enable_seqscan = off")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let plan: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN {}",
+            query.sql().as_str()
+        )))
+        .bind(areas)
+        .bind(ws.as_uuid())
+        .bind(51_i64)
+        .bind(51_i64)
+        .fetch_all(&mut *tx)
+        .await
+        .unwrap();
+
+        let plan = plan.join("\n");
+        assert!(plan.contains("audit_log_workspace_action_idx"), "{plan}");
+        assert!(!plan.contains("audit_log_pkey"), "{plan}");
     }
 
     #[sqlx::test]

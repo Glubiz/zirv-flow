@@ -13,7 +13,7 @@ use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::consent::SuppressionReason;
 
-use crate::StoreError;
+use crate::{PgPool, StoreError, Tx};
 
 /// The identifier kinds a suppression can name.
 pub const SUPPRESSION_KINDS: [&str; 2] = ["email", "phone"];
@@ -364,6 +364,27 @@ pub async fn is_suppressed<'e>(
 
 /// The position after a listed suppression: its time and id.
 pub type SuppressionCursor = (OffsetDateTime, Uuid);
+
+/// How long one page of an export may run before PostgreSQL cancels it.
+const EXPORT_PAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Starts the transaction an export pages through, read-only at `REPEATABLE READ`: every page
+/// sees the rows committed when this function returned, so the file holds each of them once.
+/// `created_at` is the start of the writing transaction, not its commit, so a writer that began
+/// before the export and commits while it pages sorts behind the cursor; without the snapshot
+/// the export would miss that row. A row committed after this returns is not in the file.
+/// PostgreSQL fixes a `REPEATABLE READ` snapshot at the first statement that needs one, not at
+/// `BEGIN`, so one cheap statement here takes it.
+/// The transaction holds a connection and a snapshot until it is dropped, so the caller bounds
+/// its life.
+pub async fn begin_suppression_export(pool: &PgPool) -> Result<Tx, StoreError> {
+    let mut tx = crate::bounded::begin_snapshot_for(pool, EXPORT_PAGE_TIMEOUT).await?;
+    sqlx::query("SELECT 1")
+        .execute(&mut *tx)
+        .await
+        .map_err(StoreError::query)?;
+    Ok(tx)
+}
 
 /// A page of suppressions, newest first by `(created_at, id)`, at most `limit`, after the
 /// `before` cursor and optionally of one reason. The flag is true when more existed.
@@ -860,5 +881,87 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    /// A writer that began before the export and commits while it pages carries a `created_at`
+    /// older than the cursor. Paged one statement at a time the row is never returned; the
+    /// export's snapshot holds every row committed before it began, once, and none committed
+    /// after, and a later export holds them all.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_export_is_one_snapshot_of_what_was_committed_when_it_began(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        for n in [1_u8, 2] {
+            add_suppression(&pool, ws, &manual([n; 32])).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let mut writer = begin(&pool).await.unwrap();
+        add_suppression(&mut *writer, ws, &manual([100; 32]))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        for n in [10_u8, 11, 12] {
+            add_suppression(&pool, ws, &manual([n; 32])).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let mut export = begin_suppression_export(&pool).await.unwrap();
+        let mut seen: Vec<u8> = Vec::new();
+        let mut cursor = None;
+        let mut writer = Some(writer);
+        loop {
+            let (page, more) = list_suppressions(&mut *export, ws, 1, cursor, None)
+                .await
+                .unwrap();
+            seen.extend(page.iter().map(|s| s.identifier_hash[0]));
+            if let Some(last) = page.last() {
+                cursor = Some((last.created_at, last.id));
+                if last.identifier_hash[0] == 12 {
+                    // The first page ran; the writer commits behind the cursor and a newer
+                    // row arrives, and neither belongs to this export.
+                    commit(writer.take().unwrap()).await.unwrap();
+                    add_suppression(&pool, ws, &manual([200; 32]))
+                        .await
+                        .unwrap();
+                }
+            }
+            if !more {
+                break;
+            }
+        }
+        drop(export);
+
+        assert!(writer.is_none());
+        assert_eq!(seen, [12, 11, 10, 2, 1]);
+        let (later, _) = list_suppressions(&pool, ws, 50, None, None).await.unwrap();
+        let later: std::collections::BTreeSet<u8> =
+            later.iter().map(|s| s.identifier_hash[0]).collect();
+        assert_eq!(
+            later,
+            std::collections::BTreeSet::from([1, 2, 10, 11, 12, 100, 200])
+        );
+    }
+
+    /// The snapshot is fixed as `begin_suppression_export` returns, not at the export's first
+    /// read: a row committed on another connection between the two is not in the file.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_export_snapshot_is_fixed_when_it_begins_not_at_its_first_read(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        add_suppression(&pool, ws, &manual([1; 32])).await.unwrap();
+        let mut export = begin_suppression_export(&pool).await.unwrap();
+        add_suppression(&pool, ws, &manual([2; 32])).await.unwrap();
+
+        let (rows, more) = list_suppressions(&mut *export, ws, 50, None, None)
+            .await
+            .unwrap();
+        drop(export);
+
+        assert_eq!(
+            rows.iter()
+                .map(|s| s.identifier_hash[0])
+                .collect::<Vec<_>>(),
+            [1]
+        );
+        assert!(!more);
     }
 }

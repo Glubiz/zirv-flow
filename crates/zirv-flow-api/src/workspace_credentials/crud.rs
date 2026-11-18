@@ -361,11 +361,14 @@ pub(crate) async fn create_credential(
         return Err(problems(found));
     }
     let keyring = keyring(state)?;
-    let live = zirv_flow_store::list_credentials(&state.pool, workspace, false).await?;
-    let key = pick_key(request.key.as_deref(), name, &live)?;
     let plaintext = to_plaintext(&request.secret)?;
 
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
+    // The key is derived from the live list, so the creators of one workspace take turns: the
+    // second reads the list after the first has committed and picks the next free key.
+    zirv_flow_store::lock_credential_creates(&mut tx, workspace).await?;
+    let live = zirv_flow_store::list_credentials(&mut *tx, workspace, false).await?;
+    let key = pick_key(request.key.as_deref(), name, &live)?;
     let secret_id = admin::create_secret_in(
         &mut tx,
         context,
@@ -849,6 +852,91 @@ mod tests {
             created_at: OffsetDateTime::UNIX_EPOCH,
             updated_at: OffsetDateTime::UNIX_EPOCH,
         }
+    }
+
+    /// A state with a keyring, a workspace named Acme and the system context.
+    async fn creating_state(pool: &sqlx::PgPool) -> (AppState, Context, WorkspaceId) {
+        use zirv_flow_core::{Keyring, MasterKey};
+
+        zirv_flow_store::migrate(pool).await.unwrap();
+        let context = Context::system();
+        let ws = admin::create_workspace(pool, &context, "Acme", None)
+            .await
+            .unwrap();
+        let keys = Keyring::new(MasterKey::generate(), None).unwrap();
+        let root = zirv_flow_core::HmacRoot::bootstrap_from(keys.current()).to_secret_bytes();
+        let sealed = zirv_flow_core::seal(
+            &keys,
+            root.expose(),
+            &zirv_flow_core::deployment_key_aad(zirv_flow_store::secrets::HMAC_ROOT),
+        );
+        zirv_flow_store::secrets::insert_hmac_root_if_absent(pool, &sealed)
+            .await
+            .unwrap();
+        let state = AppState::new(pool.clone(), std::sync::Arc::new(String::new))
+            .with_keyring(std::sync::Arc::new(keys));
+        (state, context, ws.id)
+    }
+
+    fn create_request(name: &str) -> CreateCredentialRequest {
+        serde_json::from_value(json!({
+            "kind": "api_key",
+            "name": name,
+            "secret": {"api_key": "sk-live-0123456789abcdef"}
+        }))
+        .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn concurrent_creates_with_the_same_derived_key_both_succeed(pool: sqlx::PgPool) {
+        let (state, context, ws) = creating_state(&pool).await;
+        let mut failures = Vec::new();
+        for i in 0..10 {
+            let (req_a, req_b) = (
+                create_request(&format!("Mail{i}")),
+                create_request(&format!("mail{i}!")),
+            );
+            let (one, two) = tokio::join!(
+                create_credential(&state, &context, ws, None, &req_a),
+                create_credential(&state, &context, ws, None, &req_b),
+            );
+            let mut keys = Vec::new();
+            for result in [one, two] {
+                match result {
+                    Ok(credential) => keys.push(credential.key),
+                    Err(error) => {
+                        failures.push(format!("{i}: {} {}", error.status(), error.detail()))
+                    }
+                }
+            }
+            keys.sort();
+            assert_eq!(keys, [format!("mail{i}"), format!("mail{i}-2")]);
+        }
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn concurrent_creates_with_the_same_name_give_one_success_and_one_name_taken(
+        pool: sqlx::PgPool,
+    ) {
+        let (state, context, ws) = creating_state(&pool).await;
+        let (req_a, req_b) = (create_request("Mail"), create_request("mail"));
+
+        let (one, two) = tokio::join!(
+            create_credential(&state, &context, ws, None, &req_a),
+            create_credential(&state, &context, ws, None, &req_b),
+        );
+
+        let (ok, err): (Vec<_>, Vec<_>) = [one, two].into_iter().partition(Result::is_ok);
+        assert_eq!(ok.len(), 1);
+        let error = err.into_iter().next().unwrap().unwrap_err();
+        assert_eq!(error.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            error.detail(),
+            "a credential with that name or key already exists"
+        );
     }
 
     #[test]
