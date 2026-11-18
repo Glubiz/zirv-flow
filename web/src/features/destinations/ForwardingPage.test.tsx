@@ -342,17 +342,29 @@ describe("dead letters", () => {
     expect(screen.getByRole("button", { name: "Show more" })).toBeEnabled();
   });
 
-  it("drops the Show more rows at once when a re-drive succeeds, before the reload lands", async () => {
+  it("drops the Show more rows at once when a re-drive succeeds, then pages from the reloaded first page", async () => {
     let land: (response: Response) => void = () => undefined;
     let reload: (response: Response) => void = () => undefined;
+    let landPending = false;
     let firstCalls = 0;
-    mockApi(
+    const calls = mockApi(
       base({
         [`POST ${WS}/forwarding/re-drive`]: () => json({ redriven: 1 }),
         [`GET ${WS}/forwarding/dead-letters`]: ((request: Request) => {
           const q = new URL(request.url).searchParams;
           if (q.get("cursor") === "c1") return json({ letters: [letter({ id: OTHER_LETTER_ID, error: "b1_error" })], next_cursor: "c2" });
-          if (q.get("cursor") === "c2") return new Promise<Response>((resolve) => (land = resolve));
+          if (q.get("cursor") === "c2") {
+            landPending = true;
+            return new Promise<Response>((resolve) => {
+              land = (response) => {
+                landPending = false;
+                resolve(response);
+              };
+            });
+          }
+          if (q.get("cursor") === "c3") {
+            return json({ letters: [letter({ id: "cccccccc-0000-4000-8000-00000000000a", error: "a4_error" })], next_cursor: null });
+          }
           firstCalls += 1;
           if (firstCalls === 1) return json({ letters: [letter({ error: "a1_error" })], next_cursor: "c1" });
           return new Promise<Response>((resolve) => (reload = resolve));
@@ -365,17 +377,55 @@ describe("dead letters", () => {
     await user.click(await screen.findByRole("button", { name: "Show more" }));
     await screen.findByText("b1_error");
     await user.click(screen.getByRole("button", { name: "Show more" }));
+    await waitFor(() => expect(calls.some((call) => call.search.includes("cursor=c2"))).toBe(true));
+    expect(landPending).toBe(true);
     await user.click(screen.getByRole("button", { name: "Re-drive all dead letters" }));
     await user.click(await screen.findByRole("button", { name: "Re-drive now" }));
     expect(await screen.findByText("1 row put back in the queue.")).toBeInTheDocument();
 
     expect(screen.queryByText("b1_error")).not.toBeInTheDocument();
+    expect(landPending).toBe(true);
     act(() => land(json({ letters: [letter({ id: "cccccccc-0000-4000-8000-000000000009", error: "b2_error" })], next_cursor: null })));
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(screen.queryByText("b2_error")).not.toBeInTheDocument();
     expect(screen.queryByText("b1_error")).not.toBeInTheDocument();
-    act(() => reload(json({ letters: [letter({ error: "a3_error" })], next_cursor: null })));
+    act(() => reload(json({ letters: [letter({ error: "a3_error" })], next_cursor: "c3" })));
     expect(await screen.findByText("a3_error")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Show more" }));
+    expect(await screen.findByText("a4_error")).toBeInTheDocument();
+    const last = calls.filter((call) => call.path.endsWith("/dead-letters")).at(-1);
+    expect(last?.search).toContain("cursor=c3");
+    expect(last?.search).not.toContain("cursor=c2");
+    expect(screen.getByText("a3_error")).toBeInTheDocument();
+    expect(screen.queryByText("b1_error")).not.toBeInTheDocument();
+    expect(screen.queryByText("b2_error")).not.toBeInTheDocument();
+  });
+
+  it("keeps the Show more rows when a re-drive fails", async () => {
+    mockApi(
+      base({
+        [`POST ${WS}/forwarding/re-drive`]: () => problem(500, "Internal Server Error", "re-drive broke"),
+        [`GET ${WS}/forwarding/dead-letters`]: ((request: Request) => {
+          if (new URL(request.url).searchParams.get("cursor") === "c1") {
+            return json({ letters: [letter({ id: OTHER_LETTER_ID, error: "b1_error" })], next_cursor: null });
+          }
+          return json({ letters: [letter({ error: "a1_error" })], next_cursor: "c1" });
+        }) as never,
+      }),
+    );
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "Show more" }));
+    await screen.findByText("b1_error");
+    await user.click(screen.getByRole("button", { name: "Re-drive all dead letters" }));
+    await user.click(await screen.findByRole("button", { name: "Re-drive now" }));
+    expect(await screen.findByText("re-drive broke")).toBeInTheDocument();
+
+    expect(screen.getByText("b1_error")).toBeInTheDocument();
+    expect(screen.getByText("a1_error")).toBeInTheDocument();
+    expect(screen.queryByText("1 row put back in the queue.")).not.toBeInTheDocument();
   });
 
   it("hides Show more when the next page is empty and has no further cursor", async () => {
