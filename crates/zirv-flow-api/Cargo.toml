@@ -14,6 +14,8 @@ chrono.workspace = true
 chrono-tz.workspace = true
 futures-util.workspace = true
 hashbrown.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
 metrics.workspace = true
 rust-embed.workspace = true
 serde.workspace = true
@@ -44,6 +46,7 @@ http-body-util.workspace = true
 metrics-exporter-prometheus.workspace = true
 rskafka.workspace = true
 sqlx.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 tower.workspace = true
 tracing-subscriber.workspace = true
 zirv-flow-ai = { workspace = true, features = ["test-support"] }

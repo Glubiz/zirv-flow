@@ -5,15 +5,81 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+/// Limit for the request and reply once connected.
 const TIMEOUT: Duration = Duration::from_secs(2);
+/// Limit for the connect itself. Longer than [`TIMEOUT`] so a refusal that takes a couple of
+/// seconds to arrive (Windows loopback) is still an error, not a timeout.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Why a probe failed: the connection was refused or failed, or the listener answered badly.
+enum Failure {
+    Connect(String),
+    Other(String),
+}
+
+type Connected = std::io::Result<TcpStream>;
 
 /// Probes `GET /readyz` on the configured bind address. Exits 0 on a 200 and 1 otherwise.
-pub(crate) async fn run(bind: SocketAddr, stderr: &mut impl Write) -> u8 {
-    match tokio::time::timeout(TIMEOUT, probe(target(bind))).await {
-        Ok(Ok(())) => 0,
-        Ok(Err(message)) => fail(stderr, &message),
-        Err(_) => fail(stderr, "timed out"),
-    }
+///
+/// A worker or scheduler process has no listener on `bind`; its `/readyz` is on `ops`. So when
+/// `bind` refuses or cannot be reached (a connect error) and `ops` is set, `ops` is probed and its
+/// result reported. A listener on `bind` that does not complete the connect within
+/// [`CONNECT_TIMEOUT`] (a saturated backlog), or that answers badly or not at all, never falls
+/// back: it is the unhealthy one.
+pub(crate) async fn run(bind: SocketAddr, ops: Option<SocketAddr>, stderr: &mut impl Write) -> u8 {
+    run_with(bind, ops, stderr, TcpStream::connect).await
+}
+
+/// [`run`] with the connect operation as a parameter, so a test can make a connect hang.
+async fn run_with<C, F>(
+    bind: SocketAddr,
+    ops: Option<SocketAddr>,
+    stderr: &mut impl Write,
+    connect: C,
+) -> u8
+where
+    C: Fn(SocketAddr) -> F,
+    F: Future<Output = Connected>,
+{
+    let failure = match probe_within(bind, &connect).await {
+        Ok(()) => return 0,
+        Err(failure) => failure,
+    };
+    let failure = match (failure, ops) {
+        (Failure::Connect(_), Some(ops)) => match probe_within(ops, &connect).await {
+            Ok(()) => return 0,
+            Err(failure) => failure,
+        },
+        (failure, _) => failure,
+    };
+    let (Failure::Connect(message) | Failure::Other(message)) = failure;
+    fail(stderr, &message)
+}
+
+/// One probe of `bind`. A connect that fails with an error (refused, unreachable) is a
+/// [`Failure::Connect`]: nothing listens there. A connect still pending after [`CONNECT_TIMEOUT`]
+/// is a [`Failure::Other`]: something listens but cannot accept. Once connected, the request and
+/// reply get [`TIMEOUT`], and a silent listener is not a connect failure either.
+async fn probe_within<C, F>(bind: SocketAddr, connect: &C) -> Result<(), Failure>
+where
+    C: Fn(SocketAddr) -> F,
+    F: Future<Output = Connected>,
+{
+    let target = target(bind);
+    let stream = match tokio::time::timeout(CONNECT_TIMEOUT, connect(target)).await {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(error)) => return Err(Failure::Connect(format!("connect {target}: {error}"))),
+        Err(_) => {
+            return Err(Failure::Other(format!(
+                "connect {target}: timed out after {}s",
+                CONNECT_TIMEOUT.as_secs()
+            )));
+        }
+    };
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    tokio::time::timeout_at(deadline, probe(stream, target))
+        .await
+        .unwrap_or_else(|_| Err(Failure::Other("timed out".to_owned())))
 }
 
 fn fail(stderr: &mut impl Write, message: &str) -> u8 {
@@ -31,15 +97,13 @@ fn target(bind: SocketAddr) -> SocketAddr {
     SocketAddr::new(ip, bind.port())
 }
 
-async fn probe(target: SocketAddr) -> Result<(), String> {
-    let mut stream = TcpStream::connect(target)
-        .await
-        .map_err(|error| format!("connect {target}: {error}"))?;
+async fn probe(mut stream: TcpStream, target: SocketAddr) -> Result<(), Failure> {
+    let other = Failure::Other;
     let request = format!("GET /readyz HTTP/1.1\r\nHost: {target}\r\nConnection: close\r\n\r\n");
     stream
         .write_all(request.as_bytes())
         .await
-        .map_err(|error| format!("send: {error}"))?;
+        .map_err(|error| other(format!("send: {error}")))?;
 
     let mut head = Vec::new();
     let mut chunk = [0u8; 256];
@@ -47,7 +111,7 @@ async fn probe(target: SocketAddr) -> Result<(), String> {
         let read = stream
             .read(&mut chunk)
             .await
-            .map_err(|error| format!("receive: {error}"))?;
+            .map_err(|error| other(format!("receive: {error}")))?;
         if read == 0 {
             break;
         }
@@ -58,7 +122,7 @@ async fn probe(target: SocketAddr) -> Result<(), String> {
     let line = line.lines().next().unwrap_or_default();
     match line.split_whitespace().nth(1) {
         Some("200") => Ok(()),
-        _ => Err(format!("unexpected response: {line:?}")),
+        _ => Err(other(format!("unexpected response: {line:?}"))),
     }
 }
 
@@ -100,7 +164,7 @@ mod tests {
         let addr = answering("HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n").await;
         let mut stderr = Vec::new();
 
-        assert_eq!(run(addr, &mut stderr).await, 0);
+        assert_eq!(run(addr, None, &mut stderr).await, 0);
         assert!(stderr.is_empty());
     }
 
@@ -109,7 +173,7 @@ mod tests {
         let addr = answering("HTTP/1.1 503 Service Unavailable\r\n\r\n").await;
         let mut stderr = Vec::new();
 
-        assert_eq!(run(addr, &mut stderr).await, 1);
+        assert_eq!(run(addr, None, &mut stderr).await, 1);
         let message = String::from_utf8(stderr).unwrap();
         assert!(message.starts_with("error: healthcheck: "), "{message}");
     }
@@ -123,8 +187,50 @@ mod tests {
             .unwrap();
         let mut stderr = Vec::new();
 
-        assert_eq!(run(addr, &mut stderr).await, 1);
+        assert_eq!(run(addr, None, &mut stderr).await, 1);
         assert!(!stderr.is_empty());
+    }
+
+    async fn unused() -> SocketAddr {
+        TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .local_addr()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_refused_server_bind_falls_back_to_the_ops_bind() {
+        let ops = answering("HTTP/1.1 200 OK\r\n\r\n").await;
+        let mut stderr = Vec::new();
+
+        assert_eq!(run(unused().await, Some(ops), &mut stderr).await, 0);
+        assert!(stderr.is_empty());
+
+        let ops = answering("HTTP/1.1 503 Service Unavailable\r\n\r\n").await;
+        assert_eq!(run(unused().await, Some(ops), &mut stderr).await, 1);
+        assert!(String::from_utf8(stderr).unwrap().contains("503"));
+    }
+
+    #[tokio::test]
+    async fn a_server_bind_that_answers_503_never_falls_back_to_the_ops_bind() {
+        let server = answering("HTTP/1.1 503 Service Unavailable\r\n\r\n").await;
+        let ops = answering("HTTP/1.1 200 OK\r\n\r\n").await;
+        let mut stderr = Vec::new();
+
+        assert_eq!(run(server, Some(ops), &mut stderr).await, 1);
+        assert!(String::from_utf8(stderr).unwrap().contains("503"));
+    }
+
+    #[tokio::test]
+    async fn when_neither_bind_listens_the_failure_is_named() {
+        let mut stderr = Vec::new();
+
+        assert_eq!(
+            run(unused().await, Some(unused().await), &mut stderr).await,
+            1
+        );
+        assert!(String::from_utf8(stderr).unwrap().contains("connect"));
     }
 
     #[tokio::test]
@@ -134,10 +240,33 @@ mod tests {
         let mut stderr = Vec::new();
 
         let started = std::time::Instant::now();
-        assert_eq!(run(addr, &mut stderr).await, 1);
+        assert_eq!(run(addr, None, &mut stderr).await, 1);
 
         assert!(started.elapsed() < TIMEOUT + Duration::from_secs(2));
         assert!(String::from_utf8(stderr).unwrap().contains("timed out"));
         drop(listener);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_server_bind_connect_that_never_completes_does_not_fall_back_to_ops() {
+        let server: SocketAddr = "192.0.2.1:9".parse().unwrap();
+        let ops = answering("HTTP/1.1 200 OK\r\n\r\n").await;
+        let mut stderr = Vec::new();
+
+        let code = run_with(server, Some(ops), &mut stderr, |addr| async move {
+            if addr == server {
+                std::future::pending::<Connected>().await
+            } else {
+                TcpStream::connect(addr).await
+            }
+        })
+        .await;
+
+        assert_eq!(code, 1);
+        let message = String::from_utf8(stderr).unwrap();
+        assert!(
+            message.contains("connect") && message.contains("timed out"),
+            "{message}"
+        );
     }
 }
