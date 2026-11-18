@@ -9,6 +9,7 @@ mod tests {
     use axum::Router;
     use axum::body::{Body, Bytes};
     use axum::http::{Request, StatusCode, header};
+    use futures_util::StreamExt;
     use http_body_util::BodyExt;
     use serde_json::Value;
     use sqlx::PgPool;
@@ -131,6 +132,17 @@ mod tests {
                 request = request.header(header::AUTHORIZATION, format!("Bearer {key}"));
             }
             reply(&self.router, request.body(body).unwrap()).await
+        }
+
+        async fn post_to(&self, uri: &str, content_type: &str, body: Body) -> Reply {
+            let request = Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header(header::CONTENT_TYPE, content_type)
+                .header(header::AUTHORIZATION, format!("Bearer {}", self.write))
+                .body(body)
+                .unwrap();
+            reply(&self.router, request).await
         }
 
         async fn upload(&self, name: &str, content_type: &str, bytes: &[u8]) -> Reply {
@@ -842,5 +854,37 @@ mod tests {
                 .await,
             0
         );
+    }
+    /// A body that sends one byte every 30 seconds for 30 minutes, so neither upload handler's own
+    /// 60 second no-byte limit can fire; only the 15 minute upload deadline can end it early.
+    fn trickle() -> Body {
+        let pieces = futures_util::stream::iter(0..60).then(|_| async {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            Ok::<_, std::io::Error>(Bytes::from_static(b"a"))
+        });
+        Body::from_stream(pieces)
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_real_upload_routes_end_a_trickling_upload_at_the_upload_deadline(pool: PgPool) {
+        let f = fixture(&pool).await;
+        tokio::time::pause();
+        for (uri, content_type) in [
+            (format!("{}?name=slow", f.assets(f.ws, "")), "image/png"),
+            (
+                format!("/api/v1/workspaces/{}/imports?name=slow", f.ws.as_uuid()),
+                "text/csv",
+            ),
+        ] {
+            let reply = f.post_to(&uri, content_type, trickle()).await;
+
+            assert_eq!(reply.status, StatusCode::REQUEST_TIMEOUT, "{uri}");
+            assert_eq!(
+                reply.json()["detail"],
+                "the upload did not finish in time",
+                "{uri}"
+            );
+        }
     }
 }

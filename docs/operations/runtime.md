@@ -236,7 +236,9 @@ example `ZIRV_FLOW_OPS__BIND=0.0.0.0:9100`) to serve `/metrics`, `/healthz` and
 `/readyz` from it; `/readyz` is 503 once a role loop has stopped or shutdown has
 begun. With `serve` or `all` the same endpoints are on `server.bind` and
 `ops.bind` is ignored; there `/readyz` is 503 for the same reasons. The image health
-check probes `server.bind`, and `ops.bind` when nothing listens on `server.bind`.
+check probes `server.bind`, and `ops.bind` only when the connect to `server.bind` fails with an
+error (nothing listens). A connect that hangs for 5 s (a saturated listener) fails the check and
+never falls back.
 
 Both listeners close a connection that has not sent a request's headers within 10 seconds,
 which also ends a kept-alive connection that idles that long, and keep at most 10,000

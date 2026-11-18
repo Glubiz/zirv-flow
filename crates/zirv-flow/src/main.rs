@@ -287,8 +287,9 @@ async fn run(
 /// an older version or a crash) is repaired. Prints the key id, never the key.
 ///
 /// The key is written to a temporary file beside `out`, synced, then hard-linked into place,
-/// so `out` only ever appears complete. Two runs repairing the same empty file at once both
-/// succeed, but the later rename wins and the earlier run may have printed another key id.
+/// so `out` only ever appears complete. Repairing an empty file takes an exclusive lock on a
+/// sibling `.<name>.lock` file (never removed) and re-reads `out` under it, so of two runs
+/// repairing at once one installs its key and the other keeps and prints that one.
 fn generate_master_key(
     out: &Path,
     if_missing: bool,
@@ -344,15 +345,25 @@ fn generate_master_key(
                     out.display()
                 ));
             }
+            let lock = match lock_beside(out) {
+                Ok(lock) => lock,
+                Err(error) => {
+                    let _ = fs::remove_file(&temporary);
+                    return fail(format!("could not lock {}: {error}", out.display()));
+                }
+            };
             let text = fs::read_to_string(out);
             if text.as_ref().is_ok_and(|text| text.trim().is_empty()) {
-                if let Err(error) = fs::rename(&temporary, out) {
+                let renamed = fs::rename(&temporary, out);
+                drop(lock);
+                if let Err(error) = renamed {
                     let _ = fs::remove_file(&temporary);
                     return fail(format!("could not write {}: {error}", out.display()));
                 }
                 let _ = writeln!(stdout, "master key written: {}", key.key_id());
                 return 0;
             }
+            drop(lock);
             let _ = fs::remove_file(&temporary);
             let existing = text
                 .map_err(|_| "not readable".to_owned())
@@ -372,6 +383,22 @@ fn generate_master_key(
             fail(format!("could not create {}: {error}", out.display()))
         }
     }
+}
+
+/// Takes an exclusive lock on `.<name>.lock` beside `out`, creating it if absent. The lock is
+/// released when the returned file is dropped; the lock file itself is never removed.
+fn lock_beside(out: &Path) -> io::Result<fs::File> {
+    let path = out.with_file_name(format!(
+        ".{}.lock",
+        out.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let file = options.open(path)?;
+    file.lock()?;
+    Ok(file)
 }
 
 /// Flushes the trace exporter, if there is one, before the process exits.
@@ -1570,6 +1597,8 @@ endpoint = \"http://collector:4318/\""
         }
     }
 
+    const RACE_TRIALS: usize = 300;
+
     fn generate(out: &Path, if_missing: bool) -> (u8, String, String) {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -1581,10 +1610,12 @@ endpoint = \"http://collector:4318/\""
         )
     }
 
+    /// The file names in `dir`, except the sibling lock file a repair leaves on purpose.
     fn key_files_in(dir: &Path) -> Vec<String> {
         let mut names: Vec<String> = fs::read_dir(dir)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name != ".master.key.lock")
             .collect();
         names.sort();
         names
@@ -1712,6 +1743,51 @@ endpoint = \"http://collector:4318/\""
                 0o600
             );
         }
+    }
+
+    /// Runs `trials` rounds of two simultaneous `--if-missing` repairs of one empty key file and
+    /// returns how many rounds ended with a printed "written" id that is not the key on disk.
+    fn racing_repairs(trials: usize) -> usize {
+        let mut wrong = 0;
+        for _ in 0..trials {
+            let dir = TempDir::new();
+            fs::create_dir_all(&dir.0).unwrap();
+            let out = dir.0.join("master.key");
+            fs::write(&out, "").unwrap();
+            let barrier = std::sync::Barrier::new(2);
+            let results: Vec<(u8, String)> = std::thread::scope(|scope| {
+                let runs: Vec<_> = (0..2)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            barrier.wait();
+                            let (code, stdout, _) = generate(&out, true);
+                            (code, stdout)
+                        })
+                    })
+                    .collect();
+                runs.into_iter().map(|run| run.join().unwrap()).collect()
+            });
+            let on_disk = zirv_flow_store::MasterKey::parse(&fs::read_to_string(&out).unwrap())
+                .unwrap()
+                .key_id()
+                .to_string();
+            let printed_other = results.iter().any(|(_, stdout)| {
+                stdout
+                    .strip_prefix("master key written: ")
+                    .is_some_and(|id| id.trim() != on_disk)
+            });
+            if printed_other || results.iter().any(|(code, _)| *code != 0) {
+                wrong += 1;
+            }
+        }
+        wrong
+    }
+
+    #[test]
+    fn racing_if_missing_repairs_never_print_a_key_id_that_is_not_on_disk() {
+        let wrong = racing_repairs(RACE_TRIALS);
+        eprintln!("racing repairs: {wrong} of {RACE_TRIALS} wrong");
+        assert_eq!(wrong, 0);
     }
 
     #[test]

@@ -5,7 +5,11 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+/// Limit for the request and reply once connected.
 const TIMEOUT: Duration = Duration::from_secs(2);
+/// Limit for the connect itself. Longer than [`TIMEOUT`] so a refusal that takes a couple of
+/// seconds to arrive (Windows loopback) is still an error, not a timeout.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Why a probe failed: the connection was refused or failed, or the listener answered badly.
 enum Failure {
@@ -13,18 +17,36 @@ enum Failure {
     Other(String),
 }
 
+type Connected = std::io::Result<TcpStream>;
+
 /// Probes `GET /readyz` on the configured bind address. Exits 0 on a 200 and 1 otherwise.
 ///
 /// A worker or scheduler process has no listener on `bind`; its `/readyz` is on `ops`. So when
-/// `bind` cannot be connected to and `ops` is set, `ops` is probed and its result reported. A
-/// listener on `bind` that answers badly or not at all never falls back: it is the unhealthy one.
+/// `bind` refuses or cannot be reached (a connect error) and `ops` is set, `ops` is probed and its
+/// result reported. A listener on `bind` that does not complete the connect within
+/// [`CONNECT_TIMEOUT`] (a saturated backlog), or that answers badly or not at all, never falls
+/// back: it is the unhealthy one.
 pub(crate) async fn run(bind: SocketAddr, ops: Option<SocketAddr>, stderr: &mut impl Write) -> u8 {
-    let failure = match probe_within(bind).await {
+    run_with(bind, ops, stderr, TcpStream::connect).await
+}
+
+/// [`run`] with the connect operation as a parameter, so a test can make a connect hang.
+async fn run_with<C, F>(
+    bind: SocketAddr,
+    ops: Option<SocketAddr>,
+    stderr: &mut impl Write,
+    connect: C,
+) -> u8
+where
+    C: Fn(SocketAddr) -> F,
+    F: Future<Output = Connected>,
+{
+    let failure = match probe_within(bind, &connect).await {
         Ok(()) => return 0,
         Err(failure) => failure,
     };
     let failure = match (failure, ops) {
-        (Failure::Connect(_), Some(ops)) => match probe_within(ops).await {
+        (Failure::Connect(_), Some(ops)) => match probe_within(ops, &connect).await {
             Ok(()) => return 0,
             Err(failure) => failure,
         },
@@ -34,16 +56,27 @@ pub(crate) async fn run(bind: SocketAddr, ops: Option<SocketAddr>, stderr: &mut 
     fail(stderr, &message)
 }
 
-/// One probe of `bind` within [`TIMEOUT`]. A connect that is refused or does not complete in time
-/// is a [`Failure::Connect`]: nothing listens there. Once connected, a silent listener is not.
-async fn probe_within(bind: SocketAddr) -> Result<(), Failure> {
-    let deadline = tokio::time::Instant::now() + TIMEOUT;
+/// One probe of `bind`. A connect that fails with an error (refused, unreachable) is a
+/// [`Failure::Connect`]: nothing listens there. A connect still pending after [`CONNECT_TIMEOUT`]
+/// is a [`Failure::Other`]: something listens but cannot accept. Once connected, the request and
+/// reply get [`TIMEOUT`], and a silent listener is not a connect failure either.
+async fn probe_within<C, F>(bind: SocketAddr, connect: &C) -> Result<(), Failure>
+where
+    C: Fn(SocketAddr) -> F,
+    F: Future<Output = Connected>,
+{
     let target = target(bind);
-    let stream = match tokio::time::timeout_at(deadline, TcpStream::connect(target)).await {
+    let stream = match tokio::time::timeout(CONNECT_TIMEOUT, connect(target)).await {
         Ok(Ok(stream)) => stream,
         Ok(Err(error)) => return Err(Failure::Connect(format!("connect {target}: {error}"))),
-        Err(_) => return Err(Failure::Connect(format!("connect {target}: timed out"))),
+        Err(_) => {
+            return Err(Failure::Other(format!(
+                "connect {target}: timed out after {}s",
+                CONNECT_TIMEOUT.as_secs()
+            )));
+        }
     };
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
     tokio::time::timeout_at(deadline, probe(stream, target))
         .await
         .unwrap_or_else(|_| Err(Failure::Other("timed out".to_owned())))
@@ -212,5 +245,28 @@ mod tests {
         assert!(started.elapsed() < TIMEOUT + Duration::from_secs(2));
         assert!(String::from_utf8(stderr).unwrap().contains("timed out"));
         drop(listener);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_server_bind_connect_that_never_completes_does_not_fall_back_to_ops() {
+        let server: SocketAddr = "192.0.2.1:9".parse().unwrap();
+        let ops = answering("HTTP/1.1 200 OK\r\n\r\n").await;
+        let mut stderr = Vec::new();
+
+        let code = run_with(server, Some(ops), &mut stderr, |addr| async move {
+            if addr == server {
+                std::future::pending::<Connected>().await
+            } else {
+                TcpStream::connect(addr).await
+            }
+        })
+        .await;
+
+        assert_eq!(code, 1);
+        let message = String::from_utf8(stderr).unwrap();
+        assert!(
+            message.contains("connect") && message.contains("timed out"),
+            "{message}"
+        );
     }
 }

@@ -46,6 +46,7 @@ http-body-util.workspace = true
 metrics-exporter-prometheus.workspace = true
 rskafka.workspace = true
 sqlx.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 tower.workspace = true
 tracing-subscriber.workspace = true
 zirv-flow-ai = { workspace = true, features = ["test-support"] }
