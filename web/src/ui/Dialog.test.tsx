@@ -89,4 +89,28 @@ describe("menu", () => {
     await user.keyboard("{ArrowDown}{Enter}");
     expect(picked).toEqual(["a"]);
   });
+
+  it("keeps a submit inside the dialog from reaching a form it is rendered within", async () => {
+    const user = userEvent.setup();
+    let outer = 0;
+    render(
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          outer += 1;
+        }}
+      >
+        <Dialog title="Inner" onClose={() => undefined}>
+          <form onSubmit={(event) => event.preventDefault()}>
+            <input aria-label="Name" />
+            <button type="submit">Send</button>
+          </form>
+        </Dialog>
+      </form>,
+    );
+
+    await user.type(screen.getByLabelText("Name"), "x{Enter}");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    expect(outer).toBe(0);
+  });
 });

@@ -75,7 +75,7 @@ export function CreateKeyDialog({ workspaceId, onClose }: CreateKeyDialogProps) 
   }
 
   return (
-    <Dialog key="form" title="New API key" onClose={onClose}>
+    <Dialog key="form" title="New API key" onClose={busy ? () => undefined : onClose}>
       <form className="stack" onSubmit={(event) => void submit(event)} noValidate>
         <TextField
           label="Name"
@@ -101,7 +101,9 @@ export function CreateKeyDialog({ workspaceId, onClose }: CreateKeyDialogProps) 
         </fieldset>
         {failure ? <InlineError {...failure} /> : null}
         <div className="dialog-actions">
-          <Button onClick={onClose}>Cancel</Button>
+          <Button onClick={onClose} disabled={busy}>
+            Cancel
+          </Button>
           <Button type="submit" variant="primary" disabled={busy || scopes.length === 0 || name.trim() === ""}>
             {busy ? "Creating" : "Create key"}
           </Button>

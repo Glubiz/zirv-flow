@@ -56,7 +56,7 @@ function Picker({ workspaceId, onPick, onClose, themeLogo, allowUrl }: Omit<Prop
     if (!file) return;
     const uploaded = await upload(file);
     if (uploaded) {
-      if (uploaded.created) add(uploaded.asset);
+      add(uploaded.asset);
       setChoice(uploaded.asset.id);
     }
   }

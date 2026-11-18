@@ -58,7 +58,6 @@ function SchemaView({ workspaceId, name, canManage }: SchemaViewProps) {
     <ResourceView resource={detail} loadingLabel="Loading schema">
       {(data) => (
         <SchemaBody
-          key={data.schema.updated_at}
           workspaceId={workspaceId}
           data={data}
           canManage={canManage}
@@ -82,7 +81,12 @@ function SchemaBody({ workspaceId, data, canManage, onChanged }: SchemaBodyProps
       {!canManage ? <p className="muted">Only workspace admins and the instance owner can change this schema.</p> : null}
       <Panel title="Settings">
         {canManage ? (
-          <SettingsForm workspaceId={workspaceId} data={data} onSaved={onChanged} />
+          <SettingsForm
+            key={`${data.schema.mode}/${data.schema.retention_days ?? ""}`}
+            workspaceId={workspaceId}
+            data={data}
+            onSaved={onChanged}
+          />
         ) : (
           <dl className="facts">
             <dt>Mode</dt>
@@ -93,7 +97,13 @@ function SchemaBody({ workspaceId, data, canManage, onChanged }: SchemaBodyProps
         )}
       </Panel>
       <Panel title="Draft">
-        <DraftSection workspaceId={workspaceId} data={data} canManage={canManage} onChanged={onChanged} />
+        <DraftSection
+          key={`${data.schema.current_version ?? 0}/${data.schema.inferred}/${JSON.stringify(data.draft ?? null)}`}
+          workspaceId={workspaceId}
+          data={data}
+          canManage={canManage}
+          onChanged={onChanged}
+        />
       </Panel>
       <Panel title="Published versions">
         {data.versions.length === 0 ? (

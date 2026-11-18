@@ -17,14 +17,14 @@ function Gate({ children }: { children: React.ReactNode }) {
   return state.status === "signed-in" ? <>{children}</> : <p>Waiting</p>;
 }
 
-function mount(props: { themeLogo?: boolean; allowUrl?: boolean; role?: "admin" | "editor" | null; list?: unknown } = {}) {
+function mount(props: { themeLogo?: boolean; allowUrl?: boolean; role?: "admin" | "editor" | null; list?: unknown; more?: unknown } = {}) {
   const role = props.role === undefined ? "editor" : props.role;
   const user = role === "admin" ? OWNER : MEMBER;
   mockApi({
     "GET /api/v1/session": () => json(session(user, "csrf-pick")),
     "GET /api/v1/workspaces/ws1/members": () => json(role === null ? [] : members(role, user.id)),
     [`GET ${WS}/assets`]: (request) =>
-      new URL(request.url).searchParams.has("cursor") ? problem(500, "Broken", "Try later") : json(props.list ?? listBody([A, B])),
+      new URL(request.url).searchParams.has("cursor") ? (props.more ? json(props.more) : problem(500, "Broken", "Try later")) : json(props.list ?? listBody([A, B])),
   });
   const onPick = vi.fn();
   const onClose = vi.fn();
@@ -66,6 +66,35 @@ describe("the asset picker", () => {
     await user.click(await screen.findByRole("radio", { name: /banner\.jpg/ }));
     await user.click(screen.getByRole("button", { name: "Use image" }));
 
+    expect(onPick).toHaveBeenCalledWith({ asset: { id: B.id, url: B.url } });
+  });
+
+  it("selects an existing image outside the loaded page after a duplicate upload", async () => {
+    const { onPick } = mount();
+    const user = userEvent.setup();
+    await screen.findByRole("button", { name: /Upload/ });
+
+    fireEvent.change(screen.getByLabelText("Choose an image file"), { target: { files: [new File(["x"], "dup.png", { type: "image/png" })] } });
+    const old = assetBody(77, { name: "old.png" });
+    act(() => FakeRequest.all[0]!.respond(200, old));
+
+    expect(await screen.findByRole("radio", { name: /old\.png/ })).toBeChecked();
+    await user.click(screen.getByRole("button", { name: "Use image" }));
+    expect(onPick).toHaveBeenCalledWith({ asset: { id: old.id, url: old.url } });
+  });
+
+  it("keeps an image loaded by Show more in its place when its bytes are uploaded again", async () => {
+    const { onPick } = mount({ list: listBody([A], { next_cursor: A.id }), more: listBody([B]) });
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole("button", { name: "Show more" }));
+    await screen.findByRole("radio", { name: /banner\.jpg/ });
+    fireEvent.change(screen.getByLabelText("Choose an image file"), { target: { files: [new File(["x"], "again.jpg", { type: "image/jpeg" })] } });
+    act(() => FakeRequest.all[0]!.respond(200, B));
+
+    await vi.waitFor(() => expect(screen.getByRole("radio", { name: /banner\.jpg/ })).toBeChecked());
+    expect(screen.getAllByRole("radio").map((radio) => radio.getAttribute("aria-label") ?? radio.textContent)[0]).toMatch(/photo-1\.png/);
+    await user.click(screen.getByRole("button", { name: "Use image" }));
     expect(onPick).toHaveBeenCalledWith({ asset: { id: B.id, url: B.url } });
   });
 
