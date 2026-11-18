@@ -18,6 +18,26 @@ export function niceMax(value: number): number {
   return step * power;
 }
 
+/** The fixed length of one bucket in UTC, as the server buckets with date_trunc. */
+const STEP_MS: Record<string, number> = { hour: 3_600_000, day: 86_400_000, week: 604_800_000 };
+
+/**
+ * Where each bar sits, in slots from the left. Buckets are placed by their start time, so a quiet
+ * stretch with no events keeps its width. An unknown unit or an unreadable date falls back to the
+ * position in the list.
+ */
+function place(bars: readonly Bar[], unit: string): { positions: number[]; slots: number } {
+  const step = STEP_MS[unit];
+  const origin = bars[0] ? Date.parse(bars[0].start) : Number.NaN;
+  if (step !== undefined && Number.isFinite(origin)) {
+    const positions = bars.map((bar) => Math.round((Date.parse(bar.start) - origin) / step));
+    if (positions.every((position) => Number.isFinite(position) && position >= 0)) {
+      return { positions, slots: Math.max(1, ...positions.map((position) => position + 1)) };
+    }
+  }
+  return { positions: bars.map((_, index) => index), slots: Math.max(1, bars.length) };
+}
+
 /**
  * Counts over time as an inline SVG bar chart, with the same numbers in a table for anyone who
  * cannot read the chart. The axis starts at zero.
@@ -26,7 +46,8 @@ export function BarChart({ bars, unit }: { bars: readonly Bar[]; unit: string })
   const total = bars.reduce((sum, bar) => sum + bar.count, 0);
   const top = niceMax(Math.max(0, ...bars.map((bar) => bar.count)));
   const inner = { width: WIDTH - PAD.left - PAD.right, height: HEIGHT - PAD.top - PAD.bottom };
-  const slot = bars.length === 0 ? inner.width : inner.width / bars.length;
+  const { positions, slots } = place(bars, unit);
+  const slot = inner.width / slots;
   // A day or a week starts at midnight, so only an hour needs the time.
   const label = unit === "hour" ? formatDateTime : formatDate;
   const first = bars[0];
@@ -53,7 +74,7 @@ export function BarChart({ bars, unit }: { bars: readonly Bar[]; unit: string })
             <rect
               key={bar.start}
               className="chart-bar"
-              x={PAD.left + index * slot + slot * 0.1}
+              x={PAD.left + (positions[index] ?? index) * slot + slot * 0.1}
               y={PAD.top + inner.height - height}
               width={Math.max(1, slot * 0.8)}
               height={height}

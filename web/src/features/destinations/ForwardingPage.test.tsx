@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -286,6 +286,60 @@ describe("dead letters", () => {
     expect(screen.getByText("http_4xx")).toBeInTheDocument();
     expect(calls.filter((call) => call.path.endsWith("/dead-letters")).at(-1)?.search).toContain("cursor=cursor-1");
     expect(screen.queryByRole("button", { name: "Show more" })).not.toBeInTheDocument();
+  });
+
+  it("ignores a Show more answer that lands after the destination filter changed", async () => {
+    let land: (response: Response) => void = () => undefined;
+    mockApi(
+      base({
+        [`GET ${WS}/forwarding/dead-letters`]: ((request: Request) => {
+          const q = new URL(request.url).searchParams;
+          if (q.get("cursor") === "c1") return new Promise<Response>((resolve) => (land = resolve));
+          if (q.get("destination_id") === OTHER_DEST_ID) {
+            return json({ letters: [letter({ id: OTHER_LETTER_ID, error: "b1_error", destination_id: OTHER_DEST_ID })], next_cursor: null });
+          }
+          return json({ letters: [letter({ error: "a1_error" })], next_cursor: "c1" });
+        }) as never,
+      }),
+    );
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "Show more" }));
+    await user.selectOptions(screen.getByLabelText("Destination", { selector: "select" }), OTHER_DEST_ID);
+    await screen.findByText("b1_error");
+    act(() => land(json({ letters: [letter({ id: "cccccccc-0000-4000-8000-000000000009", error: "a2_error" })], next_cursor: "c2" })));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(screen.queryByText("a2_error")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Show more" })).not.toBeInTheDocument();
+  });
+
+  it("ignores a Show more answer that lands after a re-drive", async () => {
+    let land: (response: Response) => void = () => undefined;
+    mockApi(
+      base({
+        [`POST ${WS}/forwarding/re-drive`]: () => json({ redriven: 1 }),
+        [`GET ${WS}/forwarding/dead-letters`]: ((request: Request) => {
+          const q = new URL(request.url).searchParams;
+          if (q.get("cursor") === "c1") return new Promise<Response>((resolve) => (land = resolve));
+          return json({ letters: [letter({ error: "a1_error" })], next_cursor: "c1" });
+        }) as never,
+      }),
+    );
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "Show more" }));
+    await user.click(screen.getByRole("button", { name: "Re-drive all dead letters" }));
+    await user.click(await screen.findByRole("button", { name: "Re-drive now" }));
+    expect(await screen.findByText("1 row put back in the queue.")).toBeInTheDocument();
+    await screen.findByText("a1_error");
+    act(() => land(json({ letters: [letter({ id: "cccccccc-0000-4000-8000-000000000009", error: "a2_error" })], next_cursor: null })));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(screen.queryByText("a2_error")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show more" })).toBeEnabled();
   });
 
   it("hides Show more when the next page is empty and has no further cursor", async () => {

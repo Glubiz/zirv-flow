@@ -81,7 +81,8 @@ export function useAssets(workspaceId: string): UseAssets {
       : {
           ...first,
           data: {
-            assets: dedupe([...added, ...first.data.assets, ...(pages?.assets ?? [])]),
+            // An added image already in the loaded list keeps its place there; one outside it goes first.
+            assets: dedupe([...added.filter((item) => !first.data.assets.some((loaded) => loaded.id === item.id)), ...first.data.assets, ...(pages?.assets ?? [])]),
             usedBytes: first.data.used_bytes,
             limitBytes: first.data.limit_bytes,
             maxFileBytes: first.data.max_file_bytes,

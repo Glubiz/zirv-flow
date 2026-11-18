@@ -69,6 +69,20 @@ describe("the asset picker", () => {
     expect(onPick).toHaveBeenCalledWith({ asset: { id: B.id, url: B.url } });
   });
 
+  it("selects an existing image outside the loaded page after a duplicate upload", async () => {
+    const { onPick } = mount();
+    const user = userEvent.setup();
+    await screen.findByRole("button", { name: /Upload/ });
+
+    fireEvent.change(screen.getByLabelText("Choose an image file"), { target: { files: [new File(["x"], "dup.png", { type: "image/png" })] } });
+    const old = assetBody(77, { name: "old.png" });
+    act(() => FakeRequest.all[0]!.respond(200, old));
+
+    expect(await screen.findByRole("radio", { name: /old\.png/ })).toBeChecked();
+    await user.click(screen.getByRole("button", { name: "Use image" }));
+    expect(onPick).toHaveBeenCalledWith({ asset: { id: old.id, url: old.url } });
+  });
+
   it("will not use an image before one is chosen, and Cancel closes", async () => {
     const { onPick, onClose } = mount();
     const user = userEvent.setup();

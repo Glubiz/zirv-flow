@@ -159,6 +159,91 @@ describe("one destination", () => {
     expect(screen.getByText("(credential_refused)")).toBeInTheDocument();
   });
 
+  it("does not save the destination when the new credential dialog is submitted", async () => {
+    const calls = mockApi(
+      base({
+        [`POST ${WS}/credentials`]: () => json(credential("new-1", "Fresh", ["signing_secret"]), 201),
+        [`PATCH ${WS}/destinations/${DEST_ID}`]: () => json(destination()),
+      }),
+    );
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "New credential" }));
+    const dialog = within(screen.getByRole("dialog"));
+    await user.type(dialog.getByLabelText(/signing/i), "s3cret-value");
+    await user.click(dialog.getByRole("button", { name: "Create credential" }));
+    await waitFor(() => expect(calls.some((c) => c.method === "POST" && c.path.endsWith("/credentials"))).toBe(true));
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
+  });
+
+  it("sends nothing when Enter submits a form whose required credential is missing", async () => {
+    const calls = mockApi(
+      base({
+        [`GET ${WS}/destinations/${DEST_ID}`]: () => json(destination({ credential_id: null })),
+        [`PATCH ${WS}/destinations/${DEST_ID}`]: () => json(destination()),
+      }),
+    );
+    const user = userEvent.setup();
+    mount();
+
+    const rate = await screen.findByLabelText("Rate (deliveries per second)");
+    await user.type(rate, "{Enter}");
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
+  });
+
+  it("clears the check result after the settings are saved", async () => {
+    let stored = destination();
+    mockApi(
+      base({
+        [`GET ${WS}/destinations/${DEST_ID}`]: () => json(stored),
+        [`POST ${WS}/destinations/${DEST_ID}/check`]: () => json({ ok: true, code: null, error: null }),
+        [`PATCH ${WS}/destinations/${DEST_ID}`]: () => {
+          stored = destination({ rate: 25, updated_at: "2026-10-03T09:00:00Z" });
+          return json(stored);
+        },
+      }),
+    );
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "Check the destination" }));
+    expect(await screen.findByText("Check passed")).toBeInTheDocument();
+    const rate = screen.getByLabelText("Rate (deliveries per second)");
+    await user.clear(rate);
+    await user.type(rate, "25");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(await screen.findByText("Saved.")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText("Rate (deliveries per second)")).toHaveValue(25));
+    expect(screen.queryByText("Check passed")).not.toBeInTheDocument();
+  });
+
+  it("clears a failed check result after the settings are saved", async () => {
+    let stored = destination();
+    mockApi(
+      base({
+        [`GET ${WS}/destinations/${DEST_ID}`]: () => json(stored),
+        [`POST ${WS}/destinations/${DEST_ID}/check`]: () => json({ ok: false, code: "credential_refused", error: "The credential was refused." }),
+        [`PATCH ${WS}/destinations/${DEST_ID}`]: () => {
+          stored = destination({ rate: 25, updated_at: "2026-10-03T09:00:00Z" });
+          return json(stored);
+        },
+      }),
+    );
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "Check the destination" }));
+    expect(await screen.findByText("Check failed")).toBeInTheDocument();
+    const rate = screen.getByLabelText("Rate (deliveries per second)");
+    await user.clear(rate);
+    await user.type(rate, "25");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(await screen.findByText("Saved.")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText("Rate (deliveries per second)")).toHaveValue(25));
+    expect(screen.queryByText("Check failed")).not.toBeInTheDocument();
+  });
+
   it("shows the provider's domain status beside ours for a provider destination", async () => {
     mockApi(
       base({

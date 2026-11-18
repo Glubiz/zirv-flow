@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router";
 
 import { client, describeError, unwrap, unwrapEmpty, useResource, type ErrorSummary } from "../../api";
@@ -260,13 +260,20 @@ function scopeText(scope: Scope, known: Destination[]): string {
 
 const PAGE = 50;
 
+/** The pages loaded after the first page `base`; `letters` is null until one has landed. */
+interface Paged {
+  base: unknown;
+  letters: DeadLetter[] | null;
+  next: string | null;
+  loading: boolean;
+  error: ErrorSummary | null;
+}
+
 function DeadLettersPanel({ workspaceId, known, onRedriven }: { workspaceId: string; known: Destination[]; onRedriven: () => void }) {
   const [destinationId, setDestinationId] = useState("");
-  const [extra, setExtra] = useState<DeadLetter[]>([]);
-  const [before, setBefore] = useState<string | null>(null);
-  const [pagedOn, setPagedOn] = useState(false);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [more, setMore] = useState<ErrorSummary | null>(null);
+  // Paging belongs to the first page it started from, so an answer for an older filter or a list
+  // that was re-driven since is ignored.
+  const [paged, setPaged] = useState<Paged | null>(null);
   const [scope, setScope] = useState<Scope | null>(null);
   const [result, setResult] = useState<string | null>(null);
   const first = useResource(
@@ -279,37 +286,53 @@ function DeadLettersPanel({ workspaceId, known, onRedriven }: { workspaceId: str
     [workspaceId, destinationId],
   );
 
-  async function loadMore(cursor: string) {
-    setLoadingMore(true);
-    setMore(null);
+  const base = first.status === "ready" ? first.data : null;
+  const current = useRef(base);
+  useEffect(() => {
+    current.current = base;
+  }, [base]);
+  const mine = paged !== null && paged.base === base ? paged : null;
+  const loadingMore = mine?.loading ?? false;
+  const more = mine?.error ?? null;
+  const extra = mine?.letters ?? [];
+  const cursor = base ? (mine?.letters ? mine.next : (base.next_cursor ?? null)) : null;
+
+  async function loadMore(from: string) {
+    if (base === null) return;
+    setPaged((held) => ({ base, letters: held?.base === base ? held.letters : null, next: held?.base === base ? held.next : null, loading: true, error: null }));
     try {
       const page = await unwrap(
         client.GET("/api/v1/workspaces/{ws}/forwarding/dead-letters", {
           params: {
             path: { ws: workspaceId },
-            query: { limit: PAGE, cursor, ...(destinationId !== "" ? { destination_id: destinationId } : {}) },
+            query: { limit: PAGE, cursor: from, ...(destinationId !== "" ? { destination_id: destinationId } : {}) },
           },
         }),
       );
-      setExtra((current) => [...current, ...page.letters]);
-      setPagedOn(true);
-      setBefore(page.next_cursor ?? null);
+      if (current.current !== base) return;
+      setPaged((held) => ({
+        base,
+        letters: [...(held?.base === base ? (held.letters ?? []) : []), ...page.letters],
+        next: page.next_cursor ?? null,
+        loading: false,
+        error: null,
+      }));
     } catch (error) {
-      setMore(describeError(error));
-    } finally {
-      setLoadingMore(false);
+      if (current.current !== base) return;
+      setPaged((held) => ({
+        base,
+        letters: held?.base === base ? held.letters : null,
+        next: held?.base === base ? held.next : null,
+        loading: false,
+        error: describeError(error),
+      }));
     }
   }
 
   function filterBy(id: string) {
     setDestinationId(id);
-    setExtra([]);
-    setBefore(null);
-    setPagedOn(false);
     setResult(null);
   }
-
-  const cursor = pagedOn ? before : first.status === "ready" ? (first.data.next_cursor ?? null) : null;
 
   return (
     <Panel title="Dead letters" flush>
@@ -407,9 +430,6 @@ function DeadLettersPanel({ workspaceId, known, onRedriven }: { workspaceId: str
           onDone={(count) => {
             setScope(null);
             setResult(`${plural(count, "row", "rows")} put back in the queue.`);
-            setExtra([]);
-            setBefore(null);
-            setPagedOn(false);
             first.reload();
             onRedriven();
           }}
