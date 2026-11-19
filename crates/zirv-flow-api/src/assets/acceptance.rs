@@ -860,7 +860,7 @@ mod tests {
     /// is paused when the body is first polled, which is after the auth extractor and the
     /// handler's opening queries, so no database I/O runs on a paused clock: there the runtime
     /// idles on the socket and the clock jumps to the next timer, such as the pool's 30 second
-    /// acquire timeout, which answers 500. The caller resumes time after the reply.
+    /// acquire timeout, which answers 500. The caller resumes time once it has checked the reply.
     fn trickle() -> Body {
         let pieces = futures_util::stream::iter(0..60).then(|piece| async move {
             if piece == 0 {
@@ -888,7 +888,6 @@ mod tests {
             ),
         ] {
             let reply = f.post_to(&uri, content_type, trickle()).await;
-            tokio::time::resume();
 
             assert_eq!(reply.status, StatusCode::REQUEST_TIMEOUT, "{uri}");
             assert_eq!(
@@ -896,6 +895,9 @@ mod tests {
                 "the upload did not finish in time",
                 "{uri}"
             );
+            // After the checks: a reply that came before the body was polled never paused time,
+            // and `resume` would panic over the status the check names.
+            tokio::time::resume();
         }
     }
 }
