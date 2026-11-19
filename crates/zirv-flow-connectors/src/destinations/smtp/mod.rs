@@ -793,9 +793,15 @@ mod tests {
         );
     }
 
-    /// A TCP proxy in front of `port` that holds back the server's `221` for `delay`.
-    async fn quit_delaying_proxy(port: u16, delay: Duration) -> u16 {
+    /// A TCP proxy in front of `port` that holds back the server's `221` for `delay`. The
+    /// instant the `221` arrived at the proxy is stored in the returned cell.
+    async fn quit_delaying_proxy(
+        port: u16,
+        delay: Duration,
+    ) -> (u16, Arc<std::sync::Mutex<Option<std::time::Instant>>>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let goodbye_at = Arc::new(std::sync::Mutex::new(None));
+        let record = Arc::clone(&goodbye_at);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
@@ -816,6 +822,7 @@ mod tests {
                     break;
                 }
                 if chunk[..read].starts_with(b"221") {
+                    *record.lock().unwrap() = Some(std::time::Instant::now());
                     tokio::time::sleep(delay).await;
                 }
                 if to_client.write_all(&chunk[..read]).await.is_err() {
@@ -823,16 +830,17 @@ mod tests {
                 }
             }
         });
-        proxy
+        (proxy, goodbye_at)
     }
 
     #[tokio::test]
     async fn the_result_does_not_wait_for_the_answer_to_quit() {
         let sink = SmtpSink::start(SinkOptions::default()).await;
-        let proxy = quit_delaying_proxy(sink.port(), Duration::from_secs(2)).await;
+        // The delay is far past `QUIT_TIMEOUT`, so a delivery that waited would return a whole
+        // `QUIT_TIMEOUT` after the goodbye was written.
+        let (proxy, goodbye_at) = quit_delaying_proxy(sink.port(), Duration::from_secs(10)).await;
         let mut credential = sink_login(&sink, "none");
         credential.insert("port", SecretString::new(proxy.to_string()));
-        let started = std::time::Instant::now();
 
         let signer = signer("example.com");
 
@@ -847,11 +855,16 @@ mod tests {
         .await;
 
         assert_eq!(delivered, Ok(Delivered::default()));
+        let returned_at = std::time::Instant::now();
         assert_eq!(sink.messages().len(), 1);
+        // Measured from the goodbye, not from the start, so the connect, the exchange and the
+        // signature do not count. A delivery that returned first saw no `221` yet.
+        let waited = goodbye_at.lock().unwrap().map_or(Duration::ZERO, |at| {
+            returned_at.saturating_duration_since(at)
+        });
         assert!(
-            started.elapsed() < Duration::from_millis(500),
-            "deliver took {:?}",
-            started.elapsed()
+            waited < QUIT_TIMEOUT / 2,
+            "deliver returned {waited:?} after the goodbye"
         );
     }
 

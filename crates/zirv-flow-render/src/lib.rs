@@ -184,7 +184,11 @@ mod test_support {
         }
         let respawned = mode == "slow_respawn" && !first_run(&marker);
         if respawned {
-            std::thread::sleep(Duration::from_millis(500));
+            let delay = std::env::var("ZIRV_RENDER_TEST_READY_MS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(500);
+            std::thread::sleep(Duration::from_millis(delay));
         }
         if mode == "wrong_ready" {
             let answer = RenderResponse::Webhook(RenderedWebhook {

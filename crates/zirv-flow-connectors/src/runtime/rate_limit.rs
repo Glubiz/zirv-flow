@@ -261,10 +261,12 @@ mod tests {
         assert!(wait > Duration::ZERO);
     }
 
-    #[tokio::test]
+    // On the paused clock the sleeps are exact. On the real clock, a sleep that overshoots lets
+    // the bucket refill, so the next acquire computes a shorter wait and `waited` drops (#844).
+    #[tokio::test(start_paused = true)]
     async fn five_acquires_at_two_per_second_take_about_a_second_and_a_half() {
         let limits = RateLimits::new();
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         let mut waited = Duration::ZERO;
 
         for _ in 0..5 {
