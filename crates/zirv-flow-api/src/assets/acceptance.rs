@@ -856,9 +856,16 @@ mod tests {
         );
     }
     /// A body that sends one byte every 30 seconds for 30 minutes, so neither upload handler's own
-    /// 60 second no-byte limit can fire; only the 15 minute upload deadline can end it early.
+    /// 60 second no-byte limit can fire; only the 15 minute upload deadline can end it early. Time
+    /// is paused when the body is first polled, which is after the auth extractor and the
+    /// handler's opening queries, so no database I/O runs on a paused clock: there the runtime
+    /// idles on the socket and the clock jumps to the next timer, such as the pool's 30 second
+    /// acquire timeout, which answers 500. The caller resumes time after the reply.
     fn trickle() -> Body {
-        let pieces = futures_util::stream::iter(0..60).then(|_| async {
+        let pieces = futures_util::stream::iter(0..60).then(|piece| async move {
+            if piece == 0 {
+                tokio::time::pause();
+            }
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             Ok::<_, std::io::Error>(Bytes::from_static(b"a"))
         });
@@ -866,14 +873,13 @@ mod tests {
     }
 
     /// Proves the upload deadline layer is attached to both real upload routes: the test fails if
-    /// either route loses it. It does not prove the trickle itself; under paused time the clock
-    /// auto-advances while the request waits on the API-key lookup, so the deadline may fire before
-    /// the body is read. The trickling body is covered by the server tests in `server.rs`.
+    /// either route loses it. Neither route queries the database while it reads the body, and the
+    /// trickle pauses time only for that window, so the clock jumps straight to the 15 minute
+    /// deadline. The trickling body itself is covered by the server tests in `server.rs`.
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_real_upload_routes_carry_the_upload_deadline(pool: PgPool) {
         let f = fixture(&pool).await;
-        tokio::time::pause();
         for (uri, content_type) in [
             (format!("{}?name=slow", f.assets(f.ws, "")), "image/png"),
             (
@@ -882,6 +888,7 @@ mod tests {
             ),
         ] {
             let reply = f.post_to(&uri, content_type, trickle()).await;
+            tokio::time::resume();
 
             assert_eq!(reply.status, StatusCode::REQUEST_TIMEOUT, "{uri}");
             assert_eq!(
