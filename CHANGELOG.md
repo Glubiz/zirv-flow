@@ -15,3 +15,11 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v1.0.22 (2026-11-19)
+
+### Chores
+
+- run the rate-limit timing test on the paused clock (#844)
+- give the render pool deadline tests room for a respawn under load (#839)
+- make the SMTP QUIT and suppression export deadline tests deterministic (#834, #836)
+
