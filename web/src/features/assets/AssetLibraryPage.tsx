@@ -28,7 +28,7 @@ function Library({ workspaceId }: { workspaceId: string }) {
     if (!file) return;
     const uploaded = await upload(file);
     if (uploaded) {
-      if (uploaded.created) add(uploaded.asset);
+      add(uploaded.asset);
       setSelectedId(uploaded.asset.id);
       reload();
     }

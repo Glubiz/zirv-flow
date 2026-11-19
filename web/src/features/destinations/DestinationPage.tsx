@@ -77,7 +77,7 @@ function DestinationDetail({
               </p>
             ) : null}
           </Panel>
-          <CheckPanel workspaceId={workspaceId} destination={destination} />
+          <CheckPanel key={destination.updated_at} workspaceId={workspaceId} destination={destination} />
         </>
       )}
       <DeliveryPanel workspaceId={workspaceId} destination={destination} />

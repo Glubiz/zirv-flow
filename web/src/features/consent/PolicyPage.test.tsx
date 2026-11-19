@@ -223,6 +223,84 @@ describe("consent policy builder", () => {
     expect(screen.getByText("Draft saved · v2 live")).toBeInTheDocument();
   });
 
+  async function publishFirst(user: User) {
+    await user.click(await screen.findByRole("button", { name: "Publish…" }));
+    const dialog = await screen.findByRole("dialog", { name: "Publish the policy?" });
+    await user.click(within(dialog).getByRole("button", { name: "Publish" }));
+    expect(await screen.findByText(/Published as version 1/)).toBeInTheDocument();
+  }
+
+  it("saves at the revision the server holds after publishing a never-saved draft", async () => {
+    let server = 0;
+    const calls = mockApi(
+      routes("admin", {
+        [`GET ${WS}/consent/policy/draft`]: () => json(draftBody([BUILTIN], server, server ? 1 : null)),
+        [`POST ${WS}/consent/policy/publish`]: () => {
+          server = 1;
+          return json({ version: 1, rules: [BUILTIN], published_by: OWNER.id, published_at: "2026-10-24T09:00:00Z" });
+        },
+        [`PUT ${WS}/consent/policy/draft`]: async (request) => {
+          const body = (await request.json()) as { revision: number };
+          if (body.revision !== server) return problem(409, "Conflict", "the draft changed", undefined, "consent_policy_revision_mismatch");
+          server += 1;
+          return json(draftBody([BUILTIN], server, 1));
+        },
+      }),
+    );
+    const user = userEvent.setup();
+    mount();
+
+    await publishFirst(user);
+    await addRule(user, "Edited after publish");
+    await user.click(screen.getByRole("button", { name: "Save draft" }));
+
+    await waitFor(() => expect(savedBodies(calls)).toHaveLength(1));
+    expect((savedBodies(calls)[0] as { revision: number }).revision).toBe(1);
+    expect(screen.queryByText(/saved by someone else/)).not.toBeInTheDocument();
+  });
+
+  it("offers the latest draft when the revision cannot be read back after a first publish", async () => {
+    let reads = 0;
+    mockApi(
+      routes("admin", {
+        [`GET ${WS}/consent/policy/draft`]: () => {
+          reads += 1;
+          return reads === 1 ? json(draftBody()) : problem(500, "Broken", "Could not read the draft");
+        },
+        [`POST ${WS}/consent/policy/publish`]: () => json({ version: 1, rules: [BUILTIN], published_by: OWNER.id, published_at: "2026-10-24T09:00:00Z" }),
+      }),
+    );
+    const user = userEvent.setup();
+    mount();
+
+    await publishFirst(user);
+
+    expect(await screen.findByRole("button", { name: "Load the latest draft" })).toBeInTheDocument();
+  });
+
+  it("reads the draft again only after a publish at revision 0", async () => {
+    let reads = 0;
+    mockApi(
+      routes("admin", {
+        [`GET ${WS}/consent/policy/draft`]: () => {
+          reads += 1;
+          return json(draftBody([BUILTIN], 3, 1));
+        },
+        [`POST ${WS}/consent/policy/publish`]: () => json({ version: 2, rules: [BUILTIN], published_by: OWNER.id, published_at: "2026-10-24T09:00:00Z" }),
+      }),
+    );
+    const user = userEvent.setup();
+    mount();
+
+    expect(await screen.findByText("Draft saved · v1 live")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Publish…" }));
+    const dialog = await screen.findByRole("dialog", { name: "Publish the policy?" });
+    await user.click(within(dialog).getByRole("button", { name: "Publish" }));
+    expect(await screen.findByText(/Published as version 2/)).toBeInTheDocument();
+
+    expect(reads).toBe(1);
+  });
+
   it("says when someone else saved the draft first, and loads theirs", async () => {
     let reads = 0;
     mockApi(

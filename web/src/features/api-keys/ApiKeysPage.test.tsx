@@ -1,8 +1,8 @@
-import { screen, within } from "@testing-library/react";
+import { act, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
-import { json, mockApi, OWNER, session } from "../../test/mockApi";
+import { json, mockApi, OWNER, problem, session } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
 import { ApiKeysPage } from "./ApiKeysPage";
 
@@ -100,5 +100,52 @@ describe("API keys", () => {
 
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(trigger).toHaveFocus();
+  });
+
+  function routes(post: () => Response | Promise<Response>) {
+    return {
+      "GET /api/v1/session": () => json(session(OWNER, "csrf-keys")),
+      "GET /api/v1/workspaces/ws1/members": () =>
+        json([{ user_id: OWNER.id, email: OWNER.email, role: "admin", added_at: "2026-10-01T09:00:00Z" }]),
+      "GET /api/v1/workspaces/ws1/api-keys": () => json([]),
+      "POST /api/v1/workspaces/ws1/api-keys": post,
+    };
+  }
+
+  async function startCreating(user: ReturnType<typeof userEvent.setup>) {
+    renderRoute("/w/ws1/api-keys", "/w/:ws/api-keys", <ApiKeysPage />);
+    await user.click(await screen.findByRole("button", { name: "Create key" }));
+    const form = within(screen.getByRole("dialog", { name: "New API key" }));
+    await user.type(form.getByLabelText("Name"), "Slow key");
+    await user.click(form.getByRole("button", { name: "Create key" }));
+  }
+
+  it("keeps the dialog open while the create request is in flight", async () => {
+    let release: (response: Response) => void = () => undefined;
+    mockApi(routes(() => new Promise<Response>((resolve) => (release = resolve))));
+    const user = userEvent.setup();
+    await startCreating(user);
+
+    await screen.findByRole("button", { name: "Creating" });
+    const cancel = screen.getByRole("button", { name: "Cancel" });
+    expect(cancel).toBeDisabled();
+    await user.keyboard("{Escape}");
+    expect(screen.getByRole("dialog", { name: "New API key" })).toBeInTheDocument();
+
+    act(() => release(json(CREATED, 201)));
+    expect(await screen.findByRole("dialog", { name: "Copy your new key" })).toBeInTheDocument();
+    expect(screen.getByText("zfk_this-secret-is-shown-once")).toBeInTheDocument();
+  });
+
+  it("lets the dialog be cancelled again after a failed create", async () => {
+    mockApi(routes(() => problem(500, "Broken", "Could not create the key")));
+    const user = userEvent.setup();
+    await startCreating(user);
+
+    expect(await screen.findByText(/Could not create the key/)).toBeInTheDocument();
+    const cancel = screen.getByRole("button", { name: "Cancel" });
+    expect(cancel).toBeEnabled();
+    await user.click(cancel);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 });

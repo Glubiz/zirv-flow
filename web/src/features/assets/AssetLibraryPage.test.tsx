@@ -149,6 +149,17 @@ describe("uploading an image", () => {
     expect(screen.getAllByRole("button", { name: /photo-1\.png/ })).toHaveLength(1);
   });
 
+  it("opens the details of an existing image outside the loaded page after a duplicate upload", async () => {
+    const old = assetBody(77, { name: "old.png" });
+    asRole("admin", listBody([A, B]), { [`GET ${WS}/assets/${old.id}`]: () => json({ ...old, used_by: [] }) });
+    mount();
+
+    await sendFile(PNG());
+    act(() => FakeRequest.all[0]!.respond(200, old));
+
+    expect(await screen.findByRole("dialog", { name: "old.png" })).toBeInTheDocument();
+  });
+
   it("keeps the newest-first order when the same bytes of an older image are uploaded again", async () => {
     asRole("admin");
     mount();

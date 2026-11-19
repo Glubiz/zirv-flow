@@ -75,13 +75,16 @@ export function useAssets(workspaceId: string): UseAssets {
   const add = useCallback((asset: Asset) => setAdded((current) => [asset, ...current.filter((item) => item.id !== asset.id)]), []);
   const forget = useCallback((id: string) => setAdded((current) => current.filter((item) => item.id !== id)), []);
 
+  const loadedIds = new Set([...(firstData?.assets ?? []), ...(pages?.assets ?? [])].map((loaded) => loaded.id));
+
   const resource: Resource<AssetList> =
     first.status !== "ready"
       ? first
       : {
           ...first,
           data: {
-            assets: dedupe([...added, ...first.data.assets, ...(pages?.assets ?? [])]),
+            // An added image already in the loaded list keeps its place there; one outside it goes first.
+            assets: dedupe([...added.filter((item) => !loadedIds.has(item.id)), ...first.data.assets, ...(pages?.assets ?? [])]),
             usedBytes: first.data.used_bytes,
             limitBytes: first.data.limit_bytes,
             maxFileBytes: first.data.max_file_bytes,

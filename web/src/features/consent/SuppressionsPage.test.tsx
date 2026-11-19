@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
@@ -86,6 +86,64 @@ describe("suppressions", () => {
 
     await waitFor(() => expect(screen.queryByText(/9f2a41c7/)).not.toBeInTheDocument());
     expect(calls.some((call) => call.search.includes("reason=erased"))).toBe(true);
+  });
+
+  it("a stale Show more failure does not show under another reason", async () => {
+    let fail: (response: Response) => void = () => undefined;
+    mockApi(
+      adminRoutes({
+        [`GET ${BASE}`]: (request) => {
+          const q = new URL(request.url).searchParams;
+          if (q.get("cursor") === "cursor-1") return new Promise<Response>((resolve) => (fail = resolve));
+          if (q.get("reason") === "erased") return json({ suppressions: [ERASED], next_cursor: "cursor-2" });
+          return json({ suppressions: [MANUAL], next_cursor: "cursor-1" });
+        },
+      }),
+    );
+    const user = userEvent.setup();
+    renderRoute("/w/ws1/suppressions", ROUTE, <SuppressionsPage />);
+
+    await user.click(await screen.findByRole("button", { name: "Show more" }));
+    await screen.findByRole("button", { name: "Loading" });
+    await user.selectOptions(screen.getByLabelText("Show"), "erased");
+    await screen.findByText(/00ab12cd/);
+    const next = await screen.findByRole("button", { name: /Show more|Loading/ });
+    act(() => fail(problem(500, "Broken", "Stale failure text")));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(next).toHaveTextContent("Show more");
+    expect(screen.queryByText(/Stale failure text|Broken/)).not.toBeInTheDocument();
+  });
+
+  it("ignores a Show more page that lands after the filter changed, and keeps a failure on the current list under it", async () => {
+    let land: (response: Response) => void = () => undefined;
+    let failCurrent = false;
+    mockApi(
+      adminRoutes({
+        [`GET ${BASE}`]: (request) => {
+          const q = new URL(request.url).searchParams;
+          if (q.get("cursor") === "cursor-1") return new Promise<Response>((resolve) => (land = resolve));
+          if (q.get("cursor") === "cursor-2") return failCurrent ? problem(500, "Broken", "Current failure text") : json({ suppressions: [], next_cursor: null });
+          if (q.get("reason") === "erased") return json({ suppressions: [ERASED], next_cursor: "cursor-2" });
+          return json({ suppressions: [MANUAL], next_cursor: "cursor-1" });
+        },
+      }),
+    );
+    const user = userEvent.setup();
+    renderRoute("/w/ws1/suppressions", ROUTE, <SuppressionsPage />);
+
+    await user.click(await screen.findByRole("button", { name: "Show more" }));
+    await screen.findByRole("button", { name: "Loading" });
+    await user.selectOptions(screen.getByLabelText("Show"), "erased");
+    await screen.findByText(/00ab12cd/);
+    act(() => land(json({ suppressions: [{ ...MANUAL, hash_prefix: "5151aaaa" }], next_cursor: null })));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(screen.queryByText(/5151aaaa/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show more" })).toBeEnabled();
+
+    failCurrent = true;
+    await user.click(screen.getByRole("button", { name: "Show more" }));
+    expect(await screen.findByText(/Current failure text/)).toBeInTheDocument();
   });
 
   it("is read-only for a member, who can still check an address", async () => {

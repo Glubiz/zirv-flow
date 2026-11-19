@@ -186,6 +186,73 @@ describe("event schema", () => {
     expect(screen.getByRole("button", { name: "Publish" })).toBeDisabled();
   });
 
+  it("keeps unsaved draft edits after the settings are saved", async () => {
+    let stored = detail();
+    mountAsAdmin({
+      [`GET ${URI}`]: () => json(stored),
+      [`PATCH ${URI}`]: () => {
+        stored = detail({ schema: { ...SCHEMA, mode: "block", updated_at: "2026-10-02T09:00:00Z" } });
+        return json(stored);
+      },
+    });
+    const user = userEvent.setup();
+    open();
+
+    const draft = await screen.findAllByRole("group", { name: /Property/ });
+    const name = within(draft[0]!).getByLabelText("Name");
+    await user.clear(name);
+    await user.type(name, "edited_unsaved");
+    await user.selectOptions(screen.getByLabelText("When an event breaks the schema"), "block");
+    await user.click(screen.getByRole("button", { name: "Save settings" }));
+    await waitFor(() => expect(screen.getByLabelText("When an event breaks the schema")).toHaveValue("block"));
+    await new Promise((r) => setTimeout(r, 200));
+    const after = screen.getAllByRole("group", { name: /Property/ });
+    expect(within(after[0]!).getByLabelText("Name")).toHaveValue("edited_unsaved");
+  });
+
+  it("keeps an unsaved settings edit after the draft is saved", async () => {
+    let stored = detail();
+    mountAsAdmin({
+      [`GET ${URI}`]: () => json(stored),
+      [`PUT ${URI}/draft`]: () => {
+        stored = detail({ draft: [{ ...TOTAL, name: "renamed" }, EMAIL], schema: { ...SCHEMA, updated_at: "2026-10-02T09:00:00Z" } });
+        return json(stored);
+      },
+    });
+    const user = userEvent.setup();
+    open();
+
+    const draft = await screen.findAllByRole("group", { name: /Property/ });
+    const name = within(draft[0]!).getByLabelText("Name");
+    await user.clear(name);
+    await user.type(name, "renamed");
+    await user.selectOptions(screen.getByLabelText("When an event breaks the schema"), "block");
+    await user.click(screen.getByRole("button", { name: "Save draft" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Publish" })).toBeEnabled());
+    await new Promise((r) => setTimeout(r, 200));
+    expect(screen.getByLabelText("When an event breaks the schema")).toHaveValue("block");
+  });
+
+  it("keeps an unsaved Start a draft after the settings are saved", async () => {
+    let stored = detail({ draft: null, schema: { ...SCHEMA, has_draft: false } });
+    mountAsAdmin({
+      [`GET ${URI}`]: () => json(stored),
+      [`PATCH ${URI}`]: () => {
+        stored = detail({ draft: null, schema: { ...SCHEMA, has_draft: false, mode: "block", updated_at: "2026-10-02T09:00:00Z" } });
+        return json(stored);
+      },
+    });
+    const user = userEvent.setup();
+    open();
+
+    await user.click(await screen.findByRole("button", { name: "Start a draft from version 1" }));
+    await user.selectOptions(screen.getByLabelText("When an event breaks the schema"), "block");
+    await user.click(screen.getByRole("button", { name: "Save settings" }));
+    await waitFor(() => expect(screen.getByLabelText("When an event breaks the schema")).toHaveValue("block"));
+    await new Promise((r) => setTimeout(r, 200));
+    expect(screen.getAllByRole("group", { name: /Property/ })).toHaveLength(1);
+  });
+
   it("says so when a schema has no published version, and explains an inferred draft", async () => {
     mountAsAdmin({
       [`GET ${URI}`]: () =>

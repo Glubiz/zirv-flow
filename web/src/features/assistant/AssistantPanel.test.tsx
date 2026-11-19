@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -249,6 +249,34 @@ describe("the assistant panel", () => {
     expect(onAccept).toHaveBeenCalledWith(CONTENT, expect.objectContaining({ id: "d1" }));
     expect(calls.some((call) => call.method === "PUT")).toBe(false);
     expect(screen.queryByRole("button", { name: "Put into the draft" })).not.toBeInTheDocument();
+  });
+
+  it("sends no second draft while an accept is in flight", async () => {
+    let release: (response: Response) => void = () => undefined;
+    const calls = mockApi({
+      ...BASE,
+      [SETTINGS]: () => json(settings(true)),
+      [DRAFT]: () => json(VALID),
+      [ACCEPT]: () => new Promise<Response>((resolve) => (release = resolve)),
+    });
+    const user = userEvent.setup();
+    mount();
+    await ask(user);
+    await user.click(screen.getByRole("button", { name: "Draft" }));
+    await user.click(await screen.findByRole("button", { name: "Put into the draft" }));
+    await waitFor(() => expect(calls.some((call) => call.path.endsWith("/accept"))).toBe(true));
+
+    expect(screen.getByRole("button", { name: "Draft" })).toBeDisabled();
+    expect(screen.getByLabelText("Ask for another change")).toBeDisabled();
+    fireEvent.keyDown(screen.getByLabelText("Ask for another change"), { key: "Enter", ctrlKey: true });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const drafts = calls.filter((call) => call.method === "POST" && call.path.endsWith("/ai/drafts"));
+    act(() => release(json({ id: "d1", kind: "mapping", source_id: "src-1", stream: "contacts", content: CONTENT })));
+    expect(drafts).toHaveLength(1);
+
+    expect(await screen.findByText("Loaded into the editor. Save to apply it.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Draft" })).toBeEnabled();
+    expect(screen.getByLabelText("Ask for another change")).toBeEnabled();
   });
 
   it("sends no accept request and keeps Put into the draft available when the host refuses the replacement", async () => {

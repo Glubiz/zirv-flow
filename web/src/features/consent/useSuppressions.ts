@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { client, unwrap, useResource, type components, type Resource } from "../../api";
 
@@ -11,6 +11,13 @@ interface Extra {
   base: Page;
   suppressions: Suppression[];
   nextBefore: string | null;
+}
+
+/** Whether the load more of the page `base` is running or failed; one that belongs to an older page is ignored. */
+interface Progress {
+  base: Page;
+  loading: boolean;
+  error: unknown;
 }
 
 export interface SuppressionsState {
@@ -35,34 +42,40 @@ export function useSuppressions(workspaceId: string, reason: string): Suppressio
     [workspaceId, reason],
   );
   const [extra, setExtra] = useState<Extra | null>(null);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [moreError, setMoreError] = useState<unknown>(null);
+  const [progress, setProgress] = useState<Progress | null>(null);
 
   const base = first.status === "ready" ? first.data : null;
+  const current = useRef(base);
+  useEffect(() => {
+    current.current = base;
+  }, [base]);
+  const mine = progress !== null && progress.base === base ? progress : null;
+  const loadingMore = mine?.loading ?? false;
+  const moreError = mine?.error ?? null;
   const more = extra !== null && extra.base === base ? extra : null;
   const suppressions = base ? [...base.suppressions, ...(more?.suppressions ?? [])] : [];
   const nextBefore = base ? (more ? more.nextBefore : (base.next_cursor ?? null)) : null;
 
   const loadMore = useCallback(() => {
     if (base === null || nextBefore === null) return;
-    setLoadingMore(true);
-    setMoreError(null);
+    setProgress({ base, loading: true, error: null });
     unwrap(
       client.GET("/api/v1/workspaces/{ws}/suppressions", {
         params: { path: { ws: workspaceId }, query: { limit: PAGE_SIZE, cursor: nextBefore, reason: filter } },
       }),
     ).then(
       (page) => {
+        if (current.current !== base) return;
         setExtra((current) => ({
           base,
           suppressions: [...(current?.base === base ? current.suppressions : []), ...page.suppressions],
           nextBefore: page.next_cursor ?? null,
         }));
-        setLoadingMore(false);
+        setProgress({ base, loading: false, error: null });
       },
       (failure: unknown) => {
-        setMoreError(failure);
-        setLoadingMore(false);
+        if (current.current !== base) return;
+        setProgress({ base, loading: false, error: failure });
       },
     );
   }, [base, nextBefore, workspaceId, filter]);
