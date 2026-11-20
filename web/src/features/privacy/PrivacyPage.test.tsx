@@ -510,6 +510,44 @@ describe("privacy", () => {
       expect(seen.second).toBe(1);
     });
 
+    it("does not reload endlessly when the inputs return before the other inputs' first page lands", async () => {
+      const BASE2 = "/api/v1/workspaces/ws2/privacy";
+      const seen = { firstA: 0 };
+      mockApi(
+        adminRoutes({
+          [`GET ${BASE}/erasures`]: (request) => {
+            if (new URL(request.url).searchParams.get("cursor")) return json({ erasures: [FAILED], next_cursor: null });
+            seen.firstA += 1;
+            return json({ erasures: [DONE], next_cursor: "c1" });
+          },
+          "GET /api/v1/workspaces/ws2/members": () => json(members("admin", OWNER.id)),
+          // The other inputs' first page is held for the whole test.
+          [`GET ${BASE2}/erasures`]: () => new Promise<Response>(() => {}),
+          [`GET ${BASE2}/exports`]: () => json({ exports: [], next_cursor: null }),
+          [`GET ${BASE2}/settings`]: () => json({ orphan_policy: "keep" }),
+          "GET /api/v1/workspaces/ws2/retention": () => json({ windows: [] }),
+        }),
+      );
+      let setWorkspace: (ws: string) => void = () => {};
+      function Harness() {
+        const [ws, set] = useState("ws1");
+        setWorkspace = set;
+        return <ErasureSection workspaceId={ws} />;
+      }
+      renderRoute("/w/ws1/privacy", ROUTE, <Harness />);
+      await userEvent.setup().click(await screen.findByRole("button", { name: "Show more" }));
+      expect(await screen.findByText("Failed")).toBeInTheDocument();
+
+      act(() => setWorkspace("ws2"));
+      const firstBefore = seen.firstA;
+      act(() => setWorkspace("ws1"));
+      await waitFor(() => expect(seen.firstA).toBeGreaterThan(firstBefore));
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+
+      expect(screen.queryByText("Failed")).not.toBeInTheDocument();
+      expect(seen.firstA - firstBefore).toBeLessThanOrEqual(2);
+    });
+
     it("keeps rows a poll pushed out of the first page, once each", async () => {
       vi.useFakeTimers({ shouldAdvanceTime: true });
       const row = (id: string, status: string) => ({ ...DONE, id, status, completed_at: null, person_id: `person-${id}` });

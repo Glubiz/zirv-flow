@@ -121,6 +121,8 @@ export function useEventTypes(workspaceId: string, names: readonly string[]): Ev
   const [retry, setRetry] = useState(0);
   const asked = useRef(new Set<string>());
   const failures = useRef(new Map<string, number>());
+  // Names that used their retries stay asked-for: another name's retry tick must not ask them again.
+  const exhausted = useRef(new Set<string>());
   const timers = useRef(new Set<ReturnType<typeof setTimeout>>());
   const mounted = useRef(true);
   const wanted = names.filter((name) => name !== "").join("\n");
@@ -140,17 +142,19 @@ export function useEventTypes(workspaceId: string, names: readonly string[]): Ev
     scope.current = workspaceId;
     asked.current.clear();
     failures.current.clear();
+    exhausted.current.clear();
     for (const timer of timers.current) clearTimeout(timer);
     timers.current.clear();
   }, [workspaceId]);
   // Asking for other events starts the count again.
   useEffect(() => {
     failures.current.clear();
+    exhausted.current.clear();
   }, [wanted]);
 
   useEffect(() => {
     for (const name of wanted === "" ? [] : wanted.split("\n")) {
-      if (asked.current.has(name)) continue;
+      if (asked.current.has(name) || exhausted.current.has(name)) continue;
       asked.current.add(name);
       unwrap(
         client.GET("/api/v1/workspaces/{ws}/event-schemas/{name}", {
@@ -174,6 +178,7 @@ export function useEventTypes(workspaceId: string, names: readonly string[]): Ev
           failures.current.set(name, count);
           if (!mounted.current || count > MAX_RETRIES) {
             asked.current.delete(name);
+            exhausted.current.add(name);
             return;
           }
           // Only this name is freed when its own backoff ends, so another name's timer cannot retry it early.

@@ -815,6 +815,34 @@ describe("event types", () => {
     await waitFor(() => expect(attempts.alpha).toBe(2));
   });
 
+  it("does not ask a name that used its retries again when another name's retry tick fires", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const attempts = { alpha: 0, beta: 0 };
+    mockApi({
+      [`GET ${WS}/event-schemas/alpha`]: () => {
+        attempts.alpha += 1;
+        return problem(500, "Internal Server Error", "internal error");
+      },
+      // Beta answers 5 s late, so its retry ticks fire after alpha (asked at 0, 1, 3 and 7 s) is exhausted.
+      [`GET ${WS}/event-schemas/beta`]: async () => {
+        attempts.beta += 1;
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+        return problem(500, "Internal Server Error", "internal error");
+      },
+    });
+    renderHook(() => useEventTypes("ws1", ["alpha", "beta"]));
+    await waitFor(() => expect(attempts.alpha).toBe(1));
+
+    for (let second = 0; second < 60; second += 1) {
+      await act(() => vi.advanceTimersByTimeAsync(1000));
+      // Let the mocked fetch answer, which runs on real time.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+
+    expect(attempts.beta).toBeGreaterThanOrEqual(3);
+    expect(attempts.alpha).toBe(4);
+  });
+
   it("asks at once in a new workspace and lets the old workspace's retry timer lapse", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const asks: string[] = [];

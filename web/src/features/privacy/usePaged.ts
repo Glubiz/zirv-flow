@@ -61,6 +61,9 @@ export function usePaged<T>(
     }
     return { items: uniqueById(items, idOf), next: page.next, extra, wanted };
   }, inputs);
+  // The depth wanted now, as state for render; `depth` is the same value for the loader. Other inputs start at 0.
+  const [wantedDepth, setWantedDepth] = useState({ inputs: key, extra: 0 });
+  if (wantedDepth.inputs !== key) setWantedDepth({ inputs: key, extra: 0 });
   const [loadingMore, setLoadingMore] = useState(false);
   const [moreError, setMoreError] = useState<unknown>(null);
   const [known, setKnown] = useState<Known<T> | null>(null);
@@ -69,9 +72,11 @@ export function usePaged<T>(
     latest.current = known;
   });
 
-  // A refresh that started before a Show more page landed is shallower than what is shown: keep the deeper chain.
+  // A refresh that started before a Show more page landed is shallower than the depth now wanted for these inputs: keep the deeper chain.
+  // It is compared with the wanted depth, not the shown chain, so a reload that asks for it cannot be stale again.
+  const wantedNow = wantedDepth.inputs === key ? wantedDepth.extra : 0;
   const stale =
-    first.status === "ready" && known?.inputs === key && known.source !== first.data && first.data.wanted < known.chain.extra;
+    first.status === "ready" && known?.inputs === key && known.source !== first.data && first.data.wanted < wantedNow;
   const reload = first.status === "ready" ? first.reload : null;
   const refreshed = first.status === "ready" ? first.data : null;
   useEffect(() => {
@@ -104,6 +109,7 @@ export function usePaged<T>(
             wanted: current.chain.extra + 1,
           };
           depth.current = { inputs: key, extra: chain.extra };
+          setWantedDepth(depth.current);
           const appended = { ...current, chain };
           latest.current = appended;
           setKnown(appended);
