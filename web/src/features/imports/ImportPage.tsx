@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useParams } from "react-router";
 
-import { ApiError, client, unwrap, useResource, type Resource } from "../../api";
+import { ApiError, client, unwrap, useResource, usePolling, type Resource } from "../../api";
 import { formatDateTime, PageHeader, Panel, Pill, ResourceView, Stepper } from "../../ui";
 import { useImportAccess } from "./access";
 import { DryRunStep } from "./DryRunStep";
@@ -62,12 +62,9 @@ function ImportView({ workspaceId, importId, pollMs }: { workspaceId: string; im
     polled.status !== "ready" && held !== null && !gone ? { status: "ready", data: held, reload: polled.reload, refreshing: true } : polled;
 
   const active = resource.status === "ready" && isActive(resource.data.status);
-  const reload = resource.reload;
-  useEffect(() => {
-    if (!active) return;
-    const timer = setInterval(reload, pollMs);
-    return () => clearInterval(timer);
-  }, [active, reload, pollMs]);
+  // A beat is skipped while the last poll is still in flight, so a slow response is applied, not dropped by the next reload.
+  const inFlight = polled.status === "loading" || (polled.status === "ready" && polled.refreshing);
+  usePolling(active, inFlight, resource.reload, pollMs);
 
   return (
     <div className="page">
