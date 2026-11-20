@@ -260,10 +260,12 @@ function Drafting({
   const asked = translating ? `Translate into ${language.trim()}. ${prompt.trim()}`.trim() : prompt.trim();
   const tooLong = asked.length > MAX_PROMPT_CHARS || byteLength(documentation) > MAX_DOCUMENTATION_BYTES;
   const wanted = translating ? language.trim() !== "" : prompt.trim() !== "";
-  const canDraft = run.status !== "running" && wanted && !tooLong && !waitingForSample && !budgetSpent;
+  const acceptingNow = run.status === "done" && run.accepting;
+  const canDraft = run.status !== "running" && !acceptingNow && wanted && !tooLong && !waitingForSample && !budgetSpent;
 
   async function draft() {
-    if (!canDraft) return;
+    // The confirmation before an accept is not visible in run, so the ref covers that window too.
+    if (!canDraft || accepting.current) return;
     const abort = new AbortController();
     controller.current = abort;
     setRun({ status: "running" });
@@ -456,7 +458,7 @@ function Drafting({
           rows={2}
           placeholder="For example: only people in Denmark"
           value={prompt}
-          disabled={run.status === "running" || budgetSpent}
+          disabled={run.status === "running" || acceptingNow || budgetSpent}
           error={tooLong ? `Too long: the most is ${MAX_PROMPT_CHARS} characters, now ${asked.length}.` : undefined}
           onChange={(event) => setPrompt(event.target.value)}
           onKeyDown={(event) => {

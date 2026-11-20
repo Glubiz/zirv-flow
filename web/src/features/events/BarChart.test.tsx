@@ -63,4 +63,57 @@ describe("bar chart", () => {
 
     expect(screen.getByRole("img", { name: "Events per hour: none" })).toBeInTheDocument();
   });
+
+  it("places bars by time so quiet days keep their width", () => {
+    const { container } = render(
+      <BarChart
+        bars={[
+          { start: "2026-10-01T00:00:00Z", count: 1 },
+          { start: "2026-10-08T00:00:00Z", count: 1 },
+        ]}
+        unit="day"
+      />,
+    );
+    const rects = [...container.querySelectorAll("rect")];
+    const xs = rects.map((r) => Number(r.getAttribute("x")));
+    const w = Number(rects[0]!.getAttribute("width"));
+    expect(xs[1]! - xs[0]!).toBeGreaterThan(w * 5);
+  });
+
+  it("spaces hour and week buckets by their own step, equal for consecutive buckets", () => {
+    const xsOf = (unit: string, starts: string[]) => {
+      const { container, unmount } = render(<BarChart bars={starts.map((start) => ({ start, count: 1 }))} unit={unit} />);
+      const xs = [...container.querySelectorAll("rect")].map((r) => Number(r.getAttribute("x")));
+      unmount();
+      return xs;
+    };
+    const hours = xsOf("hour", ["2026-10-01T00:00:00Z", "2026-10-01T01:00:00Z", "2026-10-01T04:00:00Z"]);
+    expect(hours[2]! - hours[1]!).toBeCloseTo(3 * (hours[1]! - hours[0]!));
+    const weeks = xsOf("week", ["2026-09-28T00:00:00Z", "2026-10-05T00:00:00Z", "2026-10-12T00:00:00Z"]);
+    expect(weeks[2]! - weeks[1]!).toBeCloseTo(weeks[1]! - weeks[0]!);
+  });
+
+  it("draws one bar and an empty list without dividing by zero, and falls back to the index for an unknown unit", () => {
+    const one = render(<BarChart bars={[{ start: "2026-10-01T00:00:00Z", count: 4 }]} unit="day" />);
+    const x = Number(one.container.querySelector("rect")!.getAttribute("x"));
+    expect(Number.isFinite(x)).toBe(true);
+    one.unmount();
+
+    const none = render(<BarChart bars={[]} unit="day" />);
+    expect(none.container.querySelectorAll("rect")).toHaveLength(0);
+    none.unmount();
+
+    const odd = render(
+      <BarChart
+        bars={[
+          { start: "2026-10-01T00:00:00Z", count: 1 },
+          { start: "2026-10-20T00:00:00Z", count: 1 },
+          { start: "2026-10-21T00:00:00Z", count: 1 },
+        ]}
+        unit="month"
+      />,
+    );
+    const xs = [...odd.container.querySelectorAll("rect")].map((r) => Number(r.getAttribute("x")));
+    expect(xs[2]! - xs[1]!).toBeCloseTo(xs[1]! - xs[0]!);
+  });
 });

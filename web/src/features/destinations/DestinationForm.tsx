@@ -67,7 +67,7 @@ function Fields({ workspaceId, existing, onSaved, kinds }: DestinationFormProps 
 
   async function submit(event: SyntheticEvent) {
     event.preventDefault();
-    if (!kind) return;
+    if (!kind || !ready) return;
     const parsed = configFrom(kind, values);
     if (!parsed.ok) {
       setErrors(parsed.errors);

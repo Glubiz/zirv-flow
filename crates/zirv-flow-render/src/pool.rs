@@ -745,6 +745,7 @@ fn record_failure<T>(result: &Result<T, RenderFailure>) {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsStr;
     use std::fs;
     use std::path::PathBuf;
 
@@ -1110,7 +1111,7 @@ mod tests {
             "hang_first",
             [("ZIRV_RENDER_TEST_MARKER", marker.as_os_str())],
         );
-        let pool = RenderPool::start(command, config(1, 500)).await.unwrap();
+        let pool = RenderPool::start(command, config(1, 3000)).await.unwrap();
 
         let failure = pool
             .render_email(&doc("x"), &context(), &Hooks::untracked())
@@ -1129,7 +1130,7 @@ mod tests {
             "hang_first",
             [("ZIRV_RENDER_TEST_MARKER", marker.as_os_str())],
         );
-        let pool = RenderPool::start(command, config(1, 500)).await.unwrap();
+        let pool = RenderPool::start(command, config(1, 3000)).await.unwrap();
         let catalog = FieldCatalog::default();
 
         let failure = pool.validate(&doc("x"), &catalog).await.unwrap_err();
@@ -1446,13 +1447,18 @@ mod tests {
         let _ = fs::remove_file(&marker);
         let command = child_with(
             "slow_respawn",
-            [("ZIRV_RENDER_TEST_MARKER", marker.as_os_str())],
+            [
+                ("ZIRV_RENDER_TEST_MARKER", marker.as_os_str()),
+                ("ZIRV_RENDER_TEST_READY_MS", OsStr::new("1500")),
+            ],
         );
-        let pool = RenderPool::start(command, config(1, 800)).await.unwrap();
+        let pool = RenderPool::start(command, config(1, 3000)).await.unwrap();
         pool.kill_idle();
         tokio::time::sleep(Duration::from_millis(300)).await;
 
-        // The new child takes about 500 ms to become ready, then hangs on the request.
+        // The new child takes 1.5 s to become ready, then hangs on the request. One shared
+        // deadline ends the call at about 3 s; a fresh deadline for the render would end it at
+        // about 4.5 s. The bound sits 0.75 s from each.
         let began = Instant::now();
         let failure = pool
             .render_email(&doc("x"), &context(), &Hooks::untracked())
@@ -1460,7 +1466,7 @@ mod tests {
             .unwrap_err();
         let took = began.elapsed();
         assert_eq!(failure, RenderFailure::Deadline);
-        assert!(took < Duration::from_millis(1250), "took {took:?}");
+        assert!(took < Duration::from_millis(3750), "took {took:?}");
         let _ = fs::remove_file(&marker);
     }
 
@@ -1473,13 +1479,13 @@ mod tests {
             [("ZIRV_RENDER_TEST_HEARTBEAT", beat.as_os_str())],
         );
         let began = Instant::now();
-        let error = RenderPool::start(command, config(4, 700))
+        let error = RenderPool::start(command, config(4, 1500))
             .await
             .unwrap_err();
         let took = began.elapsed();
         assert!(error.to_string().contains("deadline"), "{error}");
         assert!(
-            took < Duration::from_millis(2000),
+            took < Duration::from_millis(4500),
             "four in a row would take 4x: {took:?}"
         );
 

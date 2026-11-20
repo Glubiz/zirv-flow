@@ -150,6 +150,19 @@ export function usePolicyDraft(workspaceId: string): PolicyDraft {
         }),
       );
       setPublishedVersion(version.version);
+      if (revision === 0) {
+        // Only a publish at revision 0 creates the stored draft, and the publish answer does not
+        // carry its revision. Read it back so the next save is not refused. Rules and the saved
+        // baseline stay as they are, so edits typed meanwhile survive.
+        try {
+          const stored = await unwrap(client.GET("/api/v1/workspaces/{ws}/consent/policy/draft", { params: { path: { ws: workspaceId } } }));
+          setRevision(stored.revision);
+          setPublishedVersion(stored.published_version ?? version.version);
+        } catch (error) {
+          setStale(true);
+          setFailure(describeError(error));
+        }
+      }
       return version.version;
     } catch (error) {
       refuse(error);

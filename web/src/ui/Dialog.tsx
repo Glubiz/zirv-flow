@@ -59,7 +59,7 @@ export function Dialog({ title, onClose, wide = false, children }: DialogProps) 
   }
 
   return createPortal(
-    <div className="dialog-backdrop">
+    <div className="dialog-backdrop" onSubmit={(event) => event.stopPropagation()}>
       <div
         ref={panel}
         className={wide ? "dialog dialog-wide" : "dialog"}
