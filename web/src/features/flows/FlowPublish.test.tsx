@@ -2,7 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { FLOW_ID, flowBody, flowDetail, flowRoutes, impactBody, WS } from "../../test/flowsApi";
+import { FLOW_ID, flowBody, flowDetail, flowRoutes, impactBody, versionBody, WS } from "../../test/flowsApi";
 import { mountEditor as mount, openInspectorOf } from "../../test/flowsEditor";
 import { json, mockApi, problem, type Handler } from "../../test/mockApi";
 import { stubReactFlow } from "../../test/reactFlowStubs";
@@ -172,6 +172,26 @@ describe("publish dialog", () => {
     expect(screen.getByText("v1 live")).toBeInTheDocument();
     expect(screen.getByText("Version 1 of Welcome series is published.")).toBeInTheDocument();
     expect(calls.filter((call) => call.method === "POST" && call.path.endsWith("/publish") && call.search === "")).toHaveLength(1);
+  });
+
+  it("reads the new live version after a publish, and the draft comparison follows it", async () => {
+    const calls = mockApi({
+      ...flowRoutes({ flow: { state: "published", current_version: 3 } }),
+      // Version 3 differs from the draft; version 4, as published from it, matches.
+      [`GET ${WS}/flows/${FLOW_ID}/versions/3`]: () => json(versionBody(3, { graph: { v: 1, nodes: [], edges: [] } })),
+      [`GET ${WS}/flows/${FLOW_ID}/versions/4`]: () => json(versionBody(4)),
+      ...publishRoute(() => json(impactBody({ next_version: 4 })), () => published(4)),
+    });
+    const user = userEvent.setup();
+    mount();
+    expect(await screen.findByText("Draft with changes")).toBeInTheDocument();
+    const dialog = await openDialog(user);
+
+    await user.click(await within(dialog).findByRole("button", { name: "Publish version 4" }));
+
+    await waitFor(() => expect(calls.some((call) => call.method === "GET" && call.path === `${WS}/flows/${FLOW_ID}/versions/4`)).toBe(true));
+    await waitFor(() => expect(screen.queryByText("Draft with changes")).not.toBeInTheDocument());
+    expect(screen.getByText("v4 live")).toBeInTheDocument();
   });
 
   it("keeps the dialog open when the publish is refused and shows the issues on the canvas", async () => {

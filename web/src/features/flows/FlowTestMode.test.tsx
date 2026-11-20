@@ -448,6 +448,9 @@ describe("advancing the clock by a huge amount", () => {
     expect(advanceBy(START, 3000, "days")).toBe("2038-03-20T00:00:00.000Z");
     expect(advanceBy("9999-12-31T00:00:00Z", 2, "days")).toBeNull();
     expect(advanceBy("not a time", 1, "days")).toBeNull();
+    // Exactly the last millisecond of 9999 is accepted; one millisecond more is refused.
+    expect(advanceBy("9999-12-31T23:58:59.999Z", 1, "minutes")).toBe("9999-12-31T23:59:59.999Z");
+    expect(advanceBy("9999-12-31T23:59:00.000Z", 1, "minutes")).toBeNull();
   });
 });
 
