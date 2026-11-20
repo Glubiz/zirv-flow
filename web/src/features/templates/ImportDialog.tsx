@@ -1,4 +1,4 @@
-import { useState, type ChangeEvent, type SyntheticEvent } from "react";
+import { useMemo, useRef, useState, type ChangeEvent, type SyntheticEvent } from "react";
 import { useNavigate } from "react-router";
 
 import { client, describeError, unwrap, type ErrorSummary } from "../../api";
@@ -10,9 +10,27 @@ interface Props {
   onClose: () => void;
 }
 
-/** Source that opens with an `<mjml>` tag is MJML; anything else is HTML. */
+/** Source that opens with an `<mjml>` tag is MJML; anything else is HTML. A linear scan: no pattern can backtrack on a long run of comments. */
 export function isMjml(source: string): boolean {
-  return /^\s*(<\?xml[^>]*>\s*)?(<!--[\s\S]*?-->\s*)*<mjml[\s>]/i.test(source);
+  const blank = /\s/;
+  let at = 0;
+  const skipBlank = () => {
+    while (at < source.length && blank.test(source.charAt(at))) at += 1;
+  };
+  skipBlank();
+  if (source.slice(at, at + 5).toLowerCase() === "<?xml") {
+    const end = source.indexOf(">", at);
+    if (end < 0) return false;
+    at = end + 1;
+    skipBlank();
+  }
+  while (source.startsWith("<!--", at)) {
+    const end = source.indexOf("-->", at + 4);
+    if (end < 0) return false;
+    at = end + 3;
+    skipBlank();
+  }
+  return /^<mjml[\s>]/i.test(source.slice(at, at + 6));
 }
 
 const MAX_SOURCE_BYTES = 1_000_000;
@@ -28,18 +46,29 @@ export function ImportDialog({ workspaceId, onClose }: Props) {
   const [source, setSource] = useState("");
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
-  const mjml = isMjml(source);
+  const mjml = useMemo(() => isMjml(source), [source]);
+  const read = useRef(0);
 
   async function onFile(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
+    const mine = ++read.current;
     if (file.size > MAX_SOURCE_BYTES) {
+      // The picker names the rejected file, so the form must not keep importing the one before it.
+      setSource("");
+      event.target.value = "";
       setFailure({ title: "That file is too large", detail: "A template source can be up to 1 MB.", traceId: null });
       return;
     }
     setFailure(null);
-    setSource(await file.text());
-    setName((current) => (current === "" ? nameFromFile(file.name) : current));
+    try {
+      const text = await file.text();
+      if (mine !== read.current) return;
+      setSource(text);
+      setName((current) => (current === "" ? nameFromFile(file.name) : current));
+    } catch {
+      if (mine === read.current) setFailure({ title: "That file could not be read", detail: "Pick it again, or paste the source below.", traceId: null });
+    }
   }
 
   async function submit(event: SyntheticEvent) {
@@ -77,7 +106,10 @@ export function ImportDialog({ workspaceId, onClose }: Props) {
         <TextAreaField
           label="Source"
           value={source}
-          onChange={(event) => setSource(event.target.value)}
+          onChange={(event) => {
+            read.current += 1;
+            setSource(event.target.value);
+          }}
           rows={8}
           mono
           hint={source.trim() === "" ? undefined : mjml ? "Read as MJML." : "Read as HTML."}

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { client, describeError, unwrap, useResource, type ErrorSummary } from "../../api";
 import { Button, EmptyState, formatDateTime, InlineError, Pill, ResourceView } from "../../ui";
@@ -15,10 +15,12 @@ interface RunsPanelProps {
   /** Changes when a run was started elsewhere on the page, so the history loads again. */
   version: number;
   pollMs?: number;
+  /** Called once when the last active run of the history ends, so the page can refresh what a run changes. */
+  onSettled?: () => void;
 }
 
 /** The run history of a source: state, attempt, times and counters, with cancel for admins. */
-export function RunsPanel({ workspaceId, sourceId, canManage, version, pollMs = RUNS_POLL_MS }: RunsPanelProps) {
+export function RunsPanel({ workspaceId, sourceId, canManage, version, pollMs = RUNS_POLL_MS, onSettled }: RunsPanelProps) {
   const resource = useResource(
     () =>
       unwrap(
@@ -32,12 +34,32 @@ export function RunsPanel({ workspaceId, sourceId, canManage, version, pollMs = 
   // Older pages belong to the history they were loaded for; a new key starts again from the newest.
   const [extra, setExtra] = useState<{ key: string; runs: Run[]; cursor: string | null } | null>(null);
   const older = extra?.key === key ? extra : null;
+  // The first page last seen: when a newer run shifts it, the rows it pushed out are kept with the older ones.
+  const [seen, setSeen] = useState<{ key: string; page: object; runs: Run[] } | null>(null);
   const [viewing, setViewing] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
 
   const active = resource.status === "ready" && resource.data.runs.some(isActiveRun);
   const reload = resource.reload;
+  if (resource.status === "ready" && seen?.page !== resource.data) {
+    if (older && seen?.key === key) {
+      const now = new Set(resource.data.runs.map((run) => run.id));
+      const had = new Set(older.runs.map((run) => run.id));
+      const pushed = seen.runs.filter((run) => !now.has(run.id) && !had.has(run.id));
+      if (pushed.length > 0) setExtra({ ...older, runs: [...pushed, ...older.runs] });
+    }
+    setSeen({ key, page: resource.data, runs: resource.data.runs });
+  }
+  const was = useRef(false);
+  const settled = useRef(onSettled);
+  useEffect(() => {
+    settled.current = onSettled;
+  });
+  useEffect(() => {
+    if (was.current && !active) settled.current?.();
+    was.current = active;
+  }, [active]);
   useEffect(() => {
     if (!active) return;
     const timer = setInterval(reload, pollMs);
@@ -48,11 +70,13 @@ export function RunsPanel({ workspaceId, sourceId, canManage, version, pollMs = 
     setBusy(true);
     setFailure(null);
     try {
-      await unwrap(
+      const cancelled = await unwrap(
         client.POST("/api/v1/workspaces/{ws}/sources/{id}/runs/{run_id}/cancel", {
           params: { path: { ws: workspaceId, id: sourceId, run_id: run.id } },
         }),
       );
+      // Only the first page reloads, so an older row is patched from the answer.
+      setExtra((current) => (current ? { ...current, runs: current.runs.map((row) => (row.id === cancelled.id ? cancelled : row)) } : current));
       reload();
     } catch (error) {
       setFailure(describeError(error));

@@ -11,7 +11,7 @@ import { aRun, aRunDetail, aSource, aStream, FAKE_KIND } from "./testData";
 
 const BASE = "/api/v1/workspaces/ws1/sources/src-1";
 
-type Handlers = Record<string, () => Response | Promise<Response>>;
+type Handlers = Record<string, (request: Request) => Response | Promise<Response>>;
 
 function members(role: "admin" | "editor", userId: string) {
   return [{ user_id: userId, email: "someone@example.test", role, added_at: "2026-10-01T09:00:00Z" }];
@@ -133,6 +133,65 @@ describe("the runs of a source", () => {
 
     await waitFor(() => expect(calls.filter((call) => call.path === `${BASE}/runs`).length).toBeGreaterThan(1));
     expect(calls.some((call) => call.search.includes("cursor=next-1"))).toBe(true);
+  });
+
+  it("keeps a run that a newer run pushed off the first page", async () => {
+    const named = (id: string, change: Parameters<typeof aRun>[0] = {}) => aRun({ id, stream: `s-${id}`, ...change });
+    const running = { state: "running", finished_at: null } as const;
+    let firstPages = 0;
+    mockApi(
+      routes("admin", {
+        [`GET ${BASE}/runs`]: (request) => {
+          if (new URL(request.url).searchParams.get("cursor") === "c1") return json({ runs: [named("D"), named("E")], next_cursor: null });
+          firstPages += 1;
+          return firstPages === 1
+            ? json({ runs: [named("A", running), named("B"), named("C")], next_cursor: "c1" })
+            : json({ runs: [named("N", running), named("A", running), named("B")], next_cursor: "c2" });
+        },
+      }),
+    );
+    const user = userEvent.setup();
+    renderRoute(
+      "/w/ws1/sources/src-1",
+      "/w/:ws/sources/:sourceId",
+      <RunsPanel workspaceId="ws1" sourceId="src-1" canManage version={0} pollMs={50} />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Show older runs" }));
+    expect(await screen.findByText("s-E")).toBeInTheDocument();
+    await screen.findByText("s-N", undefined, { timeout: 6000 });
+
+    expect(screen.getByText("s-C")).toBeInTheDocument();
+    expect(screen.getByText("s-E")).toBeInTheDocument();
+    expect(screen.getAllByText("s-C")).toHaveLength(1);
+  });
+
+  it("shows an older run as cancelled once it is cancelled", async () => {
+    const named = (id: string, change: Parameters<typeof aRun>[0] = {}) => aRun({ id, stream: `s-${id}`, ...change });
+    const calls = mockApi(
+      routes("admin", {
+        [`GET ${BASE}/runs`]: (request) =>
+          new URL(request.url).searchParams.get("cursor") === "c1"
+            ? json({ runs: [named("D", { state: "running", finished_at: null })], next_cursor: null })
+            : json({ runs: [named("A")], next_cursor: "c1" }),
+        [`POST ${BASE}/runs/D/cancel`]: () => json(named("D", { state: "cancelled" })),
+      }),
+    );
+    const user = userEvent.setup();
+    renderRoute(
+      "/w/ws1/sources/src-1",
+      "/w/:ws/sources/:sourceId",
+      <RunsPanel workspaceId="ws1" sourceId="src-1" canManage version={0} pollMs={50} />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Show older runs" }));
+    await user.click(await screen.findByRole("button", { name: "Cancel the s-D run" }));
+
+    await waitFor(() => expect(calls.some((call) => call.path === `${BASE}/runs/D/cancel`)).toBe(true));
+    const row = (await screen.findByText("s-D")).closest("tr")!;
+    await waitFor(() => expect(within(row).getByText("Cancelled")).toBeInTheDocument());
+    expect(within(row).queryByRole("button", { name: /^Cancel/ })).not.toBeInTheDocument();
+    expect(screen.getByText("s-A")).toBeInTheDocument();
   });
 
   it("lets an admin run every stream, or one, and cancel an active run", async () => {
@@ -263,6 +322,31 @@ describe("the runs of a source", () => {
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(reads).toBe(settled);
+  });
+
+  it("tells the page once when the last active run ends", async () => {
+    let reads = 0;
+    let settled = 0;
+    mockApi(
+      routes("admin", {
+        [`GET ${BASE}/runs`]: () => {
+          reads += 1;
+          const state = reads < 3 ? "running" : "succeeded";
+          return json({ runs: [aRun({ state, finished_at: state === "running" ? null : "2026-10-03T09:00:09Z" })], next_cursor: null });
+        },
+      }),
+    );
+    renderRoute(
+      "/w/ws1/sources/src-1",
+      "/w/:ws/sources/:sourceId",
+      <RunsPanel workspaceId="ws1" sourceId="src-1" canManage version={0} pollMs={20} onSettled={() => (settled += 1)} />,
+    );
+
+    await screen.findByText("Running");
+    await screen.findByText("Succeeded");
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    expect(settled).toBe(1);
   });
 
   it("shows the kind of each run and the removed records of a run in its details", async () => {

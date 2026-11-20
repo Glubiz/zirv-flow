@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { useId, useRef, useState } from "react";
 
 import { client, describeError, unwrap, useResource, type components, type ErrorSummary } from "../../api";
 import { AssistantDock, AssistantPanel, AssistantToggle, useAssistantDock } from "../assistant";
@@ -135,6 +135,7 @@ function Editor({ workspaceId, sourceId, stream, push = false, traits, lists, on
   const [previewing, setPreviewing] = useState(false);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [previewFailure, setPreviewFailure] = useState<ErrorSummary | null>(null);
+  const previewRun = useRef(0);
   const [saveFailure, setSaveFailure] = useState<ErrorSummary | null>(null);
 
   // A webhook payload has no key: its event id comes from the dedupe field.
@@ -143,9 +144,16 @@ function Editor({ workspaceId, sourceId, stream, push = false, traits, lists, on
   const problems = draftProblems(draft, hasKey);
   const previewBlocked = problems.length > 0 || (sample !== null && !sample.ok);
 
+  /** Drops the preview and any read still in flight, so an answer for an older mapping never shows. */
+  function discardPreview() {
+    previewRun.current += 1;
+    setPreview(null);
+    setPreviewing(false);
+  }
+
   function edit(next: MappingDraft) {
     setDraft(next);
-    setPreview(null);
+    discardPreview();
   }
 
   function changeRule(id: number, change: Partial<RuleDraft>) {
@@ -165,26 +173,28 @@ function Editor({ workspaceId, sourceId, stream, push = false, traits, lists, on
   /** Loads an accepted draft as the unsaved mapping; saving stays the person's own action. */
   function acceptDraft(content: unknown) {
     setDraft(mappingToDraft(fieldNames, content as Mapping));
-    setPreview(null);
+    discardPreview();
   }
 
   async function runPreview() {
+    const mine = ++previewRun.current;
     setPreviewing(true);
     setPreviewFailure(null);
     try {
-      setPreview(
-        await unwrap(
-          client.POST("/api/v1/workspaces/{ws}/sources/{id}/streams/{name}/preview", {
-            params: { path: { ws: workspaceId, id: sourceId, name: stream.name } },
-            body: { mapping: draftToMapping(draft), ...(sample?.ok ? { sample: sample.sample } : {}) },
-          }),
-        ),
+      const result = await unwrap(
+        client.POST("/api/v1/workspaces/{ws}/sources/{id}/streams/{name}/preview", {
+          params: { path: { ws: workspaceId, id: sourceId, name: stream.name } },
+          body: { mapping: draftToMapping(draft), ...(sample?.ok ? { sample: sample.sample } : {}) },
+        }),
       );
+      if (mine === previewRun.current) setPreview(result);
     } catch (error) {
-      setPreview(null);
-      setPreviewFailure(describeError(error));
+      if (mine === previewRun.current) {
+        setPreview(null);
+        setPreviewFailure(describeError(error));
+      }
     } finally {
-      setPreviewing(false);
+      if (mine === previewRun.current) setPreviewing(false);
     }
   }
 
@@ -522,7 +532,7 @@ function Editor({ workspaceId, sourceId, stream, push = false, traits, lists, on
               disabled={busy}
               onChange={(event) => {
                 setSampleText(event.target.value);
-                setPreview(null);
+                discardPreview();
               }}
               hint="One JSON object, or an array of up to 20. It is only used here: nothing is saved or sent."
             />
