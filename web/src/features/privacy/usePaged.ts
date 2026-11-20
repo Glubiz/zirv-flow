@@ -10,6 +10,8 @@ export interface Page<T> {
 /** The first page and the pages after it, as one list; `extra` is how many further pages it holds. */
 interface Chain<T> extends Page<T> {
   extra: number;
+  /** The depth this load asked for; it may reach less when the list got shorter. */
+  wanted: number;
 }
 
 interface Known<T> {
@@ -46,7 +48,9 @@ export function usePaged<T>(
   const key = inputs.join("|");
   const depth = useRef<{ inputs: string; extra: number }>({ inputs: key, extra: 0 });
   const first = useResource<Chain<T>>(async () => {
-    const wanted = depth.current.inputs === key ? depth.current.extra : 0;
+    // Other inputs start from page one, whatever depth an earlier input reached.
+    if (depth.current.inputs !== key) depth.current = { inputs: key, extra: 0 };
+    const wanted = depth.current.extra;
     let page = await fetchPage(null);
     let items = page.items;
     let extra = 0;
@@ -55,7 +59,7 @@ export function usePaged<T>(
       items = [...items, ...page.items];
       extra += 1;
     }
-    return { items: uniqueById(items, idOf), next: page.next, extra };
+    return { items: uniqueById(items, idOf), next: page.next, extra, wanted };
   }, inputs);
   const [loadingMore, setLoadingMore] = useState(false);
   const [moreError, setMoreError] = useState<unknown>(null);
@@ -65,7 +69,16 @@ export function usePaged<T>(
     latest.current = known;
   });
 
-  if (first.status === "ready" && (known?.inputs !== key || known.source !== first.data)) {
+  // A refresh that started before a Show more page landed is shallower than what is shown: keep the deeper chain.
+  const stale =
+    first.status === "ready" && known?.inputs === key && known.source !== first.data && first.data.wanted < known.chain.extra;
+  const reload = first.status === "ready" ? first.reload : null;
+  const refreshed = first.status === "ready" ? first.data : null;
+  useEffect(() => {
+    if (stale && reload && refreshed) reload();
+  }, [stale, reload, refreshed]);
+
+  if (first.status === "ready" && !stale && (known?.inputs !== key || known.source !== first.data)) {
     setKnown({ inputs: key, source: first.data, chain: first.data });
   }
 
@@ -88,6 +101,7 @@ export function usePaged<T>(
             items: uniqueById([...current.chain.items, ...page.items], idOf),
             next: page.next,
             extra: current.chain.extra + 1,
+            wanted: current.chain.extra + 1,
           };
           depth.current = { inputs: key, extra: chain.extra };
           const appended = { ...current, chain };

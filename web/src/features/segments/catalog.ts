@@ -134,10 +134,19 @@ export function useEventTypes(workspaceId: string, names: readonly string[]): Ev
       pending.clear();
     };
   }, []);
+  const scope = useRef(workspaceId);
+  // Another workspace starts clean: no held names, no counts, no pending retry of the old one.
+  useEffect(() => {
+    scope.current = workspaceId;
+    asked.current.clear();
+    failures.current.clear();
+    for (const timer of timers.current) clearTimeout(timer);
+    timers.current.clear();
+  }, [workspaceId]);
   // Asking for other events starts the count again.
   useEffect(() => {
     failures.current.clear();
-  }, [workspaceId, wanted]);
+  }, [wanted]);
 
   useEffect(() => {
     for (const name of wanted === "" ? [] : wanted.split("\n")) {
@@ -149,6 +158,7 @@ export function useEventTypes(workspaceId: string, names: readonly string[]): Ev
         }),
       ).then(
         (detail) => {
+          if (scope.current !== workspaceId) return;
           const properties = detail.versions[0]?.properties ?? detail.draft ?? [];
           const map = new Map<string, ValueType>();
           for (const property of properties) {
@@ -159,6 +169,7 @@ export function useEventTypes(workspaceId: string, names: readonly string[]): Ev
           setTypes((current) => new Map(current).set(name, map));
         },
         () => {
+          if (scope.current !== workspaceId) return;
           const count = (failures.current.get(name) ?? 0) + 1;
           failures.current.set(name, count);
           if (!mounted.current || count > MAX_RETRIES) {

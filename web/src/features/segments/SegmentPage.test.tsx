@@ -815,6 +815,32 @@ describe("event types", () => {
     await waitFor(() => expect(attempts.alpha).toBe(2));
   });
 
+  it("asks at once in a new workspace and lets the old workspace's retry timer lapse", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const asks: string[] = [];
+    mockApi({
+      [`GET ${WS}/event-schemas/purchase`]: () => {
+        asks.push("ws1");
+        return problem(500, "Internal Server Error", "internal error");
+      },
+      "GET /api/v1/workspaces/ws2/event-schemas/purchase": () => {
+        asks.push("ws2");
+        return problem(500, "Internal Server Error", "internal error");
+      },
+    });
+    const { rerender } = renderHook(({ ws }) => useEventTypes(ws, ["purchase"]), { initialProps: { ws: "ws1" } });
+    await waitFor(() => expect(asks).toEqual(["ws1"]));
+
+    // Let the failure land, so ws1's 1 s retry timer is pending, then change workspace.
+    await act(() => vi.advanceTimersByTimeAsync(50));
+    rerender({ ws: "ws2" });
+    await act(() => vi.advanceTimersByTimeAsync(100));
+    expect(asks).toEqual(["ws1", "ws2"]);
+    await act(() => vi.advanceTimersByTimeAsync(1100));
+    await waitFor(() => expect(asks).toEqual(["ws1", "ws2", "ws2"]));
+    expect(asks.filter((ws) => ws === "ws1")).toHaveLength(1);
+  });
+
   it("stops retrying once unmounted", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const attempts = schemaRoute(99);
