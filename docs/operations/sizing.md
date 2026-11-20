@@ -122,6 +122,29 @@ guidance. It was one development machine with CPU and memory caps, not reference
   database-URL settings. A pre-release run improved with them and the 1.0.0 run did not, and both ran in a fixed
   order on a growing database. Do not adopt them as a default; measure them on your own workload. See
   [section 8 of the benchmark](../benchmarks/simulated-5x.md#8-the-connection-settings-inconclusive).
+- **App cores (D).** App cores = inbox items per second x 1.2 ms / 1000, with at least 2. The measured app cost
+  was 1.14 ms per item at 2,500/s (W2), 0.69 at the peak and 1.56 at light load (D), so 1.2 ms is conservative
+  above about 2,500/s.
+- **Size for the peak, not the mean,** so the inbox keeps up when traffic is highest. Watch the inbox slope: a
+  flat or falling inbox means you keep up, a growing one means you are short.
+- **Later releases were not re-measured cleanly.** A rerun of 1.0.23 on the same stack applied about 25% less at
+  the peak, but other work shared the machine during it, so the cause is unresolved ([#858](https://github.com/Glubiz/zirv-flow/issues/858)). Plan with headroom.
+
+### Worked examples
+
+Cores are sized for the daily-curve peak (D). Inbox items are about 68% of all events in this mix. Disk uses the
+report's 250 GB a day for the whole daily curve, which accrues at the daily mean (D), scaled linearly by peak, and
+30 days of retention.
+
+| Example | Peak events/s in total | Inbox items/s | Database cores | App cores | Disk per retained day | 30 days |
+| --- | --- | --- | --- | --- | --- | --- |
+| One fifth of the benchmark | 1,300 | 880 | 2.6, so plan 4 | 1.1, so plan 2 | about 50 GB | about 1.5 TB |
+| The benchmark's load | 6,500 | 4,400 | 13.2, so plan 16 | 5.3, so plan 6 | about 250 GB | about 7.5 TB |
+| Twice the benchmark | 13,000 | 8,800 | 26.4, so plan 32 | 10.6, so plan 12 | about 500 GB | about 15 TB |
+
+Only the 8-core database was measured. The 16- and 32-core rows are linear extrapolations, and the row-lock
+contention the benchmark found can cap a single PostgreSQL before its CPU does.
+
 
 ## Connection arithmetic
 
