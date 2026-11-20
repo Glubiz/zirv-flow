@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, type ChangeEvent, type SyntheticEvent } from "react";
+import { useRef, useState, type ChangeEvent, type SyntheticEvent } from "react";
 import { useNavigate } from "react-router";
 
 import { client, describeError, unwrap, type ErrorSummary } from "../../api";
@@ -46,7 +46,7 @@ export function ImportDialog({ workspaceId, onClose }: Props) {
   const [source, setSource] = useState("");
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
-  const mjml = useMemo(() => isMjml(source), [source]);
+  const mjml = isMjml(source);
   const read = useRef(0);
 
   async function onFile(event: ChangeEvent<HTMLInputElement>) {
