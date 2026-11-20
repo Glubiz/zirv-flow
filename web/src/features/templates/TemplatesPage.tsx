@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate, useParams, useSearchParams } from "react-router";
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router";
 
 import { ApiError, client, describeError, unwrap, useResource, type ErrorSummary } from "../../api";
 import { Button, EmptyState, InlineError, LibraryNav, PageHeader, Pill, ResourceView } from "../../ui";
@@ -49,6 +49,10 @@ function TemplateLibrary({ workspaceId }: { workspaceId: string }) {
   const [text, setText] = useState(filters.q);
   // The last search this page put in the URL itself: any other value there came from outside.
   const written = useRef(filters.q);
+  // Set when this page navigates (its own debounce write, a filter change, clearFilters); the next location change is then not external.
+  const own = useRef(false);
+  const location = useLocation();
+  const seenKey = useRef(location.key);
   const [adding, setAdding] = useState(false);
   const [importing, setImporting] = useState(false);
   const [archiving, setArchiving] = useState<TemplateListItem | null>(null);
@@ -69,6 +73,7 @@ function TemplateLibrary({ workspaceId }: { workspaceId: string }) {
 
   const update = useCallback(
     (patch: Partial<Filters>) => {
+      own.current = true;
       setParams((current) => writeFilters({ ...readFilters(current), ...patch }), { replace: true });
     },
     [setParams],
@@ -85,12 +90,17 @@ function TemplateLibrary({ workspaceId }: { workspaceId: string }) {
     return () => clearTimeout(timer);
   }, [text, filters.q, update]);
 
-  // A link, Back or Forward changed the search: the box follows, so the old term is not written back.
+  // A link, Back or Forward is a new location even when its search is the same: the box follows it, so a pending write of the old term is dropped.
   useEffect(() => {
-    if (filters.q === written.current) return;
+    if (seenKey.current === location.key) return;
+    seenKey.current = location.key;
+    if (own.current) {
+      own.current = false;
+      return;
+    }
     written.current = filters.q;
     setText(filters.q);
-  }, [filters.q]);
+  }, [location.key, filters.q]);
 
   function clearFilters() {
     setText("");

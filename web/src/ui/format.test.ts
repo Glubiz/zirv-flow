@@ -36,6 +36,7 @@ describe("formatCount", () => {
     expect(formatCount(999_999)).toBe("1 M");
     expect(formatCount(1_000_000)).toBe("1 M");
     expect(formatCount(100_000)).toBe("100 k");
+    expect(formatCount(-999_950)).toBe("-1 M");
     expect(formatCount(-999_999)).toBe("-1 M");
     expect(formatCount(-120_000)).toBe("-120 k");
   });

@@ -197,6 +197,21 @@ describe("the template library", () => {
     expect(router.state.location.search).toBe("?q=foo");
   });
 
+  it("follows a navigation to the same search while a typed term is pending", async () => {
+    mockApi(libraryRoutes());
+    const { router } = mount("/w/ws1/templates?q=foo");
+    const box = await screen.findByRole("searchbox", { name: "Search templates" });
+
+    fireEvent.change(box, { target: { value: "bar" } });
+    await act(async () => {
+      await router.navigate("/w/ws1/templates?q=foo");
+    });
+    await new Promise((resolve) => setTimeout(resolve, 700));
+
+    expect(router.state.location.search).toBe("?q=foo");
+    expect(box).toHaveValue("foo");
+  });
+
   it("filters by theme", async () => {
     const calls = mockApi(libraryRoutes({ themes: [{ ...themeBody({ id: "th1", name: "Warm" }), tokens: tokens(), used_by_templates: 0 }] }));
     const user = userEvent.setup();

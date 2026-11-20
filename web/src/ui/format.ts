@@ -53,7 +53,7 @@ export function formatTime(value: string): string {
 export function formatCount(value: number): string {
   const compact = (divisor: number, unit: string) => `${(value / divisor).toFixed(1).replace(/\.0$/, "")} ${unit}`;
   // A figure that rounds up to 1000 k is a million: judge the unit by the rounded figure.
-  if (Math.abs(Math.round(value / 100) / 10) >= 1000) return compact(1_000_000, "M");
+  if (Math.round(Math.abs(value) / 100) / 10 >= 1000) return compact(1_000_000, "M");
   if (Math.abs(value) >= 100_000) return compact(1_000, "k");
   return value.toLocaleString("en-US");
 }
