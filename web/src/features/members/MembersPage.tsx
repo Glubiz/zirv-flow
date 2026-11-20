@@ -59,7 +59,8 @@ function WorkspaceMembers({ ws }: { ws: string }) {
   const access = members.status === "ready" ? accessFor(members.data, user.id, user.is_owner) : null;
   const canAdmin = access?.canAdmin ?? false;
   const adminCount = members.status === "ready" ? members.data.filter((member) => member.role === "admin").length : 0;
-  const lastAdmin = (member: Member) => member.role === "admin" && adminCount <= 1;
+  // The instance owner may remove the last admin, as the server allows.
+  const lastAdmin = (member: Member) => member.role === "admin" && adminCount <= 1 && !user.is_owner;
 
   function changeRole(member: Member, role: string) {
     // An admin who steps down loses this page, unless they are the owner, who keeps every right.

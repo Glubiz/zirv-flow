@@ -1,6 +1,6 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { FakeEventSource } from "../../test/fakeEventSource";
 import { json, MEMBER, mockApi, OWNER, session } from "../../test/mockApi";
@@ -54,6 +54,27 @@ async function connected() {
 describe("event debugger", () => {
   beforeEach(() => {
     FakeEventSource.install();
+  });
+
+  it("rerenders only the new row when one event arrives", async () => {
+    signedInAs(OWNER, "admin");
+    open();
+    const source = await connected();
+    act(() => {
+      for (let n = 1; n <= 300; n += 1) source.emit("item", item(n, { name: `e${n}` }), String(n));
+    });
+    await screen.findByRole("table", { name: "Live events" });
+
+    const spy = vi.spyOn(Date.prototype, "toLocaleString");
+    try {
+      act(() => {
+        source.emit("item", item(301, { name: "e301" }), "301");
+      });
+      // One formatted time for the new row, none for the 300 rows already shown.
+      expect(spy.mock.calls.length).toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("opens the stream for the workspace and lists events newest first as they arrive", async () => {

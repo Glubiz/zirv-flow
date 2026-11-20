@@ -21,6 +21,8 @@ import { ImportDialog } from "./ImportDialog";
 import { useListMembers, type ListMember } from "./useListMembers";
 
 const KINDS = ["email", "phone", "anonymous_id", "external"];
+/** The most people the server removes from a list in one call. */
+const REMOVE_BATCH = 1000;
 
 export function ListDetailPage() {
   const { ws = "", listId = "" } = useParams();
@@ -57,18 +59,26 @@ function ListDetail({ workspaceId, listId }: { workspaceId: string; listId: stri
     setBusy(true);
     setFailure(null);
     setNotice(null);
+    const ids = [...selected];
+    let removed = 0;
+    let failed = false;
+    // The server takes at most REMOVE_BATCH people per call; a later failure keeps what the earlier calls did.
     try {
-      const result = await unwrap(
-        client.POST("/api/v1/workspaces/{ws}/lists/{id}/members/remove", {
-          params: { path: { ws: workspaceId, id: listId } },
-          body: { person_ids: [...selected] },
-        }),
-      );
-      setNotice(`Removed ${plural(result.removed, "person", "people")}.`);
-      refresh();
+      for (let at = 0; at < ids.length; at += REMOVE_BATCH) {
+        const result = await unwrap(
+          client.POST("/api/v1/workspaces/{ws}/lists/{id}/members/remove", {
+            params: { path: { ws: workspaceId, id: listId } },
+            body: { person_ids: ids.slice(at, at + REMOVE_BATCH) },
+          }),
+        );
+        removed += result.removed;
+      }
     } catch (error) {
+      failed = true;
       setFailure(describeError(error));
     } finally {
+      if (!failed || removed > 0) setNotice(`Removed ${plural(removed, "person", "people")}.`);
+      if (!failed || removed > 0) refresh();
       setBusy(false);
     }
   }

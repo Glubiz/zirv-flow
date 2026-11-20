@@ -123,6 +123,29 @@ describe("identity conflicts", () => {
     expect(statuses.at(-1)).toContain("status=resolved");
   });
 
+  it("drops a failed Show more error when the filter changes", async () => {
+    const resolved = { ...CONFLICT, resolved_at: "2026-10-02T09:00:00Z", resolution: "kept_separate" };
+    mountAsAdmin({
+      [LIST]: (request) => {
+        const params = new URL(request.url).searchParams;
+        if (params.get("cursor") === "cursor-1") return problem(500, "Internal Server Error", "STALEBOOM");
+        return params.get("status") === "resolved"
+          ? json({ conflicts: [resolved], next_cursor: "r-cursor" })
+          : json({ conflicts: [CONFLICT], next_cursor: "cursor-1" });
+      },
+    });
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "Show more" }));
+    expect(await screen.findByText(/STALEBOOM/)).toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText("Show"), "resolved");
+
+    await screen.findByRole("table", { name: "Resolved identity conflicts" });
+    expect(screen.getByRole("button", { name: "Show more" })).toBeInTheDocument();
+    expect(screen.queryByText(/STALEBOOM/)).not.toBeInTheDocument();
+  });
+
   it("shows an empty state for each filter, and a retry when loading fails", async () => {
     mountAsAdmin({ [LIST]: () => json({ conflicts: [], next_cursor: null }) });
     const user = userEvent.setup();
@@ -161,6 +184,53 @@ describe("identity conflicts", () => {
     expect(screen.getByText("Email address")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Show more" })).not.toBeInTheDocument();
     expect(calls.some((call) => call.search.includes("cursor=cursor-1"))).toBe(true);
+  });
+
+  describe("while the access to resolve is unknown", () => {
+    const NOTICE = /Only workspace admins and the instance owner can resolve conflicts/;
+    const MEMBERS = "GET /api/v1/workspaces/ws1/members";
+
+    it("shows the access error with a retry, not the cannot-resolve notice, when the members fail to load", async () => {
+      mountAsAdmin({ [MEMBERS]: () => problem(500, "Internal Server Error", "membersdown") });
+      mount();
+
+      expect(await screen.findByText(/membersdown/)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+      expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
+    });
+
+    it("says nothing about access while it loads, then explains a non-admin", async () => {
+      let answer: () => void = () => undefined;
+      const held = new Promise<void>((done) => {
+        answer = done;
+      });
+      mountAsAdmin({
+        "GET /api/v1/session": () => json(session(MEMBER, "csrf-conflicts")),
+        [MEMBERS]: async () => {
+          await held;
+          return json(members("editor", MEMBER.id));
+        },
+      });
+      mount();
+
+      await screen.findByRole("table", { name: "Open identity conflicts" });
+      expect(screen.queryByText(NOTICE)).not.toBeInTheDocument();
+      answer();
+      expect(await screen.findByText(NOTICE)).toBeInTheDocument();
+    });
+
+    it("claims nothing and offers no resolution in the review dialog", async () => {
+      mountAsAdmin({ [MEMBERS]: () => problem(500, "Internal Server Error", "membersdown") });
+      const user = userEvent.setup();
+      mount();
+
+      await user.click(await screen.findByRole("button", { name: /^Review Email address conflict/ }));
+
+      const dialog = within(await screen.findByRole("dialog", { name: "Review conflict" }));
+      await dialog.findByRole("region", { name: "Person A" });
+      expect(dialog.queryByText(NOTICE)).not.toBeInTheDocument();
+      expect(dialog.queryByRole("button", { name: "Keep separate" })).not.toBeInTheDocument();
+    });
   });
 
   it("shows the two people side by side with the shared identifier marked", async () => {

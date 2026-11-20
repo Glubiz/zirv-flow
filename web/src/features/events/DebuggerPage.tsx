@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type SyntheticEvent } from "react";
+import { memo, useEffect, useRef, useState, type SyntheticEvent } from "react";
 import { Link, useParams } from "react-router";
 
 import type { components } from "../../api";
@@ -275,7 +275,7 @@ function LiveFeed({ workspaceId, url, onReconnect }: { workspaceId: string; url:
   );
 }
 
-function ItemRow({ workspaceId, item }: { workspaceId: string; item: Item }) {
+const ItemRow = memo(function ItemRow({ workspaceId, item }: { workspaceId: string; item: Item }) {
   return (
     <tr>
       <td>{formatDateTime(item.at)}</td>
@@ -307,4 +307,4 @@ function ItemRow({ workspaceId, item }: { workspaceId: string; item: Item }) {
       </td>
     </tr>
   );
-}
+});
