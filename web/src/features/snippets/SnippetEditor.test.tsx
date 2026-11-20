@@ -100,6 +100,56 @@ describe("the block editor in snippet mode", () => {
     expect(saves(calls)).toHaveLength(1);
   });
 
+  it("stops saying the preview is updating when a newer refresh cannot save the draft", async () => {
+    let release: () => void = () => undefined;
+    const routes = snippetRoutes({ save: () => refusal(500, {}) });
+    routes[`POST ${BASE}/preview`] = async () => {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return json(previewBody());
+    };
+    mockApi(routes);
+    const user = userEvent.setup();
+    mount();
+
+    await screen.findByText(/Updating the preview/);
+    await user.click(await screen.findByRole("button", { name: "Add heading block" }));
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    expect(screen.queryByText(/Updating the preview/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Publish…" })).toBeDisabled();
+  });
+
+  it("saves nothing when the editor is left with Leave, as the dialog says", async () => {
+    const calls = mockApi(snippetRoutes());
+    const user = userEvent.setup();
+    const { router } = mount();
+
+    await user.click(await screen.findByRole("button", { name: "Add heading block" }));
+    void router.navigate("/w/ws1/elsewhere");
+    const dialog = await screen.findByRole("dialog", { name: "Leave without saving?" });
+    await user.click(within(dialog).getByRole("button", { name: "Leave" }));
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+
+    expect(saves(calls)).toHaveLength(0);
+  });
+
+  it("still saves once after Keep editing", async () => {
+    const calls = mockApi(snippetRoutes());
+    const user = userEvent.setup();
+    const { router } = mount();
+
+    await user.click(await screen.findByRole("button", { name: "Add heading block" }));
+    void router.navigate("/w/ws1/elsewhere");
+    const dialog = await screen.findByRole("dialog", { name: "Leave without saving?" });
+    await user.click(within(dialog).getByRole("button", { name: "Keep editing" }));
+
+    await waitFor(() => expect(saves(calls)).toHaveLength(1), WAIT);
+  });
+
   it("shows preview warnings as issues and still renders the preview", async () => {
     mockApi(
       snippetRoutes({

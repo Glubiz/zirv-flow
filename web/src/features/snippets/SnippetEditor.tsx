@@ -108,7 +108,11 @@ export function SnippetEditor({ workspaceId, initial, canWrite, canPublish: mayP
 
   const refresh = useCallback(async () => {
     const mine = ++run.current;
-    if (editable && !(await flush())) return;
+    if (editable && !(await flush())) {
+      // A refresh this one superseded cannot clear the flag, so the newest one does.
+      if (mine === run.current && live.current) setRefreshing(false);
+      return;
+    }
     if (!canWrite || mine !== run.current || !live.current) return;
     setRefreshing(true);
     try {
@@ -274,7 +278,15 @@ export function SnippetEditor({ workspaceId, initial, canWrite, canPublish: mayP
           <p className="muted">The draft has changes that are not saved yet. They are lost if you leave now.</p>
           <div className="dialog-actions">
             <Button onClick={guard.stay}>Keep editing</Button>
-            <Button variant="primary" onClick={guard.leave}>
+            <Button
+              variant="primary"
+              onClick={() => {
+                // Leave discards the edits, as the dialog says: the unmount flush must save nothing.
+                dirty.current = false;
+                stopped.current = true;
+                guard.leave();
+              }}
+            >
               Leave
             </Button>
           </div>

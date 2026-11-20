@@ -336,7 +336,7 @@ describe("a source", () => {
     expect(dialog.getByRole("button", { name: "Save stream" })).toBeDisabled();
   });
 
-  it("edits and clears the reconciliation cron and the sweep limit, and saves the mapping unchanged", async () => {
+  it("edits and clears the reconciliation cron and the sweep limit, and leaves the mapping to the Map dialog", async () => {
     const mapped = aStream({
       enabled: true,
       sync_mode: "incremental",
@@ -373,9 +373,8 @@ describe("a source", () => {
     await waitFor(() => expect(calls.filter((call) => call.method === "PUT")).toHaveLength(1));
     const first = calls.find((call) => call.method === "PUT")!;
     expect(first.body).toMatchObject({ reconcile_schedule: "0 3 * * *", sweep_limit: 1 });
-    // The mapping goes back exactly as it was read: the event, the list, the ignored column, the
-    // key and the delete signal.
-    expect(JSON.stringify((first.body as { mapping: unknown }).mapping)).toBe(JSON.stringify(mapped.mapping));
+    // The mapping is not sent: the server keeps the saved one, and only the Map dialog writes it.
+    expect(Object.keys(first.body as object)).not.toContain("mapping");
 
     // Clearing the cron sends none.
     await user.click(await screen.findByRole("button", { name: "Set up stream_1" }));
@@ -385,7 +384,75 @@ describe("a source", () => {
     await waitFor(() => expect(calls.filter((call) => call.method === "PUT")).toHaveLength(2));
     const cleared = calls.filter((call) => call.method === "PUT")[1]!;
     expect(cleared.body).toMatchObject({ reconcile_schedule: null, sweep_limit: 0.25 });
-    expect(JSON.stringify((cleared.body as { mapping: unknown }).mapping)).toBe(JSON.stringify(mapped.mapping));
+    expect(Object.keys(cleared.body as object)).not.toContain("mapping");
+  });
+
+  it("does not send the saved mapping, so a stream whose list is gone can still be switched off", async () => {
+    const mapped = aStream({
+      enabled: true,
+      mapping: { key_column: null, columns: [{ column: "email", target: { type: "list", list_id: "gone" }, transforms: [] }] },
+    });
+    const calls = mockApi({
+      ...ADMIN,
+      "GET /api/v1/workspaces/ws1/sources/src-1/streams": () => json([mapped]),
+      "PUT /api/v1/workspaces/ws1/sources/src-1/streams/stream_1": async (request) => {
+        const body = (await request.json()) as Record<string, unknown>;
+        return "mapping" in body ? problem(422, "Unprocessable Entity", "mapping: unknown_list") : json(aStream({ enabled: false, mapping: mapped.mapping }));
+      },
+    });
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "Set up stream_1" }));
+    const dialog = within(screen.getByRole("dialog", { name: "Set up stream_1" }));
+    await user.click(dialog.getByRole("button", { name: "Save stream" }));
+
+    expect(await screen.findByText("Saved stream_1.")).toBeInTheDocument();
+    const put = calls.find((call) => call.method === "PUT")!;
+    expect(Object.keys(put.body as object)).not.toContain("mapping");
+  });
+
+  it("refreshes the source's freshness after a stream is discovered", async () => {
+    let found = false;
+    mockApi({
+      ...ADMIN,
+      "GET /api/v1/workspaces/ws1/sources/src-1": () => json(aSource({ freshness: found ? "fresh" : null })),
+      "POST /api/v1/workspaces/ws1/sources/src-1/discover": () => {
+        found = true;
+        return json([aStream()]);
+      },
+    });
+    const user = userEvent.setup();
+    mount();
+    const settings = within(await screen.findByRole("region", { name: "Settings" }));
+    expect(await settings.findByText("No enabled streams")).toBeInTheDocument();
+
+    await user.click(await screen.findByRole("button", { name: "Discover streams again" }));
+
+    expect(await screen.findByText("Found 1 stream.")).toBeInTheDocument();
+    await waitFor(() => expect(settings.queryByText("No enabled streams")).not.toBeInTheDocument());
+  });
+
+  it("refreshes the source's freshness after a stream is saved", async () => {
+    let saved = false;
+    mockApi({
+      ...ADMIN,
+      "GET /api/v1/workspaces/ws1/sources/src-1": () => json(aSource({ freshness: saved ? "fresh" : null })),
+      "PUT /api/v1/workspaces/ws1/sources/src-1/streams/stream_1": () => {
+        saved = true;
+        return json(aStream({ enabled: true }));
+      },
+    });
+    const user = userEvent.setup();
+    mount();
+    const settings = within(await screen.findByRole("region", { name: "Settings" }));
+    expect(await settings.findByText("No enabled streams")).toBeInTheDocument();
+
+    await user.click(await screen.findByRole("button", { name: "Set up stream_1" }));
+    await user.click(within(screen.getByRole("dialog", { name: "Set up stream_1" })).getByRole("button", { name: "Save stream" }));
+
+    expect(await screen.findByText("Saved stream_1.")).toBeInTheDocument();
+    await waitFor(() => expect(settings.queryByText("No enabled streams")).not.toBeInTheDocument());
   });
 
   it("hides the cron for a full refresh stream and says what a sweep does", async () => {

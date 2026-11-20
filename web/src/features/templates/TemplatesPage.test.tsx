@@ -621,6 +621,98 @@ describe("importing HTML or MJML", () => {
     expect(email["html"]).toBe(source);
   });
 
+  it("empties the source when the next file is too large", async () => {
+    mockApi(routes());
+    const { user, dialog } = await openDialog();
+
+    await user.upload(within(dialog).getByLabelText("File"), new File(["<p>small</p>"], "small.html", { type: "text/html" }));
+    await waitFor(() => expect(within(dialog).getByLabelText("Source")).toHaveValue("<p>small</p>"));
+    const big = new File(["<p>big</p>"], "big.html", { type: "text/html" });
+    Object.defineProperty(big, "size", { value: 2_000_000 });
+    await user.upload(within(dialog).getByLabelText("File"), big);
+
+    expect(await within(dialog).findByText("That file is too large")).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Source")).toHaveValue("");
+    expect(within(dialog).getByRole("button", { name: "Import template" })).toBeDisabled();
+  });
+
+  it("keeps the text pasted while a slow file was still being read", async () => {
+    mockApi(routes());
+    const { user, dialog } = await openDialog();
+    let finish: (text: string) => void = () => undefined;
+    const slow = new File(["<p>file</p>"], "slow.html", { type: "text/html" });
+    Object.defineProperty(slow, "text", {
+      value: () =>
+        new Promise<string>((resolve) => {
+          finish = resolve;
+        }),
+    });
+
+    await user.upload(within(dialog).getByLabelText("File"), slow);
+    fireEvent.change(within(dialog).getByLabelText("Source"), { target: { value: "<p>pasted</p>" } });
+    finish("<p>file</p>");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(within(dialog).getByLabelText("Source")).toHaveValue("<p>pasted</p>");
+  });
+
+  it("keeps the last file picked when two reads finish out of order", async () => {
+    mockApi(routes());
+    const { user, dialog } = await openDialog();
+    const finishes: Record<string, (text: string) => void> = {};
+    const slow = (name: string) => {
+      const file = new File(["x"], name, { type: "text/html" });
+      Object.defineProperty(file, "text", {
+        value: () =>
+          new Promise<string>((resolve) => {
+            finishes[name] = resolve;
+          }),
+      });
+      return file;
+    };
+
+    await user.upload(within(dialog).getByLabelText("File"), slow("first.html"));
+    await user.upload(within(dialog).getByLabelText("File"), slow("second.html"));
+    finishes["second.html"]?.("<p>second</p>");
+    await waitFor(() => expect(within(dialog).getByLabelText("Source")).toHaveValue("<p>second</p>"));
+    finishes["first.html"]?.("<p>first</p>");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(within(dialog).getByLabelText("Source")).toHaveValue("<p>second</p>");
+  });
+
+  it("keeps the newer source when an earlier file read fails after it", async () => {
+    mockApi(routes());
+    const { user, dialog } = await openDialog();
+    let fail: (error: Error) => void = () => undefined;
+    const slow = new File(["x"], "slow.html", { type: "text/html" });
+    Object.defineProperty(slow, "text", {
+      value: () =>
+        new Promise<string>((_resolve, reject) => {
+          fail = reject;
+        }),
+    });
+
+    await user.upload(within(dialog).getByLabelText("File"), slow);
+    fireEvent.change(within(dialog).getByLabelText("Source"), { target: { value: "<p>pasted</p>" } });
+    fail(new Error("unreadable"));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(within(dialog).getByLabelText("Source")).toHaveValue("<p>pasted</p>");
+    expect(within(dialog).queryByText("That file could not be read")).not.toBeInTheDocument();
+  });
+
+  it("says so when a file cannot be read", async () => {
+    mockApi(routes());
+    const { user, dialog } = await openDialog();
+    const broken = new File(["x"], "broken.html", { type: "text/html" });
+    Object.defineProperty(broken, "text", { value: () => Promise.reject(new Error("unreadable")) });
+
+    await user.upload(within(dialog).getByLabelText("File"), broken);
+
+    expect(await within(dialog).findByText("That file could not be read")).toBeInTheDocument();
+  });
+
   it("needs a source and a name", async () => {
     mockApi(routes());
     const { dialog } = await openDialog();

@@ -112,6 +112,34 @@ describe("the Versions and use page", () => {
     expect(screen.getByText("Archiving is blocked while an active flow sends this template.")).toBeInTheDocument();
   });
 
+  it("renders a saved person once, not again after each answer", async () => {
+    const calls = mockApi(routes());
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: /^Version 2/ }));
+    await user.selectOptions(await screen.findByRole("combobox", { name: "Show the render for" }), "p-1");
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+
+    expect(previewsOf(calls).filter((body) => body["person_id"] === "p-1")).toHaveLength(1);
+  });
+
+  it("asks exactly once more when the sample person is chosen again", async () => {
+    const calls = mockApi(routes());
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: /^Version 2/ }));
+    const select = await screen.findByRole("combobox", { name: "Show the render for" });
+    await user.selectOptions(select, "p-1");
+    await waitFor(() => expect(previewsOf(calls).filter((body) => body["person_id"] === "p-1")).toHaveLength(1));
+    const before = previewsOf(calls).length;
+    await user.selectOptions(select, within(select).getAllByRole("option").at(-1) as HTMLElement);
+    await new Promise((resolve) => setTimeout(resolve, 800));
+
+    expect(previewsOf(calls)).toHaveLength(before + 1);
+  });
+
   it("copies a version into the draft and puts the earlier draft back on Undo", async () => {
     const calls = mockApi(routes({ put: (body, asked) => saved(body.document, asked === 1 ? 2 : 3) }));
     const user = userEvent.setup();

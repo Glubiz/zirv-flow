@@ -83,6 +83,7 @@ function SourceDetail({ workspaceId, sourceId }: { workspaceId: string; sourceId
       const found = await unwrap(client.POST("/api/v1/workspaces/{ws}/sources/{id}/discover", path));
       setNotice(`Found ${plural(found.length, "stream", "streams")}.`);
       streams.reload();
+      source.reload();
     });
 
   /** Sends the browser to the provider's consent page; it comes back with `?oauth=`. */
@@ -113,11 +114,13 @@ function SourceDetail({ workspaceId, sourceId }: { workspaceId: string; sourceId
           : `Started ${plural(started.length, "run", "runs")}.`,
       );
       setRunsVersion((value) => value + 1);
+      source.reload();
     });
 
   function streamChanged(saved: Stream) {
     setNotice(`Saved ${saved.name}.`);
     streams.reload();
+    source.reload();
   }
 
   return (
@@ -274,7 +277,7 @@ function SourceDetail({ workspaceId, sourceId }: { workspaceId: string; sourceId
                   </div>
                 ) : null}
                 {push ? null : (
-                  <RunsPanel workspaceId={workspaceId} sourceId={sourceId} canManage={canManage} version={runsVersion} />
+                  <RunsPanel workspaceId={workspaceId} sourceId={sourceId} canManage={canManage} version={runsVersion} onSettled={source.reload} />
                 )}
               </Panel>
               {!canManage ? <p className="muted">You can look at this source but not change it.</p> : null}

@@ -27,11 +27,12 @@ interface Verdict {
   streams: ManifestStream[];
 }
 
+/** A sample knows the stream and the manifest text it was read for, so it is shown only against them. */
 type Sample =
   | { status: "idle" }
-  | { status: "loading" }
-  | { status: "error"; failure: ErrorSummary }
-  | { status: "ready"; records: Record<string, unknown>[]; truncated: boolean };
+  | { status: "loading"; stream: string; text: string }
+  | { status: "error"; stream: string; text: string; failure: ErrorSummary }
+  | { status: "ready"; stream: string; text: string; records: Record<string, unknown>[]; truncated: boolean };
 
 interface ManifestEditorProps {
   label: string;
@@ -76,6 +77,7 @@ export function ManifestEditor({
   const [stream, setStream] = useState("");
   const [limit, setLimit] = useState("10");
   const [sample, setSample] = useState<Sample>({ status: "idle" });
+  const sampleRun = useRef(0);
   const blank = value.trim() === "";
   // The text the editor opened with, or last loaded from a draft: edits since are unsaved.
   const baseline = useRef(value);
@@ -119,6 +121,7 @@ export function ManifestEditor({
       : (answered?.issues ?? []);
   const streams = answered?.valid ? answered.streams : [];
   const chosen = streams.find((entry) => entry.name === stream) ?? streams[0];
+  const shown: Sample = sample.status !== "idle" && (sample.stream !== chosen?.name || sample.text !== value) ? { status: "idle" } : sample;
   const checking = !blank && analysis.ok && answered === null && unreachable === null;
 
   function show(issue: Issue) {
@@ -135,7 +138,9 @@ export function ManifestEditor({
 
   async function read() {
     if (!sourceId || !chosen || !analysis.ok) return;
-    setSample({ status: "loading" });
+    const mine = ++sampleRun.current;
+    const at = { stream: chosen.name, text: value };
+    setSample({ status: "loading", ...at });
     try {
       const body = await unwrap(
         client.POST("/api/v1/workspaces/{ws}/sources/{id}/manifest/sample", {
@@ -147,9 +152,9 @@ export function ManifestEditor({
           },
         }),
       );
-      setSample({ status: "ready", records: body.records, truncated: body.truncated });
+      if (mine === sampleRun.current) setSample({ status: "ready", ...at, records: body.records, truncated: body.truncated });
     } catch (error) {
-      setSample({ status: "error", failure: describeError(error) });
+      if (mine === sampleRun.current) setSample({ status: "error", ...at, failure: describeError(error) });
     }
   }
 
@@ -227,6 +232,7 @@ export function ManifestEditor({
               disabled={disabled || streams.length === 0}
               onChange={(event) => {
                 setStream(event.target.value);
+                sampleRun.current += 1;
                 setSample({ status: "idle" });
               }}
             >
@@ -251,18 +257,18 @@ export function ManifestEditor({
             </SelectField>
             <Button
               onClick={() => void read()}
-              disabled={disabled || !chosen || sample.status === "loading"}
+              disabled={disabled || !chosen || shown.status === "loading"}
             >
               Test with sample
             </Button>
           </div>
-          {sample.status === "idle" ? (
+          {shown.status === "idle" ? (
             <p className="muted">Reads a few records with the saved credential and shows them as the API returns them.</p>
-          ) : sample.status === "loading" ? (
+          ) : shown.status === "loading" ? (
             <LoadingState label="Reading a sample" />
-          ) : sample.status === "error" ? (
-            <InlineError {...sample.failure} />
-          ) : sample.records.length === 0 ? (
+          ) : shown.status === "error" ? (
+            <InlineError {...shown.failure} />
+          ) : shown.records.length === 0 ? (
             <EmptyState title="The API returned no records" />
           ) : (
             <div className="stack">
@@ -278,7 +284,7 @@ export function ManifestEditor({
                     </tr>
                   </thead>
                   <tbody>
-                    {sample.records.map((record, index) => (
+                    {shown.records.map((record, index) => (
                       <tr key={index}>
                         {(chosen?.fields ?? []).map((field) => (
                           <td key={field.name}>{cell(record[field.name])}</td>
@@ -290,7 +296,7 @@ export function ManifestEditor({
               </div>
               <p className="muted">
                 Raw values, as the API returned them, before any mapping.
-                {sample.truncated ? " The stream has more records than shown." : ""}
+                {shown.truncated ? " The stream has more records than shown." : ""}
               </p>
             </div>
           )}

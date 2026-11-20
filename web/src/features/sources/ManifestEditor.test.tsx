@@ -199,6 +199,115 @@ describe("the sample", () => {
     expect(await screen.findByText("the source refused the credential")).toBeInTheDocument();
   });
 
+  it("does not show a sample under another stream when the stream changes while it loads", async () => {
+    let release: () => void = () => undefined;
+    mockApi({
+      ...BASE,
+      [VALIDATE]: () =>
+        json({
+          valid: true,
+          issues: [],
+          streams: [
+            { name: "contacts", fields: [{ name: "id", type: "string" }] },
+            { name: "orders", fields: [{ name: "total", type: "number" }] },
+          ],
+        }),
+      [SAMPLE]: async () => {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return json({ records: [{ id: "c1" }], read: 1, truncated: false });
+      },
+    });
+    const user = userEvent.setup();
+    mount(starterManifest("none"), "src-1");
+
+    const test = await screen.findByRole("button", { name: "Test with sample" });
+    await vi.waitFor(() => expect(test).toBeEnabled());
+    await user.click(test);
+    await user.selectOptions(screen.getByLabelText("Stream to read"), "orders");
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    expect(screen.queryByRole("table", { name: "Sample records" })).not.toBeInTheDocument();
+    expect(screen.getByText(/Reads a few records with the saved credential/)).toBeInTheDocument();
+  });
+
+  it("keeps the newest read when an earlier read of the same stream fails after it", async () => {
+    const releases: (() => void)[] = [];
+    let asked = 0;
+    mockApi({
+      ...ready,
+      [SAMPLE]: async () => {
+        const mine = ++asked;
+        await new Promise<void>((resolve) => releases.push(resolve));
+        return mine === 1
+          ? problem(502, "Bad Gateway", "the source refused the credential")
+          : json({ records: [{ id: "second" }], read: 1, truncated: false });
+      },
+    });
+    const user = userEvent.setup();
+    mount(starterManifest("none"), "src-1");
+
+    const test = await screen.findByRole("button", { name: "Test with sample" });
+    await vi.waitFor(() => expect(test).toBeEnabled());
+    await user.click(test);
+    await user.selectOptions(screen.getByLabelText("Stream to read"), "contacts");
+    await user.click(screen.getByRole("button", { name: "Test with sample" }));
+    await vi.waitFor(() => expect(releases).toHaveLength(2));
+    releases[1]?.();
+    await screen.findByText("second");
+    releases[0]?.();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    expect(screen.getByText("second")).toBeInTheDocument();
+    expect(screen.queryByText("the source refused the credential")).not.toBeInTheDocument();
+  });
+
+  it("drops the rows once the manifest text is edited", async () => {
+    mockApi({ ...ready, [SAMPLE]: () => json({ records: [{ id: "c1", email: "a@example.com" }], read: 1, truncated: false }) });
+    const user = userEvent.setup();
+    mount(starterManifest("none"), "src-1");
+
+    const test = await screen.findByRole("button", { name: "Test with sample" });
+    await vi.waitFor(() => expect(test).toBeEnabled());
+    await user.click(test);
+    await screen.findByRole("table", { name: "Sample records" });
+    await user.type(screen.getByLabelText("Manifest"), " ");
+
+    expect(screen.queryByRole("table", { name: "Sample records" })).not.toBeInTheDocument();
+    expect(screen.getByText(/Reads a few records with the saved credential/)).toBeInTheDocument();
+  });
+
+  it("shows only the newest read when the same stream is read again while the first is pending", async () => {
+    const releases: (() => void)[] = [];
+    let asked = 0;
+    mockApi({
+      ...ready,
+      [SAMPLE]: async () => {
+        const mine = ++asked;
+        await new Promise<void>((resolve) => releases.push(resolve));
+        return json({ records: [{ id: mine === 1 ? "first" : "second" }], read: 1, truncated: false });
+      },
+    });
+    const user = userEvent.setup();
+    mount(starterManifest("none"), "src-1");
+
+    const test = await screen.findByRole("button", { name: "Test with sample" });
+    await vi.waitFor(() => expect(test).toBeEnabled());
+    await user.click(test);
+    await user.selectOptions(screen.getByLabelText("Stream to read"), "contacts");
+    await user.click(screen.getByRole("button", { name: "Test with sample" }));
+    await vi.waitFor(() => expect(releases).toHaveLength(2));
+    releases[1]?.();
+    await screen.findByText("second");
+    releases[0]?.();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    expect(screen.getByText("second")).toBeInTheDocument();
+    expect(screen.queryByText("first")).not.toBeInTheDocument();
+  });
+
   it("cannot be asked for while the manifest has problems", async () => {
     mockApi({
       ...BASE,
