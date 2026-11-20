@@ -15,3 +15,10 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v1.0.23 (2026-11-20)
+
+### Chores
+
+- resume time after the upload-deadline checks (#843)
+- make the bracket-scan timing and upload-deadline route tests deterministic (#841, #843)
+
