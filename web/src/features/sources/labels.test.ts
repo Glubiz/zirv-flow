@@ -304,12 +304,22 @@ describe("webhook labels", () => {
   it("writes the example command the sources guide documents, for either scheme", () => {
     const timestamped = curlExample("https://flow.example.test/hooks/hook-1", aWebhook(), "zfwh_secret");
     expect(timestamped).toContain(`printf '%s' "$TS.$BODY" | openssl dgst -sha256 -hmac 'zfwh_secret'`);
-    expect(timestamped).toContain(`-H "X-Zirv-Timestamp: $TS"`);
-    expect(timestamped).toContain(`-H "X-Zirv-Signature: sha256=$SIG"`);
+    expect(timestamped).toContain(`-H 'X-Zirv-Timestamp: '"$TS"`);
+    expect(timestamped).toContain(`-H 'X-Zirv-Signature: sha256='"$SIG"`);
     expect(timestamped).toContain(`curl -X POST 'https://flow.example.test/hooks/hook-1' \\\n  -H 'Content-Type`);
     const bodyOnly = curlExample("https://x/hooks/h", aWebhook({ timestamp_header: null }), "zfwh_secret");
     expect(bodyOnly).toContain(`printf '%s' "$BODY" | openssl dgst`);
     expect(bodyOnly).not.toContain("$TS");
+  });
+
+  it("never lets a signature prefix or other value reach the shell as code", () => {
+    const hook = aWebhook({ signature_prefix: "$(touch /tmp/x)`id`'\"" });
+    const out = curlExample("https://x/hooks/h?a=$(id)", hook, "se'cret$(id)");
+    const line = out.split("\n").find((l) => l.includes("touch"))!;
+    expect(line).not.toMatch(/"[^"]*\$\([^"]*"/);
+    expect(line).toBe(`  -H 'X-Zirv-Signature: $(touch /tmp/x)\`id\`'\\''"'"$SIG" \\`);
+    expect(out).toContain(`curl -X POST 'https://x/hooks/h?a=$(id)'`);
+    expect(out).toContain(`-hmac 'se'\\''cret$(id)'`);
   });
 
   it("explains the codes in plain words and shows an unknown one as it is", () => {

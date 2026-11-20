@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router";
 
 import { ApiError, client, describeError, unwrap, useResource, type ErrorSummary } from "../../api";
@@ -47,6 +47,8 @@ function TemplateLibrary({ workspaceId }: { workspaceId: string }) {
   const [params, setParams] = useSearchParams();
   const filters = readFilters(params);
   const [text, setText] = useState(filters.q);
+  // The last search this page put in the URL itself: any other value there came from outside.
+  const written = useRef(filters.q);
   const [adding, setAdding] = useState(false);
   const [importing, setImporting] = useState(false);
   const [archiving, setArchiving] = useState<TemplateListItem | null>(null);
@@ -76,12 +78,23 @@ function TemplateLibrary({ workspaceId }: { workspaceId: string }) {
   useEffect(() => {
     const term = text.trim();
     if (term === filters.q) return;
-    const timer = setTimeout(() => update({ q: term }), SEARCH_DELAY_MS);
+    const timer = setTimeout(() => {
+      written.current = term;
+      update({ q: term });
+    }, SEARCH_DELAY_MS);
     return () => clearTimeout(timer);
   }, [text, filters.q, update]);
 
+  // A link, Back or Forward changed the search: the box follows, so the old term is not written back.
+  useEffect(() => {
+    if (filters.q === written.current) return;
+    written.current = filters.q;
+    setText(filters.q);
+  }, [filters.q]);
+
   function clearFilters() {
     setText("");
+    written.current = "";
     update({ q: "", status: "", channel: "", theme: "" });
   }
 

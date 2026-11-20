@@ -58,6 +58,35 @@ function publishButtons() {
 }
 
 describe("the Review and publish page", () => {
+  it("does not send the queued previews of a person it moved past", async () => {
+    const asked: string[] = [];
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    mockApi({
+      ...liveRoutes(blocksDoc(heading("Hi")), blocksDoc(heading("Hi"))),
+      [`GET ${BASE}/preview-people`]: () => json(PEOPLE),
+      [PREVIEW]: async (request) => {
+        const body = (await request.json()) as { person_id?: string; version?: number };
+        asked.push(`${body.person_id ?? "sample"}@${body.version ?? "draft"}`);
+        // The first three requests hold every slot, so what follows is queued until the person is chosen.
+        if (asked.length <= 3) await gate;
+        return rendered();
+      },
+    });
+    const user = userEvent.setup();
+    mount();
+    const select = await screen.findByLabelText("Show the render for", undefined, WAIT);
+    await waitFor(() => expect(asked.length).toBe(3), WAIT);
+    await user.selectOptions(select, "p-1");
+    await user.selectOptions(select, "p-2");
+    release();
+    await waitFor(() => expect(asked.filter((entry) => entry.endsWith("@1")).length).toBeGreaterThanOrEqual(2), WAIT);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(asked.filter((entry) => entry.endsWith("@1"))).toEqual(["sample@1", "p-2@1"]);
+  });
+
   it("checks three saved people and the sample person, three at a time, and a blocking result disables Publish", async () => {
     let inFlight = 0;
     let peak = 0;

@@ -394,15 +394,21 @@ export function curlExample(
 ): string {
   const lines = [`BODY='{"id":"order-1","email":"ada@example.com"}'`];
   if (hook.timestamp_header === null) {
-    lines.push(`SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac '${secret}' | sed 's/^.* //')`);
+    lines.push(`SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac ${shellQuote(secret)} | sed 's/^.* //')`);
   } else {
     lines.push("TS=$(date +%s)");
-    lines.push(`SIG=$(printf '%s' "$TS.$BODY" | openssl dgst -sha256 -hmac '${secret}' | sed 's/^.* //')`);
+    lines.push(`SIG=$(printf '%s' "$TS.$BODY" | openssl dgst -sha256 -hmac ${shellQuote(secret)} | sed 's/^.* //')`);
   }
-  const curl = [`curl -X POST '${url}'`, `  -H 'Content-Type: application/json'`];
-  if (hook.timestamp_header !== null) curl.push(`  -H "${hook.timestamp_header}: $TS"`);
-  curl.push(`  -H "${hook.signature_header}: ${hook.signature_prefix}$SIG"`, `  -d "$BODY"`);
+  const curl = [`curl -X POST ${shellQuote(url)}`, `  -H 'Content-Type: application/json'`];
+  // Only `$TS` and `$SIG` stay outside single quotes, so the shell expands nothing a person typed.
+  if (hook.timestamp_header !== null) curl.push(`  -H ${shellQuote(`${hook.timestamp_header}: `)}"$TS"`);
+  curl.push(`  -H ${shellQuote(`${hook.signature_header}: ${hook.signature_prefix}`)}"$SIG"`, `  -d "$BODY"`);
   return [...lines, curl.join(" \\\n")].join("\n");
+}
+
+/** One shell word that is `value` exactly: single quotes, with each embedded `'` written `'\''`. */
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
 /** What a code the hooks API or a reject carries means, in plain words. */
