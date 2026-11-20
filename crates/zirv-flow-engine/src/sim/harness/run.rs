@@ -746,12 +746,17 @@ mod tests {
         assert!(sim.db.queue.values().all(|queued| queued.crashes > 0));
     }
 
-    /// Commits `kind` for `a` at `at` as its own claim, with no crash.
-    fn run_alone(sim: &mut Sim<'_>, a: Uuid, kind: JobKind, at: DateTime<Utc>) {
-        for mut one in sim.claim(vec![job(a, kind, at)]) {
+    /// Claims `jobs` as one claim of their own and commits each, with no crash.
+    fn run_claim(sim: &mut Sim<'_>, jobs: Vec<Job>, at: DateTime<Utc>) {
+        for mut one in sim.claim(jobs) {
             let prepared = sim.prepare(&mut one, at);
             sim.complete(one, prepared, at);
         }
+    }
+
+    /// Commits `kind` for `a` at `at` as its own claim, with no crash.
+    fn run_alone(sim: &mut Sim<'_>, a: Uuid, kind: JobKind, at: DateTime<Utc>) {
+        run_claim(sim, vec![job(a, kind, at)], at);
     }
 
     /// Redelivers every queued redelivery, in queue order, each as its own claim.
@@ -765,10 +770,7 @@ mod tests {
             .collect();
         for key in keys {
             let queued = sim.db.queue.remove(&key).expect("queued");
-            for mut one in sim.claim(vec![queued]) {
-                let prepared = sim.prepare(&mut one, at);
-                sim.complete(one, prepared, at);
-            }
+            run_claim(sim, vec![queued], at);
         }
     }
 
