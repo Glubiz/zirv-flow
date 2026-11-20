@@ -15,3 +15,15 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v1.0.25 (2026-11-20)
+
+### Fixes
+
+- show a failed committed import after a re-pick; reload after a later removal chunk fails
+- apply a committed list import after a re-pick; test the removal chunk boundary
+- imports, members, lists, people and debugger web review findings (#776-#783)
+
+### Chores
+
+- one guard for the removal notice and refresh
+
