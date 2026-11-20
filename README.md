@@ -15,9 +15,8 @@ from that data, and run automation flows for everyone or for a segment.
 ## Status
 
 Release 1.0: M0–M8 are implemented, 1.x is the supported release line, and `/api/v1` changes only additively from 1.0.
-The scalability figures were measured under reference-resource emulation, not on dedicated reference hardware; the
-[M8 validation report](docs/benchmarks/m8-validation.md) states each limit. See the [roadmap](docs/roadmap.md#m8--beta-hardening-and-v10)
-for what 1.0 covers and [architecture](docs/architecture.md) for the design.
+The scalability figures were measured under reference-resource emulation, not on dedicated reference hardware; the [M8 validation report](docs/benchmarks/m8-validation.md) states each limit.
+See the [roadmap](docs/roadmap.md#m8--beta-hardening-and-v10) for what 1.0 covers and [architecture](docs/architecture.md) for the design.
 
 ## Documentation
 
@@ -43,8 +42,7 @@ docker compose up -d --build --wait
 curl -fsS localhost:8080/readyz
 ```
 
-Create the first owner. The password is read from one line of standard input,
-so it never appears on a command line:
+Create the first owner. The password is read from one line of standard input, so it never appears on a command line:
 
 ```sh
 docker compose exec -T zirv-flow zirv-flow admin create-owner --email you@example.com
@@ -267,26 +265,28 @@ npm --prefix web run e2e:install      # Chromium, once
 DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/postgres npm --prefix web run e2e
 ```
 
-Playwright starts the binary, waits for its `READY` line and generates a password for the run. The
-tests are in `web/e2e/`; `ZIRV_FLOW_BROWSER_TEST_PORT` (default 47700) and
-`ZIRV_FLOW_BROWSER_TEST_BIN` (the binary, default under `target/debug`) change where it runs.
-The run cleans up after itself: a global teardown asks the server to stop (`POST /__test/shutdown`)
-which answers once it has dropped its scratch database. CI runs the same steps in the `browser` job.
+Playwright starts the binary, waits for its `READY` line and generates a password for the run. The tests are in `web/e2e/`; `ZIRV_FLOW_BROWSER_TEST_PORT` (default 47700) and `ZIRV_FLOW_BROWSER_TEST_BIN` (the binary, default under `target/debug`) change where it runs.
+The run cleans up after itself: a global teardown asks the server to stop (`POST /__test/shutdown`) which answers once it has dropped its scratch database. CI runs the same steps in the `browser` job.
 
-## Benchmarks
+## Benchmarks and scaling
 
-Reports record their environment and limitations; development-machine results are not
-reference-hardware guarantees. The load generator is `tools/loadgen`; see the
-[benchmark runbook](scripts/bench/README.md).
-The [M8 driver](scripts/bench/README.md#13-m8-reference-resource-emulation-issue-393) adds resumable
-scale seeds and reference-resource emulation; its Docker smoke run and hardware validation remain outstanding.
+Reports record their environment and limitations; development-machine results are not reference-hardware guarantees. The load generator is `tools/loadgen`; see the [benchmark runbook](scripts/bench/README.md).
+The [M8 driver](scripts/bench/README.md#13-m8-reference-resource-emulation-issue-393) adds resumable scale seeds and reference-resource emulation; its Docker smoke run and hardware validation remain outstanding.
+Reports: [m2-ingestion](docs/benchmarks/m2-ingestion.md), [m4-segments](docs/benchmarks/m4-segments.md), [m5-flows](docs/benchmarks/m5-flows.md), [m6-send](docs/benchmarks/m6-send.md), [m7-render](docs/benchmarks/m7-render.md), [m8-validation](docs/benchmarks/m8-validation.md), [simulated-5x](docs/benchmarks/simulated-5x.md).
 
-- [m2-ingestion](docs/benchmarks/m2-ingestion.md)
-- [m4-segments](docs/benchmarks/m4-segments.md)
-- [m5-flows](docs/benchmarks/m5-flows.md)
-- [m6-send](docs/benchmarks/m6-send.md)
-- [m7-render](docs/benchmarks/m7-render.md)
-- [m8-validation](docs/benchmarks/m8-validation.md), [simulated-5x](docs/benchmarks/simulated-5x.md)
+The published 1.0.0 image ran on the simulated production stack at the x5 load: 500k people (1.62M by the end) and a daily-curve peak of 6,500 events/s, about 4,400/s through the ingest API.
+The stack was PostgreSQL 16 with 8 CPUs and 10 GB, 2 `serve`, 4 workers and a scheduler, on one capped development machine, not reference hardware ([#606](https://github.com/Glubiz/zirv-flow/issues/606)).
+It kept up at 1,000 and 2,500 ingest items/s and fell about 4% short at the 4,420/s peak (M). PostgreSQL CPU was the limit, at 7.97 of 8 cores, while the app used about 3 of its 8. Ingest p99 stayed near 100 ms with no 429 or 5xx (M), and storage cost about 1.1 KB per ingested event (D). See [the report](docs/benchmarks/simulated-5x.md).
+Planning rules (D), with cores sized for the daily-curve peak: database cores ≈ inbox items/s × 3 ms ÷ 1000; app cores ≈ items/s × 1.2 ms ÷ 1000, at least 2. Disk ≈ 250 GB per retained day for the benchmark's daily curve, which a day accrues at its mean rate, scaled linearly by peak.
+
+| Example (D) | Peak events/s in total | Inbox items/s | Database cores | App cores | Disk per retained day | 30 days of retention |
+| --- | --- | --- | --- | --- | --- | --- |
+| One fifth of the benchmark | 1,300 | 880 | 2.6, so plan 4 | 1.1, so plan 2 | about 50 GB | about 1.5 TB |
+| The benchmark's load | 6,500 | 4,400 | 13.2, so plan 16 | 5.3, so plan 6 | about 250 GB | about 7.5 TB |
+| Twice the benchmark | 13,000 | 8,800 | 26.4, so plan 32 | 10.6, so plan 12 | about 500 GB | about 15 TB |
+
+Only the 8-core database was measured, so the larger rows are linear extrapolations and row-lock contention can cap a single PostgreSQL first. Events are retained 760 days by default, so set retention to what you need. A 1.0.23 rerun applied about 25% less at the peak while other work shared the machine; the cause is unresolved ([#858](https://github.com/Glubiz/zirv-flow/issues/858)).
+For the method, caveats, memory and connection budgets, see [sizing](docs/operations/sizing.md#scaling-past-the-5x-simulated-load).
 
 ## Development
 
