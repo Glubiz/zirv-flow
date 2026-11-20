@@ -1,5 +1,6 @@
 import { client, describeError, unwrap, useResource, type components } from "../../api";
 import { Button, DayBars, EmptyState, InlineError, LoadingState, Panel } from "../../ui";
+import { useReloadOn } from "./useReloadOn";
 
 type SegmentSize = components["schemas"]["SegmentSizeBody"];
 
@@ -13,7 +14,7 @@ export function sizeLabel(size: SegmentSize): string {
 }
 
 /** How many people the segment held at the end of each day. */
-export function SegmentSizePanel({ workspaceId, segmentId }: { workspaceId: string; segmentId: string }) {
+export function SegmentSizePanel({ workspaceId, segmentId, refreshed = 0 }: { workspaceId: string; segmentId: string; refreshed?: number }) {
   const size = useResource(
     () =>
       unwrap(
@@ -23,6 +24,7 @@ export function SegmentSizePanel({ workspaceId, segmentId }: { workspaceId: stri
       ),
     [workspaceId, segmentId],
   );
+  useReloadOn(refreshed, size.reload);
   return (
     <Panel title={`Size, last ${DAYS} days`}>
       {size.status === "loading" ? (

@@ -1,6 +1,6 @@
 import { useCallback, useState, type SyntheticEvent } from "react";
 
-import { client, describeError, unwrap, type ErrorSummary } from "../../api";
+import { client, describeError, unwrap, type ErrorSummary, usePaged } from "../../api";
 import {
   Button,
   Dialog,
@@ -16,7 +16,6 @@ import {
 import { CONFIRM_PHRASE, erasureStatus } from "./labels";
 import { TargetForm, type PersonTarget } from "./TargetForm";
 import { ShowMore } from "./ShowMore";
-import { usePaged } from "./usePaged";
 import { usePolling } from "./usePolling";
 
 const PAGE_SIZE = 50;
@@ -33,7 +32,7 @@ export function ErasureSection({ workspaceId }: { workspaceId: string }) {
     },
     [workspaceId],
   );
-  const requests = usePaged(fetchPage, [workspaceId]);
+  const requests = usePaged(fetchPage, [workspaceId], (item) => item.id);
   usePolling(
     requests.resource.status === "ready" && requests.resource.data.some((request) => request.status === "pending"),
     requests.resource.status === "ready" && requests.resource.refreshing,

@@ -68,8 +68,7 @@ export function StreamDialog({ workspaceId, sourceId, stream, push = false, onCl
             staleness_threshold_seconds: stalenessValue,
             reconcile_schedule: incremental && reconcile.trim() !== "" ? reconcile.trim() : null,
             sweep_limit: streaming ? 0.5 : limitValue / 100,
-            // The mapping is edited in its own dialog; a save here sends it back as it is.
-            mapping: stream.mapping ?? undefined,
+            // No mapping: the server keeps the saved one, and the Map dialog is the only place it is written.
           },
         }),
       );

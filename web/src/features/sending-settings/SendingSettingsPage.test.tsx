@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
@@ -130,6 +130,71 @@ describe("sending limits", () => {
 
     await user.type(screen.getByLabelText("Limit of cap 1"), "0");
     expect(screen.queryByText(/Saved\./)).not.toBeInTheDocument();
+  });
+
+  it("does not show one workspace's saved notice in another", async () => {
+    mockApi({
+      ...access("admin"),
+      [`GET ${WS}/sending/settings`]: () => json(STORED),
+      [`PUT ${WS}/sending/settings`]: async (request) => json(await request.json()),
+      "GET /api/v1/workspaces/ws2": () => json({ id: "ws2", name: "Other", slug: "other", timezone: "Europe/Copenhagen", utm: UTM_OFF, created_at: "2026-10-01T09:00:00Z" }),
+      "GET /api/v1/workspaces/ws2/members": () => json([{ user_id: OWNER.id, email: OWNER.email, role: "admin", added_at: "2026-10-01T09:00:00Z" }]),
+      "GET /api/v1/workspaces/ws2/sending/settings": () => json({ ...STORED, revision: 1 }),
+      "GET /api/v1/workspaces/ws2/sending-domains": () => json([]),
+      "GET /api/v1/workspaces/ws2/test-send-allowlist": () => json({ entries: [] }),
+      "GET /api/v1/workspaces/ws2/test-send-allowlist/options": () => json([]),
+    });
+    const user = userEvent.setup();
+    const view = mount();
+
+    const limit = await screen.findByLabelText("Limit of cap 1");
+    await user.clear(limit);
+    await user.type(limit, "5");
+    await user.click(screen.getByRole("button", { name: "Save limits" }));
+    expect(await screen.findByText(/Saved\./)).toBeInTheDocument();
+
+    await act(() => view.router.navigate("/w/ws2/settings/sending"));
+    await waitFor(() => expect(screen.getByLabelText("Limit of cap 1")).toHaveValue(3));
+    expect(screen.queryByText(/Saved\./)).not.toBeInTheDocument();
+  });
+
+  it("sends the new revision on a second save, even while the reload is still in flight", async () => {
+    let stored = STORED;
+    let reads = 0;
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const puts: number[] = [];
+    mockApi({
+      ...access("admin"),
+      [`GET ${WS}/sending/settings`]: async () => {
+        reads += 1;
+        if (reads > 1) await held;
+        return json(stored);
+      },
+      [`PUT ${WS}/sending/settings`]: async (request) => {
+        const body = (await request.json()) as { revision: number };
+        puts.push(body.revision);
+        if (body.revision !== stored.revision) return problem(409, "Conflict", "changed", undefined, "send_settings_revision_mismatch");
+        stored = { ...(body as typeof STORED), revision: body.revision + 1 };
+        return json(stored);
+      },
+    });
+    const user = userEvent.setup();
+    mount();
+
+    const limit = await screen.findByLabelText("Limit of cap 1");
+    await user.clear(limit);
+    await user.type(limit, "5");
+    await user.click(screen.getByRole("button", { name: "Save limits" }));
+    expect(await screen.findByText(/Saved\./)).toBeInTheDocument();
+    // Nothing is left to save, so a second click cannot send the old revision.
+    expect(screen.getByRole("button", { name: "Save limits" })).toBeDisabled();
+
+    await user.type(screen.getByLabelText("Limit of cap 1"), "0");
+    await user.click(screen.getByRole("button", { name: "Save limits" }));
+    await waitFor(() => expect(puts).toEqual([4, 5]));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    release();
   });
 
   it("keeps the draft and offers the latest settings when they changed since the page was opened", async () => {

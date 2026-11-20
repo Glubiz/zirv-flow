@@ -302,6 +302,86 @@ describe("the mapping dialog", () => {
     expect(dialog.queryByText("The source returned no records")).not.toBeInTheDocument();
   });
 
+  it("drops a preview that was requested for a mapping edited while it loaded", async () => {
+    let release: () => void = () => undefined;
+    mockApi({
+      ...ROUTES,
+      [PREVIEW_PATH]: async () => {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return json(PREVIEW);
+      },
+    });
+    const user = userEvent.setup();
+    mount();
+    const dialog = within(await openDialog(user));
+    await user.type(dialog.getByLabelText("Field of row 1"), "profile.email");
+
+    await user.click(dialog.getByRole("button", { name: "Preview" }));
+    await user.type(dialog.getByLabelText("Field of row 1"), "2");
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    expect(dialog.queryByRole("table", { name: "What the mapping makes of the first records" })).not.toBeInTheDocument();
+    expect(dialog.getByRole("button", { name: "Preview" })).toBeEnabled();
+  });
+
+  it("shows no error for a preview that failed after the mapping was edited", async () => {
+    let release: () => void = () => undefined;
+    mockApi({
+      ...ROUTES,
+      [PREVIEW_PATH]: async () => {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return problem(502, "Bad Gateway", "the source could not be reached");
+      },
+    });
+    const user = userEvent.setup();
+    mount();
+    const dialog = within(await openDialog(user));
+    await user.type(dialog.getByLabelText("Field of row 1"), "profile.email");
+
+    await user.click(dialog.getByRole("button", { name: "Preview" }));
+    await user.type(dialog.getByLabelText("Field of row 1"), "2");
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    expect(dialog.queryByRole("alert")).not.toBeInTheDocument();
+    expect(dialog.queryByText(/the source could not be reached/)).not.toBeInTheDocument();
+    expect(dialog.getByRole("button", { name: "Preview" })).toBeEnabled();
+  });
+
+  it("shows only the newest preview when an edit is previewed again before the first answers", async () => {
+    const releases: (() => void)[] = [];
+    let asked = 0;
+    mockApi({
+      ...ROUTES,
+      [PREVIEW_PATH]: async () => {
+        const mine = ++asked;
+        await new Promise<void>((resolve) => releases.push(resolve));
+        return json(mine === 1 ? { ...PREVIEW, records: [{ ...PREVIEW.records[0], key: "first" }] } : { ...PREVIEW, records: [{ ...PREVIEW.records[0], key: "second", traits: { display_name: "Second" } }] });
+      },
+    });
+    const user = userEvent.setup();
+    mount();
+    const dialog = within(await openDialog(user));
+    await user.type(dialog.getByLabelText("Field of row 1"), "profile.email");
+
+    await user.click(dialog.getByRole("button", { name: "Preview" }));
+    await user.type(dialog.getByLabelText("Field of row 1"), "2");
+    await user.click(dialog.getByRole("button", { name: "Preview" }));
+    await waitFor(() => expect(releases).toHaveLength(2));
+    releases[1]?.();
+    await dialog.findByText("display_name: Second");
+    releases[0]?.();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    expect(dialog.getByText("display_name: Second")).toBeInTheDocument();
+    expect(dialog.queryByText("display_name: Ada")).not.toBeInTheDocument();
+  });
+
   it("shows the server's reason when a save is refused and keeps the dialog open", async () => {
     mockApi({
       ...ROUTES,
