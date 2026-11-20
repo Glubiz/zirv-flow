@@ -276,6 +276,45 @@ describe("a list", () => {
       expect(sent.flat().sort()).toEqual(Array.from({ length: 1050 }, (_, n) => person(n)));
     }, 30000);
 
+    describe("at the chunk boundary", () => {
+      /** Loads `total` people (pages of 50, the last one shorter), selects them all and removes them. */
+      async function removeTotal(total: number) {
+        const pages = Math.ceil(total / 50);
+        const calls = asAdmin({
+          [MEMBERS_ROUTE]: (request) => {
+            const cursor = new URL(request.url).searchParams.get("cursor");
+            const page = cursor === null ? 0 : Number(cursor.slice(1));
+            const count = Math.min(50, total - page * 50);
+            const members = Array.from({ length: count }, (_, index) => member(person(page * 50 + index), "email", `m${page * 50 + index}@example.test`));
+            return json({ members, next_cursor: page < pages - 1 ? `c${page + 1}` : null });
+          },
+          [REMOVE_ROUTE]: async (request) => {
+            const ids = ((await request.clone().json()) as { person_ids: string[] }).person_ids;
+            return json({ removed: ids.length, not_member: 0, not_found: [] });
+          },
+        });
+        const user = userEvent.setup();
+        mount();
+        await screen.findByText("m0@example.test");
+        for (let page = 1; page < pages; page += 1) {
+          await user.click(await screen.findByRole("button", { name: "Show more" }));
+          await screen.findByText(`m${page * 50}@example.test`);
+        }
+        await user.click(screen.getByRole("checkbox", { name: "Select everyone on this page" }));
+        await user.click(await screen.findByRole("button", { name: `Remove ${total} selected people` }));
+        expect(await screen.findByText(`Removed ${total} people.`, undefined, { timeout: 4000 })).toBeInTheDocument();
+        return calls.filter((call) => call.path.endsWith("/remove")).map((call) => (call.body as { person_ids: string[] }).person_ids.length);
+      }
+
+      it("makes exactly one call for exactly 1000 people", async () => {
+        expect(await removeTotal(1000)).toEqual([1000]);
+      }, 30000);
+
+      it("makes two calls of 1000 and 1 for 1001 people", async () => {
+        expect(await removeTotal(1001)).toEqual([1000, 1]);
+      }, 30000);
+    });
+
     it("shows what was removed and the error when a later chunk fails, then reloads", async () => {
       let removals = 0;
       const calls = asAdmin({
@@ -468,6 +507,33 @@ describe("choosing another CSV file", () => {
     expect(bodies).toHaveLength(1);
     expect(bodies[0]).toContain("b@example.test");
     expect(bodies[0]).not.toContain("a@example.test");
+  });
+
+  it("still applies a committed import when another file is chosen while it runs", async () => {
+    let answer: () => void = () => undefined;
+    const held = new Promise<void>((done) => {
+      answer = done;
+    });
+    asAdmin({
+      [IMPORT_ROUTE]: async (request) => {
+        const dry = new URL(request.url).searchParams.get("dry_run") === "true";
+        if (dry) return json({ matched: 1, added: 1, already_member: 0, unmatched: [], unmatched_count: 0 });
+        await held;
+        return json({ matched: 1, added: 1, already_member: 0, unmatched: [], unmatched_count: 0 });
+      },
+    });
+    const user = userEvent.setup();
+    mount();
+    const dialog = await openDialog(user);
+
+    await user.upload(dialog.getByLabelText("CSV file"), new File([A_CSV], "A.csv", { type: "text/csv" }));
+    await user.click(dialog.getByRole("button", { name: "Check file" }));
+    await user.click(await dialog.findByRole("button", { name: "Add 1 person" }));
+    await user.upload(dialog.getByLabelText("CSV file"), new File([B_CSV], "B.csv", { type: "text/csv" }));
+    answer();
+
+    expect(await screen.findByText(/Added 1 person\./)).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Import people from a CSV" })).not.toBeInTheDocument());
   });
 
   it("drops the preview of a file that was replaced while it was being checked", async () => {
