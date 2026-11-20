@@ -329,6 +329,25 @@ describe("polling an import", () => {
     expect(await screen.findByText(/Finished 4 rows/, undefined, { timeout: 3000 })).toBeInTheDocument();
   });
 
+  it("ends on the terminal status when a poll never settles", async () => {
+    const api = server({ status: "running", started_at: "2026-10-01T10:00:00Z", rows_total: 4, rows_done: 1, rows_applied: 1 });
+    const real = api.routes[`GET ${importPath}`] as (request: Request) => Response | Promise<Response>;
+    let gets = 0;
+    api.routes[`GET ${importPath}`] = (request) => {
+      gets += 1;
+      if (gets === 2) return new Promise<Response>(() => undefined);
+      if (gets === 3) {
+        api.current = { ...api.current, status: "succeeded", rows_done: 4, rows_applied: 4, finished_at: "2026-10-01T10:02:00Z" };
+      }
+      return real(request);
+    };
+    mockApi(api.routes);
+    mount(20);
+
+    expect(await screen.findByText(/Importing row 1 of 4/)).toBeInTheDocument();
+    expect(await screen.findByText(/Finished 4 rows/, undefined, { timeout: 3000 })).toBeInTheDocument();
+  });
+
   it("still shows the error with a retry when the first load fails", async () => {
     const api = server(running);
     polled(api, () => problem(503, "Unavailable", "restarting"));
