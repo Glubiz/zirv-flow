@@ -127,6 +127,7 @@ describe("the pieces", () => {
     expect(parseEntries("M=male\n F = female \n\nbroken\n=nothing\nk=a=b")).toEqual({
       M: "male",
       F: "female",
+      "": "nothing",
       k: "a=b",
     });
   });

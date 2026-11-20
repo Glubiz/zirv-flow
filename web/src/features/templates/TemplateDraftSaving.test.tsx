@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import { mockApi, problem, type Handler } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
-import { drafts, templateDetail, templateRoutes, TEMPLATE_ID, WS, type Doc } from "../../test/templatesApi";
+import { drafts, previews, templateDetail, templateRoutes, TEMPLATE_ID, WS, type Doc } from "../../test/templatesApi";
 import { TemplatePage } from "./TemplatePage";
 
 const WAIT = { timeout: 4000 };
@@ -100,6 +100,49 @@ describe("saving the draft", () => {
     expect(started[1]).toContain("AB");
     expect(overlapped).toBe(false);
     expect(await screen.findByText("Draft saved", undefined, WAIT)).toBeInTheDocument();
+  });
+});
+
+describe("the preview when a newer refresh cannot save the draft", () => {
+  const PREVIEW = `POST ${WS}/templates/${TEMPLATE_ID}/preview`;
+
+  it("stops saying Updating, and runs again once the save works", async () => {
+    const base = templateRoutes();
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let asked = 0;
+    let failPut = false;
+    const calls = mockApi({
+      ...base,
+      [PREVIEW]: async (request) => {
+        asked += 1;
+        if (asked === 2) await gate;
+        return (base[PREVIEW] as Handler)(request);
+      },
+      [PUT]: (request) => (failPut ? problem(500, "Server error", "The draft was not saved.") : (base[PUT] as Handler)(request)),
+    });
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("textbox", { name: /source/ }));
+    await user.paste("<b>one</b>");
+    await waitFor(() => expect(asked).toBeGreaterThanOrEqual(2), WAIT);
+    expect(screen.getByText("Updating the preview")).toBeInTheDocument();
+
+    failPut = true;
+    await user.paste("<b>two</b>");
+    await screen.findByRole("button", { name: "Try saving again" }, WAIT);
+    release();
+    await waitFor(() => expect(screen.queryByText("Updating the preview")).not.toBeInTheDocument(), WAIT);
+
+    failPut = false;
+    const before = previews(calls).length;
+    await user.click(screen.getByRole("button", { name: "Try saving again" }));
+    await waitFor(() => expect(previews(calls).length).toBeGreaterThan(before), WAIT);
+    await waitFor(() => expect(screen.queryByText("Updating the preview")).not.toBeInTheDocument(), WAIT);
+    expect(screen.queryByRole("button", { name: "Try saving again" })).not.toBeInTheDocument();
   });
 });
 

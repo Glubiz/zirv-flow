@@ -41,16 +41,19 @@ export function WorkspaceSwitcher({ compact = false }: { compact?: boolean }) {
   }));
   entries.push({ key: "all", label: "All workspaces", onSelect: () => void navigate("/w") });
 
+  // The first code point, not the first UTF-16 unit: an emoji must not be cut in half.
+  const label = compact ? (Array.from(current?.name ?? "")[0] ?? "W") : (current?.name ?? "No workspace");
+
   return (
     <MenuButton
       label="Switch workspace"
-      visibleText={compact ? (current?.name.slice(0, 1) ?? "W") : (current?.name ?? "No workspace")}
+      visibleText={label}
       placement={compact ? "beside" : "below-start"}
       buttonClassName="pill-button"
       buttonContent={
         <>
           <span className="dot" aria-hidden="true" />
-          <span className="workspace-name">{compact ? (current?.name.slice(0, 1) ?? "W") : (current?.name ?? "No workspace")}</span>
+          <span className="workspace-name">{label}</span>
           {compact ? null : <Chevron />}
         </>
       }

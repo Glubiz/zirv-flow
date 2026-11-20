@@ -149,6 +149,47 @@ describe("the theme editor", () => {
     expect(screen.queryByTitle("Preview of the theme")).not.toBeInTheDocument();
   });
 
+  it("clears Updating when the newer save fails, and recovers on a retry", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let nSaves = 0;
+    const base = themeRoutes({
+      save: () => {
+        nSaves += 1;
+        return nSaves === 2 ? refusal(500, {}) : null;
+      },
+    });
+    let asked = 0;
+    mockApi({
+      ...base,
+      [`POST ${BASE}/preview`]: async (request) => {
+        asked += 1;
+        if (asked === 2) await gate;
+        return base[`POST ${BASE}/preview`]!(request);
+      },
+    });
+    mount();
+    await screen.findByTitle("Preview of the theme");
+    await waitFor(() => expect(asked).toBe(1), WAIT);
+
+    fireEvent.change(screen.getByLabelText("Primary"), { target: { value: "#112233" } });
+    await waitFor(() => expect(asked).toBe(2), WAIT);
+    expect(screen.getByText("Updating the preview")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Link"), { target: { value: "#445566" } });
+    await waitFor(() => expect(nSaves).toBe(2), WAIT);
+    const retry = await screen.findByRole("button", { name: "Try saving again" }, WAIT);
+    release();
+
+    await waitFor(() => expect(screen.queryByText("Updating the preview")).not.toBeInTheDocument(), WAIT);
+    expect(screen.getByRole("button", { name: "Publish…" })).toBeDisabled();
+    fireEvent.click(retry);
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Try saving again" })).not.toBeInTheDocument(), WAIT);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Publish…" })).toBeEnabled(), WAIT);
+    expect(screen.queryByText("Updating the preview")).not.toBeInTheDocument();
+  });
+
   it("offers footer snippets that are published, with a link to the chosen one", async () => {
     const footer = "88888888-0000-4000-8000-000000000001";
     mockApi({

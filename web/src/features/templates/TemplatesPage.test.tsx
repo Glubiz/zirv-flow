@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
@@ -170,6 +170,46 @@ describe("the template library", () => {
     expect(await screen.findByRole("link", { name: "Spring sale" })).toBeInTheDocument();
     expect(listCalls(calls).filter((query) => query.get("q") === "sale")).toHaveLength(1);
     expect(listCalls(calls).filter((query) => query.get("q") === "sa")).toHaveLength(0);
+  });
+
+  it("follows a navigation to another search and does not write the old term back", async () => {
+    mockApi(libraryRoutes());
+    const { router } = mount("/w/ws1/templates?q=foo");
+    const box = await screen.findByRole("searchbox", { name: "Search templates" });
+    expect(box).toHaveValue("foo");
+
+    await act(async () => {
+      await router.navigate("/w/ws1/templates");
+    });
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(router.state.location.search).toBe("");
+    expect(box).toHaveValue("");
+
+    fireEvent.change(box, { target: { value: "abc" } });
+    await waitFor(() => expect(router.state.location.search).toBe("?q=abc"));
+    expect(box).toHaveValue("abc");
+
+    await act(async () => {
+      await router.navigate("/w/ws1/templates?q=foo");
+    });
+    expect(box).toHaveValue("foo");
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(router.state.location.search).toBe("?q=foo");
+  });
+
+  it("follows a navigation to the same search while a typed term is pending", async () => {
+    mockApi(libraryRoutes());
+    const { router } = mount("/w/ws1/templates?q=foo");
+    const box = await screen.findByRole("searchbox", { name: "Search templates" });
+
+    fireEvent.change(box, { target: { value: "bar" } });
+    await act(async () => {
+      await router.navigate("/w/ws1/templates?q=foo");
+    });
+    await new Promise((resolve) => setTimeout(resolve, 700));
+
+    expect(router.state.location.search).toBe("?q=foo");
+    expect(box).toHaveValue("foo");
   });
 
   it("filters by theme", async () => {

@@ -57,4 +57,33 @@ describe("workspaces", () => {
     await user.click(screen.getByRole("menuitemradio", { name: "Spring campaigns" }));
     expect(router.state.location.pathname).toBe("/w/ws1");
   });
+
+  it("shows a whole emoji, not half of one, as the compact switcher label", async () => {
+    mockApi({
+      "GET /api/v1/session": () => json(session(OWNER)),
+      "GET /api/v1/workspaces": () => json([{ ...WORKSPACE, name: "🚀 Launch" }]),
+    });
+    renderRoute("/w/ws1", "/w/*", <WorkspacesProvider><WorkspaceSwitcher compact /></WorkspacesProvider>);
+    const button = await screen.findByRole("button", { name: /switch workspace$/ });
+    expect(button.textContent).toBe("🚀");
+    expect(button).toHaveAccessibleName("🚀, switch workspace");
+  });
+
+  it("keeps the first letter of a plain name and falls back to W for an empty one", async () => {
+    mockApi({
+      "GET /api/v1/session": () => json(session(OWNER)),
+      "GET /api/v1/workspaces": () => json([{ ...WORKSPACE, name: "" }]),
+    });
+    renderRoute("/w/ws1", "/w/*", <WorkspacesProvider><WorkspaceSwitcher compact /></WorkspacesProvider>);
+    expect((await screen.findByRole("button", { name: /switch workspace$/ })).textContent).toBe("W");
+  });
+
+  it("shows the first letter of a plain name in the compact switcher", async () => {
+    mockApi({
+      "GET /api/v1/session": () => json(session(OWNER)),
+      "GET /api/v1/workspaces": () => json([WORKSPACE]),
+    });
+    renderRoute("/w/ws1", "/w/*", <WorkspacesProvider><WorkspaceSwitcher compact /></WorkspacesProvider>);
+    expect((await screen.findByRole("button", { name: /switch workspace$/ })).textContent).toBe("S");
+  });
 });
