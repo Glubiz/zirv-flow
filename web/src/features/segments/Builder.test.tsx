@@ -252,7 +252,7 @@ describe("segment builder", () => {
       ...routes("reader"),
       [`GET ${WS}/segments/${SEGMENT_ID}`]: () => json(detail()),
     });
-    renderRoute(`/w/ws1/segments/${SEGMENT_ID}`, "/w/:ws/segments/:id", <SegmentPage />);
+    renderRoute(`/w/ws1/segments/${SEGMENT_ID}?tab=rules`, "/w/:ws/segments/:id", <SegmentPage />);
 
     const value = await screen.findByLabelText("Value");
     expect(value).toBeDisabled();

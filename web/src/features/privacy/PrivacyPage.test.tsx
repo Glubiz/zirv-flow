@@ -1,9 +1,11 @@
 import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { json, MEMBER, mockApi, OWNER, problem, session } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
+import { ErasureSection } from "./ErasureSection";
 import { PrivacyPage } from "./PrivacyPage";
 
 const BASE = "/api/v1/workspaces/ws1/privacy";
@@ -238,6 +240,33 @@ describe("privacy", () => {
     expect(put?.body).toEqual({ orphan_policy: "delete" });
   });
 
+  it("keeps the saved notice after the settings reload with the stored policy", async () => {
+    let policy = "keep";
+    mockApi(
+      adminRoutes({
+        [`GET ${BASE}/settings`]: () => json({ orphan_policy: policy }),
+        [`PUT ${BASE}/settings`]: async (request) => {
+          policy = ((await request.json()) as { orphan_policy: string }).orphan_policy;
+          return json({ orphan_policy: policy });
+        },
+      }),
+    );
+    const user = userEvent.setup();
+    renderRoute("/w/ws1/privacy", ROUTE, <PrivacyPage />);
+    const select = await screen.findByLabelText("Orphan policy");
+
+    await user.selectOptions(select, "delete");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(screen.getByLabelText("Orphan policy")).toHaveValue("delete"));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(screen.getByText("Saved.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+
+    await user.selectOptions(screen.getByLabelText("Orphan policy"), "keep");
+    expect(screen.queryByText("Saved.")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
+  });
+
   it("gives a member no privacy tools and asks for none of its data", async () => {
     const calls = mockApi({
       "GET /api/v1/session": () => json(session(MEMBER)),
@@ -348,6 +377,280 @@ describe("privacy", () => {
 
       expect(await screen.findByText("Erased")).toBeInTheDocument();
       expect(erasures).toBe(2);
+    });
+
+    it("keeps the pages loaded with Show more when a pending list polls", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const pending = { ...DONE, status: "pending", completed_at: null };
+      let firstPages = 0;
+      mockApi(
+        adminRoutes({
+          [`GET ${BASE}/erasures`]: (request) => {
+            if (new URL(request.url).searchParams.get("cursor")) return json({ erasures: [FAILED], next_cursor: null });
+            firstPages += 1;
+            return json({ erasures: [pending], next_cursor: "c1" });
+          },
+        }),
+      );
+      renderRoute("/w/ws1/privacy", ROUTE, <PrivacyPage />);
+      await userEvent.setup({ advanceTimers: vi.advanceTimersByTime }).click(await screen.findByRole("button", { name: "Show more" }));
+      expect(await screen.findByText("Failed")).toBeInTheDocument();
+
+      await vi.advanceTimersByTimeAsync(5500);
+      await waitFor(() => expect(firstPages).toBe(2));
+      await vi.advanceTimersByTimeAsync(500);
+
+      expect(screen.getByText("Failed")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Show more" })).not.toBeInTheDocument();
+    });
+
+    it("keeps a Show more page that landed while a poll was in flight, and re-fetches at full depth", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const pending = { ...DONE, status: "pending", completed_at: null };
+      let firstPages = 0;
+      let secondPages = 0;
+      let release: () => void = () => {};
+      mockApi(
+        adminRoutes({
+          [`GET ${BASE}/erasures`]: async (request) => {
+            if (new URL(request.url).searchParams.get("cursor")) {
+              secondPages += 1;
+              return json({ erasures: [FAILED], next_cursor: null });
+            }
+            firstPages += 1;
+            if (firstPages === 2) await new Promise<void>((resolve) => (release = resolve));
+            return json({ erasures: [pending], next_cursor: "c1" });
+          },
+        }),
+      );
+      renderRoute("/w/ws1/privacy", ROUTE, <PrivacyPage />);
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      const more = await screen.findByRole("button", { name: "Show more" });
+      await vi.advanceTimersByTimeAsync(5500);
+      await waitFor(() => expect(firstPages).toBe(2));
+
+      await user.click(more);
+      expect(await screen.findByText("Failed")).toBeInTheDocument();
+      const before = secondPages;
+      act(() => {
+        release();
+      });
+      await vi.advanceTimersByTimeAsync(100);
+
+      expect(screen.getByText("Failed")).toBeInTheDocument();
+      await waitFor(() => expect(secondPages).toBeGreaterThan(before));
+      expect(screen.getByText("Failed")).toBeInTheDocument();
+    });
+
+    it("shows a list that got shorter than what was loaded, and does not reload in a loop", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const pending = { ...DONE, status: "pending", completed_at: null };
+      let shrunk = false;
+      let gets = 0;
+      mockApi(
+        adminRoutes({
+          [`GET ${BASE}/erasures`]: (request) => {
+            gets += 1;
+            if (new URL(request.url).searchParams.get("cursor")) return json({ erasures: [FAILED], next_cursor: null });
+            return shrunk ? json({ erasures: [pending], next_cursor: null }) : json({ erasures: [pending], next_cursor: "c1" });
+          },
+        }),
+      );
+      renderRoute("/w/ws1/privacy", ROUTE, <PrivacyPage />);
+      await userEvent.setup({ advanceTimers: vi.advanceTimersByTime }).click(await screen.findByRole("button", { name: "Show more" }));
+      expect(await screen.findByText("Failed")).toBeInTheDocument();
+      shrunk = true;
+
+      await vi.advanceTimersByTimeAsync(5500);
+      await waitFor(() => expect(screen.queryByText("Failed")).not.toBeInTheDocument());
+      const settled = gets;
+      await vi.advanceTimersByTimeAsync(15000);
+
+      expect(gets - settled).toBeLessThanOrEqual(4);
+    });
+
+    it("loads only page one when the inputs change and come back", async () => {
+      const BASE2 = "/api/v1/workspaces/ws2/privacy";
+      const seen = { second: 0, firstA: 0 };
+      mockApi(
+        adminRoutes({
+          [`GET ${BASE}/erasures`]: (request) => {
+            if (new URL(request.url).searchParams.get("cursor")) {
+              seen.second += 1;
+              return json({ erasures: [FAILED], next_cursor: null });
+            }
+            seen.firstA += 1;
+            return json({ erasures: [DONE], next_cursor: "c1" });
+          },
+          "GET /api/v1/workspaces/ws2/members": () => json(members("admin", OWNER.id)),
+          [`GET ${BASE2}/erasures`]: () => json({ erasures: [], next_cursor: null }),
+          [`GET ${BASE2}/exports`]: () => json({ exports: [], next_cursor: null }),
+          [`GET ${BASE2}/settings`]: () => json({ orphan_policy: "keep" }),
+          "GET /api/v1/workspaces/ws2/retention": () => json({ windows: [] }),
+        }),
+      );
+      let setWorkspace: (ws: string) => void = () => {};
+      function Harness() {
+        const [ws, set] = useState("ws1");
+        setWorkspace = set;
+        return <ErasureSection workspaceId={ws} />;
+      }
+      renderRoute("/w/ws1/privacy", ROUTE, <Harness />);
+      await userEvent.setup().click(await screen.findByRole("button", { name: "Show more" }));
+      expect(await screen.findByText("Failed")).toBeInTheDocument();
+      expect(seen.second).toBe(1);
+
+      act(() => setWorkspace("ws2"));
+      await waitFor(() => expect(screen.queryByText("Failed")).not.toBeInTheDocument());
+      const firstBefore = seen.firstA;
+      act(() => setWorkspace("ws1"));
+      await waitFor(() => expect(seen.firstA).toBeGreaterThan(firstBefore));
+      await screen.findByRole("button", { name: "Show more" });
+
+      expect(seen.second).toBe(1);
+    });
+
+    it("does not reload endlessly when the inputs return before the other inputs' first page lands", async () => {
+      const BASE2 = "/api/v1/workspaces/ws2/privacy";
+      const seen = { firstA: 0 };
+      mockApi(
+        adminRoutes({
+          [`GET ${BASE}/erasures`]: (request) => {
+            if (new URL(request.url).searchParams.get("cursor")) return json({ erasures: [FAILED], next_cursor: null });
+            seen.firstA += 1;
+            return json({ erasures: [DONE], next_cursor: "c1" });
+          },
+          "GET /api/v1/workspaces/ws2/members": () => json(members("admin", OWNER.id)),
+          // The other inputs' first page is held for the whole test.
+          [`GET ${BASE2}/erasures`]: () => new Promise<Response>(() => {}),
+          [`GET ${BASE2}/exports`]: () => json({ exports: [], next_cursor: null }),
+          [`GET ${BASE2}/settings`]: () => json({ orphan_policy: "keep" }),
+          "GET /api/v1/workspaces/ws2/retention": () => json({ windows: [] }),
+        }),
+      );
+      let setWorkspace: (ws: string) => void = () => {};
+      function Harness() {
+        const [ws, set] = useState("ws1");
+        setWorkspace = set;
+        return <ErasureSection workspaceId={ws} />;
+      }
+      renderRoute("/w/ws1/privacy", ROUTE, <Harness />);
+      await userEvent.setup().click(await screen.findByRole("button", { name: "Show more" }));
+      expect(await screen.findByText("Failed")).toBeInTheDocument();
+
+      act(() => setWorkspace("ws2"));
+      const firstBefore = seen.firstA;
+      act(() => setWorkspace("ws1"));
+      await waitFor(() => expect(seen.firstA).toBeGreaterThan(firstBefore));
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+
+      expect(screen.queryByText("Failed")).not.toBeInTheDocument();
+      expect(seen.firstA - firstBefore).toBeLessThanOrEqual(2);
+    });
+
+    it("keeps rows a poll pushed out of the first page, once each", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const row = (id: string, status: string) => ({ ...DONE, id, status, completed_at: null, person_id: `person-${id}` });
+      let polled = false;
+      mockApi(
+        adminRoutes({
+          [`GET ${BASE}/erasures`]: (request) => {
+            if (new URL(request.url).searchParams.get("cursor")) {
+              // The second page moves with the first: after the poll it starts with the row pushed out.
+              return json({ erasures: polled ? [row("b", "completed"), row("c", "failed")] : [row("c", "failed")], next_cursor: null });
+            }
+            return polled
+              ? json({ erasures: [row("n", "pending"), row("a", "pending")], next_cursor: "c1" })
+              : json({ erasures: [row("a", "pending"), row("b", "completed")], next_cursor: "c1" });
+          },
+        }),
+      );
+      renderRoute("/w/ws1/privacy", ROUTE, <PrivacyPage />);
+      await userEvent.setup({ advanceTimers: vi.advanceTimersByTime }).click(await screen.findByRole("button", { name: "Show more" }));
+      expect(await screen.findByText("Failed")).toBeInTheDocument();
+      polled = true;
+
+      await vi.advanceTimersByTimeAsync(5500);
+
+      const table = screen.getByRole("table", { name: "Erasure requests" });
+      await waitFor(() => expect(within(table).getByTitle("person-n")).toBeInTheDocument());
+      const people = within(table).getAllByTitle(/^person-/).map((cell) => cell.getAttribute("title"));
+      expect(people).toEqual(["person-n", "person-a", "person-b", "person-c"]);
+    });
+
+    it("refreshes a pending row that newer requests pushed past page one until it settles, then stops polling", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const row = (id: string, status: string) => ({ ...DONE, id, status, completed_at: null, person_id: `person-${id}` });
+      let phase: "initial" | "pushed" | "settled" = "initial";
+      let gets = 0;
+      mockApi(
+        adminRoutes({
+          [`GET ${BASE}/erasures`]: (request) => {
+            gets += 1;
+            const second = new URL(request.url).searchParams.get("cursor");
+            if (phase === "initial") {
+              return second
+                ? json({ erasures: [row("c", "failed")], next_cursor: null })
+                : json({ erasures: [row("a", "pending")], next_cursor: "c1" });
+            }
+            const a = row("a", phase === "settled" ? "completed" : "pending");
+            const n = row("n", phase === "settled" ? "completed" : "pending");
+            return second
+              ? json({ erasures: [a, row("c", "failed")], next_cursor: null })
+              : json({ erasures: [n], next_cursor: "c1" });
+          },
+        }),
+      );
+      renderRoute("/w/ws1/privacy", ROUTE, <PrivacyPage />);
+      await userEvent.setup({ advanceTimers: vi.advanceTimersByTime }).click(await screen.findByRole("button", { name: "Show more" }));
+      expect(await screen.findByText("Failed")).toBeInTheDocument();
+      phase = "pushed";
+      await vi.advanceTimersByTimeAsync(5500);
+      const table = screen.getByRole("table", { name: "Erasure requests" });
+      await waitFor(() => expect(within(table).getByTitle("person-n")).toBeInTheDocument());
+      expect(within(table).getAllByText("Waiting to run")).toHaveLength(2);
+
+      phase = "settled";
+      await vi.advanceTimersByTimeAsync(5000);
+      await waitFor(() => expect(within(table).queryByText("Waiting to run")).not.toBeInTheDocument());
+      expect(within(table).getAllByText("Erased")).toHaveLength(2);
+      const settled = gets;
+
+      await vi.advanceTimersByTimeAsync(30000);
+      expect(gets).toBe(settled);
+    });
+
+    it("lists a row once when the refreshed chain overlaps itself", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const row = (id: string, status: string) => ({ ...DONE, id, status, completed_at: null, person_id: `person-${id}` });
+      let polled = false;
+      mockApi(
+        adminRoutes({
+          [`GET ${BASE}/erasures`]: (request) => {
+            const second = new URL(request.url).searchParams.get("cursor");
+            if (!polled) {
+              return second
+                ? json({ erasures: [row("c", "failed")], next_cursor: null })
+                : json({ erasures: [row("a", "pending")], next_cursor: "c1" });
+            }
+            // A row slipped between the two fetches of the chain, so "a" is on both pages.
+            return second
+              ? json({ erasures: [row("a", "pending"), row("b", "failed"), row("c", "failed")], next_cursor: null })
+              : json({ erasures: [row("a", "pending")], next_cursor: "c1" });
+          },
+        }),
+      );
+      renderRoute("/w/ws1/privacy", ROUTE, <PrivacyPage />);
+      await userEvent.setup({ advanceTimers: vi.advanceTimersByTime }).click(await screen.findByRole("button", { name: "Show more" }));
+      expect(await screen.findByText("Failed")).toBeInTheDocument();
+      polled = true;
+
+      await vi.advanceTimersByTimeAsync(5500);
+
+      const table = screen.getByRole("table", { name: "Erasure requests" });
+      await waitFor(() => expect(within(table).getByTitle("person-b")).toBeInTheDocument());
+      const people = within(table).getAllByTitle(/^person-/).map((cell) => cell.getAttribute("title"));
+      expect(people).toEqual(["person-a", "person-b", "person-c"]);
     });
 
     it("does not poll while the tab is hidden", async () => {

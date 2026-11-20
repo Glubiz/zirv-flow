@@ -91,7 +91,17 @@ function Segments({ workspaceId }: { workspaceId: string }) {
           isEmpty={(data) => data.length === 0 || shown.length === 0}
           empty={
             segments.status === "ready" && segments.data.length > 0 ? (
-              <EmptyState title="No segments match">Nothing is called or described like &ldquo;{query}&rdquo;.</EmptyState>
+              <EmptyState title="No segments match">
+                {query.trim() === "" ? (
+                  active === "used" ? (
+                    "No segments are used by a flow."
+                  ) : (
+                    "Every segment is used by a flow."
+                  )
+                ) : (
+                  <>Nothing is called or described like &ldquo;{query}&rdquo;.</>
+                )}
+              </EmptyState>
             ) : (
               <EmptyState
                 title="No segments yet"
