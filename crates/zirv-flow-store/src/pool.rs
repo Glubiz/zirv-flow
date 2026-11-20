@@ -101,19 +101,27 @@ mod tests {
             }
             task.abort();
             let _ = task.await;
-            // Every connection back, and none inside a transaction: `SAVEPOINT` is an error outside
-            // one.
+            // Every connection back, and none inside a transaction: outside one, `SAVEPOINT` fails
+            // with no_active_sql_transaction (25P01); inside one it succeeds, or fails with 25P02
+            // when that transaction is aborted.
             let mut held = Vec::new();
             while held.len() < pool.size() as usize {
                 held.push(pool.acquire().await.unwrap());
             }
             for mut connection in held {
-                let open = sqlx::raw_sql("SAVEPOINT leak_probe")
+                let outside = sqlx::raw_sql("SAVEPOINT leak_probe")
                     .execute(&mut *connection)
                     .await
-                    .is_ok();
+                    .err()
+                    .and_then(|error| {
+                        error
+                            .as_database_error()?
+                            .code()
+                            .map(|code| code == "25P01")
+                    })
+                    .unwrap_or(false);
                 assert!(
-                    !open,
+                    outside,
                     "a connection came back inside a transaction after a cancelled begin (round {round})"
                 );
             }
