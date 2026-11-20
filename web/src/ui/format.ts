@@ -17,9 +17,10 @@ export function formatDateTime(value: string): string {
 export function formatDuration(seconds: number | null | undefined): string {
   if (seconds === null || seconds === undefined) return "—";
   if (seconds < 1) return "under 1 s";
-  if (seconds < 60) return `${Math.round(seconds)} s`;
-  if (seconds < 3600) return `${Math.round(seconds / 60)} min`;
-  if (seconds < 86400) return `${(seconds / 3600).toFixed(1)} h`;
+  // Pick the unit from the figure as it will print, so 59.6 s is "1 min", not "60 s".
+  if (Math.round(seconds) < 60) return `${Math.round(seconds)} s`;
+  if (Math.round(seconds / 60) < 60) return `${Math.round(seconds / 60)} min`;
+  if (Number((seconds / 3600).toFixed(1)) < 24) return `${(seconds / 3600).toFixed(1)} h`;
   return `${(seconds / 86400).toFixed(1)} d`;
 }
 
@@ -51,7 +52,8 @@ export function formatTime(value: string): string {
 /** A count for a figure: separators under 100,000, "2.4 M" above. */
 export function formatCount(value: number): string {
   const compact = (divisor: number, unit: string) => `${(value / divisor).toFixed(1).replace(/\.0$/, "")} ${unit}`;
-  if (Math.abs(value) >= 1_000_000) return compact(1_000_000, "M");
+  // A figure that rounds up to 1000 k is a million: judge the unit by the rounded figure.
+  if (Math.round(Math.abs(value) / 100) / 10 >= 1000) return compact(1_000_000, "M");
   if (Math.abs(value) >= 100_000) return compact(1_000, "k");
   return value.toLocaleString("en-US");
 }

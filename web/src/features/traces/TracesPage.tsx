@@ -86,6 +86,13 @@ export function TracesPage() {
   const navigate = useNavigate();
   const [input, setInput] = useState(traceId ?? "");
   const [problem, setProblem] = useState<string | null>(null);
+  // Another trace id in the URL (a link, Back or Forward) starts the form over, in this same render.
+  const [seen, setSeen] = useState(traceId);
+  if (seen !== traceId) {
+    setSeen(traceId);
+    setInput(traceId ?? "");
+    setProblem(null);
+  }
 
   const urlInvalid = traceId !== undefined && !TRACE_ID.test(traceId);
   const shown = problem ?? (urlInvalid ? INVALID : null);

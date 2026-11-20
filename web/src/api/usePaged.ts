@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { useResource, type Resource } from "../../api";
+import { useResource, type Resource } from "./useResource";
 
 export interface Page<T> {
   items: T[];

@@ -72,19 +72,89 @@ export function opLabel(op: TransformOp): string {
   }
 }
 
-export function parseEntries(text: string): Record<string, string> {
-  const map: Record<string, string> = {};
-  for (const line of text.split(/\r?\n/)) {
-    const at = line.indexOf("=");
-    if (at <= 0) continue;
-    map[line.slice(0, at).trim()] = line.slice(at + 1).trim();
+/**
+ * The text form of a value map is one `from=to` pair per line. A backslash writes what a line cannot
+ * hold: `\\` is a backslash, `\=` an equals sign (needed only in a `from`, which ends at the first
+ * unescaped `=`), `\n` and `\r` a line break, `\t` a tab, `\s` a space, and `\uXXXX` any other
+ * whitespace character. Spaces, tabs and the like are trimmed from the ends of each side, so at an
+ * end they are always written as an escape. A backslash followed by anything else stands for itself,
+ * so one is written `\\` only where it would otherwise start an escape.
+ */
+const ESCAPES: Record<string, string> = { "\\": "\\", "=": "=", n: "\n", r: "\r", t: "\t", s: " " };
+
+function unescapeText(text: string): string {
+  let out = "";
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text.charAt(i);
+    if (char !== "\\" || i === text.length - 1) {
+      out += char;
+      continue;
+    }
+    const next = text.charAt(i + 1);
+    const hex = next === "u" ? text.slice(i + 2, i + 6) : "";
+    if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+      out += String.fromCharCode(parseInt(hex, 16));
+      i += 5;
+    } else if (ESCAPES[next] !== undefined) {
+      out += ESCAPES[next] ?? "";
+      i += 1;
+    } else {
+      out += char;
+    }
   }
-  return map;
+  return out;
+}
+
+/** Whether a backslash written before this text would start an escape. */
+function startsEscape(rest: string): boolean {
+  const next = rest.charAt(0);
+  return ESCAPES[next] !== undefined || (next === "u" && /^[0-9a-fA-F]{4}$/.test(rest.slice(1, 5)));
+}
+
+function escapeText(text: string, key: boolean): string {
+  const edge = (char: string, index: number) => /\s/.test(char) && (/^\s*$/.test(text.slice(0, index + 1)) || /^\s*$/.test(text.slice(index)));
+  const pieces: string[] = [];
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text.charAt(i);
+    if (char === "=" && key) pieces.push("\\=");
+    else if (char === "\n") pieces.push("\\n");
+    else if (char === "\r") pieces.push("\\r");
+    else if (edge(char, i)) pieces.push(char === " " ? "\\s" : char === "\t" ? "\\t" : `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
+    else pieces.push(char);
+  }
+  // A backslash is doubled only where what follows it would read as an escape, so `C:\dir` shows as
+  // stored. Right to left, so each one sees the text written after it; a key is followed by its `=`.
+  let rest = key ? "=" : "";
+  for (let i = pieces.length - 1; i >= 0; i -= 1) {
+    const piece = pieces[i] ?? "";
+    rest = (piece === "\\" && startsEscape(rest) ? "\\\\" : piece) + rest;
+  }
+  return key ? rest.slice(0, -1) : rest;
+}
+
+/** The index of the first `=` that no backslash escapes, or -1. */
+function splitAt(line: string): number {
+  for (let i = 0; i < line.length; i += 1) {
+    if (line[i] === "\\") i += 1;
+    else if (line[i] === "=") return i;
+  }
+  return -1;
+}
+
+export function parseEntries(text: string): Record<string, string> {
+  const pairs: [string, string][] = [];
+  for (const line of text.split(/\r?\n/)) {
+    const at = splitAt(line);
+    if (at < 0) continue;
+    pairs.push([unescapeText(line.slice(0, at).trim()), unescapeText(line.slice(at + 1).trim())]);
+  }
+  // From entries, so a key such as `__proto__` stays an own property.
+  return Object.fromEntries(pairs);
 }
 
 function formatEntries(map: Record<string, string>): string {
   return Object.entries(map)
-    .map(([from, to]) => `${from}=${to}`)
+    .map(([from, to]) => `${escapeText(from, true)}=${escapeText(to, false)}`)
     .join("\n");
 }
 

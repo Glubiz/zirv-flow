@@ -27,10 +27,15 @@ export function usePreviews(workspaceId: string, templateId: string, requests: r
   useEffect(() => {
     if (requests === null) return;
     let alive = true;
+    const stop = new AbortController();
     for (const request of requests) {
       const { subject, version } = request;
       const body = { annotate: true, ...(subject.personId === null ? {} : { person_id: subject.personId }), ...(version === undefined ? {} : { version }) };
-      void limit(() => unwrap(client.POST("/api/v1/workspaces/{ws}/templates/{id}/preview", { params: { path: { ws: workspaceId, id: templateId } }, body })))
+      void limit(() => {
+        // A run that was replaced while this waited its turn sends nothing and frees its slot.
+        if (!alive) throw new DOMException("superseded", "AbortError");
+        return unwrap(client.POST("/api/v1/workspaces/{ws}/templates/{id}/preview", { signal: stop.signal, params: { path: { ws: workspaceId, id: templateId } }, body }));
+      })
         .then<Check>((preview) => ({ status: "ready", preview }))
         .catch<Check>((error: unknown) => ({ status: "failed", error: describeError(error) }))
         .then((check) => {
@@ -39,6 +44,7 @@ export function usePreviews(workspaceId: string, templateId: string, requests: r
     }
     return () => {
       alive = false;
+      stop.abort();
     };
   }, [workspaceId, templateId, requests, limit, run]);
 

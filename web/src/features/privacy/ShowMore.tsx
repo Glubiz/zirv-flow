@@ -1,6 +1,5 @@
-import { describeError } from "../../api";
+import { describeError, type Paged } from "../../api";
 import { Button, InlineError } from "../../ui";
-import type { Paged } from "./usePaged";
 
 /** The footer of a paged list: shown while another page exists. */
 export function ShowMore<T>({ paged }: { paged: Paged<T> }) {

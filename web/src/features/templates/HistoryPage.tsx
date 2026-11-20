@@ -255,9 +255,11 @@ function RenderCard({ workspaceId, templateId, selected, canWrite, canAdmin, aga
     async () => (canAdmin ? unwrap(client.GET("/api/v1/workspaces/{ws}/templates/{id}/preview-people", idPath(workspaceId, templateId))) : []),
     [workspaceId, templateId, canAdmin],
   );
+  // `useResource` returns a new object each render; its `data` is the stable value, so key on that.
+  const people = saved.status === "ready" ? saved.data : null;
   const subjects: Subject[] = useMemo(
-    () => [...(saved.status === "ready" ? saved.data.map((entry) => ({ key: entry.person_id, label: labelOf(entry.person_id, entry.display), personId: entry.person_id })) : []), SAMPLE_SUBJECT],
-    [saved],
+    () => [...(people ? people.map((entry) => ({ key: entry.person_id, label: labelOf(entry.person_id, entry.display), personId: entry.person_id })) : []), SAMPLE_SUBJECT],
+    [people],
   );
   const [personKey, setPersonKey] = useState(SAMPLE_SUBJECT.key);
   const [retry, setRetry] = useState(0);

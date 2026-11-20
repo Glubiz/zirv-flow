@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 
-import { client, describeError, unwrap, type components, type ErrorSummary } from "../../api";
+import { client, describeError, unwrap, type components, type ErrorSummary, usePaged } from "../../api";
 import {
   EmptyState,
   formatDateTime,
@@ -14,7 +14,6 @@ import {
 import { exportStatus, secondsLeft } from "./labels";
 import { TargetForm, type PersonTarget } from "./TargetForm";
 import { ShowMore } from "./ShowMore";
-import { usePaged } from "./usePaged";
 import { usePolling } from "./usePolling";
 
 type Export = components["schemas"]["ExportBody"];

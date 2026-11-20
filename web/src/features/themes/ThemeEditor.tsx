@@ -117,7 +117,11 @@ export function ThemeEditor({ workspaceId, initial, canWrite, canAdmin, canPubli
 
   const refresh = useCallback(async () => {
     const mine = ++run.current;
-    if (editable && !(await flush())) return;
+    if (editable && !(await flush())) {
+      // This run owns the busy flag unless a newer one took it over while the save ran.
+      if (mine === run.current && live.current) setRefreshing(false);
+      return;
+    }
     if (!canWrite || mine !== run.current || !live.current) return;
     setRefreshing(true);
     try {
