@@ -8,7 +8,8 @@ export interface Page<T> {
 }
 
 interface Extra<T> {
-  base: Page<T>;
+  /** The inputs the pages were loaded for. A poll builds a new first page, so it must not key them. */
+  key: string;
   items: T[];
   next: string | null;
 }
@@ -16,6 +17,8 @@ interface Extra<T> {
 interface Known<T> {
   inputs: string;
   page: Page<T>;
+  /** First-page rows that a refresh pushed past the first page, kept so the loaded pages stay contiguous. */
+  tail: T[];
 }
 
 export interface Paged<T> {
@@ -34,7 +37,11 @@ export interface Paged<T> {
  * first page has loaded it stays on screen while a reload runs or fails, so a poll that fails
  * once does not lose the list and the next beat can try again.
  */
-export function usePaged<T>(fetchPage: (before: string | null) => Promise<Page<T>>, inputs: readonly string[]): Paged<T> {
+export function usePaged<T>(
+  fetchPage: (before: string | null) => Promise<Page<T>>,
+  inputs: readonly string[],
+  idOf: (item: T) => string,
+): Paged<T> {
   const first = useResource(() => fetchPage(null), inputs);
   const [extra, setExtra] = useState<Extra<T> | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -43,13 +50,19 @@ export function usePaged<T>(fetchPage: (before: string | null) => Promise<Page<T
 
   const key = inputs.join("|");
   if (first.status === "ready" && (known?.inputs !== key || known.page !== first.data)) {
-    setKnown({ inputs: key, page: first.data });
+    // Rows a refresh pushed out of the first page sit before the loaded pages: keep them, newest first.
+    let tail: T[] = [];
+    if (known?.inputs === key && extra?.key === key) {
+      const present = new Set(first.data.items.map(idOf));
+      tail = [...known.page.items, ...known.tail].filter((item) => !present.has(idOf(item)));
+    }
+    setKnown({ inputs: key, page: first.data, tail });
   }
 
   const kept = known?.inputs === key ? known.page : null;
   const base = first.status === "ready" ? first.data : kept;
-  const more = extra !== null && extra.base === base ? extra : null;
-  const items = base ? [...base.items, ...(more?.items ?? [])] : [];
+  const more = extra?.key === key ? extra : null;
+  const items = base ? uniqueById([...base.items, ...(known?.inputs === key && more ? known.tail : []), ...(more?.items ?? [])], idOf) : [];
   const next = base ? (more ? more.next : base.next) : null;
 
   const loadMore = useCallback(() => {
@@ -59,8 +72,8 @@ export function usePaged<T>(fetchPage: (before: string | null) => Promise<Page<T
     fetchPage(next).then(
       (page) => {
         setExtra((current) => ({
-          base,
-          items: [...(current?.base === base ? current.items : []), ...page.items],
+          key,
+          items: [...(current?.key === key ? current.items : []), ...page.items],
           next: page.next,
         }));
         setLoadingMore(false);
@@ -70,7 +83,7 @@ export function usePaged<T>(fetchPage: (before: string | null) => Promise<Page<T
         setLoadingMore(false);
       },
     );
-  }, [base, next, fetchPage]);
+  }, [base, next, fetchPage, key]);
 
   const resource: Resource<T[]> =
     first.status === "ready"
@@ -80,4 +93,14 @@ export function usePaged<T>(fetchPage: (before: string | null) => Promise<Page<T
         : first;
   const refreshError = first.status === "error" && base ? first.error : null;
   return { resource, next, loadingMore, moreError, refreshError, loadMore };
+}
+
+function uniqueById<T>(items: T[], idOf: (item: T) => string): T[] {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    const id = idOf(item);
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
 }

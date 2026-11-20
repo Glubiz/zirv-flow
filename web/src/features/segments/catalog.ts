@@ -30,6 +30,22 @@ function first(resources: readonly Resource<unknown>[]): Resource<unknown> | nul
   return resources.find((resource) => resource.status === "error") ?? null;
 }
 
+/** The workspace's lists. */
+export function useLists(workspaceId: string): Resource<ListDef[]> {
+  return useResource(
+    () => unwrap(client.GET("/api/v1/workspaces/{ws}/lists", { params: { path: { ws: workspaceId } } })),
+    [workspaceId],
+  );
+}
+
+/** The workspace's segments. */
+export function useSegmentRows(workspaceId: string): Resource<SegmentRow[]> {
+  return useResource(
+    () => unwrap(client.GET("/api/v1/workspaces/{ws}/segments", { params: { path: { ws: workspaceId } } })),
+    [workspaceId],
+  );
+}
+
 /** What the builder offers to pick from: the workspace's fields, events, lists, segments and topics. */
 export function useCatalog(workspaceId: string): CatalogState {
   const traits = useResource(
@@ -40,14 +56,8 @@ export function useCatalog(workspaceId: string): CatalogState {
     () => unwrap(client.GET("/api/v1/workspaces/{ws}/event-schemas", { params: { path: { ws: workspaceId } } })),
     [workspaceId],
   );
-  const lists = useResource(
-    () => unwrap(client.GET("/api/v1/workspaces/{ws}/lists", { params: { path: { ws: workspaceId } } })),
-    [workspaceId],
-  );
-  const segments = useResource(
-    () => unwrap(client.GET("/api/v1/workspaces/{ws}/segments", { params: { path: { ws: workspaceId } } })),
-    [workspaceId],
-  );
+  const lists = useLists(workspaceId);
+  const segments = useSegmentRows(workspaceId);
   const topics = useResource(
     () => unwrap(client.GET("/api/v1/workspaces/{ws}/topics", { params: { path: { ws: workspaceId } } })),
     [workspaceId],
@@ -98,14 +108,36 @@ export function traitTypes(traits: readonly TraitDef[]): ReadonlyMap<string, Val
   return types;
 }
 
+/** A failed event-schema fetch is tried again this many times, after 1, 2 and 4 seconds. */
+const MAX_RETRIES = 3;
+const RETRY_BASE_MS = 1000;
+
 /**
  * The property types of each named event, loaded as the names appear. An event that cannot be
- * loaded is left out, so a definition that uses it is not complete.
+ * loaded is tried again a few times, then left out, so a definition that uses it is not complete.
  */
 export function useEventTypes(workspaceId: string, names: readonly string[]): EventTypes {
   const [types, setTypes] = useState<EventTypes>(new Map());
+  const [retry, setRetry] = useState(0);
   const asked = useRef(new Set<string>());
+  const failures = useRef(new Map<string, number>());
+  const timers = useRef(new Set<ReturnType<typeof setTimeout>>());
+  const mounted = useRef(true);
   const wanted = names.filter((name) => name !== "").join("\n");
+
+  useEffect(() => {
+    mounted.current = true;
+    const pending = timers.current;
+    return () => {
+      mounted.current = false;
+      for (const timer of pending) clearTimeout(timer);
+      pending.clear();
+    };
+  }, []);
+  // Asking for other events starts the count again.
+  useEffect(() => {
+    failures.current.clear();
+  }, [workspaceId, wanted]);
 
   useEffect(() => {
     for (const name of wanted === "" ? [] : wanted.split("\n")) {
@@ -123,14 +155,23 @@ export function useEventTypes(workspaceId: string, names: readonly string[]): Ev
             const type = asValueType(property.type);
             if (type !== null) map.set(property.name, type);
           }
+          failures.current.delete(name);
           setTypes((current) => new Map(current).set(name, map));
         },
         () => {
           asked.current.delete(name);
+          const count = (failures.current.get(name) ?? 0) + 1;
+          failures.current.set(name, count);
+          if (!mounted.current || count > MAX_RETRIES) return;
+          const timer = setTimeout(() => {
+            timers.current.delete(timer);
+            setRetry((current) => current + 1);
+          }, RETRY_BASE_MS * 2 ** (count - 1));
+          timers.current.add(timer);
         },
       );
     }
-  }, [workspaceId, wanted]);
+  }, [workspaceId, wanted, retry]);
 
   return useMemo(() => {
     const merged = new Map(types);

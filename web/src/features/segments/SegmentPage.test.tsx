@@ -1,7 +1,7 @@
-import { act, screen, waitFor, within } from "@testing-library/react";
+import { act, renderHook, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Route, Routes } from "react-router";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { json, mockApi, problem, type Call, type Handler } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
@@ -11,12 +11,14 @@ import {
   detail,
   LIVE_AGE,
   PERSON_ID,
+  PURCHASE_DETAIL,
   previewBody,
   refusal,
   SEGMENT_ID,
   VERSION_1,
   WS,
 } from "../../test/segmentsApi";
+import { useEventTypes } from "./catalog";
 import { NewSegmentPage } from "./NewSegmentPage";
 import { REFRESH_RELOAD_MS, SegmentPage } from "./SegmentPage";
 
@@ -639,5 +641,250 @@ describe("refresh now", () => {
 
     await screen.findByRole("heading", { name: "Big spenders" });
     expect(screen.queryByRole("button", { name: "Refresh now" })).not.toBeInTheDocument();
+  });
+});
+
+const PURCHASED = { v: 1, all: [{ event: "purchase", window: { last: "P30D" } }] };
+
+describe("saving part of a segment", () => {
+  it("saves the header of a segment whose saved rules cannot be completed", async () => {
+    const calls = mockApi({
+      ...base(),
+      [`GET ${SEGMENT}`]: () => json(detail({}, { definition: PURCHASED })),
+      [`GET ${WS}/event-schemas/purchase`]: () => problem(500, "Internal Server Error", "internal error"),
+      [`PATCH ${SEGMENT}`]: () => json(detail({ name: "Big spenders 2" }, { definition: PURCHASED })),
+    });
+    const user = userEvent.setup();
+    mountPage();
+
+    await user.type(await screen.findByLabelText("Name"), " 2");
+    expect(screen.queryByText("Fill in every condition to save.")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(await screen.findByText("Saved.")).toBeInTheDocument();
+    expect(bodyOf(calls, "PATCH", SEGMENT)).toEqual({ name: "Big spenders 2" });
+  });
+
+  it("still needs a complete definition when the definition is what changed", async () => {
+    mockApi(base());
+    const user = userEvent.setup();
+    mountPage();
+
+    await user.clear(await screen.findByLabelText("Value"));
+
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(screen.getByText("Fill in every condition to save.")).toBeInTheDocument();
+  });
+
+  it("keeps what was typed while the save was in flight", async () => {
+    let answer: (response: Response) => void = () => undefined;
+    const calls = mockApi({
+      ...base(),
+      [`PATCH ${SEGMENT}`]: () => new Promise<Response>((resolve) => (answer = resolve)),
+    });
+    const user = userEvent.setup();
+    mountPage();
+
+    const name = await screen.findByLabelText("Name");
+    await user.clear(name);
+    await user.type(name, "First");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls.some((call) => call.method === "PATCH")).toBe(true));
+    await user.type(screen.getByLabelText("Name"), " and more");
+    await act(async () => {
+      answer(json(detail({ name: "First" })));
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByText("Saved.")).toBeInTheDocument();
+    expect(screen.getByLabelText("Name")).toHaveValue("First and more");
+    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+  });
+
+  it("keeps a condition edited while the save was in flight", async () => {
+    let answer: (response: Response) => void = () => undefined;
+    const calls = mockApi({
+      ...base(),
+      [`PATCH ${SEGMENT}`]: () => new Promise<Response>((resolve) => (answer = resolve)),
+    });
+    const user = userEvent.setup();
+    mountPage();
+
+    const name = await screen.findByLabelText("Name");
+    await user.clear(name);
+    await user.type(name, "Renamed");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls.some((call) => call.method === "PATCH")).toBe(true));
+    await user.type(screen.getByLabelText("Value"), "x");
+    await act(async () => {
+      answer(json(detail({ name: "Renamed" })));
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByText("Saved.")).toBeInTheDocument();
+    expect(screen.getByLabelText("Value")).toHaveValue("Aarhusx");
+    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+  });
+
+  it("adopts the name the server stored when nothing was typed meanwhile", async () => {
+    mockApi({ ...base(), [`PATCH ${SEGMENT}`]: () => json(detail({ name: "Renamed" })) });
+    const user = userEvent.setup();
+    mountPage();
+
+    const name = await screen.findByLabelText("Name");
+    await user.clear(name);
+    await user.type(name, "  Renamed ");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(await screen.findByText("Saved.")).toBeInTheDocument();
+    expect(screen.getByLabelText("Name")).toHaveValue("Renamed");
+    expect(screen.queryByText("Unsaved changes")).not.toBeInTheDocument();
+  });
+});
+
+describe("event types", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function schemaRoute(failures: number) {
+    const attempts = { count: 0 };
+    mockApi({
+      [`GET ${WS}/event-schemas/purchase`]: () => {
+        attempts.count += 1;
+        return attempts.count <= failures ? problem(500, "Internal Server Error", "internal error") : json(PURCHASE_DETAIL);
+      },
+    });
+    return attempts;
+  }
+
+  it("asks again after a failed fetch and then has the event", async () => {
+    const attempts = schemaRoute(1);
+    const { result } = renderHook(() => useEventTypes("ws1", ["purchase"]));
+
+    await waitFor(() => expect(attempts.count).toBe(1));
+    await waitFor(() => expect(result.current.has("purchase")).toBe(true), { timeout: 2000 });
+    expect(attempts.count).toBe(2);
+  });
+
+  it("gives up after three retries, one, two and four seconds apart", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const attempts = schemaRoute(99);
+    const { result } = renderHook(() => useEventTypes("ws1", ["purchase"]));
+
+    await waitFor(() => expect(attempts.count).toBe(1));
+    for (const [wait, total] of [
+      [1000, 2],
+      [2000, 3],
+      [4000, 4],
+    ] as const) {
+      await act(() => vi.advanceTimersByTimeAsync(wait));
+      await waitFor(() => expect(attempts.count).toBe(total));
+    }
+    await act(() => vi.advanceTimersByTimeAsync(60000));
+
+    expect(attempts.count).toBe(4);
+    expect(result.current.has("purchase")).toBe(false);
+  });
+
+  it("stops retrying once unmounted", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const attempts = schemaRoute(99);
+    const { unmount } = renderHook(() => useEventTypes("ws1", ["purchase"]));
+    await waitFor(() => expect(attempts.count).toBe(1));
+
+    unmount();
+    await act(() => vi.advanceTimersByTimeAsync(20000));
+
+    expect(attempts.count).toBe(1);
+  });
+});
+
+describe("opening a segment", () => {
+  it("makes no live count or catalog request until Rules is opened", async () => {
+    const calls = mockApi(base());
+    const user = userEvent.setup();
+    mountPage("?tab=overview");
+
+    await screen.findByText("Kept up to date");
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const count = (method: string, path: string) => calls.filter((call) => call.method === method && call.path === path).length;
+    expect(count("POST", `${WS}/segments/preview`)).toBe(0);
+    for (const path of ["traits", "event-schemas", "topics"]) expect(count("GET", `${WS}/${path}`)).toBe(0);
+    expect(count("GET", `${WS}/lists`)).toBe(1);
+    expect(count("GET", `${WS}/segments`)).toBe(1);
+
+    await openTab(user, "Rules");
+    await waitFor(() => expect(count("POST", `${WS}/segments/preview`)).toBe(1));
+    expect(count("GET", `${WS}/traits`)).toBe(1);
+  });
+
+  it("keeps the rules form, and what was typed in it, after Rules has been opened", async () => {
+    mockApi(base());
+    const user = userEvent.setup();
+    mountPage("?tab=rules");
+
+    await user.type(await screen.findByLabelText("Name"), " 2");
+    await openTab(user, "Overview");
+    await openTab(user, "Rules");
+
+    expect(screen.getByLabelText("Name")).toHaveValue("Big spenders 2");
+  });
+});
+
+describe("refresh now reloads the panels", () => {
+  function refreshRoutes() {
+    let round = 1;
+    return mockApi({
+      ...base(),
+      [`GET ${SEGMENT}/members`]: () =>
+        json({ items: [memberItem(round)], computed_at: "2026-10-10T09:00:00Z", data_age: LIVE_AGE, next_cursor: null }),
+      [`GET ${SEGMENT}/size`]: () => json(sizeSeries([1, round * 10])),
+      [`POST ${SEGMENT}/refresh`]: () => {
+        round = 2;
+        return json({ queued: true }, 202);
+      },
+    });
+  }
+
+  async function refresh(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(await screen.findByRole("button", { name: "Refresh now" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Refresh now" })).toBeEnabled(), {
+      timeout: REFRESH_RELOAD_MS + 3000,
+    });
+  }
+
+  it("shows the new people on the People tab", async () => {
+    refreshRoutes();
+    const user = userEvent.setup();
+    mountPage("?tab=people");
+    expect(await screen.findByRole("link", { name: "person1@example.test" })).toBeInTheDocument();
+
+    await refresh(user);
+
+    expect(await screen.findByRole("link", { name: "person2@example.test" }, { timeout: 1500 })).toBeInTheDocument();
+  });
+
+  it("shows the new size on the Overview tab", async () => {
+    refreshRoutes();
+    const user = userEvent.setup();
+    mountPage("?tab=overview");
+    expect(await screen.findByText("10 people now")).toBeInTheDocument();
+
+    await refresh(user);
+
+    expect(await screen.findByText("20 people now", undefined, { timeout: 1500 })).toBeInTheDocument();
+  });
+
+  it("reads the panels once when Refresh now was never used", async () => {
+    const calls = mockApi({
+      ...base(),
+      [`GET ${SEGMENT}/members`]: () => json({ items: [memberItem(1)], computed_at: null, data_age: LIVE_AGE, next_cursor: null }),
+    });
+    mountPage("?tab=people");
+
+    await screen.findByRole("link", { name: "person1@example.test" });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(calls.filter((call) => call.path === `${SEGMENT}/members`)).toHaveLength(1);
   });
 });

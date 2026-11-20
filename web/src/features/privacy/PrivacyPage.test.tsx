@@ -238,6 +238,33 @@ describe("privacy", () => {
     expect(put?.body).toEqual({ orphan_policy: "delete" });
   });
 
+  it("keeps the saved notice after the settings reload with the stored policy", async () => {
+    let policy = "keep";
+    mockApi(
+      adminRoutes({
+        [`GET ${BASE}/settings`]: () => json({ orphan_policy: policy }),
+        [`PUT ${BASE}/settings`]: async (request) => {
+          policy = ((await request.json()) as { orphan_policy: string }).orphan_policy;
+          return json({ orphan_policy: policy });
+        },
+      }),
+    );
+    const user = userEvent.setup();
+    renderRoute("/w/ws1/privacy", ROUTE, <PrivacyPage />);
+    const select = await screen.findByLabelText("Orphan policy");
+
+    await user.selectOptions(select, "delete");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(screen.getByLabelText("Orphan policy")).toHaveValue("delete"));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(screen.getByText("Saved.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+
+    await user.selectOptions(screen.getByLabelText("Orphan policy"), "keep");
+    expect(screen.queryByText("Saved.")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
+  });
+
   it("gives a member no privacy tools and asks for none of its data", async () => {
     const calls = mockApi({
       "GET /api/v1/session": () => json(session(MEMBER)),
@@ -348,6 +375,58 @@ describe("privacy", () => {
 
       expect(await screen.findByText("Erased")).toBeInTheDocument();
       expect(erasures).toBe(2);
+    });
+
+    it("keeps the pages loaded with Show more when a pending list polls", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const pending = { ...DONE, status: "pending", completed_at: null };
+      let firstPages = 0;
+      mockApi(
+        adminRoutes({
+          [`GET ${BASE}/erasures`]: (request) => {
+            if (new URL(request.url).searchParams.get("cursor")) return json({ erasures: [FAILED], next_cursor: null });
+            firstPages += 1;
+            return json({ erasures: [pending], next_cursor: "c1" });
+          },
+        }),
+      );
+      renderRoute("/w/ws1/privacy", ROUTE, <PrivacyPage />);
+      await userEvent.setup({ advanceTimers: vi.advanceTimersByTime }).click(await screen.findByRole("button", { name: "Show more" }));
+      expect(await screen.findByText("Failed")).toBeInTheDocument();
+
+      await vi.advanceTimersByTimeAsync(5500);
+      await waitFor(() => expect(firstPages).toBe(2));
+      await vi.advanceTimersByTimeAsync(500);
+
+      expect(screen.getByText("Failed")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Show more" })).not.toBeInTheDocument();
+    });
+
+    it("keeps rows a poll pushed out of the first page, once each", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const row = (id: string, status: string) => ({ ...DONE, id, status, completed_at: null, person_id: `person-${id}` });
+      let polled = false;
+      mockApi(
+        adminRoutes({
+          [`GET ${BASE}/erasures`]: (request) => {
+            if (new URL(request.url).searchParams.get("cursor")) return json({ erasures: [row("c", "failed")], next_cursor: null });
+            return polled
+              ? json({ erasures: [row("n", "pending"), row("a", "pending")], next_cursor: "c1" })
+              : json({ erasures: [row("a", "pending"), row("b", "completed")], next_cursor: "c1" });
+          },
+        }),
+      );
+      renderRoute("/w/ws1/privacy", ROUTE, <PrivacyPage />);
+      await userEvent.setup({ advanceTimers: vi.advanceTimersByTime }).click(await screen.findByRole("button", { name: "Show more" }));
+      expect(await screen.findByText("Failed")).toBeInTheDocument();
+      polled = true;
+
+      await vi.advanceTimersByTimeAsync(5500);
+
+      const table = screen.getByRole("table", { name: "Erasure requests" });
+      await waitFor(() => expect(within(table).getByTitle("person-n")).toBeInTheDocument());
+      const people = within(table).getAllByTitle(/^person-/).map((cell) => cell.getAttribute("title"));
+      expect(people).toEqual(["person-n", "person-a", "person-b", "person-c"]);
     });
 
     it("does not poll while the tab is hidden", async () => {
