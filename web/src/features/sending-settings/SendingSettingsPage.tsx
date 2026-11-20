@@ -1,4 +1,4 @@
-import { useState, type SyntheticEvent } from "react";
+import { useEffect, useRef, useState, type SyntheticEvent } from "react";
 import { useParams } from "react-router";
 
 import { ApiError, client, describeError, unwrap, useResource, type ErrorSummary } from "../../api";
@@ -10,6 +10,7 @@ import {
   draftToApi,
   hasProblems,
   MAX_CAPS,
+  mergeSaved,
   nextCapKey,
   sameDraft,
   WEEKDAYS,
@@ -48,7 +49,7 @@ function SendingSettingsView({ ws }: { ws: string }) {
       {settings.status === "error" ? <ErrorState {...describeError(settings.error)} onRetry={settings.reload} /> : null}
       {settings.status === "ready" ? (
         <SettingsForm
-          key={JSON.stringify(settings.data)}
+          key={ws}
           workspaceId={ws}
           stored={settings.data}
           zone={workspace.status === "ready" ? workspace.data.timezone : null}
@@ -79,7 +80,7 @@ interface FormProps {
   stored: SendSettings;
   zone: string | null;
   canManage: boolean;
-  /** Held by the page: a save reloads the settings, which remounts the form. */
+  /** Held by the page, so it outlives the form; a changed workspace remounts both. */
   notice: string | null;
   onNotice: (notice: string | null) => void;
   onReload: () => void;
@@ -91,10 +92,30 @@ function SettingsForm({ workspaceId, stored, zone, canManage, notice, onNotice, 
   const [original, setOriginal] = useState<SettingsDraft>(() => draftFromApi(stored));
   const [revision, setRevision] = useState(stored.revision);
   const [draft, setDraft] = useState<SettingsDraft>(original);
+  // The draft as last committed, so a save that lands can tell what was typed while it was in flight.
+  const latest = useRef(draft);
+  useEffect(() => {
+    latest.current = draft;
+  });
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
   const [stale, setStale] = useState(false);
   const [tried, setTried] = useState(false);
+  // "Load the latest limits" asks for a reload whose answer replaces the form; any other reload leaves it alone.
+  const [seen, setSeen] = useState(stored);
+  const [loadingLatest, setLoadingLatest] = useState(false);
+  if (stored !== seen) {
+    setSeen(stored);
+    if (loadingLatest) {
+      const fresh = draftFromApi(stored);
+      setLoadingLatest(false);
+      setOriginal(fresh);
+      setRevision(stored.revision);
+      setDraft(fresh);
+      setStale(false);
+      setTried(false);
+    }
+  }
   const problems = check(draft);
   const dirty = !sameDraft(draft, original);
   const readOnly = !canManage;
@@ -121,6 +142,8 @@ function SettingsForm({ workspaceId, stored, zone, canManage, notice, onNotice, 
     setBusy(true);
     setFailure(null);
     setStale(false);
+    /** What this request carries: an edit made while it is in flight is not in it, and must survive the answer. */
+    const sent = draft;
     try {
       const saved = await unwrap(
         client.PUT("/api/v1/workspaces/{ws}/sending/settings", {
@@ -128,9 +151,14 @@ function SettingsForm({ workspaceId, stored, zone, canManage, notice, onNotice, 
           body: draftToApi(draft, revision),
         }),
       );
-      setOriginal(draftFromApi(saved));
+      const confirmed = draftFromApi(saved);
+      const merged = mergeSaved(latest.current, sent, confirmed);
+      latest.current = merged;
+      setOriginal(confirmed);
       setRevision(saved.revision);
-      onNotice("Saved. The limits apply to messages that reach the check from now on.");
+      setDraft(merged);
+      // The notice describes the saved form: it stays hidden while an edit made during the save is still unsaved.
+      onNotice(sameDraft(merged, confirmed) ? "Saved. The limits apply to messages that reach the check from now on." : null);
       onReload();
     } catch (error) {
       if (error instanceof ApiError && error.code === "send_settings_revision_mismatch") {
@@ -303,7 +331,14 @@ function SettingsForm({ workspaceId, stored, zone, canManage, notice, onNotice, 
             limits discards them.
           </span>
           <div>
-            <Button onClick={onReload}>Load the latest limits</Button>
+            <Button
+              onClick={() => {
+                setLoadingLatest(true);
+                onReload();
+              }}
+            >
+              Load the latest limits
+            </Button>
           </div>
         </div>
       ) : null}
