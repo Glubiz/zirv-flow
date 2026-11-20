@@ -77,8 +77,10 @@ function ListDetail({ workspaceId, listId }: { workspaceId: string; listId: stri
       failed = true;
       setFailure(describeError(error));
     } finally {
-      if (!failed || removed > 0) setNotice(`Removed ${plural(removed, "person", "people")}.`);
-      if (!failed || removed > 0) refresh();
+      if (!failed || removed > 0) {
+        setNotice(`Removed ${plural(removed, "person", "people")}.`);
+        refresh();
+      }
       setBusy(false);
     }
   }
