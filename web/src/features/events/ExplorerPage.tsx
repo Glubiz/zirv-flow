@@ -14,6 +14,7 @@ import {
   formatDateTime,
 } from "../../ui";
 import { BarChart } from "./BarChart";
+import { propertiesOf } from "./catalog";
 import { EventsNav } from "./EventsNav";
 import { FilterBuilder, buildFilter, typeOf, type BuiltFilter, type FilterRow } from "./FilterBuilder";
 import { PropertyFacts } from "./PropertyFacts";
@@ -110,11 +111,20 @@ function Explorer({ workspaceId }: { workspaceId: string }) {
         : unwrap(client.GET("/api/v1/workspaces/{ws}/event-schemas/{name}", { params: { path: { ws: workspaceId, name: form.name } } })),
     [workspaceId, form.name],
   );
-  const properties: SchemaProperty[] =
-    detail.status === "ready" ? (detail.data?.versions[0]?.properties ?? []) : [];
+  const properties: SchemaProperty[] = detail.status === "ready" ? propertiesOf(detail.data) : [];
 
   function submit(event: SyntheticEvent) {
     event.preventDefault();
+    // Typing a filter needs the schema; without it a number would go out as text.
+    if (rows.length > 0 && detail.status !== "ready") {
+      if (detail.status === "error") {
+        setProblem(describeError(detail.error).detail);
+        detail.reload();
+      } else {
+        setProblem("The event's properties are still loading.");
+      }
+      return;
+    }
     const filters: BuiltFilter[] = [];
     for (const row of rows) {
       const built = buildFilter(row, typeOf(properties, row.key.trim()));

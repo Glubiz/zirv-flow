@@ -1,7 +1,7 @@
 import { Link, useNavigate, useParams } from "react-router";
 
-import { client, unwrap, useResource, type components } from "../../api";
-import { Button, EmptyState, formatAgo, PageHeader, Panel, Pill, ResourceView, type Tone } from "../../ui";
+import { client, describeError, unwrap, useResource, type components } from "../../api";
+import { Button, EmptyState, formatAgo, InlineError, PageHeader, Panel, Pill, ResourceView, type Tone } from "../../ui";
 import { useFlowAccess } from "./access";
 
 type Flow = components["schemas"]["FlowBody"];
@@ -25,7 +25,7 @@ export function FlowsPage() {
 
 function Flows({ workspaceId }: { workspaceId: string }) {
   const navigate = useNavigate();
-  const { canWrite } = useFlowAccess(workspaceId);
+  const { canWrite, failure } = useFlowAccess(workspaceId);
   const flows = useResource(
     () => unwrap(client.GET("/api/v1/workspaces/{ws}/flows", { params: { path: { ws: workspaceId } } })),
     [workspaceId],
@@ -46,6 +46,14 @@ function Flows({ workspaceId }: { workspaceId: string }) {
           ) : null
         }
       />
+      {failure ? (
+        <>
+          <InlineError {...describeError(failure.error)} />
+          <div>
+            <Button onClick={failure.retry}>Try again</Button>
+          </div>
+        </>
+      ) : null}
       <Panel flush>
         <ResourceView
           resource={flows}

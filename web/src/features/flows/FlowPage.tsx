@@ -87,6 +87,17 @@ function FlowLoader({ workspaceId, flowId }: { workspaceId: string; flowId: stri
     </p>
   );
 
+  if (flow.status !== "error" && access.failure) {
+    // Failing closed would show the flow as read-only; say the lookup failed instead.
+    return (
+      <div className="page">
+        {back}
+        <Panel flush>
+          <LoadError error={access.failure.error} onRetry={access.failure.retry} />
+        </Panel>
+      </div>
+    );
+  }
   if (flow.status === "loading" || (flow.status === "ready" && !access.ready)) {
     return (
       <div className="page">
@@ -166,13 +177,26 @@ function Editor({
   const [showCounts, setShowCounts] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
   const counts = useVersionCounts(workspaceId, flow.id, !versionsOpen && activeView === "build" && (showCounts || selected !== null) ? life.version : null);
+  // The list carries every version with its full graph, so it loads the first time a view needs it.
+  const [versionsWanted, setVersionsWanted] = useState(false);
+  if (!versionsWanted && (versionsOpen || activeView === "results")) setVersionsWanted(true);
   const versions = useResource(
-    () => unwrap(client.GET("/api/v1/workspaces/{ws}/flows/{id}/versions", { params: { path: { ws: workspaceId, id: flow.id } } })),
-    [workspaceId, flow.id, life.version],
+    async (): Promise<FlowVersion[]> =>
+      versionsWanted
+        ? unwrap(client.GET("/api/v1/workspaces/{ws}/flows/{id}/versions", { params: { path: { ws: workspaceId, id: flow.id } } }))
+        : [],
+    [workspaceId, flow.id, versionsWanted, life.version],
   );
-  const currentVersion = versions.status === "ready" ? versions.data.find((entry) => entry.version === life.version) : undefined;
-  const draftChanged = currentVersion !== undefined &&
-    (!sameJson(currentVersion.graph, draft.graph) || !sameJson(currentVersion.settings, draft.settings));
+  // The "Draft with changes" pill compares with the live version only.
+  const live = useResource(async (): Promise<FlowVersion | null> => {
+    if (life.version === null) return null;
+    return unwrap(client.GET("/api/v1/workspaces/{ws}/flows/{id}/versions/{n}", { params: { path: { ws: workspaceId, id: flow.id, n: life.version } } }));
+  }, [workspaceId, flow.id, life.version]);
+  const currentVersion = live.status === "ready" ? live.data : null;
+  const draftChanged = useMemo(
+    () => currentVersion !== null && (!sameJson(currentVersion.graph, draft.graph) || !sameJson(currentVersion.settings, draft.settings)),
+    [currentVersion, draft.graph, draft.settings],
+  );
   const countsOverlay = useMemo<Overlay | undefined>(() => {
     if (!showCounts || counts.status !== "ready" || !counts.data) return undefined;
     return { counts: new Map(counts.data.nodes.map((entry) => [entry.node_id, entry])) };
@@ -519,8 +543,10 @@ function Editor({
       const current = await unwrap(
         client.GET("/api/v1/workspaces/{ws}/flows/{id}", { params: { path: { ws: workspaceId, id: flow.id } } }),
       );
-      if (applyLife(request, { state: current.state, version: current.current_version ?? null }) && withNotice) {
-        setNotice("The flow was changed somewhere else. It is shown as it is now; nothing was done.");
+      if (applyLife(request, { state: current.state, version: current.current_version ?? null })) {
+        // The other session may have started the warm-up, which starts the polling too.
+        adoptWarmup(current.warmup);
+        if (withNotice) setNotice("The flow was changed somewhere else. It is shown as it is now; nothing was done.");
       }
     } catch (again) {
       noticeOf(again);

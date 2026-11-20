@@ -4,7 +4,8 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { flowRoutes } from "../../test/flowsApi";
 import { lastGraph, mountEditor as mount, openInspectorOf, saves, type User } from "../../test/flowsEditor";
-import { mockApi } from "../../test/mockApi";
+import { json, mockApi, problem } from "../../test/mockApi";
+import { members } from "../../test/segmentsApi";
 import { stubReactFlow } from "../../test/reactFlowStubs";
 
 beforeEach(() => {
@@ -131,3 +132,27 @@ describe("flow editor keyboard", () => {
     expect(saves(calls)).toHaveLength(0);
   });
 });
+
+describe("flow editor when the access lookup fails", () => {
+  it("says so with a retry instead of opening read-only, and opens writable once it works", async () => {
+    let working = false;
+    mockApi({
+      ...flowRoutes(),
+      "GET /api/v1/workspaces/ws1/members": () => (working ? json(members("admin")) : problem(500, "Boom", "down")),
+    });
+    const user = userEvent.setup();
+    mount();
+
+    const retry = await screen.findByRole("button", { name: /retry|try again|reload/i }, { timeout: 3000 });
+    expect(screen.queryByText("You can look at this flow but not change it.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: /^Wait: 1 day/ })).not.toBeInTheDocument();
+
+    working = true;
+    await user.click(retry);
+
+    await screen.findByRole("group", { name: /^Wait: 1 day/ });
+    expect(screen.getByRole("textbox", { name: "Flow name" })).toBeInTheDocument();
+    expect(screen.queryByText("You can look at this flow but not change it.")).not.toBeInTheDocument();
+  });
+});
+

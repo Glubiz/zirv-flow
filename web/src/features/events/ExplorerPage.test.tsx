@@ -280,3 +280,98 @@ describe("filter rows", () => {
     expect(buildFilter(row("total", "in", "1, x"), "number")).toBe('"total" takes numbers.');
   });
 });
+
+describe("filter values the form shows", () => {
+  const row = (key: string, op: string, value: string) => ({ id: 1, key, op, value });
+
+  it("rejects Infinity, 1e999 and hex as numbers", () => {
+    expect(typeof buildFilter(row("n", "gt", "Infinity"), "number")).toBe("string");
+    expect(typeof buildFilter(row("n", "gt", "1e999"), "number")).toBe("string");
+    expect(typeof buildFilter(row("n", "in", "1,Infinity"), "number")).toBe("string");
+    expect(buildFilter(row("n", "in", "1,1e999"), "number")).toBe('"n" takes numbers.');
+    expect(buildFilter(row("n", "gt", "0x10"), "number")).toBe('"n" takes a number.');
+    expect(buildFilter(row("n", "gt", "-1.5e3"), "number")).toEqual({ key: "n", op: "gt", value: -1500 });
+    expect(buildFilter(row("n", "gt", ".5"), "number")).toEqual({ key: "n", op: "gt", value: 0.5 });
+  });
+
+  it("builds a boolean filter from its displayed default Yes", () => {
+    expect(buildFilter(row("vip", "eq", ""), "boolean")).toEqual({ key: "vip", op: "eq", value: true });
+    expect(buildFilter(row("vip", "eq", "abc"), "boolean")).toEqual({ key: "vip", op: "eq", value: true });
+    expect(buildFilter(row("vip", "eq", "false"), "boolean")).toEqual({ key: "vip", op: "eq", value: false });
+  });
+
+  it("sends a boolean filter left on its default Yes", async () => {
+    const calls = mockApi(
+      routes({ [`GET ${BASE}/event-schemas/order`]: () => json({ ...DETAIL, versions: [], draft: [{ name: "vip", type: "boolean" }] }) }),
+    );
+    const user = userEvent.setup();
+    open();
+    await screen.findByText("13 events in the range.");
+    await user.selectOptions(screen.getByLabelText("Event"), "order");
+    await user.click(screen.getByRole("button", { name: "Add a filter" }));
+    await user.type(screen.getByLabelText("Property of filter 1"), "vip");
+    await user.click(screen.getByRole("button", { name: "Run query" }));
+    await waitFor(() => expect((last(calls, "count")?.body as { filters: unknown[] }).filters).toHaveLength(1));
+    expect((last(calls, "count")?.body as { filters: unknown[] }).filters).toEqual([{ key: "vip", op: "eq", value: true }]);
+    expect(screen.queryByText(/Enter a value/)).not.toBeInTheDocument();
+  });
+
+  it("sends a typed number for a draft-only schema property", async () => {
+    const calls = mockApi(
+      routes({ [`GET ${BASE}/event-schemas/order`]: () => json({ ...DETAIL, versions: [], draft: [{ name: "amount", type: "number" }] }) }),
+    );
+    const user = userEvent.setup();
+    open();
+    await screen.findByText("13 events in the range.");
+    await user.selectOptions(screen.getByLabelText("Event"), "order");
+    await user.click(screen.getByRole("button", { name: "Add a filter" }));
+    await user.type(screen.getByLabelText("Property of filter 1"), "amount");
+    await user.selectOptions(screen.getByLabelText("Operator of filter 1"), "gte");
+    await user.type(screen.getByLabelText("Value of filter 1"), "5");
+    await user.click(screen.getByRole("button", { name: "Run query" }));
+    await waitFor(() => expect((last(calls, "count")?.body as { filters: unknown[] }).filters).toHaveLength(1));
+    expect((last(calls, "count")?.body as { filters: unknown[] }).filters).toEqual([{ key: "amount", op: "gte", value: 5 }]);
+  });
+
+  it("does not run a filtered query while the event's properties are still loading", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const calls = mockApi({
+      ...routes(),
+      [`GET ${BASE}/event-schemas/order`]: async () => {
+        await gate;
+        return json(DETAIL);
+      },
+    });
+    const user = userEvent.setup();
+    open();
+    await screen.findByText("13 events in the range.");
+    const before = calls.filter((call) => call.path.endsWith("/count")).length;
+    await user.selectOptions(screen.getByLabelText("Event"), "order");
+    await user.click(screen.getByRole("button", { name: "Add a filter" }));
+    await user.type(screen.getByLabelText("Property of filter 1"), "total");
+    await user.type(screen.getByLabelText("Value of filter 1"), "5");
+    await user.click(screen.getByRole("button", { name: "Run query" }));
+    expect(await screen.findByText("The event's properties are still loading.")).toBeInTheDocument();
+    expect(calls.filter((call) => call.path.endsWith("/count"))).toHaveLength(before);
+    release();
+  });
+
+  it("does not run a filtered query when the event's properties failed to load", async () => {
+    const calls = mockApi(routes({ [`GET ${BASE}/event-schemas/order`]: () => problem(500, "Boom", "schema down") }));
+    const user = userEvent.setup();
+    open();
+    await screen.findByText("13 events in the range.");
+    const before = calls.filter((call) => call.path.endsWith("/count")).length;
+    await user.selectOptions(screen.getByLabelText("Event"), "order");
+    await user.click(screen.getByRole("button", { name: "Add a filter" }));
+    await user.type(screen.getByLabelText("Property of filter 1"), "total");
+    await user.type(screen.getByLabelText("Value of filter 1"), "5");
+    await waitFor(() => expect(calls.filter((call) => call.path.endsWith("event-schemas/order")).length).toBeGreaterThan(0));
+    await user.click(screen.getByRole("button", { name: "Run query" }));
+    expect(await screen.findByText(/schema down/)).toBeInTheDocument();
+    expect(calls.filter((call) => call.path.endsWith("/count"))).toHaveLength(before);
+  });
+});

@@ -1,10 +1,26 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { json, mockApi, OWNER, problem, session } from "../../test/mockApi";
 import { SessionProvider, useSession } from "../session";
 import { AssistantPanel } from "./AssistantPanel";
+
+/**
+ * A draft that never answers and fails only when Cancel aborts it. The signal a Request carries
+ * follows the component's controller only while something holds it, and a garbage collection
+ * between the request and Cancel would cut that link, so the test holds each signal itself.
+ */
+const heldSignals: AbortSignal[] = [];
+afterEach(() => {
+  heldSignals.length = 0;
+});
+function hangUntilAborted(request: Request): Promise<Response> {
+  heldSignals.push(request.signal);
+  return new Promise<Response>((_resolve, reject) => {
+    request.signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+  });
+}
 
 const SETTINGS = "GET /api/v1/workspaces/ws1/ai/settings";
 const DRAFT = "POST /api/v1/workspaces/ws1/ai/drafts";
@@ -162,10 +178,7 @@ describe("the assistant panel", () => {
     mockApi({
       ...BASE,
       [SETTINGS]: () => json(settings(true)),
-      [DRAFT]: (request) =>
-        new Promise<Response>((_resolve, reject) => {
-          request.signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
-        }),
+      [DRAFT]: hangUntilAborted,
     });
     const user = userEvent.setup();
     mount();
@@ -463,10 +476,7 @@ describe("the assistant panel for a segment", () => {
     mockApi({
       ...BASE,
       [SETTINGS]: () => json(settings(true)),
-      [DRAFT]: (request) =>
-        new Promise<Response>((_resolve, reject) => {
-          request.signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
-        }),
+      [DRAFT]: hangUntilAborted,
     });
     const user = userEvent.setup();
     mountSegment();

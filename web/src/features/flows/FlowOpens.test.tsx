@@ -74,3 +74,54 @@ describe("the machine filter on opens", () => {
     });
   });
 });
+
+describe("the value of a number filter", () => {
+  const FILTER_GRAPH = {
+    ...WAIT_GRAPH,
+    nodes: [
+      { id: "n1", type: "wait.until_event", event: "purchase", timeout_seconds: 3600, filters: [{ prop: "amount", op: "gt", value: "" }] },
+      { id: "n2", type: "exit" },
+    ],
+  };
+
+  async function openFilter() {
+    const user = userEvent.setup();
+    mount();
+    const sheet = await openInspectorOf(user, /^Wait/);
+    const filter = await within(sheet).findByRole("group", { name: "Filter 1" });
+    return { user, sheet, filter, value: within(filter).getByLabelText("Value") };
+  }
+
+  it("keeps a trailing dot and zeros while typing, and saves the number", async () => {
+    const calls = mockApi(flowRoutes({ flow: { graph: FILTER_GRAPH } }));
+    const { user, value } = await openFilter();
+
+    await user.type(value, "0.5");
+    expect(value).toHaveValue("0.5");
+    await user.clear(value);
+    await user.type(value, "1.05");
+    expect(value).toHaveValue("1.05");
+    await waitFor(() => expect(saves(calls).length).toBeGreaterThan(0), SAVE);
+    expect(lastGraph(calls)?.nodes[0]).toMatchObject({ filters: [{ prop: "amount", op: "gt", value: 1.05 }] });
+  });
+
+  it("shows the typed text, not the number, after a trailing dot or zero", async () => {
+    const calls = mockApi(flowRoutes({ flow: { graph: FILTER_GRAPH } }));
+    const { user, value } = await openFilter();
+
+    await user.type(value, "1.0");
+    expect((value as HTMLInputElement).value).toBe("1.0");
+    await waitFor(() => expect(saves(calls).length).toBeGreaterThan(0), SAVE);
+    expect(lastGraph(calls)?.nodes[0]).toMatchObject({ filters: [{ prop: "amount", op: "gt", value: 1 }] });
+  });
+
+  it("shows the restored value after an undo", async () => {
+    mockApi(flowRoutes({ flow: { graph: FILTER_GRAPH } }));
+    const { user, value } = await openFilter();
+    await user.type(value, "5");
+    expect(value).toHaveValue("5");
+    await user.click(screen.getByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(within(screen.getByRole("group", { name: "Filter 1" })).getByLabelText("Value")).toHaveValue(""));
+  });
+});
+

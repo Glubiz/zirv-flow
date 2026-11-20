@@ -2,7 +2,7 @@ import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { FLOW_ID, flowDetail, flowRoutes, impactBody, WS } from "../../test/flowsApi";
+import { FLOW_ID, flowDetail, flowRoutes, impactBody, warmupBody, WS } from "../../test/flowsApi";
 import { mountEditor as mount, type User } from "../../test/flowsEditor";
 import { json, mockApi, problem, type Handler } from "../../test/mockApi";
 import { stubReactFlow } from "../../test/reactFlowStubs";
@@ -170,3 +170,36 @@ describe("the empty Versions view while a publish runs", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 });
+
+describe("a publish another session made first", () => {
+  it("shows the warm-up it started once the conflict is adopted", async () => {
+    const routes = flowRoutes();
+    const load = routes[FLOW]!;
+    let loads = 0;
+    const now = Date.now();
+    mockApi({
+      ...routes,
+      [FLOW]: (request) => {
+        loads += 1;
+        if (loads === 1) return load(request);
+        return json(
+          flowDetail({
+            state: "published",
+            current_version: 1,
+            warmup: warmupBody({ started_at: new Date(now).toISOString(), ends_at: new Date(now + 300_000).toISOString() }),
+          }),
+        );
+      },
+      ...publishRoute(() => problem(409, "Conflict", "The flow changed.")),
+    });
+    const user = userEvent.setup();
+    mount();
+    await user.click(await screen.findByRole("button", { name: /^Review and publish/ }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(await within(dialog).findByRole("button", { name: "Publish version 1" }));
+
+    expect(await screen.findByText("v1 live")).toBeInTheDocument();
+    expect(await screen.findByText(/^Warming up/)).toBeInTheDocument();
+  });
+});
+

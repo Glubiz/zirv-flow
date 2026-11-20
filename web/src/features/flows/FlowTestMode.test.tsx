@@ -6,6 +6,7 @@ import { FLOW_ID, flowRoutes, WS } from "../../test/flowsApi";
 import { mountEditor as mount, openInspectorOf, saves } from "../../test/flowsEditor";
 import { json, mockApi, problem, type Call } from "../../test/mockApi";
 import { stubReactFlow } from "../../test/reactFlowStubs";
+import { advanceBy } from "./testMode";
 
 beforeEach(() => {
   stubReactFlow();
@@ -406,3 +407,50 @@ describe("test mode", () => {
     expect(calls.some((call) => call.path.endsWith("/test"))).toBe(false);
   });
 });
+
+describe("advancing the clock by a huge amount", () => {
+  it("says it is too far ahead, without an error and without asking the server", async () => {
+    const calls = mockApi({ ...flowRoutes(), [TEST]: () => json(walk()) });
+    const errors: unknown[] = [];
+    const onError = (event: ErrorEvent) => {
+      errors.push(event.error);
+      event.preventDefault();
+    };
+    window.addEventListener("error", onError);
+    try {
+      const user = userEvent.setup();
+      mount();
+      const sheet = await startMadeUp(user);
+      const before = calls.filter((call) => call.path.endsWith("/test")).length;
+      await user.click(within(sheet).getByRole("button", { name: "Advance the clock…" }));
+      const amount = within(sheet).getByLabelText("Advance by");
+      await user.clear(amount);
+      await user.type(amount, "1e12");
+      await user.click(within(sheet).getByRole("button", { name: "Advance" }));
+
+      expect(errors).toEqual([]);
+      expect(within(sheet).getByRole("alert")).toHaveTextContent("That is too far ahead.");
+      expect(calls.filter((call) => call.path.endsWith("/test"))).toHaveLength(before);
+
+      await user.clear(amount);
+      await user.type(amount, "2");
+      await user.click(within(sheet).getByRole("button", { name: "Advance" }));
+      await waitFor(() => expect(calls.filter((call) => call.path.endsWith("/test"))).toHaveLength(before + 1));
+      expect(within(sheet).queryByText("That is too far ahead.")).not.toBeInTheDocument();
+    } finally {
+      window.removeEventListener("error", onError);
+    }
+  });
+
+  it("moves the clock by the amount, and gives nothing past the year 9999 or for a clock it cannot read", () => {
+    expect(advanceBy(START, 2, "days")).toBe("2030-01-03T00:00:00.000Z");
+    expect(advanceBy(START, 1e12, "days")).toBeNull();
+    expect(advanceBy(START, 3000, "days")).toBe("2038-03-20T00:00:00.000Z");
+    expect(advanceBy("9999-12-31T00:00:00Z", 2, "days")).toBeNull();
+    expect(advanceBy("not a time", 1, "days")).toBeNull();
+    // Exactly the last millisecond of 9999 is accepted; one millisecond more is refused.
+    expect(advanceBy("9999-12-31T23:58:59.999Z", 1, "minutes")).toBe("9999-12-31T23:59:59.999Z");
+    expect(advanceBy("9999-12-31T23:59:00.000Z", 1, "minutes")).toBeNull();
+  });
+});
+

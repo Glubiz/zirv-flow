@@ -1,6 +1,6 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { BarChart, niceMax } from "./BarChart";
 
@@ -115,5 +115,39 @@ describe("bar chart", () => {
     );
     const xs = [...odd.container.querySelectorAll("rect")].map((r) => Number(r.getAttribute("x")));
     expect(xs[2]! - xs[1]!).toBeCloseTo(xs[1]! - xs[0]!);
+  });
+});
+
+describe("bar chart labels in a western zone", () => {
+  const zone = process.env.TZ;
+  beforeEach(() => {
+    process.env.TZ = "America/New_York";
+  });
+  afterEach(() => {
+    if (zone === undefined) delete process.env.TZ;
+    else process.env.TZ = zone;
+  });
+
+  it("labels a UTC day bucket with its UTC date, in the axis, the summary and the table", () => {
+    const bars = [{ start: "2026-11-14T00:00:00Z", count: 1 }];
+    const { container } = render(<BarChart bars={bars} unit="day" />);
+    const expected = new Date("2026-11-14T12:00:00Z").toLocaleDateString(undefined, { timeZone: "UTC" });
+    const labels = [...container.querySelectorAll("text.chart-label")].map((node) => node.textContent);
+    expect(labels).toContain(expected);
+    expect(screen.getByRole("img").getAttribute("aria-label")).toContain(expected);
+    expect(container.querySelector("tbody td")?.textContent).toBe(expected);
+    expect(container.querySelector("th")?.textContent).toBe("Start of the day (UTC)");
+    expect(expected).toContain("14");
+  });
+
+  it("labels a UTC week bucket with its UTC date and an hour bucket with a local time", () => {
+    const week = render(<BarChart bars={[{ start: "2026-11-09T00:00:00Z", count: 1 }]} unit="week" />);
+    expect(week.container.querySelector("tbody td")?.textContent).toContain("9");
+    expect(week.container.querySelector("th")?.textContent).toBe("Start of the week (UTC)");
+    week.unmount();
+
+    const hour = render(<BarChart bars={[{ start: "2026-11-14T00:00:00Z", count: 1 }]} unit="hour" />);
+    expect(hour.container.querySelector("tbody td")?.textContent).toMatch(/\d[:.]\d\d[:.]\d\d/);
+    expect(hour.container.querySelector("th")?.textContent).toBe("Start of the hour");
   });
 });

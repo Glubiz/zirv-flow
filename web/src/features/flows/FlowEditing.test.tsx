@@ -177,3 +177,59 @@ describe("flow settings", () => {
     expect(await screen.findByText("No one can be in this flow yet")).toBeInTheDocument();
   });
 });
+
+describe("the increment amount of a trait", () => {
+  const INCREMENT_GRAPH = {
+    v: 1,
+    nodes: [{ id: "n1", type: "action.update_trait", key: "plan", change: { op: "increment", by: 1 } }],
+    edges: [],
+  };
+
+  it("keeps a typed minus and saves the negative number", async () => {
+    const calls = mockApi(flowRoutes({ flow: { graph: INCREMENT_GRAPH } }));
+    const user = userEvent.setup();
+    mount();
+
+    const sheet = await openInspectorOf(user, /^Update a trait: /);
+    const add = within(sheet).getByLabelText("Add");
+    await user.clear(add);
+    await user.type(add, "-5");
+
+    expect(add).toHaveValue(-5);
+    await waitFor(() => expect(saves(calls).length).toBeGreaterThan(0), SAVE);
+    const node = lastGraph(calls)?.nodes.find((entry) => entry.id === "n1");
+    expect(node?.["change"]).toEqual({ op: "increment", by: -5 });
+  });
+
+  it("stays empty with a message when cleared, and keeps the last number in the draft", async () => {
+    const calls = mockApi(flowRoutes({ flow: { graph: INCREMENT_GRAPH } }));
+    const user = userEvent.setup();
+    mount();
+
+    const sheet = await openInspectorOf(user, /^Update a trait: /);
+    const add = within(sheet).getByLabelText("Add");
+    await user.clear(add);
+    expect(add).toHaveValue(null);
+    expect(within(sheet).getByText("Enter a number.")).toBeInTheDocument();
+    await user.type(add, "2.5");
+    expect(add).toHaveValue(2.5);
+    expect(within(sheet).queryByText("Enter a number.")).not.toBeInTheDocument();
+    await waitFor(() => expect(saves(calls).length).toBeGreaterThan(0), SAVE);
+    expect(lastGraph(calls)?.nodes[0]?.["change"]).toEqual({ op: "increment", by: 2.5 });
+  });
+
+  it("shows the restored amount after an undo", async () => {
+    mockApi(flowRoutes({ flow: { graph: INCREMENT_GRAPH } }));
+    const user = userEvent.setup();
+    mount();
+
+    const sheet = await openInspectorOf(user, /^Update a trait: /);
+    const add = within(sheet).getByLabelText("Add");
+    await user.clear(add);
+    await user.type(add, "7");
+    expect(add).toHaveValue(7);
+    await user.click(screen.getByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(within(screen.getByRole("region", { name: "Step inspector" })).getByLabelText("Add")).toHaveValue(1));
+  });
+});
+

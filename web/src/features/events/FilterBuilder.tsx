@@ -20,6 +20,18 @@ export function typeOf(properties: readonly SchemaProperty[], key: string): stri
   return properties.find((property) => property.name === key)?.type ?? null;
 }
 
+const DECIMAL = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/;
+
+/** A decimal that fits a finite number: no Infinity, 1e999 or hex and binary forms. */
+function isNumber(text: string): boolean {
+  return DECIMAL.test(text) && Number.isFinite(Number(text));
+}
+
+/** What a boolean row shows and sends: Yes unless it says "false", so an untouched row is Yes. */
+export function booleanOf(value: string): boolean {
+  return value !== "false";
+}
+
 function words(text: string): string[] {
   return text
     .split(",")
@@ -37,21 +49,21 @@ export function buildFilter(row: FilterRow, type: string | null): BuiltFilter | 
   if (op === "exists") {
     return { key, op: "exists", value: row.value !== "absent" };
   }
+  if (type === "boolean") return { key, op, value: booleanOf(row.value) };
   const text = row.value.trim();
   if (text === "") return `Enter a value for "${key}".`;
   const numeric = type === "number" || type === "integer";
   const parse = (item: string): unknown => {
     if (numeric) return Number(item);
-    if (type === "boolean") return item === "true";
     return item;
   };
   if (op === "in") {
     const items = words(text);
     if (items.length === 0) return `Enter at least one value for "${key}".`;
-    if (numeric && items.some((item) => Number.isNaN(Number(item)))) return `"${key}" takes numbers.`;
+    if (numeric && items.some((item) => !isNumber(item))) return `"${key}" takes numbers.`;
     return { key, op: "in", value: items.map(parse) };
   }
-  if (numeric && Number.isNaN(Number(text))) return `"${key}" takes a number.`;
+  if (numeric && !isNumber(text)) return `"${key}" takes a number.`;
   return { key, op, value: parse(text) };
 }
 
@@ -108,7 +120,7 @@ export function FilterBuilder({ properties, rows, onChange }: FilterBuilderProps
                 <option value="absent">Absent</option>
               </SelectField>
             ) : type === "boolean" ? (
-              <SelectField label={`Value of ${label}`} value={row.value === "false" ? "false" : "true"} onChange={(event) => update(row.id, { value: event.target.value })}>
+              <SelectField label={`Value of ${label}`} value={booleanOf(row.value) ? "true" : "false"} onChange={(event) => update(row.id, { value: event.target.value })}>
                 <option value="true">Yes</option>
                 <option value="false">No</option>
               </SelectField>
