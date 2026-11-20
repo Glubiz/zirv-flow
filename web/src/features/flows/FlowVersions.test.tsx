@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { FLOW_ID, flowRoutes, versionBody, WS } from "../../test/flowsApi";
 import { mountEditor as mount } from "../../test/flowsEditor";
-import { json, mockApi, problem } from "../../test/mockApi";
+import { json, mockApi, problem, type Call } from "../../test/mockApi";
 import { stubReactFlow } from "../../test/reactFlowStubs";
 
 beforeEach(() => {
@@ -173,3 +173,57 @@ describe("a version on the canvas", () => {
     expect(await screen.findByRole("button", { name: "View version 2" })).toBeInTheDocument();
   });
 });
+
+describe("fetching the versions", () => {
+  const FLOW = `${WS}/flows/${FLOW_ID}`;
+  const gets = (calls: Call[], path: string) => calls.filter((call) => call.method === "GET" && call.path === path).length;
+
+  function routes() {
+    return {
+      ...flowRoutes({ flow: { state: "published", current_version: 2 } }),
+      [VERSIONS]: () => json([versionBody(1, { graph: olderGraph() }), versionBody(2)]),
+      [`GET ${FLOW}/versions/2/counts`]: () => json({ version: 2, nodes: [] }),
+      [`GET ${FLOW}/enrollments`]: () => json({ enrollments: [], next_cursor: null }),
+    };
+  }
+
+  it("opens Build with the live version only, not the list of every version", async () => {
+    const calls = mockApi(routes());
+    mount();
+    await screen.findByRole("group", { name: /^Wait: 1 day/ });
+    await waitFor(() => expect(gets(calls, `${FLOW}/versions/2`)).toBe(1));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    expect(gets(calls, `${FLOW}/versions`)).toBe(0);
+    expect(gets(calls, `${FLOW}/versions/2`)).toBe(1);
+  });
+
+  it("loads the list once when Versions opens, and not again on closing and opening it", async () => {
+    const calls = mockApi(routes());
+    const user = userEvent.setup();
+    mount();
+    await openVersions(user);
+    await screen.findAllByRole("listitem");
+    expect(gets(calls, `${FLOW}/versions`)).toBe(1);
+
+    await user.click(screen.getByRole("button", { name: "Versions" }));
+    await user.click(screen.getByRole("button", { name: "Versions" }));
+    await screen.findAllByRole("listitem");
+    expect(gets(calls, `${FLOW}/versions`)).toBe(1);
+  });
+
+  it("loads the list for Results, and not again when going to Build and back", async () => {
+    const calls = mockApi(routes());
+    const user = userEvent.setup();
+    mount("?view=results");
+    await screen.findByRole("table", { name: "Counts per step of version 2" });
+    await waitFor(() => expect(gets(calls, `${FLOW}/versions`)).toBe(1));
+
+    await user.click(screen.getByRole("link", { name: "Build" }));
+    await screen.findByRole("group", { name: /^Wait: 1 day/ });
+    await user.click(screen.getByRole("link", { name: "Results" }));
+    await screen.findByRole("table", { name: "Counts per step of version 2" });
+    expect(gets(calls, `${FLOW}/versions`)).toBe(1);
+  });
+});
+

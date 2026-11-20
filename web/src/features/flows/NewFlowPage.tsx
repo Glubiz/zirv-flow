@@ -2,7 +2,7 @@ import { useState, type SyntheticEvent } from "react";
 import { useNavigate, useParams } from "react-router";
 
 import { client, describeError, unwrap, type ErrorSummary } from "../../api";
-import { Button, EmptyState, InlineError, PageHeader, Panel, SelectField, TextField } from "../../ui";
+import { Button, EmptyState, InlineError, LoadError, PageHeader, Panel, SelectField, TextField } from "../../ui";
 import { useFlowAccess } from "./access";
 import { defaultSettings, TRIGGER_KINDS, type TriggerType } from "./triggers";
 
@@ -13,7 +13,7 @@ export function NewFlowPage() {
 
 function NewFlow({ workspaceId }: { workspaceId: string }) {
   const navigate = useNavigate();
-  const { ready, canWrite } = useFlowAccess(workspaceId);
+  const { ready, canWrite, failure: lookup } = useFlowAccess(workspaceId);
   const [name, setName] = useState("");
   const [trigger, setTrigger] = useState<TriggerType>("segment");
   const [busy, setBusy] = useState(false);
@@ -44,7 +44,11 @@ function NewFlow({ workspaceId }: { workspaceId: string }) {
         breadcrumb={{ group: "Messaging", section: "Flows", to: `/w/${workspaceId}/flows` }}
         lede="Name it and say what starts it. You lay out the steps next."
       />
-      {ready && !canWrite ? (
+      {lookup ? (
+        <Panel flush>
+          <LoadError error={lookup.error} onRetry={lookup.retry} />
+        </Panel>
+      ) : ready && !canWrite ? (
         <Panel flush>
           <EmptyState title="You cannot create flows">Ask a member of the workspace to create one, or to give you a role.</EmptyState>
         </Panel>

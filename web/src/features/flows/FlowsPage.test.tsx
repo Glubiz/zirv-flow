@@ -141,3 +141,27 @@ describe("new flow", () => {
     expect(screen.queryByRole("button", { name: "Create flow" })).not.toBeInTheDocument();
   });
 });
+
+describe("when the access lookup fails", () => {
+  const down = { "GET /api/v1/workspaces/ws1/members": () => problem(500, "Boom", "members down") };
+
+  it("keeps the list and says the lookup failed, with a retry and no New flow button", async () => {
+    mockApi({ ...actor("writer"), ...down, [`GET ${WS}/flows`]: () => json([flowBody()]) });
+    mountList();
+
+    expect(await screen.findByRole("link", { name: "Welcome series" })).toBeInTheDocument();
+    expect(await screen.findByText(/members down/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "New flow" })).not.toBeInTheDocument();
+  });
+
+  it("does not say you cannot create flows on the new flow page, and offers a retry", async () => {
+    mockApi({ ...actor("writer"), ...down });
+    renderRoute("/w/ws1/flows/new", "/w/:ws/flows/new", <NewFlowPage />);
+
+    expect(await screen.findByRole("button", { name: "Try again" })).toBeInTheDocument();
+    expect(screen.queryByText("You cannot create flows")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Create flow" })).not.toBeInTheDocument();
+  });
+});
+

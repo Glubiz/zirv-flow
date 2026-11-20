@@ -13,14 +13,19 @@ interface FlowAccess {
   canTestWithPerson: boolean;
   /** Look people up by an identifier: the personal data grant. */
   canViewPii: boolean;
+  /** Set when the lookup failed: every flag above is false then, which is safe but not the truth. */
+  failure: { error: unknown; retry: () => void } | null;
 }
+
+const NONE = { canWrite: false, canPublish: false, canAdmin: false, canTestWithPerson: false, canViewPii: false };
 
 export function useFlowAccess(workspaceId: string): FlowAccess {
   const access = useWorkspaceAccess(workspaceId);
-  if (access.status === "loading") return { ready: false, canWrite: false, canPublish: false, canAdmin: false, canTestWithPerson: false, canViewPii: false };
-  if (access.status === "error") return { ready: true, canWrite: false, canPublish: false, canAdmin: false, canTestWithPerson: false, canViewPii: false };
+  if (access.status === "loading") return { ready: false, ...NONE, failure: null };
+  if (access.status === "error") return { ready: true, ...NONE, failure: { error: access.error, retry: access.reload } };
   return {
     ready: true,
+    failure: null,
     canWrite: access.data.canEdit,
     canPublish: access.data.canPublish,
     canAdmin: access.data.canAdmin,

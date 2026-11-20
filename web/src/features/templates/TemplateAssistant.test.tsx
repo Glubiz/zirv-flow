@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { json, mockApi, OWNER, problem, session, type Call, type Handler } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
@@ -347,8 +347,38 @@ describe("the assistant and the editor's saves", () => {
     return user;
   }
 
+  /**
+   * Holds the editor's save debounce: the timer is captured instead of started, so a slow run cannot
+   * let it fire before the test is ready. `fire` runs the timers that were not cleared.
+   */
+  let release: () => void = () => undefined;
+  afterEach(() => release());
+
+  function holdSaveDebounce() {
+    const held = new Map<number, () => void>();
+    let next = 0;
+    const realSet = window.setTimeout.bind(window);
+    const realClear = window.clearTimeout.bind(window);
+    const setSpy = vi.spyOn(window, "setTimeout").mockImplementation(((handler: () => void, delay?: number) => {
+      if (delay !== DEBOUNCE_MS) return realSet(handler, delay);
+      next -= 1;
+      held.set(next, handler);
+      return next;
+    }) as typeof window.setTimeout);
+    const clearSpy = vi.spyOn(window, "clearTimeout").mockImplementation(((id?: number) => {
+      if (id !== undefined && held.delete(id)) return;
+      realClear(id);
+    }) as typeof window.clearTimeout);
+    release = () => {
+      setSpy.mockRestore();
+      clearSpy.mockRestore();
+    };
+    return { queued: () => held.size, fire: () => [...held.values()].forEach((run) => run()) };
+  }
+
   it("cancels the queued save when unsaved edits are replaced, and accepts", async () => {
     const calls = mount(templateRoutes({ extra: { [DRAFTS]: () => json(valid()), [ACCEPT]: () => json(accepted()) } }));
+    const debounce = holdSaveDebounce();
     const user = await open();
     await user.type(await screen.findByLabelText("Ask for a change"), "Warmer");
     await user.click(screen.getByRole("button", { name: "Draft" }));
@@ -356,13 +386,16 @@ describe("the assistant and the editor's saves", () => {
     // Look at the editor, make an edit (its save is queued behind the debounce), and come back.
     await user.click(screen.getByRole("button", { name: "Assistant" }));
     await user.type(await screen.findByRole("textbox", { name: /source/ }), "x");
+    expect(debounce.queued()).toBe(1);
     await user.click(screen.getByRole("button", { name: "Assistant" }));
     await user.click(screen.getByRole("button", { name: "Put into the draft" }));
     await user.click(await screen.findByRole("button", { name: "Replace them" }));
 
     expect(await screen.findByText(/saved as the template's draft/)).toBeInTheDocument();
-    // Past the debounce: the queued save never goes out.
-    await new Promise((resolve) => setTimeout(resolve, DEBOUNCE_MS + 300));
+    // The debounce elapses now: whatever was not cancelled would save, and nothing does.
+    expect(debounce.queued()).toBe(0);
+    debounce.fire();
+    await new Promise((resolve) => setTimeout(resolve, 50));
     expect(calls.some((call) => call.method === "PUT" && call.path.endsWith("/draft"))).toBe(false);
     expect(calls.some((call) => call.path.endsWith("/accept"))).toBe(true);
   });

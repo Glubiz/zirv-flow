@@ -91,6 +91,10 @@ export function flowRoutes({ role = "writer", flow, issues = [] }: Options = {})
     ...catalogRoutes(),
     [`GET ${WS}/flows/${FLOW_ID}`]: () => json(current),
     [`GET ${WS}/flows/${FLOW_ID}/versions`]: () => json([]),
+    // The live version on its own, which the editor compares the draft with.
+    ...(typeof current.current_version === "number"
+      ? { [`GET ${WS}/flows/${FLOW_ID}/versions/${current.current_version}`]: () => json(versionBody(current.current_version as number)) }
+      : {}),
     [`PATCH ${WS}/flows/${FLOW_ID}`]: async (request) => {
       // As the server does: a save that names a revision other than the current one is refused, and one that names none applies.
       const changes = (await request.json()) as Record<string, unknown>;

@@ -382,8 +382,13 @@ function AdvanceForm({ busy, clock, onSubmit }: { busy: boolean; clock: string; 
       setProblem("Enter an amount above zero.");
       return;
     }
+    const to = advanceBy(clock, count, unit);
+    if (to === null) {
+      setProblem("That is too far ahead.");
+      return;
+    }
     setProblem(null);
-    void onSubmit(advanceBy(clock, count, unit));
+    void onSubmit(to);
   }
   return (
     <form className="fl-effect" aria-label="Advance the clock" onSubmit={submit}>

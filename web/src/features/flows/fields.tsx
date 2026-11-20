@@ -25,6 +25,7 @@ import {
   type Graph,
 } from "./model";
 import { issuesAt, issueText } from "./issues";
+import { useTypedValue } from "./typedValue";
 
 type Filter = components["schemas"]["SegmentPropertyFilter"];
 
@@ -216,6 +217,22 @@ function operandOf(text: string, type: PropertyType | undefined): unknown {
   return text;
 }
 
+interface OperandFieldProps {
+  type: PropertyType | undefined;
+  value: unknown;
+  onChange: (value: unknown) => void;
+  disabled: boolean;
+}
+
+/**
+ * The value of one filter. What is typed stays as typed, so "0." and "1.0" survive on the way to
+ * "0.5" and "1.05"; the filter always holds the number for text that reads as one.
+ */
+function OperandField({ type, value, onChange, disabled }: OperandFieldProps) {
+  const field = useTypedValue(value, (text) => operandOf(text, type), operandText, onChange);
+  return <TextField label="Value" value={field.text} onChange={(e) => field.change(e.target.value)} disabled={disabled} autoComplete="off" />;
+}
+
 interface FiltersProps {
   workspaceId: string;
   event: string;
@@ -290,7 +307,7 @@ export function EventFilters({ workspaceId, event, filters, onChange, disabled, 
                   <option value="false">false</option>
                 </SelectField>
               ) : (
-                <TextField label="Value" value={operandText(filter.value)} onChange={(e) => set(position, { ...filter, value: operandOf(e.target.value, type) })} disabled={disabled} autoComplete="off" />
+                <OperandField type={type} value={filter.value} onChange={(value) => set(position, { ...filter, value })} disabled={disabled} />
               )
             ) : null}
             {disabled ? null : (

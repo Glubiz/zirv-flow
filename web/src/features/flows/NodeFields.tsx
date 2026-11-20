@@ -15,6 +15,7 @@ import {
   TraitSelect,
 } from "./fields";
 import { conditionIssues } from "./issues";
+import { useTypedValue } from "./typedValue";
 import {
   MAX_ARMS,
   MAX_CONDITIONS,
@@ -344,6 +345,37 @@ function WeightField({ label, weight, onChange, disabled, error }: WeightFieldPr
       }}
       disabled={disabled}
       error={bad ? `Enter a whole number from ${MIN_WEIGHT} to ${MAX_WEIGHT}.` : error}
+    />
+  );
+}
+
+interface IncrementFieldProps {
+  by: number;
+  onChange: (by: number) => void;
+  disabled: boolean;
+  error?: string;
+}
+
+/** A finite number from what is typed, or null while the text is empty or not yet a number, such as "-". */
+function finiteOf(text: string): number | null {
+  const number = Number(text);
+  return text.trim() === "" || !Number.isFinite(number) ? null : number;
+}
+
+/**
+ * The amount an increment adds. What is typed stays as typed, so a lone "-" is not turned into 0;
+ * only a finite number is saved, and an empty or unfinished field says what is wanted.
+ */
+function IncrementField({ by, onChange, disabled, error }: IncrementFieldProps) {
+  const field = useTypedValue(by, finiteOf, String, onChange);
+  return (
+    <TextField
+      label="Add"
+      type="number"
+      value={field.text}
+      onChange={(event) => field.change(event.target.value)}
+      disabled={disabled}
+      error={field.bad ? "Enter a number." : error}
     />
   );
 }
@@ -685,14 +717,9 @@ function UpdateTrait({ node, issues, graph, catalog, readOnly, onChange }: Field
         )
       ) : null}
       {change.op === "increment" ? (
-        <TextField
-          label="Add"
-          type="number"
-          value={String(change.by)}
-          onChange={(event) => {
-            const by = Number(event.target.value);
-            if (Number.isFinite(by)) onChange({ ...node, change: { op: "increment", by } }, `${node.id}:by`);
-          }}
+        <IncrementField
+          by={change.by}
+          onChange={(by) => onChange({ ...node, change: { op: "increment", by } }, `${node.id}:by`)}
           disabled={readOnly}
           error={fieldError(issues, "/change/by", graph)}
         />
