@@ -51,10 +51,14 @@ export function utcInstant(value: string): string | null {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
-/** The clock moved on by an amount of one unit. */
-export function advanceBy(clock: string, amount: number, unit: UnitId): string {
+/** The latest moment the clock may reach: the end of year 9999, past which an ISO time takes extra year digits. */
+const LATEST_MS = Date.UTC(9999, 11, 31, 23, 59, 59, 999);
+
+/** The clock moved on by an amount of one unit; null when the result is not a time the server can take. */
+export function advanceBy(clock: string, amount: number, unit: UnitId): string | null {
   const seconds = UNITS.find((entry) => entry.id === unit)?.seconds ?? 60;
-  return new Date(new Date(clock).getTime() + amount * seconds * 1000).toISOString();
+  const moved = new Date(clock).getTime() + amount * seconds * 1000;
+  return Number.isFinite(moved) && moved <= LATEST_MS ? new Date(moved).toISOString() : null;
 }
 
 export function isObject(value: unknown): value is Record<string, unknown> {

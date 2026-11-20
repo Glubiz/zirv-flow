@@ -1,4 +1,4 @@
-import { formatCount, formatDate, formatDateTime } from "../../ui";
+import { formatCount, formatDateTime, formatDateUtc } from "../../ui";
 
 export interface Bar {
   start: string;
@@ -48,8 +48,9 @@ export function BarChart({ bars, unit }: { bars: readonly Bar[]; unit: string })
   const inner = { width: WIDTH - PAD.left - PAD.right, height: HEIGHT - PAD.top - PAD.bottom };
   const { positions, slots } = place(bars, unit);
   const slot = inner.width / slots;
-  // A day or a week starts at midnight, so only an hour needs the time.
-  const label = unit === "hour" ? formatDateTime : formatDate;
+  // The server cuts a day or a week at UTC midnight, so its date is shown in UTC. An hour is an
+  // instant, so it reads in the browser's zone.
+  const label = unit === "hour" ? formatDateTime : formatDateUtc;
   const first = bars[0];
   const last = bars.at(-1);
   const summary =
@@ -101,7 +102,7 @@ export function BarChart({ bars, unit }: { bars: readonly Bar[]; unit: string })
             <caption>Events per {unit}</caption>
             <thead>
               <tr>
-                <th scope="col">Start of the {unit}</th>
+                <th scope="col">Start of the {unit}{unit === "hour" ? "" : " (UTC)"}</th>
                 <th scope="col" className="num">
                   Events
                 </th>

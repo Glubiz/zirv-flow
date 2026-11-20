@@ -164,7 +164,7 @@ describe("the Build workbench", () => {
     const graph = sampleGraph();
     mockApi({
       ...flowRoutes({ flow: { state: "published", current_version: 2, graph, settings: sampleSettings() } }),
-      [`GET ${FLOW}/versions`]: () => json([versionBody(2, { graph: { ...graph, nodes: [{ id: "n1", type: "exit" }], edges: [] } })]),
+      [`GET ${FLOW}/versions/2`]: () => json(versionBody(2, { graph: { ...graph, nodes: [{ id: "n1", type: "exit" }], edges: [] } })),
     });
     mount();
     expect(await screen.findByText("Draft with changes")).toBeInTheDocument();

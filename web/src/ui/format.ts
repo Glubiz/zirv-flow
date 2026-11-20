@@ -3,6 +3,12 @@ export function formatDate(value: string): string {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString();
 }
 
+/** A date in UTC, for a bucket the server cut at UTC midnight: the browser's zone must not shift it. */
+export function formatDateUtc(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString(undefined, { timeZone: "UTC" });
+}
+
 export function formatDateTime(value: string): string {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
