@@ -15,3 +15,14 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v1.0.30 (2026-11-20)
+
+### Fixes
+
+- poll anyway after five beats a refresh stayed in flight; pin the saved-settings merge with tests
+- poll imports and source runs only after the previous request settles; keep sending limits typed during a save (#849, #851)
+
+### Documentation
+
+- add a benchmarks and scaling section to the README
+
