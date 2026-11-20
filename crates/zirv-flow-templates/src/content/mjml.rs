@@ -390,7 +390,10 @@ mod tests {
             let started = std::time::Instant::now();
             assert!(!has_include(&source));
             assert!(
-                started.elapsed() < std::time::Duration::from_millis(100),
+                // Debug build, 256 KiB of `<` and of `<a`: this scan takes 7-17 ms alone (at most 17 ms);
+                // the quadratic oracle was still running after 120 s. The bound is over 10x the
+                // scan and under a tenth of the oracle.
+                started.elapsed() < std::time::Duration::from_secs(1),
                 "has_include took {:?}",
                 started.elapsed()
             );
