@@ -1,12 +1,13 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
-import { client, describeError, unwrap, useResource, type ErrorSummary } from "../../api";
+import { client, describeError, unwrap, usePaged, type ErrorSummary, type Page } from "../../api";
 import { Button, EmptyState, formatDateTime, InlineError, Pill, ResourceView } from "../../ui";
 import { isActiveRun, runKindLabel, runStateLabel, runStateTone, triggerLabel, type Run } from "./labels";
 import { RunDialog } from "./RunDialog";
 
 export const RUNS_POLL_MS = 3000;
 const PAGE = 25;
+const runId = (run: Run) => run.id;
 
 interface RunsPanelProps {
   workspaceId: string;
@@ -21,45 +22,38 @@ interface RunsPanelProps {
 
 /** The run history of a source: state, attempt, times and counters, with cancel for admins. */
 export function RunsPanel({ workspaceId, sourceId, canManage, version, pollMs = RUNS_POLL_MS, onSettled }: RunsPanelProps) {
-  const resource = useResource(
-    () =>
-      unwrap(
+  const fetchPage = useCallback(
+    async (before: string | null): Promise<Page<Run>> => {
+      const page = await unwrap(
         client.GET("/api/v1/workspaces/{ws}/sources/{id}/runs", {
-          params: { path: { ws: workspaceId, id: sourceId }, query: { limit: PAGE } },
+          params: { path: { ws: workspaceId, id: sourceId }, query: { limit: PAGE, cursor: before ?? undefined } },
         }),
-      ),
-    [workspaceId, sourceId, version],
+      );
+      return { items: page.runs, next: page.next_cursor ?? null };
+    },
+    [workspaceId, sourceId],
   );
-  const key = `${workspaceId}/${sourceId}/${version}`;
-  // Older pages belong to the history they were loaded for; a new key starts again from the newest.
-  const [extra, setExtra] = useState<{ key: string; runs: Run[]; cursor: string | null } | null>(null);
-  const older = extra?.key === key ? extra : null;
-  // The first page last seen: when a newer run shifts it, the rows it pushed out are kept with the older ones.
-  const [seen, setSeen] = useState<{ key: string; page: object; runs: Run[] } | null>(null);
+  // A refresh re-fetches every loaded page, so a run a newer run pushed off the first page is still polled.
+  const paged = usePaged(fetchPage, [workspaceId, sourceId, String(version)], runId);
+  const resource = paged.resource;
   const [viewing, setViewing] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
 
-  const active = resource.status === "ready" && resource.data.runs.some(isActiveRun);
+  const ready = resource.status === "ready";
+  const active = ready && resource.data.some(isActiveRun);
   const reload = resource.reload;
-  if (resource.status === "ready" && seen?.page !== resource.data) {
-    if (older && seen?.key === key) {
-      const now = new Set(resource.data.runs.map((run) => run.id));
-      const had = new Set(older.runs.map((run) => run.id));
-      const pushed = seen.runs.filter((run) => !now.has(run.id) && !had.has(run.id));
-      if (pushed.length > 0) setExtra({ ...older, runs: [...pushed, ...older.runs] });
-    }
-    setSeen({ key, page: resource.data, runs: resource.data.runs });
-  }
   const was = useRef(false);
   const settled = useRef(onSettled);
   useEffect(() => {
     settled.current = onSettled;
   });
   useEffect(() => {
+    // Only a ready-to-ready change counts; a reload in between (loading) neither settles nor resets it.
+    if (!ready) return;
     if (was.current && !active) settled.current?.();
     was.current = active;
-  }, [active]);
+  }, [ready, active]);
   useEffect(() => {
     if (!active) return;
     const timer = setInterval(reload, pollMs);
@@ -70,35 +64,13 @@ export function RunsPanel({ workspaceId, sourceId, canManage, version, pollMs = 
     setBusy(true);
     setFailure(null);
     try {
-      const cancelled = await unwrap(
+      await unwrap(
         client.POST("/api/v1/workspaces/{ws}/sources/{id}/runs/{run_id}/cancel", {
           params: { path: { ws: workspaceId, id: sourceId, run_id: run.id } },
         }),
       );
-      // Only the first page reloads, so an older row is patched from the answer.
-      setExtra((current) => (current ? { ...current, runs: current.runs.map((row) => (row.id === cancelled.id ? cancelled : row)) } : current));
+      // The reload re-fetches every loaded page, so the cancelled row, wherever it sits, comes back as the server has it.
       reload();
-    } catch (error) {
-      setFailure(describeError(error));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function loadOlder(next: string) {
-    setBusy(true);
-    setFailure(null);
-    try {
-      const page = await unwrap(
-        client.GET("/api/v1/workspaces/{ws}/sources/{id}/runs", {
-          params: { path: { ws: workspaceId, id: sourceId }, query: { limit: PAGE, cursor: next } },
-        }),
-      );
-      setExtra((current) => ({
-        key,
-        runs: [...(current?.key === key ? current.runs : []), ...page.runs],
-        cursor: page.next_cursor ?? null,
-      }));
     } catch (error) {
       setFailure(describeError(error));
     } finally {
@@ -111,7 +83,7 @@ export function RunsPanel({ workspaceId, sourceId, canManage, version, pollMs = 
       <ResourceView
         resource={resource}
         loadingLabel="Loading runs"
-        isEmpty={(data) => data.runs.length === 0}
+        isEmpty={(data) => data.length === 0}
         empty={
           <EmptyState title="No runs yet">
             {canManage
@@ -120,13 +92,12 @@ export function RunsPanel({ workspaceId, sourceId, canManage, version, pollMs = 
           </EmptyState>
         }
       >
-        {(data) => {
-          const known = new Set(data.runs.map((run) => run.id));
-          const rows = [...data.runs, ...(older?.runs ?? []).filter((run) => !known.has(run.id))];
-          const next = older ? older.cursor : data.next_cursor;
+        {(rows) => {
+          const next = paged.next;
+          const problem = failure ?? (paged.moreError ? describeError(paged.moreError) : null);
           return (
             <>
-              {failure ? <InlineError {...failure} /> : null}
+              {problem ? <InlineError {...problem} /> : null}
               <div className="table-scroll">
                 <table className="table">
                   <caption>Runs of this source</caption>
@@ -195,7 +166,7 @@ export function RunsPanel({ workspaceId, sourceId, canManage, version, pollMs = 
               </div>
               {next ? (
                 <div className="panel-footer">
-                  <Button onClick={() => void loadOlder(next)} disabled={busy}>
+                  <Button onClick={paged.loadMore} disabled={busy || paged.loadingMore}>
                     Show older runs
                   </Button>
                 </div>

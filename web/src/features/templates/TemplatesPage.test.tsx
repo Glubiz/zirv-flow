@@ -681,6 +681,27 @@ describe("importing HTML or MJML", () => {
     expect(within(dialog).getByLabelText("Source")).toHaveValue("<p>second</p>");
   });
 
+  it("keeps the newer source when an earlier file read fails after it", async () => {
+    mockApi(routes());
+    const { user, dialog } = await openDialog();
+    let fail: (error: Error) => void = () => undefined;
+    const slow = new File(["x"], "slow.html", { type: "text/html" });
+    Object.defineProperty(slow, "text", {
+      value: () =>
+        new Promise<string>((_resolve, reject) => {
+          fail = reject;
+        }),
+    });
+
+    await user.upload(within(dialog).getByLabelText("File"), slow);
+    fireEvent.change(within(dialog).getByLabelText("Source"), { target: { value: "<p>pasted</p>" } });
+    fail(new Error("unreadable"));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(within(dialog).getByLabelText("Source")).toHaveValue("<p>pasted</p>");
+    expect(within(dialog).queryByText("That file could not be read")).not.toBeInTheDocument();
+  });
+
   it("says so when a file cannot be read", async () => {
     mockApi(routes());
     const { user, dialog } = await openDialog();

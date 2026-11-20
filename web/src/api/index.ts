@@ -5,3 +5,5 @@ export { offeredDestinations, useAllowlistOptions, useDestinationOptions, useSen
 export { useResource } from "./useResource";
 export type { Resource } from "./useResource";
 export type { components, paths } from "./schema";
+export { usePaged } from "./usePaged";
+export type { Page, Paged } from "./usePaged";

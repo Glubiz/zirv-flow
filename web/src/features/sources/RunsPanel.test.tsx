@@ -1,5 +1,6 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { Route, Routes } from "react-router";
 import { describe, expect, it } from "vitest";
 
@@ -142,7 +143,10 @@ describe("the runs of a source", () => {
     mockApi(
       routes("admin", {
         [`GET ${BASE}/runs`]: (request) => {
-          if (new URL(request.url).searchParams.get("cursor") === "c1") return json({ runs: [named("D"), named("E")], next_cursor: null });
+          const cursor = new URL(request.url).searchParams.get("cursor");
+          if (cursor === "c1") return json({ runs: [named("D"), named("E")], next_cursor: null });
+          // As a real server would after N shifted the list by one: the rows N pushed out lead the next page.
+          if (cursor === "c2") return json({ runs: [named("C"), named("D"), named("E")], next_cursor: null });
           firstPages += 1;
           return firstPages === 1
             ? json({ runs: [named("A", running), named("B"), named("C")], next_cursor: "c1" })
@@ -166,15 +170,100 @@ describe("the runs of a source", () => {
     expect(screen.getAllByText("s-C")).toHaveLength(1);
   });
 
+  it("refreshes a run a newer run pushed off the first page, and stops polling once none is active", async () => {
+    const named = (id: string, change: Parameters<typeof aRun>[0] = {}) => aRun({ id, stream: `s-${id}`, ...change });
+    const running = { state: "running", finished_at: null } as const;
+    let phase = 0;
+    let reads = 0;
+    mockApi(
+      routes("admin", {
+        [`GET ${BASE}/runs`]: (request) => {
+          reads += 1;
+          const cursor = new URL(request.url).searchParams.get("cursor");
+          if (phase === 0) {
+            return cursor === "c1"
+              ? json({ runs: [named("C")], next_cursor: null })
+              : json({ runs: [named("X", running), named("B")], next_cursor: "c1" });
+          }
+          if (cursor === "c2") {
+            return json({ runs: [phase === 1 ? named("X", running) : named("X"), named("B")], next_cursor: null });
+          }
+          return json({
+            runs: [named("N", phase === 1 ? running : {}), named("M")],
+            next_cursor: "c2",
+          });
+        },
+      }),
+    );
+    const user = userEvent.setup();
+    renderRoute(
+      "/w/ws1/sources/src-1",
+      "/w/:ws/sources/:sourceId",
+      <RunsPanel workspaceId="ws1" sourceId="src-1" canManage version={0} pollMs={20} />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Show older runs" }));
+    expect(await screen.findByText("s-C")).toBeInTheDocument();
+    phase = 1;
+    await screen.findByText("s-N");
+    const row = () => screen.getByText("s-X").closest("tr")!;
+    expect(within(row()).getByText("Running")).toBeInTheDocument();
+
+    phase = 2;
+    await waitFor(() => expect(within(row()).getByText("Succeeded")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: /^Cancel/ })).not.toBeInTheDocument();
+    let settled = -1;
+    while (settled !== reads) {
+      settled = reads;
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(reads).toBe(settled);
+  });
+
+  it("does not tell the page a run settled when a start reloads a history that holds an active run", async () => {
+    mockApi(
+      routes("admin", {
+        [`GET ${BASE}/runs`]: () => json({ runs: [aRun({ state: "running", finished_at: null })], next_cursor: null }),
+      }),
+    );
+    let settled = 0;
+    function Harness() {
+      const [version, setVersion] = useState(0);
+      return (
+        <>
+          <button onClick={() => setVersion((value) => value + 1)}>Start</button>
+          <RunsPanel workspaceId="ws1" sourceId="src-1" canManage version={version} pollMs={20} onSettled={() => (settled += 1)} />
+        </>
+      );
+    }
+    const user = userEvent.setup();
+    renderRoute("/w/ws1/sources/src-1", "/w/:ws/sources/:sourceId", <Harness />);
+
+    await screen.findByText("Running");
+    await user.click(screen.getByRole("button", { name: "Start" }));
+    await screen.findByText("Running");
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    expect(settled).toBe(0);
+  });
+
   it("shows an older run as cancelled once it is cancelled", async () => {
     const named = (id: string, change: Parameters<typeof aRun>[0] = {}) => aRun({ id, stream: `s-${id}`, ...change });
+    let cancelled = false;
     const calls = mockApi(
       routes("admin", {
         [`GET ${BASE}/runs`]: (request) =>
           new URL(request.url).searchParams.get("cursor") === "c1"
-            ? json({ runs: [named("D", { state: "running", finished_at: null })], next_cursor: null })
+            ? json({
+                runs: [named("D", cancelled ? { state: "cancelled" } : { state: "running", finished_at: null })],
+                next_cursor: null,
+              })
             : json({ runs: [named("A")], next_cursor: "c1" }),
-        [`POST ${BASE}/runs/D/cancel`]: () => json(named("D", { state: "cancelled" })),
+        [`POST ${BASE}/runs/D/cancel`]: () => {
+          cancelled = true;
+          return json(named("D", { state: "cancelled" }));
+        },
       }),
     );
     const user = userEvent.setup();

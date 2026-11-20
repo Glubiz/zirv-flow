@@ -327,6 +327,32 @@ describe("the mapping dialog", () => {
     expect(dialog.getByRole("button", { name: "Preview" })).toBeEnabled();
   });
 
+  it("shows no error for a preview that failed after the mapping was edited", async () => {
+    let release: () => void = () => undefined;
+    mockApi({
+      ...ROUTES,
+      [PREVIEW_PATH]: async () => {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return problem(502, "Bad Gateway", "the source could not be reached");
+      },
+    });
+    const user = userEvent.setup();
+    mount();
+    const dialog = within(await openDialog(user));
+    await user.type(dialog.getByLabelText("Field of row 1"), "profile.email");
+
+    await user.click(dialog.getByRole("button", { name: "Preview" }));
+    await user.type(dialog.getByLabelText("Field of row 1"), "2");
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    expect(dialog.queryByRole("alert")).not.toBeInTheDocument();
+    expect(dialog.queryByText(/the source could not be reached/)).not.toBeInTheDocument();
+    expect(dialog.getByRole("button", { name: "Preview" })).toBeEnabled();
+  });
+
   it("shows only the newest preview when an edit is previewed again before the first answers", async () => {
     const releases: (() => void)[] = [];
     let asked = 0;
