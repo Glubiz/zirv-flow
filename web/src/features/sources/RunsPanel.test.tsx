@@ -221,6 +221,34 @@ describe("the runs of a source", () => {
     expect(reads).toBe(settled);
   });
 
+  it("keeps the rows and shows an error when a poll fails, and clears it once a poll succeeds", async () => {
+    let phase = 0;
+    mockApi(
+      routes("admin", {
+        [`GET ${BASE}/runs`]: () => {
+          if (phase === 1) return problem(500, "Internal Server Error", "internal error");
+          return json({
+            runs: [phase === 0 ? aRun({ state: "running", finished_at: null }) : aRun()],
+            next_cursor: null,
+          });
+        },
+      }),
+    );
+    renderRoute(
+      "/w/ws1/sources/src-1",
+      "/w/:ws/sources/:sourceId",
+      <RunsPanel workspaceId="ws1" sourceId="src-1" canManage version={0} pollMs={20} />,
+    );
+
+    expect(await screen.findByText("Running")).toBeInTheDocument();
+    phase = 1;
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    expect(screen.getByText("Running")).toBeInTheDocument();
+    phase = 2;
+    await waitFor(() => expect(screen.getByText("Succeeded")).toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+  });
+
   it("does not tell the page a run settled when a start reloads a history that holds an active run", async () => {
     mockApi(
       routes("admin", {

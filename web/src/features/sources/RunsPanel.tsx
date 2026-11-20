@@ -94,7 +94,8 @@ export function RunsPanel({ workspaceId, sourceId, canManage, version, pollMs = 
       >
         {(rows) => {
           const next = paged.next;
-          const problem = failure ?? (paged.moreError ? describeError(paged.moreError) : null);
+          const listError = paged.refreshError ?? paged.moreError;
+          const problem = failure ?? (listError ? describeError(listError) : null);
           return (
             <>
               {problem ? <InlineError {...problem} /> : null}

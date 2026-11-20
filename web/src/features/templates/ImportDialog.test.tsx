@@ -10,6 +10,10 @@ describe("isMjml", () => {
     expect(isMjml("<!-- a --> <!-- b -->\n<!-- c --><mjml>")).toBe(true);
   });
 
+  it("reads a byte-order-marked MJML document as MJML", () => {
+    expect(isMjml("﻿<mjml><mj-body></mj-body></mjml>")).toBe(true);
+  });
+
   it("reads anything else as HTML", () => {
     expect(isMjml("<html><body></body></html>")).toBe(false);
     expect(isMjml("<mjmlish>")).toBe(false);
