@@ -1,4 +1,4 @@
-import { useState, type ChangeEvent } from "react";
+import { useRef, useState, type ChangeEvent } from "react";
 
 import { client, describeError, unwrap, type components, type ErrorSummary } from "../../api";
 import { Button, Dialog, InlineError } from "../../ui";
@@ -42,31 +42,35 @@ export function ImportDialog({ workspaceId, listId, onClose, onImported }: Impor
   const [preview, setPreview] = useState<ImportResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
+  // Counts file picks: a read or a check that finishes after another pick belongs to a file that is gone.
+  const picks = useRef(0);
 
   async function choose(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
+    const mine = ++picks.current;
     setPreview(null);
     setFailure(null);
+    setText(null);
     if (!file) {
       setFileName(null);
-      setText(null);
       return;
     }
     setFileName(file.name);
     try {
-      setText(await file.text());
+      const read = await file.text();
+      if (mine === picks.current) setText(read);
     } catch (error) {
-      setText(null);
-      setFailure(describeError(error));
+      if (mine === picks.current) setFailure(describeError(error));
     }
   }
 
   async function send(dryRun: boolean): Promise<ImportResult | null> {
     if (text === null) return null;
+    const mine = picks.current;
     setBusy(true);
     setFailure(null);
     try {
-      return await unwrap(
+      const result = await unwrap(
         client.POST("/api/v1/workspaces/{ws}/lists/{id}/members/import", {
           params: { path: { ws: workspaceId, id: listId }, query: { dry_run: dryRun } },
           body: text,
@@ -74,8 +78,10 @@ export function ImportDialog({ workspaceId, listId, onClose, onImported }: Impor
           headers: { "Content-Type": "text/csv" },
         }),
       );
+      // An applied import is never dropped: the server already changed the list, whatever was picked since.
+      return !dryRun || mine === picks.current ? result : null;
     } catch (error) {
-      setFailure(describeError(error));
+      if (!dryRun || mine === picks.current) setFailure(describeError(error));
       return null;
     } finally {
       setBusy(false);

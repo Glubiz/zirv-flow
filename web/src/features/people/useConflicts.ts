@@ -35,9 +35,11 @@ export function useConflicts(workspaceId: string, status: ConflictStatus): Confl
   );
   const [extra, setExtra] = useState<Extra | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
-  const [moreError, setMoreError] = useState<unknown>(null);
+  // Keyed to the first page, like `extra`: a new search, filter or reload makes an old failure vanish.
+  const [moreFailure, setMoreFailure] = useState<{ base: object; error: unknown } | null>(null);
 
   const base = first.status === "ready" ? first.data : null;
+  const moreError = moreFailure !== null && moreFailure.base === base ? moreFailure.error : null;
   const more = extra !== null && extra.base === base ? extra : null;
   const conflicts = base ? [...base.conflicts, ...(more?.conflicts ?? [])] : [];
   const nextBefore = base ? (more ? more.nextBefore : (base.next_cursor ?? null)) : null;
@@ -45,7 +47,7 @@ export function useConflicts(workspaceId: string, status: ConflictStatus): Confl
   const loadMore = useCallback(() => {
     if (base === null || nextBefore === null) return;
     setLoadingMore(true);
-    setMoreError(null);
+    setMoreFailure(null);
     unwrap(
       client.GET("/api/v1/workspaces/{ws}/identity-conflicts", {
         params: { path: { ws: workspaceId }, query: { status, limit: PAGE_SIZE, cursor: nextBefore } },
@@ -60,7 +62,7 @@ export function useConflicts(workspaceId: string, status: ConflictStatus): Confl
         setLoadingMore(false);
       },
       (failure: unknown) => {
-        setMoreError(failure);
+        setMoreFailure({ base, error: failure });
         setLoadingMore(false);
       },
     );
