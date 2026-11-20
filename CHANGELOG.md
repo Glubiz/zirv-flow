@@ -15,3 +15,15 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v1.0.27 (2026-11-20)
+
+### Fixes
+
+- show a failed runs refresh beside the kept rows; test a byte-order-marked MJML import
+- refresh every loaded run page through the shared paging hook; settle a run history only between loaded states; test three stale-failure guards
+- snippets, sources and templates web review findings (#794-#803)
+
+### Chores
+
+- call the linear MJML check directly
+
