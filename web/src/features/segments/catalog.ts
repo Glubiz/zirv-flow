@@ -159,12 +159,16 @@ export function useEventTypes(workspaceId: string, names: readonly string[]): Ev
           setTypes((current) => new Map(current).set(name, map));
         },
         () => {
-          asked.current.delete(name);
           const count = (failures.current.get(name) ?? 0) + 1;
           failures.current.set(name, count);
-          if (!mounted.current || count > MAX_RETRIES) return;
+          if (!mounted.current || count > MAX_RETRIES) {
+            asked.current.delete(name);
+            return;
+          }
+          // Only this name is freed when its own backoff ends, so another name's timer cannot retry it early.
           const timer = setTimeout(() => {
             timers.current.delete(timer);
+            asked.current.delete(name);
             setRetry((current) => current + 1);
           }, RETRY_BASE_MS * 2 ** (count - 1));
           timers.current.add(timer);

@@ -787,6 +787,34 @@ describe("event types", () => {
     expect(result.current.has("purchase")).toBe(false);
   });
 
+  it("retries each failed name after its own backoff, not when another name's timer fires", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const attempts = { alpha: 0, beta: 0 };
+    mockApi({
+      [`GET ${WS}/event-schemas/alpha`]: async () => {
+        attempts.alpha += 1;
+        // The first answer fails 0.9 s late, so alpha fails just before beta's timer fires.
+        if (attempts.alpha === 1) await new Promise((resolve) => setTimeout(resolve, 900));
+        return problem(500, "Internal Server Error", "internal error");
+      },
+      [`GET ${WS}/event-schemas/beta`]: () => {
+        attempts.beta += 1;
+        return problem(500, "Internal Server Error", "internal error");
+      },
+    });
+    renderHook(() => useEventTypes("ws1", ["alpha", "beta"]));
+    await waitFor(() => expect(attempts.beta).toBe(1));
+
+    // t = 1.05 s: beta's 1 s backoff is over, alpha failed at 0.9 s and has waited only 0.15 s.
+    await act(() => vi.advanceTimersByTimeAsync(1050));
+    await waitFor(() => expect(attempts.beta).toBe(2));
+    expect(attempts.alpha).toBe(1);
+
+    // t = 2.0 s: alpha's own 1 s backoff (from 0.9 s) is over.
+    await act(() => vi.advanceTimersByTimeAsync(950));
+    await waitFor(() => expect(attempts.alpha).toBe(2));
+  });
+
   it("stops retrying once unmounted", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const attempts = schemaRoute(99);

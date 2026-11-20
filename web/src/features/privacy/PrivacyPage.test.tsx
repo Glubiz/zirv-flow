@@ -409,7 +409,10 @@ describe("privacy", () => {
       mockApi(
         adminRoutes({
           [`GET ${BASE}/erasures`]: (request) => {
-            if (new URL(request.url).searchParams.get("cursor")) return json({ erasures: [row("c", "failed")], next_cursor: null });
+            if (new URL(request.url).searchParams.get("cursor")) {
+              // The second page moves with the first: after the poll it starts with the row pushed out.
+              return json({ erasures: polled ? [row("b", "completed"), row("c", "failed")] : [row("c", "failed")], next_cursor: null });
+            }
             return polled
               ? json({ erasures: [row("n", "pending"), row("a", "pending")], next_cursor: "c1" })
               : json({ erasures: [row("a", "pending"), row("b", "completed")], next_cursor: "c1" });
@@ -427,6 +430,81 @@ describe("privacy", () => {
       await waitFor(() => expect(within(table).getByTitle("person-n")).toBeInTheDocument());
       const people = within(table).getAllByTitle(/^person-/).map((cell) => cell.getAttribute("title"));
       expect(people).toEqual(["person-n", "person-a", "person-b", "person-c"]);
+    });
+
+    it("refreshes a pending row that newer requests pushed past page one until it settles, then stops polling", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const row = (id: string, status: string) => ({ ...DONE, id, status, completed_at: null, person_id: `person-${id}` });
+      let phase: "initial" | "pushed" | "settled" = "initial";
+      let gets = 0;
+      mockApi(
+        adminRoutes({
+          [`GET ${BASE}/erasures`]: (request) => {
+            gets += 1;
+            const second = new URL(request.url).searchParams.get("cursor");
+            if (phase === "initial") {
+              return second
+                ? json({ erasures: [row("c", "failed")], next_cursor: null })
+                : json({ erasures: [row("a", "pending")], next_cursor: "c1" });
+            }
+            const a = row("a", phase === "settled" ? "completed" : "pending");
+            const n = row("n", phase === "settled" ? "completed" : "pending");
+            return second
+              ? json({ erasures: [a, row("c", "failed")], next_cursor: null })
+              : json({ erasures: [n], next_cursor: "c1" });
+          },
+        }),
+      );
+      renderRoute("/w/ws1/privacy", ROUTE, <PrivacyPage />);
+      await userEvent.setup({ advanceTimers: vi.advanceTimersByTime }).click(await screen.findByRole("button", { name: "Show more" }));
+      expect(await screen.findByText("Failed")).toBeInTheDocument();
+      phase = "pushed";
+      await vi.advanceTimersByTimeAsync(5500);
+      const table = screen.getByRole("table", { name: "Erasure requests" });
+      await waitFor(() => expect(within(table).getByTitle("person-n")).toBeInTheDocument());
+      expect(within(table).getAllByText("Waiting to run")).toHaveLength(2);
+
+      phase = "settled";
+      await vi.advanceTimersByTimeAsync(5000);
+      await waitFor(() => expect(within(table).queryByText("Waiting to run")).not.toBeInTheDocument());
+      expect(within(table).getAllByText("Erased")).toHaveLength(2);
+      const settled = gets;
+
+      await vi.advanceTimersByTimeAsync(30000);
+      expect(gets).toBe(settled);
+    });
+
+    it("lists a row once when the refreshed chain overlaps itself", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const row = (id: string, status: string) => ({ ...DONE, id, status, completed_at: null, person_id: `person-${id}` });
+      let polled = false;
+      mockApi(
+        adminRoutes({
+          [`GET ${BASE}/erasures`]: (request) => {
+            const second = new URL(request.url).searchParams.get("cursor");
+            if (!polled) {
+              return second
+                ? json({ erasures: [row("c", "failed")], next_cursor: null })
+                : json({ erasures: [row("a", "pending")], next_cursor: "c1" });
+            }
+            // A row slipped between the two fetches of the chain, so "a" is on both pages.
+            return second
+              ? json({ erasures: [row("a", "pending"), row("b", "failed"), row("c", "failed")], next_cursor: null })
+              : json({ erasures: [row("a", "pending")], next_cursor: "c1" });
+          },
+        }),
+      );
+      renderRoute("/w/ws1/privacy", ROUTE, <PrivacyPage />);
+      await userEvent.setup({ advanceTimers: vi.advanceTimersByTime }).click(await screen.findByRole("button", { name: "Show more" }));
+      expect(await screen.findByText("Failed")).toBeInTheDocument();
+      polled = true;
+
+      await vi.advanceTimersByTimeAsync(5500);
+
+      const table = screen.getByRole("table", { name: "Erasure requests" });
+      await waitFor(() => expect(within(table).getByTitle("person-b")).toBeInTheDocument());
+      const people = within(table).getAllByTitle(/^person-/).map((cell) => cell.getAttribute("title"));
+      expect(people).toEqual(["person-a", "person-b", "person-c"]);
     });
 
     it("does not poll while the tab is hidden", async () => {
