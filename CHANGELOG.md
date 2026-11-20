@@ -15,3 +15,14 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v1.0.29 (2026-11-20)
+
+### Fixes
+
+- match an event once against committed waits when its claim takes it, as the runtime arrival does (#848)
+- forget an event match read from a rolled-back batch before redelivering its job (#848)
+
+### Chores
+
+- share one claim loop between the redelivery test helpers
+
