@@ -15,3 +15,13 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v1.0.24 (2026-11-20)
+
+### Fixes
+
+- event filter, event chart, flow editor and flow access web review findings (#766-#775, #838, #840)
+
+### Chores
+
+- cover the live-version read after a publish and the year-9999 cap (#773, #775)
+
