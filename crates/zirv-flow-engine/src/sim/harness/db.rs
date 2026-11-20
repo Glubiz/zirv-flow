@@ -28,20 +28,13 @@ pub(super) enum JobKind {
     Start,
     /// `flow.step` for the timer registered at `version`.
     Wake { version: u64 },
-    /// An event for the enrollment arrived. `matched` is the version of the wait it matched on
-    /// arrival (the first claim); a redelivery keeps it, as the runtime's enqueued job does.
+    /// An event for the enrollment arrived. `matched` is the `wake_version` of the COMMITTED
+    /// wait row the event found when a claim first took the job, before that claim's first step
+    /// ran (`Sim::claim`): the runtime matches once, on arrival, against committed
+    /// `enrollment_waits`, and fixes that version in the job. It is `None` only until that first
+    /// claim; after it, no crash, savepoint rollback or redelivery re-matches or clears it, and
+    /// a redelivery whose version the enrollment has moved past is stale.
     Event { name: String, matched: Option<u64> },
-}
-
-impl JobKind {
-    /// Drops the wait an event matched. A batch transaction reads the wait rows its own earlier
-    /// steps wrote; when it rolls back, those rows and the versions they carry never existed, so
-    /// the redelivery must match against the committed rows again.
-    pub(super) fn forget_match(&mut self) {
-        if let Self::Event { matched, .. } = self {
-            *matched = None;
-        }
-    }
 }
 
 #[derive(Clone, Debug)]

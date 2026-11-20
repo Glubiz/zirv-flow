@@ -196,6 +196,7 @@ impl Sim<'_> {
                 if !due.is_empty() && self.rng.chance(50) {
                     group.extend(due.iter().filter_map(|key| self.db.queue.remove(key)));
                     self.clock = now;
+                    let group = self.claim(group);
                     self.run_batch(group, now);
                     continue;
                 }
@@ -203,7 +204,7 @@ impl Sim<'_> {
             self.clock = now;
             // Every job of the group reads before any of them commits.
             let mut claimed = Vec::new();
-            for mut job in group {
+            for mut job in self.claim(group) {
                 let prepared = self.prepare(&mut job, now);
                 claimed.push((job, prepared));
             }
@@ -219,6 +220,28 @@ impl Sim<'_> {
             graphs: &self.graphs,
             graph_of: &self.graph_of,
         }
+    }
+
+    /// Takes the jobs a claim got: each event job that has not been matched yet matches the
+    /// COMMITTED wait of its name now, before the claim's first step runs, and keeps that version
+    /// for good. This is the point that mirrors the runtime's `enqueue_arrivals`, which matches an
+    /// arriving event once, against committed `enrollment_waits`, and fixes the wait's version in
+    /// the job; between claims every row of the harness's db is committed, and no step of this
+    /// claim has written yet. An event that finds no wait for its name enqueues nothing in the
+    /// runtime, so its job is consumed here. A redelivered job already has its version and is
+    /// never matched again.
+    fn claim(&self, jobs: Vec<Job>) -> Vec<Job> {
+        jobs.into_iter()
+            .filter_map(|mut job| {
+                if let JobKind::Event { name, matched } = &mut job.kind
+                    && matched.is_none()
+                {
+                    let row = self.db.waits.get(&(job.enrollment, name.clone()))?;
+                    *matched = Some(row.wake_version);
+                }
+                Some(job)
+            })
+            .collect()
     }
 
     /// Reads the state and computes what the job would commit.
@@ -241,12 +264,9 @@ impl Sim<'_> {
                 },
             ),
             JobKind::Event { name, matched } => {
-                let version = match matched {
-                    Some(version) => *version,
-                    None => match self.db.waits.get(&(job.enrollment, name.clone())) {
-                        None => return Prepared::Nothing,
-                        Some(row) => *matched.insert(row.wake_version),
-                    },
+                // Matched when the claim took the job (`Sim::claim`), never here.
+                let Some(version) = *matched else {
+                    return Prepared::Nothing;
                 };
                 (
                     version,
@@ -260,6 +280,14 @@ impl Sim<'_> {
             }
         };
         if state.state_version != expected {
+            self.report.stats.stale += 1;
+            return Prepared::Nothing;
+        }
+        // The runtime's `first_input` drops an event for a name the state does not await, so the
+        // engine is never sent one.
+        if let JobKind::Event { name, .. } = &job.kind
+            && state.awaiting.as_deref() != Some(name.as_str())
+        {
             self.report.stats.stale += 1;
             return Prepared::Nothing;
         }
@@ -372,7 +400,6 @@ impl Sim<'_> {
                         .chain(std::iter::once(job))
                         .chain(held);
                     for mut job in lost {
-                        job.kind.forget_match();
                         job.crashes += 1;
                         self.redeliver(job, now);
                     }
@@ -386,8 +413,6 @@ impl Sim<'_> {
                     };
                     self.db.roll_back_to(&mut journal, to, defect);
                     self.report.stats.savepoint_rollbacks += 1;
-                    // Its match may come from a step of this batch that a later crash undoes.
-                    job.kind.forget_match();
                     self.redeliver(job, now);
                 }
                 Some(Commit::Committed) => ran.push((job, Some(tx))),
@@ -657,74 +682,226 @@ mod tests {
         }
     }
 
-    /// An event job matches the wait row it finds on its first claim, inside the batch transaction,
-    /// which can see a step of the same batch that has not committed. A crash rolls that step back
-    /// with the wait it registered, so the match must go with it: a redelivery that kept it would
-    /// pair the old version with a state that reached it by another path. Seed 483383881 hit this:
-    /// a timer moved `w1` to `w3` (version 2) and an event of the same batch matched version 2;
-    /// the crash undid both, another `order` event then took `w1` to `w2` (also version 2), and
-    /// the redelivered one got "the enrollment does not await `order`" from a state awaiting
-    /// `visit`.
-    #[test]
-    fn a_crashed_batch_does_not_keep_a_match_it_read_from_its_own_uncommitted_step() {
+    fn order_event(matched: Option<u64>) -> JobKind {
+        JobKind::Event {
+            name: "order".into(),
+            matched,
+        }
+    }
+
+    /// Two enrollments on `two_orders`: `a` has started and sleeps at `w1` (version 1, awaiting
+    /// `order`); `b` (the larger id, so it runs last in a batch) has not started.
+    fn sim_at_w1(calm: &Config) -> (Sim<'_>, Uuid, Uuid, DateTime<Utc>) {
         let graph = two_orders();
-        let id = Uuid::from_u128(7);
-        let mut rolled_back = 0;
-        for seed in 0..64 {
-            let calm = Config {
-                crash: CrashMode::Never,
-                races: false,
-                ..Config::new(seed, 0)
-            };
-            let crashing = Config {
-                crash: CrashMode::Random { one_in: 1 },
-                ..calm.clone()
-            };
-            let mut sim = Sim {
-                config: &calm,
-                graphs: vec![graph.clone()],
-                graph_of: BTreeMap::from([(id, 0)]),
-                zones: BTreeMap::from([(id, None)]),
-                db: Db::default(),
-                rng: Rng::derive(seed, &[1]),
-                clock: start(),
-                report: Report::default(),
-                checked_horizon: false,
-            };
+        let (a, b) = (Uuid::from_u128(7), Uuid::from_u128(8));
+        let mut sim = Sim {
+            config: calm,
+            graphs: vec![graph.clone()],
+            graph_of: BTreeMap::from([(a, 0), (b, 0)]),
+            zones: BTreeMap::from([(a, None), (b, None)]),
+            db: Db::default(),
+            rng: Rng::derive(calm.seed, &[1]),
+            clock: start(),
+            report: Report::default(),
+            checked_horizon: false,
+        };
+        for id in [a, b] {
             let state = EnrollmentState::new(id, &graph).expect("the graph has an entry");
             sim.db.enrollments.insert(id, state);
-            let mut first = job(id, JobKind::Start, start());
-            let prepared = sim.prepare(&mut first, start());
-            sim.complete(first, prepared, start());
-            sim.db.queue.clear();
-            let wake = sim.db.enrollments[&id].wake_at.expect("w1 sleeps");
-            sim.config = &crashing;
-            let jobs = vec![
-                job(id, JobKind::Wake { version: 1 }, wake),
-                job(
-                    id,
-                    JobKind::Event {
-                        name: "order".into(),
-                        matched: None,
-                    },
-                    wake,
-                ),
-            ];
-            sim.run_batch(jobs, wake);
-            if sim.report.stats.crashes_in_tx == 0 {
-                continue;
-            }
-            rolled_back += 1;
-            for queued in sim.db.queue.values() {
-                if let JobKind::Event { matched, .. } = &queued.kind {
-                    assert_eq!(
-                        *matched, None,
-                        "seed {seed}: the rolled-back match survived"
-                    );
-                }
+        }
+        let mut first = job(a, JobKind::Start, start());
+        let prepared = sim.prepare(&mut first, start());
+        sim.complete(first, prepared, start());
+        sim.db.queue.clear();
+        let state = &sim.db.enrollments[&a];
+        assert_eq!(
+            (state.state_version, state.awaiting.as_deref()),
+            (1, Some("order"))
+        );
+        assert_eq!(sim.db.waits[&(a, "order".into())].wake_version, 1);
+        let wake = state.wake_at.expect("w1 sleeps");
+        (sim, a, b, wake)
+    }
+
+    /// Claims `jobs` and runs them in one batch with a job of `b` last that dies at its first
+    /// write: the whole transaction rolls back and every job is redelivered with
+    /// `crashes > 0`. Jobs of `a` carry enough crashes not to die themselves.
+    fn crashed_batch<'a>(
+        sim: &mut Sim<'a>,
+        crashing: &'a Config,
+        b: Uuid,
+        mut jobs: Vec<Job>,
+        at: DateTime<Utc>,
+    ) {
+        for job in &mut jobs {
+            job.crashes = 100;
+        }
+        jobs.push(job(b, JobKind::Start, at));
+        let calm = sim.config;
+        sim.config = crashing;
+        let jobs = sim.claim(jobs);
+        sim.run_batch(jobs, at);
+        sim.config = calm;
+        assert_eq!(sim.report.stats.crashes_in_tx, 1);
+        assert!(sim.db.queue.values().all(|queued| queued.crashes > 0));
+    }
+
+    /// Commits `kind` for `a` at `at` as its own claim, with no crash.
+    fn run_alone(sim: &mut Sim<'_>, a: Uuid, kind: JobKind, at: DateTime<Utc>) {
+        for mut one in sim.claim(vec![job(a, kind, at)]) {
+            let prepared = sim.prepare(&mut one, at);
+            sim.complete(one, prepared, at);
+        }
+    }
+
+    /// Redelivers every queued redelivery, in queue order, each as its own claim.
+    fn redeliver_all(sim: &mut Sim<'_>, at: DateTime<Utc>) {
+        let keys: Vec<QueueKey> = sim
+            .db
+            .queue
+            .iter()
+            .filter(|(_, queued)| queued.crashes > 0)
+            .map(|(key, _)| *key)
+            .collect();
+        for key in keys {
+            let queued = sim.db.queue.remove(&key).expect("queued");
+            for mut one in sim.claim(vec![queued]) {
+                let prepared = sim.prepare(&mut one, at);
+                sim.complete(one, prepared, at);
             }
         }
-        assert!(rolled_back > 0, "no seed crashed inside the batch");
+    }
+
+    fn configs() -> (Config, Config) {
+        let calm = Config {
+            crash: CrashMode::Never,
+            races: false,
+            batches: false,
+            ..Config::new(1, 0)
+        };
+        let crashing = Config {
+            crash: CrashMode::EveryEffect,
+            ..calm.clone()
+        };
+        (calm, crashing)
+    }
+
+    /// Seed 483383881: a timer moved `w1` to `w3` (version 2) and an `order` event of the same
+    /// batch, matched lazily against that uncommitted wait, took version 2. The crash undid
+    /// both, another `order` event then took `w1` to `w2` (also version 2), and the redelivered
+    /// one was applied to a state awaiting `visit`: "the enrollment does not await `order`". The
+    /// event matches the committed version 1 wait at its claim, keeps it, and is dropped as
+    /// stale.
+    #[test]
+    fn a_crashed_batch_does_not_send_a_redelivered_event_to_a_state_that_awaits_another() {
+        let (calm, crashing) = configs();
+        let (mut sim, a, b, wake) = sim_at_w1(&calm);
+        let jobs = vec![
+            job(a, JobKind::Wake { version: 1 }, wake),
+            job(a, order_event(None), wake),
+        ];
+        crashed_batch(&mut sim, &crashing, b, jobs, wake);
+        let redelivered = sim
+            .db
+            .queue
+            .values()
+            .find(|queued| matches!(queued.kind, JobKind::Event { .. }))
+            .expect("the event is redelivered");
+        assert!(matches!(
+            redelivered.kind,
+            JobKind::Event {
+                matched: Some(1),
+                ..
+            }
+        ));
+        // Another `order` event takes w1 to w2, at version 2 as the timer's step would have.
+        let later = wake + TimeDelta::seconds(10);
+        run_alone(&mut sim, a, order_event(Some(1)), later);
+        let state = &sim.db.enrollments[&a];
+        assert_eq!(
+            (state.state_version, state.awaiting.as_deref()),
+            (2, Some("visit"))
+        );
+        let stale = sim.report.stats.stale;
+        redeliver_all(&mut sim, later + TimeDelta::minutes(1));
+        assert!(
+            sim.report.violations.is_empty(),
+            "{:?}",
+            sim.report.violations
+        );
+        let state = &sim.db.enrollments[&a];
+        assert_eq!(
+            (state.state_version, state.awaiting.as_deref()),
+            (2, Some("visit"))
+        );
+        assert!(
+            sim.report.stats.stale >= stale + 2,
+            "the timer and the event are stale"
+        );
+    }
+
+    /// An event that matched the committed wait at version 1 keeps it through a crash. When the
+    /// enrollment has moved to a new `order` wait (version 2) before the redelivery, the
+    /// redelivered event is stale, as the runtime's `is_stale` finds it; it is not applied to
+    /// the version 2 wait.
+    #[test]
+    fn a_committed_match_survives_a_crash_and_goes_stale() {
+        let (calm, crashing) = configs();
+        let (mut sim, a, b, wake) = sim_at_w1(&calm);
+        crashed_batch(
+            &mut sim,
+            &crashing,
+            b,
+            vec![job(a, order_event(None), wake)],
+            wake,
+        );
+        let state = &sim.db.enrollments[&a];
+        assert_eq!(
+            (state.state_version, state.awaiting.as_deref()),
+            (1, Some("order"))
+        );
+        // The timer takes w1 to w3: a new `order` wait at version 2.
+        let later = wake + TimeDelta::seconds(10);
+        run_alone(&mut sim, a, JobKind::Wake { version: 1 }, later);
+        let state = &sim.db.enrollments[&a];
+        assert_eq!(
+            (state.state_version, state.awaiting.as_deref()),
+            (2, Some("order"))
+        );
+        assert_eq!(sim.db.waits[&(a, "order".into())].wake_version, 2);
+        let stale = sim.report.stats.stale;
+        redeliver_all(&mut sim, later + TimeDelta::minutes(1));
+        let state = &sim.db.enrollments[&a];
+        assert_eq!(
+            (state.state_version, state.awaiting.as_deref()),
+            (2, Some("order")),
+            "the version 1 event must not move the version 2 wait"
+        );
+        assert_eq!(sim.report.stats.stale, stale + 1);
+        assert!(
+            sim.report.violations.is_empty(),
+            "{:?}",
+            sim.report.violations
+        );
+    }
+
+    #[test]
+    fn an_event_that_finds_no_committed_wait_is_consumed() {
+        let (calm, _) = configs();
+        let (sim, a, _, wake) = sim_at_w1(&calm);
+        let visit = JobKind::Event {
+            name: "visit".into(),
+            matched: None,
+        };
+        assert!(sim.claim(vec![job(a, visit, wake)]).is_empty());
+        let claimed = sim.claim(vec![job(a, order_event(None), wake)]);
+        assert!(matches!(
+            claimed[0].kind,
+            JobKind::Event {
+                matched: Some(1),
+                ..
+            }
+        ));
     }
 
     #[test]
