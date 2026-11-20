@@ -372,6 +372,7 @@ impl Sim<'_> {
                         .chain(std::iter::once(job))
                         .chain(held);
                     for mut job in lost {
+                        job.kind.forget_match();
                         job.crashes += 1;
                         self.redeliver(job, now);
                     }
@@ -385,6 +386,8 @@ impl Sim<'_> {
                     };
                     self.db.roll_back_to(&mut journal, to, defect);
                     self.report.stats.savepoint_rollbacks += 1;
+                    // Its match may come from a step of this batch that a later crash undoes.
+                    job.kind.forget_match();
                     self.redeliver(job, now);
                 }
                 Some(Commit::Committed) => ran.push((job, Some(tx))),
@@ -594,6 +597,135 @@ fn evaluate(seed: u64, enrollment: Uuid, node: &str, count: usize) -> Vec<bool> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zirv_flow_core::flow::{Edge, EventMatch, FlowNode, NodeKind};
+
+    fn edge(id: &str, from: &str, port: &str, to: &str) -> Edge {
+        Edge {
+            id: id.into(),
+            from: from.into(),
+            port: port.into(),
+            to: to.into(),
+        }
+    }
+
+    fn await_event(id: &str, name: &str, timeout_seconds: u64) -> FlowNode {
+        FlowNode {
+            id: id.into(),
+            kind: NodeKind::WaitUntilEvent {
+                event: EventMatch {
+                    name: name.into(),
+                    filters: Vec::new(),
+                },
+                timeout_seconds,
+            },
+        }
+    }
+
+    /// `w1` awaits `order` and on its timeout falls into `w3`, which awaits `order` again; on the
+    /// event it goes to `w2`, which awaits `visit`.
+    fn two_orders() -> FlowGraph {
+        FlowGraph {
+            v: 1,
+            nodes: vec![
+                await_event("w1", "order", 3_600),
+                await_event("w2", "visit", 7_200),
+                await_event("w3", "order", 3_600),
+                FlowNode {
+                    id: "x".into(),
+                    kind: NodeKind::Exit {},
+                },
+            ],
+            edges: vec![
+                edge("e0", "w1", "event", "w2"),
+                edge("e1", "w1", "timeout", "w3"),
+                edge("e2", "w2", "event", "x"),
+                edge("e3", "w2", "timeout", "x"),
+                edge("e4", "w3", "event", "x"),
+                edge("e5", "w3", "timeout", "x"),
+            ],
+        }
+    }
+
+    fn job(enrollment: Uuid, kind: JobKind, at: DateTime<Utc>) -> Job {
+        Job {
+            enrollment,
+            kind,
+            run_at: at,
+            tie: 0,
+            crashes: 0,
+            snapshot: None,
+        }
+    }
+
+    /// An event job matches the wait row it finds on its first claim, inside the batch transaction,
+    /// which can see a step of the same batch that has not committed. A crash rolls that step back
+    /// with the wait it registered, so the match must go with it: a redelivery that kept it would
+    /// pair the old version with a state that reached it by another path. Seed 483383881 hit this:
+    /// a timer moved `w1` to `w3` (version 2) and an event of the same batch matched version 2;
+    /// the crash undid both, another `order` event then took `w1` to `w2` (also version 2), and
+    /// the redelivered one got "the enrollment does not await `order`" from a state awaiting
+    /// `visit`.
+    #[test]
+    fn a_crashed_batch_does_not_keep_a_match_it_read_from_its_own_uncommitted_step() {
+        let graph = two_orders();
+        let id = Uuid::from_u128(7);
+        let mut rolled_back = 0;
+        for seed in 0..64 {
+            let calm = Config {
+                crash: CrashMode::Never,
+                races: false,
+                ..Config::new(seed, 0)
+            };
+            let crashing = Config {
+                crash: CrashMode::Random { one_in: 1 },
+                ..calm.clone()
+            };
+            let mut sim = Sim {
+                config: &calm,
+                graphs: vec![graph.clone()],
+                graph_of: BTreeMap::from([(id, 0)]),
+                zones: BTreeMap::from([(id, None)]),
+                db: Db::default(),
+                rng: Rng::derive(seed, &[1]),
+                clock: start(),
+                report: Report::default(),
+                checked_horizon: false,
+            };
+            let state = EnrollmentState::new(id, &graph).expect("the graph has an entry");
+            sim.db.enrollments.insert(id, state);
+            let mut first = job(id, JobKind::Start, start());
+            let prepared = sim.prepare(&mut first, start());
+            sim.complete(first, prepared, start());
+            sim.db.queue.clear();
+            let wake = sim.db.enrollments[&id].wake_at.expect("w1 sleeps");
+            sim.config = &crashing;
+            let jobs = vec![
+                job(id, JobKind::Wake { version: 1 }, wake),
+                job(
+                    id,
+                    JobKind::Event {
+                        name: "order".into(),
+                        matched: None,
+                    },
+                    wake,
+                ),
+            ];
+            sim.run_batch(jobs, wake);
+            if sim.report.stats.crashes_in_tx == 0 {
+                continue;
+            }
+            rolled_back += 1;
+            for queued in sim.db.queue.values() {
+                if let JobKind::Event { matched, .. } = &queued.kind {
+                    assert_eq!(
+                        *matched, None,
+                        "seed {seed}: the rolled-back match survived"
+                    );
+                }
+            }
+        }
+        assert!(rolled_back > 0, "no seed crashed inside the batch");
+    }
 
     #[test]
     fn the_evaluator_depends_only_on_its_inputs() {

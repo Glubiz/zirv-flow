@@ -33,6 +33,17 @@ pub(super) enum JobKind {
     Event { name: String, matched: Option<u64> },
 }
 
+impl JobKind {
+    /// Drops the wait an event matched. A batch transaction reads the wait rows its own earlier
+    /// steps wrote; when it rolls back, those rows and the versions they carry never existed, so
+    /// the redelivery must match against the committed rows again.
+    pub(super) fn forget_match(&mut self) {
+        if let Self::Event { matched, .. } = self {
+            *matched = None;
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct Job {
     pub(super) enrollment: Uuid,
