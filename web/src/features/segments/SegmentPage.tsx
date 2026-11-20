@@ -21,7 +21,7 @@ import {
 import { AssistantToggle, useAssistantAccess, useAssistantDock } from "../assistant";
 import { useSegmentAccess } from "./access";
 import { fromDefinition } from "./ast";
-import { useCatalog } from "./catalog";
+import { useLists, useSegmentRows } from "./catalog";
 import { namesOf } from "./describe";
 import { cadenceLabel, causeLabel, issueMessage } from "./labels";
 import { builtFrom, describeDefinition, usedBy } from "./overview";
@@ -29,6 +29,7 @@ import { DataAgeNote, personLabel } from "./LiveCount";
 import { SegmentSizePanel } from "./SegmentSize";
 import { DefinitionView, SegmentForm } from "./SegmentForm";
 import { usePaged } from "./usePaged";
+import { useReloadOn } from "./useReloadOn";
 
 type Segment = components["schemas"]["SegmentDetailBody"];
 type Version = components["schemas"]["SegmentVersionBody"];
@@ -62,6 +63,12 @@ function SegmentView({ workspaceId, segmentId }: { workspaceId: string; segmentI
   );
   const navigate = useNavigate();
   const { active: tab, hrefOf } = useTabParam(TABS);
+  // The rules form loads the catalog and runs a live count, so it mounts on the first visit to Rules and then stays,
+  // keeping unsaved edits across tabs.
+  const [rulesOpened, setRulesOpened] = useState(tab === "rules");
+  if (tab === "rules" && !rulesOpened) setRulesOpened(true);
+  /** Counts the Refresh now buttons' reloads, so the people and size panels read again with the segment. */
+  const [refreshed, setRefreshed] = useState(0);
   /** The dock lives beside the rules, so asking for it elsewhere goes to the rules with it open. */
   function toggleAssistant() {
     if (tab === "rules") {
@@ -109,7 +116,16 @@ function SegmentView({ workspaceId, segmentId }: { workspaceId: string; segmentI
             </Button>
           ) : null
         }
-        secondary={canWrite ? <RefreshButton workspaceId={workspaceId} segmentId={segmentId} onReload={segment.reload} /> : null}
+        secondary={canWrite ? (
+          <RefreshButton
+            workspaceId={workspaceId}
+            segmentId={segmentId}
+            onReload={() => {
+              segment.reload();
+              setRefreshed((count) => count + 1);
+            }}
+          />
+        ) : null}
         actions={assistantOn ? <AssistantToggle open={dock.open && tab === "rules"} onToggle={toggleAssistant} /> : null}
       />
       {data.issues && data.issues.length > 0 ? (
@@ -140,20 +156,22 @@ function SegmentView({ workspaceId, segmentId }: { workspaceId: string; segmentI
         </div>
       </dl>
       <TabNav label="Segment sections" tabs={TABS} />
-      {tab === "overview" ? <Overview workspaceId={workspaceId} segment={data} canWrite={canWrite} editHref={hrefOf("rules")} /> : null}
-      <div hidden={tab !== "rules"}>
-        <SegmentForm
-          workspaceId={workspaceId}
-          segment={data}
-          canWrite={canWrite}
-          assistant={assistantOn}
-          onAssistantGone={reloadAssistant}
-          dockVisible={tab === "rules"}
-          dockSlot={dockSlot}
-          onSaved={() => segment.reload()}
-        />
-      </div>
-      {tab === "people" ? <MembersPanel workspaceId={workspaceId} segmentId={segmentId} /> : null}
+      {tab === "overview" ? <Overview workspaceId={workspaceId} segment={data} canWrite={canWrite} editHref={hrefOf("rules")} refreshed={refreshed} /> : null}
+      {rulesOpened ? (
+        <div hidden={tab !== "rules"}>
+          <SegmentForm
+            workspaceId={workspaceId}
+            segment={data}
+            canWrite={canWrite}
+            assistant={assistantOn}
+            onAssistantGone={reloadAssistant}
+            dockVisible={tab === "rules"}
+            dockSlot={dockSlot}
+            onSaved={() => segment.reload()}
+          />
+        </div>
+      ) : null}
+      {tab === "people" ? <MembersPanel workspaceId={workspaceId} segmentId={segmentId} refreshed={refreshed} /> : null}
       {tab === "history" ? (
         <div className="stack">
           <HistoryPanel workspaceId={workspaceId} segmentId={segmentId} />
@@ -166,10 +184,23 @@ function SegmentView({ workspaceId, segmentId }: { workspaceId: string; segmentI
   );
 }
 
-function Overview({ workspaceId, segment, canWrite, editHref }: { workspaceId: string; segment: Segment; canWrite: boolean; editHref: string }) {
-  const catalog = useCatalog(workspaceId);
-  const lists = catalog.status === "ready" ? catalog.catalog.lists : [];
-  const segments = catalog.status === "ready" ? catalog.catalog.segments : [];
+function Overview({
+  workspaceId,
+  segment,
+  canWrite,
+  editHref,
+  refreshed,
+}: {
+  workspaceId: string;
+  segment: Segment;
+  canWrite: boolean;
+  editHref: string;
+  refreshed: number;
+}) {
+  const listRows = useLists(workspaceId);
+  const segmentRows = useSegmentRows(workspaceId);
+  const lists = listRows.status === "ready" ? listRows.data : [];
+  const segments = segmentRows.status === "ready" ? segmentRows.data : [];
   const used = useResource(
     () =>
       unwrap(
@@ -189,7 +220,7 @@ function Overview({ workspaceId, segment, canWrite, editHref }: { workspaceId: s
             {canWrite ? <Link to={editHref}>Edit rules</Link> : null}
           </div>
         </Panel>
-        <SegmentSizePanel workspaceId={workspaceId} segmentId={segment.id} />
+        <SegmentSizePanel workspaceId={workspaceId} segmentId={segment.id} refreshed={refreshed} />
       </div>
       <RelatedPanel
         groups={[
@@ -274,7 +305,7 @@ function MoreButton({
   );
 }
 
-function MembersPanel({ workspaceId, segmentId }: { workspaceId: string; segmentId: string }) {
+function MembersPanel({ workspaceId, segmentId, refreshed }: { workspaceId: string; segmentId: string; refreshed: number }) {
   const members = usePaged(
     (cursor: string | undefined) =>
       unwrap(
@@ -284,6 +315,7 @@ function MembersPanel({ workspaceId, segmentId }: { workspaceId: string; segment
       ),
     [workspaceId, segmentId],
   );
+  useReloadOn(refreshed, members.resource.reload);
   return (
     <Panel flush>
       <ResourceView

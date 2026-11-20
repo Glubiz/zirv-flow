@@ -13,7 +13,7 @@ export function OrphanPolicySection({ workspaceId }: { workspaceId: string }) {
   return (
     <Panel>
       <ResourceView resource={settings} loadingLabel="Loading settings">
-        {(data) => <PolicyForm key={data.orphan_policy} workspaceId={workspaceId} saved={data.orphan_policy} onSaved={settings.reload} />}
+        {(data) => <PolicyForm key={workspaceId} workspaceId={workspaceId} saved={data.orphan_policy} onSaved={settings.reload} />}
       </ResourceView>
     </Panel>
   );
@@ -50,7 +50,11 @@ function PolicyForm({ workspaceId, saved, onSaved }: { workspaceId: string; save
   return (
     <form className="stack" onSubmit={(event) => void submit(event)} noValidate>
       <p className="muted">What happens when a source retracts a person&apos;s last record and nothing else holds them.</p>
-      <SelectField label="Orphan policy" value={policy} onChange={(event) => setPolicy(event.target.value)} hint={help}>
+      <SelectField label="Orphan policy" value={policy} onChange={(event) => {
+          setPolicy(event.target.value);
+          setNotice(null);
+        }}
+        hint={help}>
         {ORPHAN_POLICIES.map((option) => (
           <option key={option.value} value={option.value}>
             {option.label}

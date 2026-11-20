@@ -175,6 +175,8 @@ function Form({ workspaceId, segment, canWrite, onSaved, assistant, onAssistantG
     setBusy(true);
     setFailure(null);
     setNotice(null);
+    /** What this request carries: an edit made while it is in flight is not in it, and must survive the answer. */
+    const sent = { name, description, cadence, root };
     try {
       if (saved === null) {
         const created = await unwrap(
@@ -201,10 +203,10 @@ function Form({ workspaceId, segment, canWrite, onSaved, assistant, onAssistantG
         }),
       );
       setSaved(updated);
-      setName(updated.name);
-      setDescription(updated.description);
-      setCadence(updated.cadence_minutes);
-      setRoot(fromDefinition(updated.current.definition));
+      setName((current) => (current === sent.name ? updated.name : current));
+      setDescription((current) => (current === sent.description ? updated.description : current));
+      setCadence((current) => (current === sent.cadence ? updated.cadence_minutes : current));
+      if (sameDefinition(latestRoot.current, sent.root)) setRoot(fromDefinition(updated.current.definition));
       onSaved?.(updated);
       setNotice(definitionChanged ? `Saved as version ${updated.current_version}.` : "Saved.");
     } catch (error) {
@@ -242,7 +244,9 @@ function Form({ workspaceId, segment, canWrite, onSaved, assistant, onAssistantG
     setReplacing(null);
   }
 
-  const canSave = canWrite && !busy && name.trim() !== "" && complete && (saved === null || dirty);
+  // A saved segment's header can be saved on its own: only a changed definition has to be complete.
+  const needsComplete = saved === null || definitionChanged;
+  const canSave = canWrite && !busy && name.trim() !== "" && (complete || !needsComplete) && (saved === null || dirty);
 
   const form = (
     <form className="stack" onSubmit={(event) => void save(event)} noValidate>
@@ -337,7 +341,7 @@ function Form({ workspaceId, segment, canWrite, onSaved, assistant, onAssistantG
         ) : saved ? (
           <span className="faint">Version {saved.current_version} is saved.</span>
         ) : null}
-        {canWrite && !complete ? <span className="faint">Fill in every condition to save.</span> : null}
+        {canWrite && !complete && needsComplete ? <span className="faint">Fill in every condition to save.</span> : null}
       </div>
       {guard.pending !== null ? (
         <Dialog title="Leave without saving?" onClose={guard.stay}>

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useParams } from "react-router";
 
-import { describeError } from "../../api";
+import { describeError, type Resource } from "../../api";
 import {
   Button,
   EmptyState,
@@ -14,7 +14,7 @@ import {
   ResourceView,
   SelectField,
 } from "../../ui";
-import { useWorkspaceAccess } from "../members";
+import { useWorkspaceAccess, type WorkspaceAccess } from "../members";
 import { ConflictDialog } from "./ConflictDialog";
 import { reasonLabel, resolutionLabel } from "./conflictLabels";
 import { useConflicts, type Conflict, type ConflictStatus } from "./useConflicts";
@@ -22,7 +22,6 @@ import { useConflicts, type Conflict, type ConflictStatus } from "./useConflicts
 export function ConflictsPage() {
   const { ws = "" } = useParams();
   const access = useWorkspaceAccess(ws);
-  const canManage = access.status === "ready" && access.data.canAdmin;
 
   return (
     <div className="page">
@@ -30,12 +29,14 @@ export function ConflictsPage() {
         title="Identity conflicts" breadcrumb={{ group: "Audience", section: "People" }}
         lede="Places where two people share an identifier but could not be merged. Decide whether they stay separate or the identifier moves."
       />
-      <ConflictList key={ws} workspaceId={ws} canManage={canManage} />
+      <ConflictList key={ws} workspaceId={ws} access={access} />
     </div>
   );
 }
 
-function ConflictList({ workspaceId, canManage }: { workspaceId: string; canManage: boolean }) {
+function ConflictList({ workspaceId, access }: { workspaceId: string; access: Resource<WorkspaceAccess> }) {
+  // Three-valued: null while the access is loading or failed, so nothing claims "cannot resolve" before it is known.
+  const canManage = access.status === "ready" ? access.data.canAdmin : null;
   const [status, setStatus] = useState<ConflictStatus>("open");
   const conflicts = useConflicts(workspaceId, status);
   const [reviewing, setReviewing] = useState<Conflict | null>(null);
@@ -124,8 +125,14 @@ function ConflictList({ workspaceId, canManage }: { workspaceId: string; canMana
           </div>
         ) : null}
       </Panel>
-      {!canManage ? (
+      {canManage === false ? (
         <p className="muted">Only workspace admins and the instance owner can resolve conflicts. Identifier values are hidden from you.</p>
+      ) : null}
+      {access.status === "error" ? (
+        <div className="stack-tight">
+          <InlineError {...describeError(access.error)} />
+          <Button onClick={access.reload}>Try again</Button>
+        </div>
       ) : null}
       {reviewing ? (
         <ConflictDialog

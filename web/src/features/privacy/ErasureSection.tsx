@@ -33,7 +33,7 @@ export function ErasureSection({ workspaceId }: { workspaceId: string }) {
     },
     [workspaceId],
   );
-  const requests = usePaged(fetchPage, [workspaceId]);
+  const requests = usePaged(fetchPage, [workspaceId], (item) => item.id);
   usePolling(
     requests.resource.status === "ready" && requests.resource.data.some((request) => request.status === "pending"),
     requests.resource.status === "ready" && requests.resource.refreshing,

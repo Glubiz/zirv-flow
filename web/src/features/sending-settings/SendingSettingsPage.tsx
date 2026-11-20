@@ -24,6 +24,11 @@ import { UtmSection } from "./UtmSection";
 
 export function SendingSettingsPage() {
   const { ws = "" } = useParams();
+  // The route component is reused across workspaces: remount so one workspace's notice never shows in another.
+  return <SendingSettingsView key={ws} ws={ws} />;
+}
+
+function SendingSettingsView({ ws }: { ws: string }) {
   const access = useWorkspaceAccess(ws);
   const canManage = access.status === "ready" && access.data.canAdmin;
   const settings = useResource(
@@ -43,7 +48,7 @@ export function SendingSettingsPage() {
       {settings.status === "error" ? <ErrorState {...describeError(settings.error)} onRetry={settings.reload} /> : null}
       {settings.status === "ready" ? (
         <SettingsForm
-          key={`${ws}:${JSON.stringify(settings.data)}`}
+          key={JSON.stringify(settings.data)}
           workspaceId={ws}
           stored={settings.data}
           zone={workspace.status === "ready" ? workspace.data.timezone : null}
@@ -57,7 +62,6 @@ export function SendingSettingsPage() {
       {workspace.status === "error" ? <ErrorState {...describeError(workspace.error)} onRetry={workspace.reload} /> : null}
       {workspace.status === "ready" ? (
         <UtmSection
-          key={ws}
           workspaceId={ws}
           workspaceSlug={workspace.data.slug}
           stored={workspace.data.utm}
@@ -65,7 +69,7 @@ export function SendingSettingsPage() {
           onSaved={workspace.reload}
         />
       ) : null}
-      {access.status === "ready" ? <TestInboxesSection key={`inboxes:${ws}`} workspaceId={ws} canManage={canManage} canRead={access.data.canEdit} /> : null}
+      {access.status === "ready" ? <TestInboxesSection workspaceId={ws} canManage={canManage} canRead={access.data.canEdit} /> : null}
     </div>
   );
 }
@@ -82,7 +86,10 @@ interface FormProps {
 }
 
 function SettingsForm({ workspaceId, stored, zone, canManage, notice, onNotice, onReload }: FormProps) {
-  const [original] = useState<SettingsDraft>(() => draftFromApi(stored));
+  // What the server holds now. A save moves both to the PUT response, so a second save sends the new revision
+  // even while the reload that follows is still in flight.
+  const [original, setOriginal] = useState<SettingsDraft>(() => draftFromApi(stored));
+  const [revision, setRevision] = useState(stored.revision);
   const [draft, setDraft] = useState<SettingsDraft>(original);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
@@ -115,12 +122,14 @@ function SettingsForm({ workspaceId, stored, zone, canManage, notice, onNotice, 
     setFailure(null);
     setStale(false);
     try {
-      await unwrap(
+      const saved = await unwrap(
         client.PUT("/api/v1/workspaces/{ws}/sending/settings", {
           params: { path: { ws: workspaceId } },
-          body: draftToApi(draft, stored.revision),
+          body: draftToApi(draft, revision),
         }),
       );
+      setOriginal(draftFromApi(saved));
+      setRevision(saved.revision);
       onNotice("Saved. The limits apply to messages that reach the check from now on.");
       onReload();
     } catch (error) {

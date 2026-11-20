@@ -126,6 +126,29 @@ describe("the map step", () => {
     expect(options).toContain("External ID…");
   });
 
+  it("shows a list that no longer exists as unavailable, not as left out", async () => {
+    const mapping = {
+      key_column: "Email",
+      columns: [
+        { column: "Email", target: { type: "identifier", kind: "email" }, transforms: [] },
+        { column: "Newsletter", target: { type: "list", list_id: "list-gone" }, transforms: [] },
+      ],
+    } as unknown as CsvImport["mapping"];
+    const api = server({ mapping });
+    const calls = mockApi(api.routes);
+    const user = userEvent.setup();
+    mount();
+
+    const select = await screen.findByLabelText<HTMLSelectElement>("What Newsletter becomes");
+    expect(select.selectedOptions[0]?.textContent).toBe("List not available");
+
+    await user.selectOptions(select, "list:list-1");
+    expect(select.selectedOptions[0]?.textContent).toBe("Newsletter");
+    expect(within(select).queryByRole("option", { name: "List not available" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Save and dry run" }));
+    await waitFor(() => expect(bodyOf(calls, "PUT", "/mapping")).toMatchObject({ columns: [{}, { target: { type: "list", list_id: "list-1" } }] }));
+  });
+
   it("will not save while no column identifies a person, and says why", async () => {
     mockApi(server({}).routes);
     const user = userEvent.setup();
@@ -241,6 +264,72 @@ describe("the map step", () => {
     await user.click(await screen.findByRole("button", { name: "Try again" }));
 
     expect(await screen.findByRole("heading", { name: "Customers May" })).toBeInTheDocument();
+  });
+});
+
+describe("polling an import", () => {
+  const importPath = "/api/v1/workspaces/ws1/imports/imp-1";
+  const running = { status: "running", started_at: "2026-10-01T10:00:00Z", rows_done: 1 } as const;
+
+  function polled(api: Server, fail: (call: number) => Response | null) {
+    const real = api.routes[`GET ${importPath}`] as (request: Request) => Response | Promise<Response>;
+    let gets = 0;
+    api.routes[`GET ${importPath}`] = (request) => {
+      gets += 1;
+      return fail(gets) ?? real(request);
+    };
+    return () => gets;
+  }
+
+  it("keeps the last import and keeps polling when a poll fails", async () => {
+    const api = server(running);
+    const gets = polled(api, (call) => (call === 3 ? problem(503, "Unavailable", "restarting") : null));
+    mockApi(api.routes);
+    mount(20);
+
+    await screen.findByRole("heading", { name: "Customers May" });
+    await waitFor(() => expect(gets()).toBeGreaterThanOrEqual(3));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    expect(screen.queryByText(/restarting|Unavailable/)).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Customers May" })).toBeInTheDocument();
+    expect(gets()).toBeGreaterThan(4);
+  });
+
+  it("survives two failed polls in a row and ends on the import", async () => {
+    const api = server(running);
+    const gets = polled(api, (call) => (call === 3 || call === 4 ? problem(503, "Unavailable", "restarting") : null));
+    mockApi(api.routes);
+    mount(20);
+
+    await screen.findByRole("heading", { name: "Customers May" });
+    await waitFor(() => expect(gets()).toBeGreaterThanOrEqual(6));
+
+    expect(screen.queryByText(/restarting|Unavailable/)).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Customers May" })).toBeInTheDocument();
+  });
+
+  it("still shows the error with a retry when the first load fails", async () => {
+    const api = server(running);
+    polled(api, () => problem(503, "Unavailable", "restarting"));
+    mockApi(api.routes);
+    mount(20);
+
+    expect(await screen.findByText("restarting")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+  });
+
+  it("shows the error once the import is gone", async () => {
+    const api = server(running);
+    const gets = polled(api, (call) => (call >= 3 ? problem(404, "Not Found", "no such resource") : null));
+    mockApi(api.routes);
+    mount(20);
+
+    expect(await screen.findByRole("button", { name: "Try again" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Customers May" })).not.toBeInTheDocument();
+    const seen = gets();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(gets()).toBe(seen);
   });
 });
 

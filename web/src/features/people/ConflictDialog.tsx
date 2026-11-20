@@ -17,7 +17,8 @@ function letterOf(index: number): string {
 interface ConflictDialogProps {
   workspaceId: string;
   conflict: Conflict;
-  canManage: boolean;
+  /** Null while it is not known whether the viewer may resolve. */
+  canManage: boolean | null;
   onClose: () => void;
   onResolved: (message: string) => void;
 }
@@ -87,7 +88,7 @@ export function ConflictDialog({ workspaceId, conflict, canManage, onClose, onRe
                       {conflict.resolved_at ? <> on {formatDateTime(conflict.resolved_at)}</> : null}
                     </p>
                   ) : null}
-                  {isOpen && canManage && data.people.length === 2 && owner >= 0 ? (
+                  {isOpen && canManage === true && data.people.length === 2 && owner >= 0 ? (
                     <div className="dialog-actions dialog-actions-wrap">
                       <Button
                         onClick={() => void resolve({ outcome: "keep_separate" }, "Kept the two people separate.")}
@@ -112,7 +113,7 @@ export function ConflictDialog({ workspaceId, conflict, canManage, onClose, onRe
                       )}
                     </div>
                   ) : null}
-                  {isOpen && !canManage ? (
+                  {isOpen && canManage === false ? (
                     <p className="muted">Only workspace admins and the instance owner can resolve conflicts.</p>
                   ) : null}
                   {failure && !moving ? <InlineError {...failure} /> : null}

@@ -2,7 +2,7 @@ import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
-import { json, mockApi, OWNER, session } from "../../test/mockApi";
+import { json, mockApi, OWNER, problem, session } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
 import { PeoplePage } from "./PeoplePage";
 import { operatorsFor, parseSearchValue } from "./traitSearch";
@@ -171,6 +171,28 @@ describe("people search", () => {
     expect(screen.queryByRole("button", { name: "Show more" })).not.toBeInTheDocument();
     const bodies = calls.filter((call) => call.method === "POST").map((call) => call.body);
     expect(bodies[1]).toEqual({ identifier: { kind: "email", value: "a" }, limit: 50, cursor: ADA });
+  });
+
+  it("drops a failed Show more error when a new search runs", async () => {
+    mount({
+      [SEARCH]: (request) =>
+        request.clone().json().then((body: { cursor?: string; identifier?: { value: string } }) =>
+          body.cursor === ADA
+            ? problem(500, "Internal Server Error", "STALEBOOM")
+            : json({ people: [hit(body.identifier?.value === "b" ? BOB : ADA, "email", `${body.identifier?.value}@example.test`)], next_cursor: ADA }),
+        ),
+    });
+
+    const user = await searchByEmail("a");
+    await user.click(await screen.findByRole("button", { name: "Show more" }));
+    expect(await screen.findByText(/STALEBOOM/)).toBeInTheDocument();
+    await user.clear(screen.getByLabelText("Value"));
+    await user.type(screen.getByLabelText("Value"), "b");
+    await user.click(screen.getByRole("button", { name: "Search" }));
+
+    expect(await screen.findByText("b@example.test")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show more" })).toBeInTheDocument();
+    expect(screen.queryByText(/STALEBOOM/)).not.toBeInTheDocument();
   });
 });
 

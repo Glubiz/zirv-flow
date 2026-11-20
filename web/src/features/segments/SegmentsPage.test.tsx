@@ -118,6 +118,22 @@ describe("segments list", () => {
     expect(await screen.findByText("No segments match")).toBeInTheDocument();
   });
 
+  it("does not blame an empty search when only the filter hides every segment", async () => {
+    mockApi({ ...actor("writer"), [`GET ${WS}/segments`]: () => json([segmentRow({ used_by_flows: 2 })]) });
+    renderRoute("/w/ws1/segments?filter=unused", "/w/:ws/segments", <SegmentsPage />);
+
+    expect(await screen.findByText("No segments match")).toBeInTheDocument();
+    expect(screen.getByText("Every segment is used by a flow.")).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("“”");
+  });
+
+  it("says no segment is used by a flow when that filter is empty", async () => {
+    mockApi({ ...actor("writer"), [`GET ${WS}/segments`]: () => json([segmentRow({ used_by_flows: 0 })]) });
+    renderRoute("/w/ws1/segments?filter=used", "/w/:ws/segments", <SegmentsPage />);
+
+    expect(await screen.findByText("No segments are used by a flow.")).toBeInTheDocument();
+  });
+
   it("is read-only for someone who cannot write", async () => {
     mockApi({ ...actor("reader"), [`GET ${WS}/segments`]: () => json([segmentRow()]) });
     mount();

@@ -3,6 +3,7 @@ import { Link } from "react-router";
 
 import { ApiError, client, describeError, unwrap, useResource, type components } from "../../api";
 import { Button, EmptyState, ErrorState, formatDateTime, HiddenValue, LoadingState, Panel, SelectField, shortId } from "../../ui";
+import { useLists, useSegmentRows } from "./catalog";
 import { fromDefinition, getAt, place, type Node } from "./ast";
 import { describeNode, namesOf, valueText, type Names } from "./describe";
 
@@ -170,14 +171,8 @@ interface PanelProps {
 export function SegmentExplainPanel({ workspaceId, personId }: PanelProps) {
   const [segmentId, setSegmentId] = useState("");
   const [version, setVersion] = useState("");
-  const segments = useResource(
-    () => unwrap(client.GET("/api/v1/workspaces/{ws}/segments", { params: { path: { ws: workspaceId } } })),
-    [workspaceId],
-  );
-  const lists = useResource(
-    () => unwrap(client.GET("/api/v1/workspaces/{ws}/lists", { params: { path: { ws: workspaceId } } })),
-    [workspaceId],
-  );
+  const segments = useSegmentRows(workspaceId);
+  const lists = useLists(workspaceId);
   const versions = useResource(
     () =>
       segmentId === ""

@@ -44,7 +44,7 @@ export function ExportSection({ workspaceId }: { workspaceId: string }) {
     },
     [workspaceId],
   );
-  const exports = usePaged(fetchPage, [workspaceId]);
+  const exports = usePaged(fetchPage, [workspaceId], (item) => item.id);
   usePolling(
     exports.resource.status === "ready" && exports.resource.data.some((item) => item.status === "pending"),
     exports.resource.status === "ready" && exports.resource.refreshing,

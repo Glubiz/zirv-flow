@@ -206,6 +206,8 @@ function MappingForm({ workspaceId, importId, canWrite, detail, traits, lists, o
               const value = choiceValue(draft.target);
               const traitKey = draft.target.kind === "trait" ? draft.target.key : null;
               const known = traitKey === null || traits.some((item) => item.key === traitKey);
+              const listId = draft.target.kind === "list" ? draft.target.listId : null;
+              const listKnown = listId === null || lists.some((item) => item.id === listId);
               return (
                 <tr key={draft.column}>
                   <th scope="row" className="strong">
@@ -243,6 +245,7 @@ function MappingForm({ workspaceId, importId, canWrite, detail, traits, lists, o
                               {item.name}
                             </option>
                           ))}
+                          {listKnown ? null : <option value={value}>List not available</option>}
                         </optgroup>
                       </select>
                       {draft.target.kind === "identifier" && draft.target.identifier === "external" ? (
