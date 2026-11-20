@@ -45,9 +45,11 @@ export function useSearch(workspaceId: string, query: SearchQuery | null): Searc
   );
   const [extra, setExtra] = useState<Extra | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
-  const [moreError, setMoreError] = useState<unknown>(null);
+  // Keyed to the first page, like `extra`: a new search, filter or reload makes an old failure vanish.
+  const [moreFailure, setMoreFailure] = useState<{ base: object; error: unknown } | null>(null);
 
   const base = first.status === "ready" ? first.data : null;
+  const moreError = moreFailure !== null && moreFailure.base === base ? moreFailure.error : null;
   const more = extra !== null && extra.base === base ? extra : null;
   const people = base ? [...base.people, ...(more?.people ?? [])] : [];
   const nextAfter = base ? (more ? more.nextAfter : (base.next_cursor ?? null)) : null;
@@ -55,7 +57,7 @@ export function useSearch(workspaceId: string, query: SearchQuery | null): Searc
   const loadMore = useCallback(() => {
     if (query === null || base === null || nextAfter === null) return;
     setLoadingMore(true);
-    setMoreError(null);
+    setMoreFailure(null);
     unwrap(
       client.POST("/api/v1/workspaces/{ws}/people/search", {
         params: { path: { ws: workspaceId } },
@@ -71,7 +73,7 @@ export function useSearch(workspaceId: string, query: SearchQuery | null): Searc
         setLoadingMore(false);
       },
       (failure: unknown) => {
-        setMoreError(failure);
+        setMoreFailure({ base, error: failure });
         setLoadingMore(false);
       },
     );

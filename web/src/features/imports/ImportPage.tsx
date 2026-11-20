@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useParams } from "react-router";
 
-import { client, unwrap, useResource } from "../../api";
+import { ApiError, client, unwrap, useResource, type Resource } from "../../api";
 import { formatDateTime, PageHeader, Panel, Pill, ResourceView, Stepper } from "../../ui";
 import { useImportAccess } from "./access";
 import { DryRunStep } from "./DryRunStep";
@@ -38,7 +38,7 @@ export function ImportPage({ pollMs = POLL_MS }: { pollMs?: number }) {
 
 function ImportView({ workspaceId, importId, pollMs }: { workspaceId: string; importId: string; pollMs: number }) {
   const { canWrite, canPublish } = useImportAccess(workspaceId);
-  const resource = useResource(
+  const polled = useResource(
     () =>
       unwrap(
         client.GET("/api/v1/workspaces/{ws}/imports/{id}", {
@@ -48,6 +48,18 @@ function ImportView({ workspaceId, importId, pollMs }: { workspaceId: string; im
     [workspaceId, importId],
   );
   const [view, setView] = useState<Step | null>(null);
+
+  // A failed poll must not blank a page the user is reading: keep the last good import and keep polling.
+  // Only a first load that fails, or an import that is gone (404), shows the error.
+  const [held, setHeld] = useState<CsvImport | null>(null);
+  const gone = polled.status === "error" && polled.error instanceof ApiError && polled.error.status === 404;
+  if (polled.status === "ready" && held !== polled.data) {
+    setHeld(polled.data);
+  } else if (gone && held !== null) {
+    setHeld(null);
+  }
+  const resource: Resource<CsvImport> =
+    polled.status !== "ready" && held !== null && !gone ? { status: "ready", data: held, reload: polled.reload, refreshing: true } : polled;
 
   const active = resource.status === "ready" && isActive(resource.data.status);
   const reload = resource.reload;

@@ -231,6 +231,149 @@ describe("a list", () => {
     expect(screen.queryByRole("button", { name: /^Remove/ })).not.toBeInTheDocument();
   });
 
+  describe("removing more than 1000 loaded people", () => {
+    const person = (n: number) => `p-${String(n).padStart(5, "0")}`;
+    /** 21 pages of 50: the cursor of page k is `c<k>`. */
+    function paged(): Parameters<typeof mockApi>[0] {
+      return {
+        [MEMBERS_ROUTE]: (request) => {
+          const cursor = new URL(request.url).searchParams.get("cursor");
+          const page = cursor === null ? 0 : Number(cursor.slice(1));
+          const members = Array.from({ length: 50 }, (_, index) => member(person(page * 50 + index), "email", `m${page * 50 + index}@example.test`));
+          return json({ members, next_cursor: page < 20 ? `c${page + 1}` : null });
+        },
+      };
+    }
+
+    async function selectEverything(user: ReturnType<typeof userEvent.setup>) {
+      await screen.findByText("m0@example.test");
+      for (let page = 1; page <= 20; page += 1) {
+        await user.click(await screen.findByRole("button", { name: "Show more" }));
+        await screen.findByText(`m${page * 50}@example.test`);
+      }
+      await user.click(screen.getByRole("checkbox", { name: "Select everyone on this page" }));
+      await user.click(await screen.findByRole("button", { name: "Remove 1050 selected people" }));
+    }
+
+    it("sends the removals in chunks the server accepts and sums what was removed", async () => {
+      const calls = asAdmin({
+        ...paged(),
+        [REMOVE_ROUTE]: async (request) => {
+          const ids = ((await request.clone().json()) as { person_ids: string[] }).person_ids;
+          return ids.length > 1000
+            ? problem(422, "Unprocessable", "More than 1000 people")
+            : json({ removed: ids.length, not_member: 0, not_found: [] });
+        },
+      });
+      const user = userEvent.setup();
+      mount();
+
+      await selectEverything(user);
+
+      expect(await screen.findByText("Removed 1050 people.", undefined, { timeout: 4000 })).toBeInTheDocument();
+      const sent = calls.filter((call) => call.path.endsWith("/remove")).map((call) => (call.body as { person_ids: string[] }).person_ids);
+      expect(sent.every((ids) => ids.length <= 1000)).toBe(true);
+      expect(sent.flat().sort()).toEqual(Array.from({ length: 1050 }, (_, n) => person(n)));
+    }, 30000);
+
+    describe("at the chunk boundary", () => {
+      /** Loads `total` people (pages of 50, the last one shorter), selects them all and removes them. */
+      async function removeTotal(total: number) {
+        const pages = Math.ceil(total / 50);
+        const calls = asAdmin({
+          [MEMBERS_ROUTE]: (request) => {
+            const cursor = new URL(request.url).searchParams.get("cursor");
+            const page = cursor === null ? 0 : Number(cursor.slice(1));
+            const count = Math.min(50, total - page * 50);
+            const members = Array.from({ length: count }, (_, index) => member(person(page * 50 + index), "email", `m${page * 50 + index}@example.test`));
+            return json({ members, next_cursor: page < pages - 1 ? `c${page + 1}` : null });
+          },
+          [REMOVE_ROUTE]: async (request) => {
+            const ids = ((await request.clone().json()) as { person_ids: string[] }).person_ids;
+            return json({ removed: ids.length, not_member: 0, not_found: [] });
+          },
+        });
+        const user = userEvent.setup();
+        mount();
+        await screen.findByText("m0@example.test");
+        for (let page = 1; page < pages; page += 1) {
+          await user.click(await screen.findByRole("button", { name: "Show more" }));
+          await screen.findByText(`m${page * 50}@example.test`);
+        }
+        await user.click(screen.getByRole("checkbox", { name: "Select everyone on this page" }));
+        await user.click(await screen.findByRole("button", { name: `Remove ${total} selected people` }));
+        expect(await screen.findByText(`Removed ${total} people.`, undefined, { timeout: 4000 })).toBeInTheDocument();
+        return calls.filter((call) => call.path.endsWith("/remove")).map((call) => (call.body as { person_ids: string[] }).person_ids.length);
+      }
+
+      it("makes exactly one call for exactly 1000 people", async () => {
+        expect(await removeTotal(1000)).toEqual([1000]);
+      }, 30000);
+
+      it("makes two calls of 1000 and 1 for 1001 people", async () => {
+        expect(await removeTotal(1001)).toEqual([1000, 1]);
+      }, 30000);
+    });
+
+    it("shows what was removed and the error when a later chunk fails, then reloads", async () => {
+      let removals = 0;
+      const calls = asAdmin({
+        ...paged(),
+        [REMOVE_ROUTE]: async (request) => {
+          removals += 1;
+          const ids = ((await request.clone().json()) as { person_ids: string[] }).person_ids;
+          return removals === 1 ? json({ removed: ids.length, not_member: 0, not_found: [] }) : problem(500, "Server error", "the store is down");
+        },
+      });
+      const user = userEvent.setup();
+      mount();
+
+      await selectEverything(user);
+
+      expect(await screen.findByText("Removed 1000 people.", undefined, { timeout: 4000 })).toBeInTheDocument();
+      expect(screen.getByText(/the store is down/)).toBeInTheDocument();
+      await waitFor(() => expect(calls.filter((call) => call.method === "GET" && call.path.endsWith(`/lists/${LIST_ID}/members`)).length).toBeGreaterThan(21));
+    }, 30000);
+    it("shows Removed 0 people and the error when a later chunk fails after a first chunk that removed none", async () => {
+      let removals = 0;
+      const calls = asAdmin({
+        ...paged(),
+        [REMOVE_ROUTE]: () => {
+          removals += 1;
+          return removals === 1 ? json({ removed: 0, not_member: 1000, not_found: [] }) : problem(500, "Server error", "the store is down");
+        },
+      });
+      const user = userEvent.setup();
+      mount();
+
+      await selectEverything(user);
+
+      expect(await screen.findByText("Removed 0 people.", undefined, { timeout: 4000 })).toBeInTheDocument();
+      expect(screen.getByText(/the store is down/)).toBeInTheDocument();
+      await waitFor(() => expect(calls.filter((call) => call.method === "GET" && call.path.endsWith(`/lists/${LIST_ID}/members`)).length).toBeGreaterThan(21));
+    }, 30000);
+  });
+
+  it("drops a failed Show more error when the list reloads", async () => {
+    asAdmin({
+      [MEMBERS_ROUTE]: (request) =>
+        new URL(request.url).searchParams.get("cursor") === "cursor-1"
+          ? problem(500, "Internal Server Error", "STALEBOOM")
+          : json({ members: [member(ADA, "email", "ada@example.test")], next_cursor: "cursor-1" }),
+      [REMOVE_ROUTE]: () => json({ removed: 1, not_member: 0, not_found: [] }),
+    });
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "Show more" }));
+    expect(await screen.findByText(/STALEBOOM/)).toBeInTheDocument();
+    await user.click(screen.getByRole("checkbox", { name: "Select ada@example.test" }));
+    await user.click(screen.getByRole("button", { name: "Remove 1 selected person" }));
+
+    expect(await screen.findByText("Removed 1 person.")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText(/STALEBOOM/)).not.toBeInTheDocument());
+  });
+
   it("selects everyone on the page at once, and clears again", async () => {
     asAdmin();
     const user = userEvent.setup();
@@ -320,6 +463,146 @@ describe("a list", () => {
     expect(dialog.getAllByText(/^Row \d+:/)).toHaveLength(20);
     expect(dialog.getByText("1025 rows will be skipped:")).toBeInTheDocument();
     expect(dialog.getByRole("button", { name: "Add 0 people" })).toBeDisabled();
+  });
+});
+
+function slowFile(name: string) {
+  const file = new File(["placeholder"], name, { type: "text/csv" });
+  let resolve: (text: string) => void = () => undefined;
+  const text = new Promise<string>((done) => {
+    resolve = done;
+  });
+  Object.defineProperty(file, "text", { value: () => text });
+  return { file, resolve };
+}
+
+describe("choosing another CSV file", () => {
+  async function openDialog(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(await screen.findByRole("button", { name: "Import CSV" }));
+    return within(screen.getByRole("dialog", { name: "Import people from a CSV" }));
+  }
+  const A_CSV = "kind,value\nemail,a@example.test\n";
+  const B_CSV = "kind,value\nemail,b@example.test\n";
+  const tick = () => new Promise((done) => setTimeout(done, 30));
+
+  it("cannot check while the new file is still being read", async () => {
+    asAdmin({ [IMPORT_ROUTE]: () => json({ matched: 1, added: 1, already_member: 0, unmatched: [], unmatched_count: 0 }) });
+    const user = userEvent.setup();
+    mount();
+    const dialog = await openDialog(user);
+
+    await user.upload(dialog.getByLabelText("CSV file"), new File([A_CSV], "A.csv", { type: "text/csv" }));
+    await waitFor(() => expect(dialog.getByRole("button", { name: "Check file" })).toBeEnabled());
+    const b = slowFile("B.csv");
+    await user.upload(dialog.getByLabelText("CSV file"), b.file);
+
+    expect(dialog.getByRole("button", { name: "Check file" })).toBeDisabled();
+    b.resolve(B_CSV);
+    await waitFor(() => expect(dialog.getByRole("button", { name: "Check file" })).toBeEnabled());
+  });
+
+  it("sends the last file chosen even when an earlier read finishes later", async () => {
+    const bodies: string[] = [];
+    asAdmin({
+      [IMPORT_ROUTE]: async (request) => {
+        bodies.push(await request.clone().text());
+        return json({ matched: 1, added: 1, already_member: 0, unmatched: [], unmatched_count: 0 });
+      },
+    });
+    const user = userEvent.setup();
+    mount();
+    const dialog = await openDialog(user);
+
+    const a = slowFile("A.csv");
+    await user.upload(dialog.getByLabelText("CSV file"), a.file);
+    await user.upload(dialog.getByLabelText("CSV file"), new File([B_CSV], "B.csv", { type: "text/csv" }));
+    await tick();
+    a.resolve(A_CSV);
+    await tick();
+    await user.click(dialog.getByRole("button", { name: "Check file" }));
+
+    expect(await dialog.findByText(/B.csv: 1 row matched a person/)).toBeInTheDocument();
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).toContain("b@example.test");
+    expect(bodies[0]).not.toContain("a@example.test");
+  });
+
+  it("still applies a committed import when another file is chosen while it runs", async () => {
+    let answer: () => void = () => undefined;
+    const held = new Promise<void>((done) => {
+      answer = done;
+    });
+    asAdmin({
+      [IMPORT_ROUTE]: async (request) => {
+        const dry = new URL(request.url).searchParams.get("dry_run") === "true";
+        if (dry) return json({ matched: 1, added: 1, already_member: 0, unmatched: [], unmatched_count: 0 });
+        await held;
+        return json({ matched: 1, added: 1, already_member: 0, unmatched: [], unmatched_count: 0 });
+      },
+    });
+    const user = userEvent.setup();
+    mount();
+    const dialog = await openDialog(user);
+
+    await user.upload(dialog.getByLabelText("CSV file"), new File([A_CSV], "A.csv", { type: "text/csv" }));
+    await user.click(dialog.getByRole("button", { name: "Check file" }));
+    await user.click(await dialog.findByRole("button", { name: "Add 1 person" }));
+    await user.upload(dialog.getByLabelText("CSV file"), new File([B_CSV], "B.csv", { type: "text/csv" }));
+    answer();
+
+    expect(await screen.findByText(/Added 1 person\./)).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Import people from a CSV" })).not.toBeInTheDocument());
+  });
+
+  it("shows the error of a committed import that fails after another file is chosen", async () => {
+    let answer: () => void = () => undefined;
+    const held = new Promise<void>((done) => {
+      answer = done;
+    });
+    asAdmin({
+      [IMPORT_ROUTE]: async (request) => {
+        const dry = new URL(request.url).searchParams.get("dry_run") === "true";
+        if (dry) return json({ matched: 1, added: 1, already_member: 0, unmatched: [], unmatched_count: 0 });
+        await held;
+        return problem(500, "Server error", "COMMITBOOM");
+      },
+    });
+    const user = userEvent.setup();
+    mount();
+    const dialog = await openDialog(user);
+
+    await user.upload(dialog.getByLabelText("CSV file"), new File([A_CSV], "A.csv", { type: "text/csv" }));
+    await user.click(dialog.getByRole("button", { name: "Check file" }));
+    await user.click(await dialog.findByRole("button", { name: "Add 1 person" }));
+    await user.upload(dialog.getByLabelText("CSV file"), new File([B_CSV], "B.csv", { type: "text/csv" }));
+    answer();
+
+    expect(await dialog.findByText(/COMMITBOOM/)).toBeInTheDocument();
+  });
+
+  it("drops the preview of a file that was replaced while it was being checked", async () => {
+    let answer: () => void = () => undefined;
+    const held = new Promise<void>((done) => {
+      answer = done;
+    });
+    asAdmin({
+      [IMPORT_ROUTE]: async () => {
+        await held;
+        return json({ matched: 1, added: 1, already_member: 0, unmatched: [], unmatched_count: 0 });
+      },
+    });
+    const user = userEvent.setup();
+    mount();
+    const dialog = await openDialog(user);
+
+    await user.upload(dialog.getByLabelText("CSV file"), new File([A_CSV], "A.csv", { type: "text/csv" }));
+    await user.click(dialog.getByRole("button", { name: "Check file" }));
+    await user.upload(dialog.getByLabelText("CSV file"), new File([B_CSV], "B.csv", { type: "text/csv" }));
+    answer();
+    await tick();
+
+    expect(dialog.queryByText(/matched a person/)).not.toBeInTheDocument();
+    expect(dialog.queryByText(/A\.csv/)).not.toBeInTheDocument();
   });
 });
 
