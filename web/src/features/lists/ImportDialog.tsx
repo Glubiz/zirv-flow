@@ -81,7 +81,7 @@ export function ImportDialog({ workspaceId, listId, onClose, onImported }: Impor
       // An applied import is never dropped: the server already changed the list, whatever was picked since.
       return !dryRun || mine === picks.current ? result : null;
     } catch (error) {
-      if (mine === picks.current) setFailure(describeError(error));
+      if (!dryRun || mine === picks.current) setFailure(describeError(error));
       return null;
     } finally {
       setBusy(false);

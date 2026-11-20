@@ -61,6 +61,7 @@ function ListDetail({ workspaceId, listId }: { workspaceId: string; listId: stri
     setNotice(null);
     const ids = [...selected];
     let removed = 0;
+    let chunks = 0;
     let failed = false;
     // The server takes at most REMOVE_BATCH people per call; a later failure keeps what the earlier calls did.
     try {
@@ -72,12 +73,13 @@ function ListDetail({ workspaceId, listId }: { workspaceId: string; listId: stri
           }),
         );
         removed += result.removed;
+        chunks += 1;
       }
     } catch (error) {
       failed = true;
       setFailure(describeError(error));
     } finally {
-      if (!failed || removed > 0) {
+      if (!failed || chunks > 0) {
         setNotice(`Removed ${plural(removed, "person", "people")}.`);
         refresh();
       }

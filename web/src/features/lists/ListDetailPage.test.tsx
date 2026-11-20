@@ -334,6 +334,24 @@ describe("a list", () => {
       expect(screen.getByText(/the store is down/)).toBeInTheDocument();
       await waitFor(() => expect(calls.filter((call) => call.method === "GET" && call.path.endsWith(`/lists/${LIST_ID}/members`)).length).toBeGreaterThan(21));
     }, 30000);
+    it("shows Removed 0 people and the error when a later chunk fails after a first chunk that removed none", async () => {
+      let removals = 0;
+      const calls = asAdmin({
+        ...paged(),
+        [REMOVE_ROUTE]: () => {
+          removals += 1;
+          return removals === 1 ? json({ removed: 0, not_member: 1000, not_found: [] }) : problem(500, "Server error", "the store is down");
+        },
+      });
+      const user = userEvent.setup();
+      mount();
+
+      await selectEverything(user);
+
+      expect(await screen.findByText("Removed 0 people.", undefined, { timeout: 4000 })).toBeInTheDocument();
+      expect(screen.getByText(/the store is down/)).toBeInTheDocument();
+      await waitFor(() => expect(calls.filter((call) => call.method === "GET" && call.path.endsWith(`/lists/${LIST_ID}/members`)).length).toBeGreaterThan(21));
+    }, 30000);
   });
 
   it("drops a failed Show more error when the list reloads", async () => {
@@ -534,6 +552,32 @@ describe("choosing another CSV file", () => {
 
     expect(await screen.findByText(/Added 1 person\./)).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Import people from a CSV" })).not.toBeInTheDocument());
+  });
+
+  it("shows the error of a committed import that fails after another file is chosen", async () => {
+    let answer: () => void = () => undefined;
+    const held = new Promise<void>((done) => {
+      answer = done;
+    });
+    asAdmin({
+      [IMPORT_ROUTE]: async (request) => {
+        const dry = new URL(request.url).searchParams.get("dry_run") === "true";
+        if (dry) return json({ matched: 1, added: 1, already_member: 0, unmatched: [], unmatched_count: 0 });
+        await held;
+        return problem(500, "Server error", "COMMITBOOM");
+      },
+    });
+    const user = userEvent.setup();
+    mount();
+    const dialog = await openDialog(user);
+
+    await user.upload(dialog.getByLabelText("CSV file"), new File([A_CSV], "A.csv", { type: "text/csv" }));
+    await user.click(dialog.getByRole("button", { name: "Check file" }));
+    await user.click(await dialog.findByRole("button", { name: "Add 1 person" }));
+    await user.upload(dialog.getByLabelText("CSV file"), new File([B_CSV], "B.csv", { type: "text/csv" }));
+    answer();
+
+    expect(await dialog.findByText(/COMMITBOOM/)).toBeInTheDocument();
   });
 
   it("drops the preview of a file that was replaced while it was being checked", async () => {
