@@ -1459,11 +1459,16 @@ mod tests {
 
         /// Every job row of the database against its own clock, for a claim that found nothing
         /// (#852): a job that is not `ready`, one due after `now()`, or one held by another
-        /// transaction each reads differently here.
+        /// transaction each reads differently here. The backends of this database tell a
+        /// connection left inside a transaction (`idle in transaction`, an old `xact_start`)
+        /// from a claim whose clock read earlier than the job's `created_at`.
         async fn jobs_report(&self) -> String {
-            let rows: Vec<(String, String, String, String, bool)> = sqlx::query_as(
-                "SELECT kind, state, run_at::text, now()::text || ' / ' || clock_timestamp()::text, \
-                 run_at <= now() FROM jobs ORDER BY run_at",
+            /// kind, state, run_at, created_at, now / clock, due.
+            type JobRow = (String, String, String, String, String, bool);
+            let rows: Vec<JobRow> = sqlx::query_as(
+                "SELECT kind, state, run_at::text, created_at::text, \
+                 now()::text || ' / ' || clock_timestamp()::text, run_at <= now() \
+                 FROM jobs ORDER BY run_at",
             )
             .fetch_all(&self.pool)
             .await
@@ -1475,8 +1480,19 @@ mod tests {
             .fetch_one(&self.pool)
             .await
             .unwrap();
+            /// pid, state, xact_start, backend_xid.
+            type Backend = (i32, Option<String>, Option<String>, Option<String>);
+            let backends: Vec<Backend> = sqlx::query_as(
+                "SELECT pid, state, xact_start::text, backend_xid::text FROM pg_stat_activity \
+                     WHERE datname = current_database() AND pid <> pg_backend_pid() ORDER BY pid",
+            )
+            .fetch_all(&self.pool)
+            .await
+            .unwrap();
             format!(
-                "jobs (kind, state, run_at, now / clock, due) {rows:?}; waiting row locks {locked}"
+                "jobs (kind, state, run_at, created_at, now / clock, due) {rows:?}; \
+                 waiting row locks {locked}; \
+                 other backends (pid, state, xact_start, backend_xid) {backends:?}"
             )
         }
 
