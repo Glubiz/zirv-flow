@@ -140,3 +140,41 @@ function draftToApiLoose(draft: SettingsDraft) {
     quiet: draft.quiet === null ? null : [draft.quiet.start, draft.quiet.end, [...draft.quiet.days].sort()],
   };
 }
+
+/**
+ * The form after a save: each field takes the value the server now holds only if it was not edited since the
+ * save was sent (it still equals what `sent` carried). Added or removed caps, and a toggled quiet period, count
+ * as edits of their whole list or period. Keys of the caps on screen are kept, so no input remounts.
+ */
+export function mergeSaved(current: SettingsDraft, sent: SettingsDraft, saved: SettingsDraft): SettingsDraft {
+  return { caps: mergeCaps(current.caps, sent.caps, saved.caps), quiet: mergeQuiet(current.quiet, sent.quiet, saved.quiet) };
+}
+
+function mergeCaps(current: CapDraft[], sent: CapDraft[], saved: CapDraft[]): CapDraft[] {
+  if (current.length !== sent.length || current.length !== saved.length) return current;
+  if (current.some((cap, at) => cap.key !== sent[at]?.key)) return current;
+  return current.map((cap, at) => {
+    const before = sent[at] ?? cap;
+    const after = saved[at] ?? cap;
+    return {
+      key: cap.key,
+      channel: cap.channel === before.channel ? after.channel : cap.channel,
+      hours: cap.hours === before.hours ? after.hours : cap.hours,
+      limit: cap.limit === before.limit ? after.limit : cap.limit,
+      mode: cap.mode === before.mode ? after.mode : cap.mode,
+    };
+  });
+}
+
+function mergeQuiet(current: QuietDraft | null, sent: QuietDraft | null, saved: QuietDraft | null): QuietDraft | null {
+  if (current === null || sent === null) {
+    return current === null && sent === null ? saved : current;
+  }
+  if (saved === null) return current;
+  const days = (quiet: QuietDraft) => [...quiet.days].sort().join(",");
+  return {
+    start: current.start === sent.start ? saved.start : current.start,
+    end: current.end === sent.end ? saved.end : current.end,
+    days: days(current) === days(sent) ? saved.days : current.days,
+  };
+}

@@ -441,6 +441,29 @@ describe("the runs of a source", () => {
     expect(reads).toBe(settled);
   });
 
+  it("ends on the finished state when every GET is slower than the poll interval", async () => {
+    let reads = 0;
+    mockApi(
+      routes("admin", {
+        [`GET ${BASE}/runs`]: async () => {
+          reads += 1;
+          const state = reads === 1 ? "running" : "succeeded";
+          const body = json({ runs: [aRun({ state, finished_at: state === "running" ? null : "2026-10-03T09:00:09Z" })], next_cursor: null });
+          await new Promise((resolve) => setTimeout(resolve, 150));
+          return body;
+        },
+      }),
+    );
+    renderRoute(
+      "/w/ws1/sources/src-1",
+      "/w/:ws/sources/:sourceId",
+      <RunsPanel workspaceId="ws1" sourceId="src-1" canManage version={0} pollMs={50} />,
+    );
+
+    expect(await screen.findByText("Running", undefined, { timeout: 3000 })).toBeInTheDocument();
+    expect(await screen.findByText("Succeeded", undefined, { timeout: 3000 })).toBeInTheDocument();
+  });
+
   it("tells the page once when the last active run ends", async () => {
     let reads = 0;
     let settled = 0;

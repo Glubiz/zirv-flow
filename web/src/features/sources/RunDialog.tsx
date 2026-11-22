@@ -1,7 +1,6 @@
-import { useEffect } from "react";
 import { Link } from "react-router";
 
-import { client, unwrap, useResource } from "../../api";
+import { client, unwrap, usePolling, useResource } from "../../api";
 import { Button, Dialog, EmptyState, formatDateTime, Pill, ResourceView } from "../../ui";
 import { traceHref } from "../traces";
 import {
@@ -55,12 +54,7 @@ export function RunDialog({ workspaceId, sourceId, runId, pollMs, onClose }: Run
     [workspaceId, sourceId, runId],
   );
   const active = resource.status === "ready" && isActiveRun(resource.data);
-  const reload = resource.reload;
-  useEffect(() => {
-    if (!active) return;
-    const timer = setInterval(reload, pollMs);
-    return () => clearInterval(timer);
-  }, [active, reload, pollMs]);
+  usePolling(active, resource.status === "ready" && resource.refreshing, resource.reload, pollMs);
 
   return (
     <Dialog title="Run details" onClose={onClose} wide>
