@@ -1451,8 +1451,33 @@ mod tests {
 
         /// Claims the next job and runs one attempt of it.
         async fn attempt(&self) -> Result<(), JobError> {
-            let claimed = self.claim().await.expect("a delivery.send job is ready");
+            let Some(claimed) = self.claim().await else {
+                panic!("a delivery.send job is ready: {}", self.jobs_report().await);
+            };
             self.execute(claimed).await
+        }
+
+        /// Every job row of the database against its own clock, for a claim that found nothing
+        /// (#852): a job that is not `ready`, one due after `now()`, or one held by another
+        /// transaction each reads differently here.
+        async fn jobs_report(&self) -> String {
+            let rows: Vec<(String, String, String, String, bool)> = sqlx::query_as(
+                "SELECT kind, state, run_at::text, now()::text || ' / ' || clock_timestamp()::text, \
+                 run_at <= now() FROM jobs ORDER BY run_at",
+            )
+            .fetch_all(&self.pool)
+            .await
+            .unwrap();
+            let locked: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_locks WHERE locktype = 'tuple' OR \
+                 (locktype = 'transactionid' AND NOT granted)",
+            )
+            .fetch_one(&self.pool)
+            .await
+            .unwrap();
+            format!(
+                "jobs (kind, state, run_at, now / clock, due) {rows:?}; waiting row locks {locked}"
+            )
         }
 
         /// Queues a send and runs it to its end; the message it recorded.

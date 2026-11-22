@@ -9,8 +9,23 @@ use crate::StoreError;
 pub type Tx = sqlx::Transaction<'static, sqlx::Postgres>;
 
 /// Starts a transaction.
+///
+/// Cancel safe: a caller dropped while `BEGIN` is in flight leaves no open transaction behind.
+/// sqlx queues a rollback only once its transaction depth is above zero, so a `begin` cancelled
+/// after `BEGIN` was sent has the server open a transaction that the connection returns to the
+/// pool in, and its next user runs inside it (an aborted `ingest.drain` left such a backend
+/// `idle in transaction`, #855). The connection is taken in the caller's own future, where
+/// cancelling it only gives it back; `BEGIN` runs in a task that finishes it either way, and a
+/// transaction nobody receives is dropped there, which rolls it back.
 pub async fn begin(pool: &PgPool) -> Result<Tx, StoreError> {
-    pool.begin().await.map_err(StoreError::query)
+    let connection = pool.acquire().await.map_err(StoreError::query)?;
+    tokio::spawn(sqlx::Transaction::begin(connection, None))
+        .await
+        .map_err(|error| match error.try_into_panic() {
+            Ok(panic) => std::panic::resume_unwind(panic),
+            Err(_) => StoreError::query(sqlx::Error::PoolClosed),
+        })?
+        .map_err(StoreError::query)
 }
 
 /// Commits a transaction.
@@ -67,6 +82,51 @@ mod tests {
     use metrics_exporter_prometheus::PrometheusBuilder;
 
     use super::*;
+
+    /// A connection that ran `begin` and was cancelled in flight must not return to the pool inside
+    /// a transaction the server opened for it (#855): the next user of the connection would run in
+    /// a transaction nobody commits, and its backend would stay `idle in transaction`.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_begin_cancelled_in_flight_leaves_no_open_transaction_in_the_pool(pool: PgPool) {
+        for round in 0..600_u32 {
+            let task = tokio::spawn({
+                let pool = pool.clone();
+                async move { begin(&pool).await.map(drop) }
+            });
+            // Cancelled after a varying number of turns of the runtime, so that some rounds land
+            // while `BEGIN` is on its way.
+            for _ in 0..round % 9 {
+                tokio::task::yield_now().await;
+            }
+            task.abort();
+            let _ = task.await;
+            // Every connection back, and none inside a transaction: outside one, `SAVEPOINT` fails
+            // with no_active_sql_transaction (25P01); inside one it succeeds, or fails with 25P02
+            // when that transaction is aborted.
+            let mut held = Vec::new();
+            while held.len() < pool.size() as usize {
+                held.push(pool.acquire().await.unwrap());
+            }
+            for mut connection in held {
+                let outside = sqlx::raw_sql("SAVEPOINT leak_probe")
+                    .execute(&mut *connection)
+                    .await
+                    .err()
+                    .and_then(|error| {
+                        error
+                            .as_database_error()?
+                            .code()
+                            .map(|code| code == "25P01")
+                    })
+                    .unwrap_or(false);
+                assert!(
+                    outside,
+                    "a connection came back inside a transaction after a cancelled begin (round {round})"
+                );
+            }
+        }
+    }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
