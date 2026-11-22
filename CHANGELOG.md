@@ -15,3 +15,14 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v1.0.31 (2026-11-22)
+
+### Fixes
+
+- update url to 2.5.9 for RUSTSEC-2026-0592
+- make begin cancel safe so no connection returns inside a transaction
+
+### Chores
+
+- count an aborted transaction as open in the cancelled-begin probe
+
