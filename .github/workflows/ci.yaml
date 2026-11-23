@@ -438,8 +438,32 @@ jobs:
       - name: Start The Kafka Fixtures
         run: bash scripts/kafka-fixture.sh | sed 's/^export //' >> "$GITHUB_ENV"
 
+      # Some shards lose the runner at 50 minutes and leave no log (#832). The sampler records memory,
+      # load and the largest processes every 30 s, and the step limit fails a stuck run well before
+      # then, while the runner still answers, so the upload below keeps both files.
+      - name: Start Resource Sampler
+        run: |
+          nohup bash -c 'while true; do
+            echo "=== $(date -u +%FT%TZ)"; uptime; free -m
+            ps -eo pid,rss,pcpu,etime,args --sort=-rss | head -12 | cut -c1-200
+            sleep 30
+          done' > "$RUNNER_TEMP/resources.log" 2>&1 &
+
       - name: Run PostgreSQL Tests
-        run: cargo nextest run --run-ignored only --no-fail-fast --partition count:${{ matrix.partition }}/4
+        timeout-minutes: 30
+        run: |
+          set -o pipefail
+          cargo nextest run --run-ignored only --no-fail-fast --partition count:${{ matrix.partition }}/4 2>&1 | tee "$RUNNER_TEMP/nextest.log"
+
+      - name: Upload Runner Diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: runner-diagnostics-pg${{ matrix.pg }}-${{ matrix.partition }}
+          path: |
+            ${{ runner.temp }}/resources.log
+            ${{ runner.temp }}/nextest.log
+          if-no-files-found: ignore
 
       - name: Upgrade integrity SQL self-test
         if: matrix.partition == 1
