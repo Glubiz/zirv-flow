@@ -415,13 +415,15 @@ confirmation. **Fix:** turn it off in Flow settings.
 
 **Pause** stops new enrollments and holds execution as steps observe the pause.
 It is not an undo for an external call already in progress. **Resume** lets
-held enrollments continue. Time still passes during a pause; resuming does not
-restart every duration. Trigger occurrences skipped while paused are not a
+held enrollments continue. A send queued before the pause, including one
+waiting for a rate-limit token, waits too; on resume it is checked again by
+every gate and then goes out. Time still passes during a pause; resuming does
+not restart every duration, and a send held for a long pause goes out on resume. Trigger occurrences skipped while paused are not a
 backlog of people waiting to enter.
 
 **Archive…**, then **Archive flow**, is permanent. No new person enters and
-remaining enrollments are exited in batches. The versions and history stay
-readable. An archived flow cannot be published or resumed.
+remaining enrollments are exited in batches, and the sends held by a pause end
+as skipped (`flow_inactive`). The versions and history stay readable. An archived flow cannot be published or resumed.
 
 **Common mistake:** archiving a flow for a short interruption.
 **Fix:** use Pause and Resume when you plan to continue it.

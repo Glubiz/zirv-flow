@@ -1351,7 +1351,7 @@ events (`message.sent`, `message.skipped`, ...) that later nodes can wait for.
 | Warm-up | A per-flow window after the flow starts taking enrollments (first publish, and a resume after a pause; a new version does not restart it). On by default, 5 minutes, bounded to 1 minute to 24 hours, stored on the `flows` row so a change needs no publish. Each entry has a stable place in the window, `hash(flow, person, occurrence)` as a fraction of it; an entry whose turn has not come is stored in `flow_warmup_waiting`, recorded as a `flow.enroll` decision `deferred: warm_up`, and gets a `flow.enroll` job at its admission time, which runs the normal checks (re-entry applies then) and removes the row in the same transaction. A resume, a resize and "Open now" queue the waiting entries again in one statement as one job per trace, cause and second of the window, of at most 1,000 people, run at the latest time among them; the jobs of the window they replace stay queued and do nothing when they run (the entry is waiting for its new turn, or already admitted). The flow detail's warm-up counts are exact up to 10,000 and the planner's estimate above; `admitted` counts the enrollments created in the window (to its end, or to "Open now"), so it stops growing after it. A paused flow keeps waiting entries and a resume restarts the window with the same places. "Open now" (Admin, audited) ends the window and queues every waiting entry to run now; turning the warm-up off does the same, so it needs Admin too, and the `flow.warmup_changed` audit records how many were released (`released`). All five triggers go through it, since they all reach `enroll_entries` |
 | Goal | Optional per flow: a named event (same property filters as an event trigger) or entry into a chosen segment. Reaching it during an active enrollment records a conversion (ruling 4d134de2); the setting "exit on goal" ends the enrollment. Graph `goal` nodes also record a conversion |
 | Exit criteria | A list of: leaves the trigger segment (with a cause other than `definition_change`), a named event occurs, goal reached (ruling 4d134de2). All are checked from the existing hooks: the event-insert path, and the `segment.entered` and `segment.exited` writes of refresh and re-evaluation. There are no arbitrary AST goals in v1 |
-| Pause | No new enrollments (skips are counted and recorded); due timers and arrived events are held and re-enqueued on resume. A template or destination may be archived while a flow is paused (only a `published` flow blocks it), so a resume share-locks the templates and destinations of the running version in publish's lock order and refuses with 422 `flow_invalid`, naming the node, when one is missing or archived |
+| Pause | No new enrollments (skips are counted and recorded); due timers and arrived events are held and re-enqueued on resume, and so are the `delivery.send` jobs the flow has queued (a send that meets the pause is parked in `held_sends` with a `message.send` `deferred` decision, reason `flow_paused`, and each parked send is re-enqueued on resume and runs every gate again; an archive re-enqueues them and they end `skipped: flow_inactive`). A template or destination may be archived while a flow is paused (only a `published` flow blocks it), so a resume share-locks the templates and destinations of the running version in publish's lock order and refuses with 422 `flow_invalid`, naming the node, when one is missing or archived |
 | Archive | Exits the active enrollments with reason `flow_archived` |
 | Publish | Shows how many active enrollments stay on older versions. An Admin can end every enrollment of an older version in bulk; each exits with cause `manual` and gets its own decision (ruling 469cfc51) |
 
@@ -1390,7 +1390,7 @@ send time** (consent can change while a person waits):
 
 | # | Gate | On failure |
 |---|------|------------|
-| 1 | Enrollment active, flow not paused | dropped |
+| 1 | Enrollment active, flow not paused | enrollment over or flow archived: dropped (first run) or `skipped: flow_inactive`; flow paused: held until the resume (`pending`, parked in `held_sends`) |
 | 2 | Channel address present and valid (registry channel-address trait) | `skipped: no_address` |
 | 3 | Effective consent under the workspace consent policy (below); the default is the topic's policy (explicit opt-in, or allowed unless opted out) | `skipped: no_consent` |
 | 4 | Suppression check on the address hash, in both scopes: the workspace and the organization (below) | `skipped: suppressed` |
@@ -1649,16 +1649,21 @@ envelope stays. Raw-URL webhooks have no rate bucket.
   render fails, or the six-hour rate wait ran out) the message ends
   `failed: delivery_unconfirmed`, because the first call may have been accepted (a `sending` row
   with neither the in-flight nor the unconfirmed mark, left by a 429 or 5xx, was never accepted: a
-  paused flow or ended enrollment skips it like a `pending` one); what really went
+  paused flow or ended enrollment skips it, where a pause holds a `pending` one); what really went
   wrong is a code in the gate record's `note`, never an address. The scheduler
   leader ends, at most once a minute, a `pending` or `sending` message whose `delivery.send` job
-  is no longer `ready` or `running` (it went dead), whoever holds the person or the enrollment now.
+  is no longer `ready` or `running` (it went dead), whoever holds the person or the enrollment now;
+  a message parked in `held_sends` by a pause has no job until the resume and is passed.
   The ending follows the row's marks: `delivery_unconfirmed` when the in-flight or unconfirmed mark
   says a call may have been accepted, `internal_error` for a `pending` message or a `sending` one
   with neither mark (every attempt was refused for good or never left; a timeout or reset after an HTTP request was written latches the unconfirmed mark, so it is not this). The sweep appends its `job` gate, noted
   `job_dead`, to the gates the row holds.
 - **Order of the gates**, as recorded in `messages.gate_results`: `enrollment` (dropped when the
-  enrollment ended or the flow is paused or archived: a decision, no row), `template`
+  enrollment ended or the flow is archived: a decision, no row; held, not dropped, when the flow
+  is paused: the message is `pending`, its continuation is parked in `held_sends` in the job's
+  transaction, and the resume re-enqueues it in batches of `LIFECYCLE_BATCH`, every gate running
+  again; an archive re-enqueues it to end `skipped: flow_inactive`; a `sending` message keeps the
+  unconfirmed ending), `template`
   (`failed: template_unavailable`), `sender` (`skipped: sender_unverified`, through the shared
   `require_verified_sender`, run in a transaction of its own so no lock outlives it), `address`,
   `consent` (skipped for a transactional template), `suppression`, `quiet_hours`,
@@ -4010,7 +4015,7 @@ they were ruled as their capabilities were added to the plan.
   stays in `jsonb`. `string_list` traits stay in `jsonb`. The promotion is built in the
   segment milestone (M4); until the slots exist the `jsonb_path_ops` index stays, and it is reconsidered once promoted
   traits cover the equality searches. The slots are live (#125): states `backfilling`, `ready` and `retiring`; writers take the shared slot lock before they read the assignments and assignment changes take the exclusive one, so a backfill never leaves a stale value (`people/slots.rs`); the routes are `POST` and `DELETE /traits/{key}/index`.
-  Known limitation and upgrade decision: keep released migration 0033 and its checksum. Its initial `ALTER TABLE` holds ACCESS EXCLUSIVE on `people` through all 30 partial index builds, blocking reads and writes. Populated upgrades stop all roles and budget the full build when upgrading from before 0033; `v0.187.0` already contains it. No populated build timing is recorded. Rehearse at the installation's row counts before setting the downtime window; see the [lock review](operations/upgrade.md#lock-review-through-0113). This supports stopped upgrades only; online and mixed-version upgrades remain OQ-17.
+  Known limitation and upgrade decision: keep released migration 0033 and its checksum. Its initial `ALTER TABLE` holds ACCESS EXCLUSIVE on `people` through all 30 partial index builds, blocking reads and writes. Populated upgrades stop all roles and budget the full build when upgrading from before 0033; `v0.187.0` already contains it. No populated build timing is recorded. Rehearse at the installation's row counts before setting the downtime window; see the [lock review](operations/upgrade.md#lock-review-through-0114). This supports stopped upgrades only; online and mixed-version upgrades remain OQ-17.
   Details in [docs/benchmarks/m2-ingestion.md](benchmarks/m2-ingestion.md).
 
 - **OQ-8:** A per-workspace running cap in the claim query
