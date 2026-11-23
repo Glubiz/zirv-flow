@@ -443,38 +443,12 @@ mod tests {
     }
 
     #[test]
-    fn zone_names_are_accepted_and_refused_as_the_tz_database_spells_them() {
-        // Exact names, including the Etc offsets and the backward links.
-        for name in [
-            "UTC",
-            "Etc/UTC",
-            "GMT",
-            "Zulu",
-            "Etc/GMT+5",
-            "US/Eastern",
-            "Europe/Copenhagen",
-            "America/Argentina/Buenos_Aires",
-            "Asia/Kolkata",
-        ] {
+    fn a_zone_name_is_valid_only_as_the_tz_database_spells_it() {
+        // The spelling rules live in `zone`; this is the mapping to `InvalidTimezone`.
+        for name in ["Etc/GMT+5", "US/Eastern", "Europe/Copenhagen"] {
             assert_eq!(validate("0 9 * * *", name), Ok(()), "{name}");
         }
-        // The lookup is case-sensitive, and nothing is trimmed or guessed.
-        for name in [
-            "europe/copenhagen",
-            "EUROPE/COPENHAGEN",
-            "Europe/copenhagen",
-            "utc",
-            "Utc",
-            "us/eastern",
-            "",
-            " UTC",
-            "UTC ",
-            "Etc/Unknown",
-            "etc/unknown",
-            "Not/AZone",
-            "+02:00",
-            "Europe/Copenhagen\0",
-        ] {
+        for name in ["europe/copenhagen", "utc", "", "Not/AZone"] {
             assert_eq!(
                 validate("0 9 * * *", name),
                 Err(ScheduleError::InvalidTimezone),

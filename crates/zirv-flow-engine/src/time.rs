@@ -68,11 +68,11 @@ fn weekday(day: NaiveDate) -> Weekday {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::LazyLock;
-
     use chrono::TimeZone;
 
-    static COPENHAGEN: LazyLock<Zone> = LazyLock::new(|| "Europe/Copenhagen".parse().unwrap());
+    fn copenhagen() -> Zone {
+        "Europe/Copenhagen".parse().unwrap()
+    }
 
     fn local(text: &str) -> NaiveDateTime {
         NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S").unwrap()
@@ -85,11 +85,11 @@ mod tests {
     #[test]
     fn an_ordinary_local_time_uses_the_zone_offset() {
         assert_eq!(
-            resolve_local(&COPENHAGEN, local("2030-01-15T09:00:00")),
+            resolve_local(&copenhagen(), local("2030-01-15T09:00:00")),
             utc(2030, 1, 15, 8, 0)
         );
         assert_eq!(
-            resolve_local(&COPENHAGEN, local("2030-07-15T09:00:00")),
+            resolve_local(&copenhagen(), local("2030-07-15T09:00:00")),
             utc(2030, 7, 15, 7, 0)
         );
     }
@@ -97,16 +97,16 @@ mod tests {
     #[test]
     fn a_time_in_the_spring_gap_is_read_with_the_offset_before_the_jump() {
         // 2030-03-31: 02:00 CET jumps to 03:00 CEST; 02:30 does not exist.
-        let at = resolve_local(&COPENHAGEN, local("2030-03-31T02:30:00"));
+        let at = resolve_local(&copenhagen(), local("2030-03-31T02:30:00"));
         assert_eq!(at, utc(2030, 3, 31, 1, 30));
         // Which is 03:30 on the wall clock after the jump.
         assert_eq!(
-            at.with_timezone(&*COPENHAGEN).naive_local(),
+            at.with_timezone(&copenhagen()).naive_local(),
             local("2030-03-31T03:30:00")
         );
         // The edge of the gap.
         assert_eq!(
-            resolve_local(&COPENHAGEN, local("2030-03-31T02:00:00")),
+            resolve_local(&copenhagen(), local("2030-03-31T02:00:00")),
             utc(2030, 3, 31, 1, 0)
         );
     }
@@ -115,7 +115,7 @@ mod tests {
     fn a_time_in_the_autumn_overlap_is_the_first_occurrence() {
         // 2030-10-27: 03:00 CEST falls back to 02:00 CET; 02:30 happens twice.
         assert_eq!(
-            resolve_local(&COPENHAGEN, local("2030-10-27T02:30:00")),
+            resolve_local(&copenhagen(), local("2030-10-27T02:30:00")),
             utc(2030, 10, 27, 0, 30)
         );
     }
@@ -143,11 +143,11 @@ mod tests {
         };
         // 08:00 UTC is 09:00 in Copenhagen in January: not strictly after, so tomorrow.
         assert_eq!(
-            until(&when, utc(2030, 1, 15, 8, 0), &COPENHAGEN),
+            until(&when, utc(2030, 1, 15, 8, 0), &copenhagen()),
             Ok(utc(2030, 1, 16, 8, 0))
         );
         assert_eq!(
-            until(&when, utc(2030, 1, 15, 7, 59), &COPENHAGEN),
+            until(&when, utc(2030, 1, 15, 7, 59), &copenhagen()),
             Ok(utc(2030, 1, 15, 8, 0))
         );
     }
@@ -160,12 +160,12 @@ mod tests {
             weekdays: vec![Weekday::Fri],
         };
         assert_eq!(
-            until(&when, utc(2030, 1, 15, 0, 0), &COPENHAGEN),
+            until(&when, utc(2030, 1, 15, 0, 0), &copenhagen()),
             Ok(utc(2030, 1, 18, 8, 0))
         );
         // 23:30 UTC on Thursday is already Friday 00:30 in Copenhagen.
         assert_eq!(
-            until(&when, utc(2030, 1, 17, 23, 30), &COPENHAGEN),
+            until(&when, utc(2030, 1, 17, 23, 30), &copenhagen()),
             Ok(utc(2030, 1, 18, 8, 0))
         );
     }
@@ -178,7 +178,7 @@ mod tests {
         };
         // Saturday 2030-03-30 10:00 local; the next 09:00 is Sunday, after the jump (CEST).
         assert_eq!(
-            until(&when, utc(2030, 3, 30, 9, 0), &COPENHAGEN),
+            until(&when, utc(2030, 3, 30, 9, 0), &copenhagen()),
             Ok(utc(2030, 3, 31, 7, 0))
         );
         // A time of day inside the gap lands on the shifted instant.
@@ -187,7 +187,7 @@ mod tests {
             weekdays: vec![],
         };
         assert_eq!(
-            until(&gap, utc(2030, 3, 30, 23, 0), &COPENHAGEN),
+            until(&gap, utc(2030, 3, 30, 23, 0), &copenhagen()),
             Ok(utc(2030, 3, 31, 1, 30))
         );
     }

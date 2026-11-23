@@ -43,11 +43,6 @@ impl Zone {
     /// Coordinated Universal Time.
     pub const UTC: Zone = Zone(jiff::tz::TimeZone::UTC);
 
-    /// The IANA name, as written in the database.
-    pub fn name(&self) -> &str {
-        self.0.iana_name().unwrap_or("UTC")
-    }
-
     /// A local time in this zone as an instant, or `None` when it is out of range.
     ///
     /// A time inside a gap (the clocks jump forward over it) is read with the offset in force
@@ -186,15 +181,26 @@ mod tests {
             "Etc/GMT+5",
             "US/Eastern",
             "Asia/Kolkata",
+            "Zulu",
+            "Europe/Copenhagen",
+            "America/Argentina/Buenos_Aires",
         ] {
-            assert_eq!(zone(name).name(), name);
+            assert_eq!(zone(name).0.iana_name(), Some(name));
         }
         for name in [
             "utc",
+            "Utc",
             "europe/copenhagen",
+            "Europe/copenhagen",
+            "EUROPE/COPENHAGEN",
             "US/EASTERN",
+            "us/eastern",
             "",
             " UTC",
+            "UTC ",
+            "etc/unknown",
+            "+02:00",
+            "Europe/Copenhagen\0",
             "Etc/Unknown",
             "Factory",
             "Not/AZone",
