@@ -1480,11 +1480,14 @@ mod tests {
             .fetch_one(&self.pool)
             .await
             .unwrap();
-            /// pid, state, xact_start, backend_xid.
-            type Backend = (i32, Option<String>, Option<String>, Option<String>);
+            // Every backend, the one running this query included: a pooled connection left inside
+            // a transaction can be the one the report itself runs on, and its `xact_start` is the
+            // `now()` its queries see.
+            /// pid, runs this query, state, xact_start, backend_xid.
+            type Backend = (i32, bool, Option<String>, Option<String>, Option<String>);
             let backends: Vec<Backend> = sqlx::query_as(
-                "SELECT pid, state, xact_start::text, backend_xid::text FROM pg_stat_activity \
-                     WHERE datname = current_database() AND pid <> pg_backend_pid() ORDER BY pid",
+                "SELECT pid, pid = pg_backend_pid(), state, xact_start::text, backend_xid::text \
+                 FROM pg_stat_activity WHERE datname = current_database() ORDER BY pid",
             )
             .fetch_all(&self.pool)
             .await
@@ -1492,7 +1495,7 @@ mod tests {
             format!(
                 "jobs (kind, state, run_at, created_at, now / clock, due) {rows:?}; \
                  waiting row locks {locked}; \
-                 other backends (pid, state, xact_start, backend_xid) {backends:?}"
+                 backends (pid, runs this query, state, xact_start, backend_xid) {backends:?}"
             )
         }
 
