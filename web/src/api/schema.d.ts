@@ -7288,7 +7288,8 @@ export interface components {
             /**
              * Format: int32
              * @description How many times the draft was written. Send it back as `revision` when saving, so a save
-             *     made from an older read is refused instead of replacing a newer draft.
+             *     made from an older read is refused instead of replacing a newer draft, unless the draft
+             *     already holds what it sends.
              */
             revision: number;
             settings: components["schemas"]["FlowSettings"];
@@ -11333,7 +11334,9 @@ export interface components {
             /**
              * Format: int32
              * @description The `revision` of the flow as it was read. When it is not the draft's current revision the
-             *     save is refused with 409 `flow_draft_revision_mismatch`; left out, the save always applies.
+             *     save is refused with 409 `flow_draft_revision_mismatch`, unless every field sent already equals
+             *     the draft (after the server's normalization): then it answers 200 with the current flow and
+             *     writes nothing. Left out, the save always applies.
              */
             revision?: number | null;
             settings?: components["schemas"]["FlowSettings"];
@@ -18695,7 +18698,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The updated flow */
+            /** @description The updated flow; also the current flow, unchanged and with no audit entry, when the `revision` sent is stale but every field sent already equals the draft */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -18740,7 +18743,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Another flow has that name, the flow is archived (`code` is `flow_archived`), or the draft was saved since the `revision` sent was read (`flow_draft_revision_mismatch`, with `current_revision`) */
+            /** @description Another flow has that name, the flow is archived (`code` is `flow_archived`), or the draft was saved since the `revision` sent was read and the fields sent differ from it (`flow_draft_revision_mismatch`, with `current_revision`) */
             409: {
                 headers: {
                     [name: string]: unknown;
