@@ -1149,6 +1149,79 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_stale_save_that_changes_nothing_answers_200_and_is_not_audited(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let f = fixture(&pool).await;
+            let id = f.create("Welcome", simple_graph(), manual()).await;
+            // A goal node without `exit`: the server stores it with `exit: false`.
+            let sent = json!({"v": 1, "nodes": [{"id": "won", "type": "goal"}], "edges": []});
+            let first = f
+                .lead(
+                    "PATCH",
+                    &format!("/{id}"),
+                    Some(json!({"graph": sent, "revision": 1})),
+                )
+                .await;
+            assert_eq!(first.status, StatusCode::OK, "{:?}", first.body);
+            assert_eq!(first.body["revision"], 2);
+
+            // The reply was lost: the same body goes out again with the old revision.
+            let retry = f
+                .lead(
+                    "PATCH",
+                    &format!("/{id}"),
+                    Some(json!({"graph": sent, "revision": 1})),
+                )
+                .await;
+            // Only the stored name, with the graph and settings left out.
+            let name_only = f
+                .lead(
+                    "PATCH",
+                    &format!("/{id}"),
+                    Some(json!({"name": "Welcome", "revision": 1})),
+                )
+                .await;
+            // A genuinely different graph is still a conflict, and so is a changed name beside an
+            // equal graph.
+            let other = f
+                .lead(
+                    "PATCH",
+                    &format!("/{id}"),
+                    Some(json!({"graph": simple_graph(), "revision": 1})),
+                )
+                .await;
+            let renamed = f
+                .lead(
+                    "PATCH",
+                    &format!("/{id}"),
+                    Some(json!({"name": "Other", "graph": sent, "revision": 1})),
+                )
+                .await;
+
+            assert_eq!(retry.status, StatusCode::OK, "{:?}", retry.body);
+            assert_eq!(retry.body["revision"], 2);
+            assert_eq!(retry.body["graph"], first.body["graph"]);
+            assert_eq!(retry.body["graph"]["nodes"][0]["exit"], false);
+            assert_eq!(name_only.status, StatusCode::OK, "{:?}", name_only.body);
+            assert_eq!(name_only.body["revision"], 2);
+            for refused in [&other, &renamed] {
+                assert_eq!(refused.status, StatusCode::CONFLICT, "{:?}", refused.body);
+                assert_eq!(refused.body["code"], "flow_draft_revision_mismatch");
+                assert_eq!(refused.body["current_revision"], 2);
+            }
+            let audits: Vec<String> = sqlx::query_scalar(
+                "SELECT action FROM audit_log WHERE action = 'flow.updated' ORDER BY id",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(audits, ["flow.updated"]);
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_flow_is_drafted_validated_published_paused_resumed_and_archived(pool: PgPool) {
         zirv_flow_store::decision_testing::checked(pool, |pool| async move {
             let f = fixture(&pool).await;

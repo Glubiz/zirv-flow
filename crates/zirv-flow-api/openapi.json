@@ -9946,7 +9946,7 @@
         },
         "responses": {
           "200": {
-            "description": "The updated flow",
+            "description": "The updated flow; also the current flow, unchanged and with no audit entry, when the `revision` sent is stale but every field sent, once normalized as it would be stored, already equals the draft",
             "content": {
               "application/json": {
                 "schema": {
@@ -9996,7 +9996,7 @@
             }
           },
           "409": {
-            "description": "Another flow has that name, the flow is archived (`code` is `flow_archived`), or the draft was saved since the `revision` sent was read (`flow_draft_revision_mismatch`, with `current_revision`)",
+            "description": "Another flow has that name, the flow is archived (`code` is `flow_archived`), or the draft was saved since the `revision` sent was read and the fields sent, once normalized, differ from it (`flow_draft_revision_mismatch`, with `current_revision`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -36675,7 +36675,7 @@
               "revision": {
                 "type": "integer",
                 "format": "int32",
-                "description": "How many times the draft was written. Send it back as `revision` when saving, so a save\nmade from an older read is refused instead of replacing a newer draft."
+                "description": "How many times the draft was written. Send it back as `revision` when saving, so a save\nmade from an older read is refused instead of replacing a newer draft, unless the draft\nalready holds what it sends."
               },
               "settings": {
                 "$ref": "#/components/schemas/FlowSettings"
@@ -46981,7 +46981,7 @@
               "null"
             ],
             "format": "int32",
-            "description": "The `revision` of the flow as it was read. When it is not the draft's current revision the\nsave is refused with 409 `flow_draft_revision_mismatch`; left out, the save always applies."
+            "description": "The `revision` of the flow as it was read. When it is not the draft's current revision the\nsave is refused with 409 `flow_draft_revision_mismatch`, unless every field sent already equals\nthe draft (after the server's normalization): then it answers 200 with the current flow and\nwrites nothing. Left out, the save always applies."
           },
           "settings": {
             "$ref": "#/components/schemas/FlowSettings"

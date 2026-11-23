@@ -285,19 +285,24 @@ pub async fn update_flow_draft(
     id: Uuid,
     patch: &FlowPatch,
 ) -> Result<Flow, FlowError> {
-    update_flow_draft_checked(connection, workspace, id, patch, None).await
+    update_flow_draft_checked(connection, workspace, id, patch, None)
+        .await
+        .map(|(flow, _written)| flow)
 }
 
 /// [`update_flow_draft`] that, with `expected_revision`, only saves if the draft is still at that
 /// revision, else it is [`FlowError::RevisionMismatch`]. The check runs under the row lock the
-/// save takes, so two saves from the same read cannot both win.
+/// save takes, so two saves from the same read cannot both win. A stale save whose supplied
+/// fields already equal the stored draft (as JSON values, so key order does not matter) is a
+/// replay of a save that committed with its reply lost: it succeeds with the held flow and
+/// `false`, and writes nothing. Otherwise the flow is saved and `true` comes back.
 pub async fn update_flow_draft_checked(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     id: Uuid,
     patch: &FlowPatch,
     expected_revision: Option<i32>,
-) -> Result<Flow, FlowError> {
+) -> Result<(Flow, bool), FlowError> {
     let held = lock_flow(connection, workspace, id).await?;
     if held.flow.state == FlowState::Archived {
         return Err(FlowError::Archived);
@@ -305,8 +310,18 @@ pub async fn update_flow_draft_checked(
     if let Some(expected) = expected_revision
         && held.flow.draft_revision != expected
     {
+        let flow = &held.flow;
+        let replay = patch.name.as_ref().is_none_or(|name| *name == flow.name)
+            && patch.graph.as_ref().is_none_or(|g| *g == flow.draft_graph)
+            && patch
+                .settings
+                .as_ref()
+                .is_none_or(|s| *s == flow.draft_settings);
+        if replay {
+            return Ok((held.flow, false));
+        }
         return Err(FlowError::RevisionMismatch {
-            current: held.flow.draft_revision,
+            current: flow.draft_revision,
         });
     }
     let row: FlowRow = sqlx::query_as(concat!(
@@ -324,7 +339,7 @@ pub async fn update_flow_draft_checked(
     .fetch_one(connection)
     .await
     .map_err(StoreError::query)?;
-    Ok(row.into_flow()?)
+    Ok((row.into_flow()?, true))
 }
 
 /// The versions of a flow of the workspace, newest first.
@@ -367,6 +382,7 @@ pub async fn find_flow_version<'e>(
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
     use sqlx::PgPool;
     use uuid::Uuid;
 
@@ -411,7 +427,8 @@ mod tests {
             ..FlowPatch::default()
         };
 
-        let first = save(graph_a.clone(), Some(1)).await.unwrap();
+        let (first, first_written) = save(graph_a.clone(), Some(1)).await.unwrap();
+        assert!(first_written);
         let stale = save(
             FlowPatch {
                 graph: Some(graph("b")),
@@ -420,7 +437,7 @@ mod tests {
             Some(1),
         )
         .await;
-        let unchecked = save(
+        let (unchecked, _) = save(
             FlowPatch {
                 name: Some("Renamed".to_owned()),
                 ..FlowPatch::default()
@@ -446,6 +463,94 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(wrapper.draft_revision, 4);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_stale_save_that_changes_nothing_succeeds_and_writes_nothing(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let flow = create(&pool, ws, "Welcome").await;
+        let save = |patch: FlowPatch, expected: Option<i32>| {
+            let pool = pool.clone();
+            async move {
+                let mut connection = pool.acquire().await.unwrap();
+                update_flow_draft_checked(&mut connection, ws, flow.id, &patch, expected).await
+            }
+        };
+        let saved = save(
+            FlowPatch {
+                graph: Some(graph("a")),
+                ..FlowPatch::default()
+            },
+            Some(1),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(saved.draft_revision, 2);
+
+        // The same content again with the old revision: a replay, held as it is.
+        let replay = save(
+            FlowPatch {
+                graph: Some(graph("a")),
+                ..FlowPatch::default()
+            },
+            Some(1),
+        )
+        .await
+        .unwrap();
+        // An equal name with the graph and settings left out takes part only by its name.
+        let name_only = save(
+            FlowPatch {
+                name: Some("Welcome".to_owned()),
+                ..FlowPatch::default()
+            },
+            Some(1),
+        )
+        .await
+        .unwrap();
+        // Equal settings sent alone are a replay too.
+        let settings_only = save(
+            FlowPatch {
+                settings: Some(json!({"reentry": {"mode": "once"}, "trigger": {"type": "manual"}})),
+                ..FlowPatch::default()
+            },
+            Some(1),
+        )
+        .await
+        .unwrap();
+        let differs = save(
+            FlowPatch {
+                graph: Some(graph("a")),
+                name: Some("Other".to_owned()),
+                ..FlowPatch::default()
+            },
+            Some(1),
+        )
+        .await;
+        let other_graph = save(
+            FlowPatch {
+                graph: Some(graph("b")),
+                ..FlowPatch::default()
+            },
+            Some(1),
+        )
+        .await;
+
+        assert_eq!(replay, (saved.clone(), false));
+        assert_eq!(name_only, (saved.clone(), false));
+        assert_eq!(settings_only, (saved.clone(), false));
+        assert!(matches!(
+            differs,
+            Err(FlowError::RevisionMismatch { current: 2 })
+        ));
+        assert!(matches!(
+            other_graph,
+            Err(FlowError::RevisionMismatch { current: 2 })
+        ));
+        // Nothing was written: the revision and updated_at are those of the one real save.
+        let stored = find_flow(&pool, ws, flow.id).await.unwrap().unwrap();
+        assert_eq!(stored, saved);
     }
 
     #[sqlx::test]
