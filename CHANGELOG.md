@@ -15,3 +15,11 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v1.0.32 (2026-11-23)
+
+### Chores
+
+- list every backend, the reporting one included, in the #852 report
+- release 1.0.32
+- report created_at and the other backends when a delivery.send claim misses
+
