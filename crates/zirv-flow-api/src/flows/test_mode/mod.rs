@@ -18,11 +18,11 @@ use std::collections::BTreeMap;
 
 use axum::Json;
 use axum::extract::{Path, State};
-use chrono_tz::Tz;
 use serde_json::json;
 use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::flow::{FlowGraph, FlowSettings, NodeKind, validate_graph};
+use zirv_flow_core::zone::Zone;
 use zirv_flow_segments::Catalog;
 use zirv_flow_segments::event_lower_bounds;
 use zirv_flow_store::{EXPLAIN_EVENT_CAP, ExplainEventScope, StoreError};
@@ -282,7 +282,7 @@ pub(crate) async fn test(
         settings: &settings,
         catalog: &catalog,
         subject: &subject,
-        zone: workspace.timezone.parse::<Tz>().unwrap_or(Tz::UTC),
+        zone: workspace.timezone.parse::<Zone>().unwrap_or(Zone::UTC),
         snapshot,
         start_at,
         script: &script,

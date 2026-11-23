@@ -12,9 +12,9 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, TimeDelta, TimeZone, Utc};
-use chrono_tz::Tz;
 use uuid::Uuid;
 use zirv_flow_core::flow::FlowGraph;
+use zirv_flow_core::zone::Zone;
 
 use super::db::{Commit, Db, Job, JobKind, Journal, QueueKey, Tx};
 use super::generate::{self, EVENTS};
@@ -62,8 +62,8 @@ impl StepContext for Ctx {
     fn now(&self) -> DateTime<Utc> {
         self.now
     }
-    fn workspace_timezone(&self) -> Tz {
-        Tz::Europe__Copenhagen
+    fn workspace_timezone(&self) -> Zone {
+        "Europe/Copenhagen".parse().unwrap()
     }
     fn person_timezone(&self) -> Option<String> {
         self.person.clone()

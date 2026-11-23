@@ -304,7 +304,7 @@ pub(super) async fn quiet_hours(
     let (workspace_zone, person_zone) = step_zones(connection, job.workspace, job.person).await?;
     let (zone, fell_back) = quiet::recipient_zone(&workspace_zone, person_zone.as_deref());
     let note = fell_back.then_some(TIMEZONE_FALLBACK);
-    Ok(match quiet::quiet_until(now, zone, &quiet) {
+    Ok(match quiet::quiet_until(now, &zone, &quiet) {
         None => {
             let record = GateRecord::passed("quiet_hours");
             Ok(match note {

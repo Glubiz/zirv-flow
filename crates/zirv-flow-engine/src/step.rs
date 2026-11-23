@@ -5,13 +5,13 @@
 //! not: it returns a typed [`EngineError`], and a walk longer than the node count is a cycle.
 
 use chrono::{DateTime, TimeDelta, Utc};
-use chrono_tz::Tz;
 use serde_json::Value;
 use uuid::Uuid;
 use zirv_flow_core::flow::{
     EventMatch, FlowGraph, FlowNode, NodeKind, PORT_ELSE, PORT_EVENT, PORT_NEXT, PORT_TIMEOUT,
     arm_port, case_port,
 };
+use zirv_flow_core::zone::Zone;
 
 use crate::error::EngineError;
 use crate::hash::{effect_key, split_bucket, step_key, wake_key};
@@ -253,7 +253,7 @@ impl Run<'_> {
             NodeKind::WaitUntilTime { when } => {
                 let zone = self.zone();
                 Err(
-                    until(when, now, zone).map_or(Halt::Fail(Failure::InvalidTime), |at| {
+                    until(when, now, &zone).map_or(Halt::Fail(Failure::InvalidTime), |at| {
                         Halt::Wait { at, awaiting: None }
                     }),
                 )
@@ -368,9 +368,9 @@ impl Run<'_> {
 
     /// The zone of a `wait.until_time`: the person's, else the workspace's. An invalid person
     /// zone is remembered for the step decision.
-    fn zone(&mut self) -> Tz {
+    fn zone(&mut self) -> Zone {
         match self.ctx.person_timezone() {
-            Some(name) => name.parse::<Tz>().unwrap_or_else(|_| {
+            Some(name) => name.parse::<Zone>().unwrap_or_else(|_| {
                 self.zone_fallback = Some(name);
                 self.ctx.workspace_timezone()
             }),
@@ -468,7 +468,7 @@ mod tests {
 
     struct Ctx {
         now: DateTime<Utc>,
-        workspace: Tz,
+        workspace: Zone,
         person: Option<String>,
     }
 
@@ -476,8 +476,8 @@ mod tests {
         fn now(&self) -> DateTime<Utc> {
             self.now
         }
-        fn workspace_timezone(&self) -> Tz {
-            self.workspace
+        fn workspace_timezone(&self) -> Zone {
+            self.workspace.clone()
         }
         fn person_timezone(&self) -> Option<String> {
             self.person.clone()
@@ -491,7 +491,7 @@ mod tests {
     fn ctx_at(now: DateTime<Utc>) -> Ctx {
         Ctx {
             now,
-            workspace: Tz::UTC,
+            workspace: Zone::UTC,
             person: None,
         }
     }
@@ -1085,7 +1085,7 @@ mod tests {
     fn until_time_uses_the_person_zone_then_the_workspace_zone() {
         let g = until_graph(at_nine());
         let mut context = ctx();
-        context.workspace = Tz::America__New_York;
+        context.workspace = "America/New_York".parse().unwrap();
         let workspace = step(&g, &start(&g), StepInput::Start, &context).unwrap();
         // 08:00 UTC is 03:00 in New York in January: 09:00 local is 14:00 UTC the same day.
         assert_eq!(workspace.state.wake_at, Some(utc(2030, 1, 15, 14, 0)));
@@ -1101,11 +1101,40 @@ mod tests {
     fn an_invalid_person_zone_falls_back_and_says_so() {
         let g = until_graph(at_nine());
         let mut context = ctx();
-        context.workspace = Tz::America__New_York;
+        context.workspace = "America/New_York".parse().unwrap();
         context.person = Some("Mars/Olympus".into());
         let transition = step(&g, &start(&g), StepInput::Start, &context).unwrap();
         assert_eq!(transition.state.wake_at, Some(utc(2030, 1, 15, 14, 0)));
         assert_eq!(transition.zone_fallback.as_deref(), Some("Mars/Olympus"));
+    }
+
+    #[test]
+    fn a_person_zone_is_taken_by_its_exact_name_only() {
+        let g = until_graph(at_nine());
+        // Accepted: backward links and Etc offsets (09:00 is 14:00 UTC in January).
+        for name in ["US/Eastern", "Etc/GMT+5"] {
+            let mut context = ctx();
+            context.person = Some(name.into());
+            let transition = step(&g, &start(&g), StepInput::Start, &context).unwrap();
+            assert_eq!(
+                transition.state.wake_at,
+                Some(utc(2030, 1, 15, 14, 0)),
+                "{name}"
+            );
+            assert!(transition.zone_fallback.is_none(), "{name}");
+        }
+        // Refused as written, so the workspace zone (UTC) is used and the name is recorded.
+        for name in ["europe/copenhagen", "utc", "Etc/Unknown", ""] {
+            let mut context = ctx();
+            context.person = Some(name.into());
+            let transition = step(&g, &start(&g), StepInput::Start, &context).unwrap();
+            assert_eq!(
+                transition.state.wake_at,
+                Some(utc(2030, 1, 15, 9, 0)),
+                "{name:?}"
+            );
+            assert_eq!(transition.zone_fallback.as_deref(), Some(name), "{name:?}");
+        }
     }
 
     #[test]

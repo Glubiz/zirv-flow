@@ -17,7 +17,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
-use chrono_tz::Tz;
 use hashbrown::HashMap;
 use serde_json::{Value, json};
 use sqlx::{Connection, PgConnection};
@@ -26,6 +25,7 @@ use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 use zirv_flow_core::decision_actions::{self, DecisionSpec};
 use zirv_flow_core::flow::{FlowGraph, MAX_CONDITIONS, NodeKind};
+use zirv_flow_core::zone::Zone;
 use zirv_flow_core::{Freshness, WorkspaceId};
 use zirv_flow_engine::{
     ArrivedEvent, Effect, EffectKind, EnrollmentState, ExitReason, Failure, Outcome, Status,
@@ -515,7 +515,7 @@ impl<E: Into<JobError>> From<E> for StepFailure {
 /// The inputs of the engine that are not the state: the time and the zones.
 struct Zones {
     now: DateTime<Utc>,
-    workspace: Tz,
+    workspace: Zone,
     person: Option<String>,
 }
 
@@ -524,8 +524,8 @@ impl StepContext for Zones {
         self.now
     }
 
-    fn workspace_timezone(&self) -> Tz {
-        self.workspace
+    fn workspace_timezone(&self) -> Zone {
+        self.workspace.clone()
     }
 
     fn person_timezone(&self) -> Option<String> {
@@ -689,7 +689,7 @@ async fn advance(
     let graph = pinned_graph(&mut *conn, graphs, job.workspace, enrollment).await?;
     let zones = Zones {
         now: to_chrono(run.now).ok_or_else(|| JobError::new("the time does not fit the engine"))?,
-        workspace: workspace_zone.parse().unwrap_or(Tz::UTC),
+        workspace: workspace_zone.parse().unwrap_or(Zone::UTC),
         person: person_zone,
     };
     let mut walk = Walk {

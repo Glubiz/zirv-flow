@@ -8,7 +8,6 @@
 //! the wait it names, and is added to the snapshot's events.
 
 use chrono::{DateTime, Utc};
-use chrono_tz::Tz;
 use serde_json::{Map, Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -17,6 +16,7 @@ use zirv_flow_core::flow::{
     EventMatch, ExitCriterion, FlowGraph, FlowSettings, Goal, ListChange, NodeKind, PORT_ELSE,
     PORT_EVENT, PORT_NEXT, PORT_TIMEOUT, TraitChange, case_port,
 };
+use zirv_flow_core::zone::Zone;
 use zirv_flow_engine::{
     ArrivedEvent, Effect, EffectKind, EngineError, EnrollmentState, ExitReason, Matched, Outcome,
     Status, StepContext, StepInput, Transition, settle, step,
@@ -71,7 +71,7 @@ pub(crate) struct Walk<'a> {
     pub(crate) catalog: &'a Catalog,
     pub(crate) subject: &'a Subject,
     /// The workspace zone, for `wait.until_time`.
-    pub(crate) zone: Tz,
+    pub(crate) zone: Zone,
     pub(crate) snapshot: PersonSnapshot,
     pub(crate) start_at: DateTime<Utc>,
     pub(crate) script: &'a [Step],
@@ -192,7 +192,7 @@ pub(crate) fn walk(input: Walk<'_>) -> Result<Walked, Refusal> {
 
 struct Ctx {
     now: DateTime<Utc>,
-    zone: Tz,
+    zone: Zone,
     person_zone: Option<String>,
 }
 
@@ -201,8 +201,8 @@ impl StepContext for Ctx {
         self.now
     }
 
-    fn workspace_timezone(&self) -> Tz {
-        self.zone
+    fn workspace_timezone(&self) -> Zone {
+        self.zone.clone()
     }
 
     fn person_timezone(&self) -> Option<String> {
@@ -337,7 +337,7 @@ impl Walker<'_> {
             self.steps += 1;
             let ctx = Ctx {
                 now: self.clock,
-                zone: self.input.zone,
+                zone: self.input.zone.clone(),
                 person_zone: self.person_zone(),
             };
             let transition = match step(self.input.graph, &self.state, input, &ctx) {
@@ -1090,7 +1090,7 @@ mod tests {
             settings,
             catalog: &catalog(),
             subject: &subject(),
-            zone: Tz::UTC,
+            zone: Zone::UTC,
             snapshot,
             start_at: at(0),
             script,
