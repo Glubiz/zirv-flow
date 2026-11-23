@@ -645,11 +645,11 @@ pub(crate) async fn get(
     ),
     request_body = UpdateFlowRequest,
     responses(
-        (status = 200, description = "The updated flow; also the current flow, unchanged and with no audit entry, when the `revision` sent is stale but every field sent already equals the draft", body = FlowDetailBody),
+        (status = 200, description = "The updated flow; also the current flow, unchanged and with no audit entry, when the `revision` sent is stale but every field sent, once normalized as it would be stored, already equals the draft", body = FlowDetailBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the write scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or flow, or no access", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "Another flow has that name, the flow is archived (`code` is `flow_archived`), or the draft was saved since the `revision` sent was read and the fields sent differ from it (`flow_draft_revision_mismatch`, with `current_revision`)", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "Another flow has that name, the flow is archived (`code` is `flow_archived`), or the draft was saved since the `revision` sent was read and the fields sent, once normalized, differ from it (`flow_draft_revision_mismatch`, with `current_revision`)", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "An invalid name, no field at all, or a graph or settings that are not flow documents (`flow_malformed`)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))

@@ -18698,7 +18698,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The updated flow; also the current flow, unchanged and with no audit entry, when the `revision` sent is stale but every field sent already equals the draft */
+            /** @description The updated flow; also the current flow, unchanged and with no audit entry, when the `revision` sent is stale but every field sent, once normalized as it would be stored, already equals the draft */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -18743,7 +18743,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Another flow has that name, the flow is archived (`code` is `flow_archived`), or the draft was saved since the `revision` sent was read and the fields sent differ from it (`flow_draft_revision_mismatch`, with `current_revision`) */
+            /** @description Another flow has that name, the flow is archived (`code` is `flow_archived`), or the draft was saved since the `revision` sent was read and the fields sent, once normalized, differ from it (`flow_draft_revision_mismatch`, with `current_revision`) */
             409: {
                 headers: {
                     [name: string]: unknown;

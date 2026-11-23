@@ -509,8 +509,8 @@ mod tests {
         )
         .await
         .unwrap();
-        // Settings equal with key order changed compare equal.
-        let reordered = save(
+        // Equal settings sent alone are a replay too.
+        let settings_only = save(
             FlowPatch {
                 settings: Some(json!({"reentry": {"mode": "once"}, "trigger": {"type": "manual"}})),
                 ..FlowPatch::default()
@@ -539,7 +539,7 @@ mod tests {
 
         assert_eq!(replay, (saved.clone(), false));
         assert_eq!(name_only, (saved.clone(), false));
-        assert_eq!(reordered, (saved.clone(), false));
+        assert_eq!(settings_only, (saved.clone(), false));
         assert!(matches!(
             differs,
             Err(FlowError::RevisionMismatch { current: 2 })
