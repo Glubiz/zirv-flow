@@ -113,7 +113,8 @@ pub(crate) struct FlowDetailBody {
     /// The warm-up that ramps enrollments into the flow after it starts taking them.
     warmup: WarmupBody,
     /// How many times the draft was written. Send it back as `revision` when saving, so a save
-    /// made from an older read is refused instead of replacing a newer draft.
+    /// made from an older read is refused instead of replacing a newer draft, unless the draft
+    /// already holds what it sends.
     revision: i32,
 }
 
@@ -235,7 +236,9 @@ pub(crate) struct UpdateFlowRequest {
     #[schema(schema_with = settings_schema)]
     settings: Option<Value>,
     /// The `revision` of the flow as it was read. When it is not the draft's current revision the
-    /// save is refused with 409 `flow_draft_revision_mismatch`; left out, the save always applies.
+    /// save is refused with 409 `flow_draft_revision_mismatch`, unless every field sent already equals
+    /// the draft (after the server's normalization): then it answers 200 with the current flow and
+    /// writes nothing. Left out, the save always applies.
     revision: Option<i32>,
 }
 
@@ -642,11 +645,11 @@ pub(crate) async fn get(
     ),
     request_body = UpdateFlowRequest,
     responses(
-        (status = 200, description = "The updated flow", body = FlowDetailBody),
+        (status = 200, description = "The updated flow; also the current flow, unchanged and with no audit entry, when the `revision` sent is stale but every field sent, once normalized as it would be stored, already equals the draft", body = FlowDetailBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the write scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or flow, or no access", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "Another flow has that name, the flow is archived (`code` is `flow_archived`), or the draft was saved since the `revision` sent was read (`flow_draft_revision_mismatch`, with `current_revision`)", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "Another flow has that name, the flow is archived (`code` is `flow_archived`), or the draft was saved since the `revision` sent was read and the fields sent, once normalized, differ from it (`flow_draft_revision_mismatch`, with `current_revision`)", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "An invalid name, no field at all, or a graph or settings that are not flow documents (`flow_malformed`)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
@@ -694,7 +697,7 @@ pub(crate) async fn update(
         settings,
     };
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
-    let flow = zirv_flow_store::update_flow_draft_checked(
+    let (flow, written) = zirv_flow_store::update_flow_draft_checked(
         &mut tx,
         workspace.id,
         id,
@@ -703,15 +706,18 @@ pub(crate) async fn update(
     )
     .await
     .map_err(flow_error)?;
-    admin::audit(
-        &mut tx,
-        &principal.context(),
-        Some(workspace.id),
-        "flow.updated",
-        Some(("flow", flow.id)),
-        json!({ "fields": fields }),
-    )
-    .await?;
+    // A stale save whose content is already stored is a replay: nothing was written, so no entry.
+    if written {
+        admin::audit(
+            &mut tx,
+            &principal.context(),
+            Some(workspace.id),
+            "flow.updated",
+            Some(("flow", flow.id)),
+            json!({ "fields": fields }),
+        )
+        .await?;
+    }
     zirv_flow_store::commit(tx).await?;
     Ok(Json(flow_detail(&state, workspace.id, &flow).await?))
 }

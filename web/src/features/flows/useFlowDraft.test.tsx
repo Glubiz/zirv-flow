@@ -160,6 +160,59 @@ describe("useFlowDraft replacing the draft", () => {
     );
   }
 
+  it("recovers a lost-reply save when the server stores a normalized copy of a new goal node", async () => {
+    const routes = flowRoutes();
+    const save = routes[`PATCH ${WS}/flows/${FLOW_ID}`]!;
+    const read = routes[`GET ${WS}/flows/${FLOW_ID}`]!;
+    // As parse_graph does: the stored goal node gains `exit: false`.
+    const normalize = (body: { graph?: { nodes: Array<Record<string, unknown>> } }) => {
+      for (const node of body.graph?.nodes ?? []) {
+        if (node.type === "goal" && node.exit === undefined) node.exit = false;
+      }
+      return body;
+    };
+    const sorted = (value: unknown): string =>
+      JSON.stringify(value, (_key, inner: unknown) =>
+        inner && typeof inner === "object" && !Array.isArray(inner)
+          ? Object.fromEntries(Object.entries(inner as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : 1)))
+          : inner,
+      );
+    let patches = 0;
+    const calls = mockApi({
+      ...routes,
+      [`PATCH ${WS}/flows/${FLOW_ID}`]: async (request) => {
+        patches += 1;
+        const body = normalize((await request.json()) as { graph?: { nodes: Array<Record<string, unknown>> }; revision?: number });
+        const current = (await (await read(request)).json()) as Record<string, unknown>;
+        const { revision, ...fields } = body as Record<string, unknown>;
+        // The server rule: a stale revision whose normalized fields already equal the draft answers the current flow; any other stale save is 409.
+        if (revision !== undefined && revision !== current.revision) {
+          if (Object.entries(fields).every(([key, value]) => sorted(value) === sorted(current[key]))) return json(current);
+          return problem(409, "Conflict", "the flow draft was saved by someone else; read it again", undefined, "flow_draft_revision_mismatch");
+        }
+        const stored = await save(new Request(request.url, { method: "PATCH", body: JSON.stringify(body), headers: request.headers }));
+        // The first save commits and its reply is lost.
+        return patches === 1 ? problem(503, "Service Unavailable", "the reply was lost") : stored;
+      },
+    });
+    const { result } = mountDraft();
+    act(() =>
+      result.current.edit((draft) => ({
+        ...draft,
+        graph: { ...draft.graph, nodes: [...draft.graph.nodes, { id: "won", type: "goal" } as never] },
+      })),
+    );
+    await flush(1000);
+    expect(result.current.status).toBe("error");
+    act(() => result.current.retry());
+    await flush(500);
+
+    expect(calls.length).toBeGreaterThan(0);
+    expect(patches).toBe(2);
+    expect(result.current.failure).toBeNull();
+    expect(result.current.status).toBe("saved");
+  });
+
   it("keeps the unsaved draft and its undo while held, takes no edit, and saves nothing", async () => {
     const calls = mockApi(flowRoutes());
     const { result } = mountDraft();
