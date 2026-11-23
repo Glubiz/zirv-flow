@@ -1649,10 +1649,11 @@ envelope stays. Raw-URL webhooks have no rate bucket.
   render fails, or the six-hour rate wait ran out) the message ends
   `failed: delivery_unconfirmed`, because the first call may have been accepted (a `sending` row
   with neither the in-flight nor the unconfirmed mark, left by a 429 or 5xx, was never accepted: a
-  paused flow or ended enrollment skips it like a `pending` one); what really went
+  paused flow or ended enrollment skips it, where a pause holds a `pending` one); what really went
   wrong is a code in the gate record's `note`, never an address. The scheduler
   leader ends, at most once a minute, a `pending` or `sending` message whose `delivery.send` job
-  is no longer `ready` or `running` (it went dead), whoever holds the person or the enrollment now.
+  is no longer `ready` or `running` (it went dead), whoever holds the person or the enrollment now;
+  a message parked in `held_sends` by a pause has no job until the resume and is passed.
   The ending follows the row's marks: `delivery_unconfirmed` when the in-flight or unconfirmed mark
   says a call may have been accepted, `internal_error` for a `pending` message or a `sending` one
   with neither mark (every attempt was refused for good or never left; a timeout or reset after an HTTP request was written latches the unconfirmed mark, so it is not this). The sweep appends its `job` gate, noted
