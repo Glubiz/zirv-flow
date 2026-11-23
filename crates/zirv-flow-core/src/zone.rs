@@ -55,7 +55,12 @@ impl Zone {
             .compatible()
             .ok()?
             .as_second();
-        DateTime::from_timestamp(seconds, local.nanosecond().min(999_999_999))
+        // Subtract the offset from `local` itself, as chrono does, so a leap second
+        // (nanosecond >= 1e9) keeps its representation.
+        let offset = i32::try_from(local.and_utc().timestamp() - seconds).ok()?;
+        local
+            .checked_sub_offset(FixedOffset::east_opt(offset)?)
+            .map(|utc| utc.and_utc())
     }
 
     fn offset(&self, seconds: i32) -> ZoneOffset {
@@ -124,7 +129,18 @@ impl TimeZone for Zone {
     }
 
     fn offset_from_local_date(&self, local: &NaiveDate) -> LocalResult<ZoneOffset> {
-        self.offset_from_local_datetime(&local.and_time(NaiveTime::MIN))
+        // Any offset that occurs that day will do (as chrono-tz): midnight, else 23:59:59.
+        let earliest = self.offset_from_local_datetime(&local.and_time(NaiveTime::MIN));
+        let latest = self.offset_from_local_datetime(
+            &local.and_time(NaiveTime::from_hms_opt(23, 59, 59).unwrap()),
+        );
+        match (earliest, latest) {
+            (result @ LocalResult::Single(_), _) | (_, result @ LocalResult::Single(_)) => result,
+            (LocalResult::Ambiguous(offset, _), _) | (_, LocalResult::Ambiguous(offset, _)) => {
+                LocalResult::Single(offset)
+            }
+            (LocalResult::None, LocalResult::None) => LocalResult::None,
+        }
     }
 
     fn offset_from_local_datetime(&self, local: &NaiveDateTime) -> LocalResult<ZoneOffset> {
@@ -251,5 +267,33 @@ mod tests {
                 .to_rfc3339(),
             "2030-03-31T02:30:00+00:00"
         );
+    }
+
+    #[test]
+    fn a_leap_second_keeps_its_representation_like_chrono() {
+        let leap = local("2016-12-31T23:59:60");
+        assert!(leap.nanosecond() >= 1_000_000_000);
+        assert_eq!(Zone::UTC.resolve_local(leap), Some(leap.and_utc()));
+        assert_eq!(
+            zone("Europe/Copenhagen").resolve_local(leap),
+            Some(local("2016-12-31T22:59:60").and_utc())
+        );
+    }
+
+    #[test]
+    fn a_local_date_takes_any_offset_that_occurs_that_day() {
+        let sao_paulo = zone("America/Sao_Paulo");
+        let date = NaiveDate::from_ymd_opt(2018, 11, 4).unwrap();
+        let LocalResult::Single(offset) = sao_paulo.offset_from_local_date(&date) else {
+            panic!("midnight is in a gap, 23:59:59 is not");
+        };
+        assert_eq!(offset.fix().local_minus_utc(), -7200);
+        let ordinary = NaiveDate::from_ymd_opt(2030, 1, 15).unwrap();
+        let LocalResult::Single(offset) =
+            zone("Europe/Copenhagen").offset_from_local_date(&ordinary)
+        else {
+            panic!("an ordinary date has one offset");
+        };
+        assert_eq!(offset.fix().local_minus_utc(), 3600);
     }
 }
