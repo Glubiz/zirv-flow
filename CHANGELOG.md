@@ -15,3 +15,15 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v1.0.35 (2026-11-23)
+
+### Fixes
+
+- the orphan sweep passes a send a paused flow holds (#589)
+- a paused flow holds the sends it meets and the resume sends them (#589)
+
+### Chores
+
+- write the flow-state helper's SQL with a line continuation (#589)
+- sign the published image's build provenance (#607)
+
