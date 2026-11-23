@@ -15,3 +15,18 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v1.0.33 (2026-11-23)
+
+### Fixes
+
+- accept a stale draft save that already matches the stored draft
+
+### Documentation
+
+- say the replay compares normalized fields, and name the settings case for what it tests
+- describe the replay comparison as JSON value equality
+
+### Chores
+
+- sample runner resources and cap the PostgreSQL test step so a lost runner leaves evidence
+
