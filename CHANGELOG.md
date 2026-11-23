@@ -15,3 +15,14 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v1.0.34 (2026-11-23)
+
+### Fixes
+
+- keep leap seconds and take any offset of the day, as chrono-tz did
+- move time zones from chrono-tz to jiff's bundled database
+
+### Chores
+
+- keep the name cases in the zone module and drop test-only helpers
+
