@@ -293,9 +293,9 @@ pub async fn update_flow_draft(
 /// [`update_flow_draft`] that, with `expected_revision`, only saves if the draft is still at that
 /// revision, else it is [`FlowError::RevisionMismatch`]. The check runs under the row lock the
 /// save takes, so two saves from the same read cannot both win. A stale save whose supplied
-/// fields already equal the stored draft (jsonb equality) is a replay of a save that committed
-/// with its reply lost: it succeeds with the held flow and `false`, and writes nothing. Otherwise
-/// the flow is saved and `true` comes back.
+/// fields already equal the stored draft (as JSON values, so key order does not matter) is a
+/// replay of a save that committed with its reply lost: it succeeds with the held flow and
+/// `false`, and writes nothing. Otherwise the flow is saved and `true` comes back.
 pub async fn update_flow_draft_checked(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -509,7 +509,7 @@ mod tests {
         )
         .await
         .unwrap();
-        // Settings equal with key order changed are equal as jsonb.
+        // Settings equal with key order changed compare equal.
         let reordered = save(
             FlowPatch {
                 settings: Some(json!({"reentry": {"mode": "once"}, "trigger": {"type": "manual"}})),
