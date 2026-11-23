@@ -7,13 +7,13 @@
 //! no personal value is involved), the clock is virtual, and nothing is executed or written.
 
 use chrono::{DateTime, Duration, Utc};
-use chrono_tz::Tz;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_core::flow::{FlowGraph, FlowSettings, MAX_DURATION_SECONDS, MAX_NODES, NodeKind};
+use zirv_flow_core::zone::Zone;
 use zirv_flow_segments::{Catalog, PersonSnapshot, SnapshotEvent};
 use zirv_flow_store::EXPLAIN_EVENT_CAP;
 
@@ -257,7 +257,7 @@ pub(crate) fn simulate(
     graph: &FlowGraph,
     settings: &FlowSettings,
     catalog: &Catalog,
-    zone: Tz,
+    zone: Zone,
     flow_id: Uuid,
     start: OffsetDateTime,
 ) -> SimulationBody {
@@ -277,7 +277,7 @@ pub(crate) fn simulate(
             settings,
             catalog,
             subject: &subject,
-            zone,
+            zone: zone.clone(),
             snapshot: person(graph, meets, start_at),
             start_at,
             script: &script,
@@ -356,7 +356,7 @@ mod tests {
             &graph(),
             &settings(),
             &catalog(),
-            Tz::UTC,
+            Zone::UTC,
             Uuid::nil(),
             START,
         )
@@ -385,7 +385,14 @@ mod tests {
     }
 
     fn simulated(graph: &FlowGraph) -> SimulationBody {
-        simulate(graph, &settings(), &catalog(), Tz::UTC, Uuid::nil(), START)
+        simulate(
+            graph,
+            &settings(),
+            &catalog(),
+            Zone::UTC,
+            Uuid::nil(),
+            START,
+        )
     }
 
     #[test]
@@ -459,8 +466,8 @@ mod tests {
         ]}))
         .unwrap();
 
-        let once = simulate(&one, &settings(), &catalog(), Tz::UTC, Uuid::nil(), START);
-        let again = simulate(&one, &settings(), &catalog(), Tz::UTC, Uuid::nil(), START);
+        let once = simulate(&one, &settings(), &catalog(), Zone::UTC, Uuid::nil(), START);
+        let again = simulate(&one, &settings(), &catalog(), Zone::UTC, Uuid::nil(), START);
 
         assert_eq!(once, again);
         let blank: Vec<&str> = once.people[0].path.iter().map(String::as_str).collect();
@@ -487,7 +494,7 @@ mod tests {
             &waiting,
             &settings(),
             &catalog(),
-            Tz::UTC,
+            Zone::UTC,
             Uuid::nil(),
             START,
         );
@@ -512,7 +519,14 @@ mod tests {
         ]}))
         .unwrap();
 
-        let simulation = simulate(&cycle, &settings(), &catalog(), Tz::UTC, Uuid::nil(), START);
+        let simulation = simulate(
+            &cycle,
+            &settings(),
+            &catalog(),
+            Zone::UTC,
+            Uuid::nil(),
+            START,
+        );
 
         assert!(
             simulation

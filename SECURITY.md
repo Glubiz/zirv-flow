@@ -69,19 +69,19 @@ code, so the restricted usage must continue to hold. RUSTSEC-2026-0387
   RustSec marks fixed, or remove those paths, then delete the ignore. Reassess
   before adding RSA private-key signing or decryption through `rsa`.
 
-### RUSTSEC-2026-0543 and RUSTSEC-2026-0555 — chrono and chrono-tz unmaintained
+### RUSTSEC-2026-0543 — chrono unmaintained
 
-- Notice: RustSec marks `chrono` and `chrono-tz` unmaintained, for all versions,
-  with no fixed release. Neither notice reports a vulnerability.
+- Notice: RustSec marks `chrono` unmaintained, for all versions, with no fixed
+  release. The notice reports no vulnerability.
 - Affected paths: `chrono 0.4.45` is a direct dependency of zirv-flow-core,
   -engine, -api, -connectors, -jobs and -identity. It also arrives through
   `oauth2 5.0.0`, `openidconnect 4.1.0`, `croner 4.0.1` and `rskafka 0.6.0`, so
   moving our own code off it would not remove it from `Cargo.lock`.
-  `chrono-tz 0.10.4` is used only by workspace crates.
-- Reviewed: **2026-11-17**. Exit, tracked in #830: move our own time-zone handling
-  off `chrono-tz` and delete its ignore, then move our own `chrono` use and delete
-  that ignore once the four crates above no longer need it. Reassess sooner if
-  either crate gets a vulnerability advisory.
+- Reviewed: **2026-11-17**. Exit, tracked in #830: move our own `chrono` use and
+  delete the ignore once the four crates above no longer need it. Reassess
+  sooner if `chrono` gets a vulnerability advisory. Time-zone handling already
+  moved to `jiff` with its bundled database; `chrono-tz` (RUSTSEC-2026-0555) is
+  gone from the tree.
 
 ## License exceptions
 

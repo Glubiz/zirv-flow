@@ -9,7 +9,6 @@ publish = false
 
 [dependencies]
 chrono.workspace = true
-chrono-tz.workspace = true
 futures-util = { workspace = true, features = ["std"] }
 getrandom.workspace = true
 hashbrown.workspace = true

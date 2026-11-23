@@ -1283,7 +1283,7 @@ async fn simulation_of(
         &graph,
         &settings,
         &catalog,
-        timezone.parse().unwrap_or(chrono_tz::Tz::UTC),
+        timezone.parse().unwrap_or(zirv_flow_core::zone::Zone::UTC),
         flow_id,
         now,
     ))

@@ -4,11 +4,11 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
-use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 use zirv_flow_core::flow::{EventMatch, FlowGraph, ListChange, SyncOperation, TraitChange};
+use zirv_flow_core::zone::Zone;
 
 use crate::error::EngineError;
 
@@ -87,7 +87,7 @@ pub enum StepInput {
 pub trait StepContext {
     fn now(&self) -> DateTime<Utc>;
     /// The workspace zone (an IANA name, validated when an Admin sets it).
-    fn workspace_timezone(&self) -> Tz;
+    fn workspace_timezone(&self) -> Zone;
     /// The person's `timezone` trait, as written. An invalid name falls back to the workspace
     /// zone and is reported in [`Transition::zone_fallback`].
     fn person_timezone(&self) -> Option<String>;

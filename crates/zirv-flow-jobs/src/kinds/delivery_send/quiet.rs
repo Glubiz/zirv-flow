@@ -8,20 +8,20 @@
 //! `wait.until_time`.
 
 use chrono::{DateTime, Datelike, Days, NaiveTime, Utc};
-use chrono_tz::Tz;
 use time::{OffsetDateTime, Time};
+use zirv_flow_core::zone::Zone;
 use zirv_flow_engine::resolve_local;
 use zirv_flow_store::QuietHours;
 
 /// The zone the recipient's quiet hours are read in, and whether the person's `timezone` trait was
 /// not a zone so the workspace's was used. A missing trait is not a fallback; it is the workspace
 /// zone as configured. A workspace zone that does not parse reads as UTC, as `flow.step` does.
-pub(super) fn recipient_zone(workspace: &str, person: Option<&str>) -> (Tz, bool) {
-    let workspace_zone = workspace.parse::<Tz>().unwrap_or(Tz::UTC);
+pub(super) fn recipient_zone(workspace: &str, person: Option<&str>) -> (Zone, bool) {
+    let workspace_zone = workspace.parse::<Zone>().unwrap_or(Zone::UTC);
     match person {
         None => (workspace_zone, false),
         Some(name) => name
-            .parse::<Tz>()
+            .parse::<Zone>()
             .map_or((workspace_zone, true), |zone| (zone, false)),
     }
 }
@@ -32,11 +32,11 @@ pub(super) fn recipient_zone(workspace: &str, person: Option<&str>) -> (Tz, bool
 /// midnight is the one that holds the small hours of today.
 pub(super) fn quiet_until(
     now: OffsetDateTime,
-    zone: Tz,
+    zone: &Zone,
     quiet: &QuietHours,
 ) -> Option<OffsetDateTime> {
     let now = to_chrono(now)?;
-    let today = now.with_timezone(&zone).date_naive();
+    let today = now.with_timezone(zone).date_naive();
     let (start, end) = (naive(quiet.start)?, naive(quiet.end)?);
     for back in [1, 0] {
         let day = today.checked_sub_days(Days::new(back))?;
@@ -79,11 +79,13 @@ fn from_chrono(at: DateTime<Utc>) -> Option<OffsetDateTime> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::LazyLock;
+
     use time::macros::{datetime, time};
 
     use super::*;
 
-    const COPENHAGEN: Tz = Tz::Europe__Copenhagen;
+    static COPENHAGEN: LazyLock<Zone> = LazyLock::new(|| "Europe/Copenhagen".parse().unwrap());
 
     fn quiet(start: Time, end: Time, days: &[&str]) -> QuietHours {
         QuietHours {
@@ -99,17 +101,46 @@ mod tests {
     fn a_person_zone_wins_and_an_invalid_one_falls_back_and_says_so() {
         assert_eq!(
             recipient_zone("Europe/Copenhagen", Some("Asia/Tokyo")),
-            (Tz::Asia__Tokyo, false)
+            ("Asia/Tokyo".parse().unwrap(), false)
         );
         assert_eq!(
             recipient_zone("Europe/Copenhagen", None),
-            (COPENHAGEN, false)
+            (COPENHAGEN.clone(), false)
         );
         assert_eq!(
             recipient_zone("Europe/Copenhagen", Some("Not/AZone")),
-            (COPENHAGEN, true)
+            (COPENHAGEN.clone(), true)
         );
-        assert_eq!(recipient_zone("garbage", None), (Tz::UTC, false));
+        assert_eq!(recipient_zone("garbage", None), (Zone::UTC, false));
+    }
+
+    /// The zone's UTC offset in seconds on 2026-01-15, whatever the zone type is.
+    fn january_offset((zone, _): &(impl chrono::TimeZone, bool)) -> i32 {
+        use chrono::Offset;
+        let noon = DateTime::<Utc>::from_timestamp(1_768_478_400, 0).unwrap();
+        zone.offset_from_utc_datetime(&noon.naive_utc())
+            .fix()
+            .local_minus_utc()
+    }
+
+    #[test]
+    fn zone_names_are_taken_exactly_as_the_tz_database_spells_them() {
+        // Backward links and Etc offsets are zones.
+        assert_eq!(january_offset(&recipient_zone("US/Eastern", None)), -18_000);
+        assert_eq!(january_offset(&recipient_zone("Etc/GMT+5", None)), -18_000);
+        assert_eq!(
+            january_offset(&recipient_zone("Europe/Copenhagen", Some("Etc/GMT+5"))),
+            -18_000
+        );
+        // A name in another case is not: the workspace's reads as UTC, the person's falls back.
+        assert_eq!(
+            january_offset(&recipient_zone("europe/copenhagen", None)),
+            0
+        );
+        let fallback = recipient_zone("Asia/Tokyo", Some("europe/copenhagen"));
+        assert!(fallback.1);
+        assert_eq!(january_offset(&fallback), 32_400);
+        assert!(recipient_zone("Asia/Tokyo", Some("utc")).1);
     }
 
     #[test]
@@ -118,17 +149,21 @@ mod tests {
 
         // 23:30 in Copenhagen in January (UTC+1): the period ends 08:00 local, 07:00 UTC.
         assert_eq!(
-            quiet_until(datetime!(2026-01-14 22:30 UTC), COPENHAGEN, &overnight),
+            quiet_until(datetime!(2026-01-14 22:30 UTC), &COPENHAGEN, &overnight),
             Some(datetime!(2026-01-15 07:00 UTC))
         );
         // 03:00 local: the period that started the evening before.
         assert_eq!(
-            quiet_until(datetime!(2026-01-15 02:00 UTC), COPENHAGEN, &overnight),
+            quiet_until(datetime!(2026-01-15 02:00 UTC), &COPENHAGEN, &overnight),
             Some(datetime!(2026-01-15 07:00 UTC))
         );
         // The same instant is daytime in Tokyo.
         assert_eq!(
-            quiet_until(datetime!(2026-01-15 02:00 UTC), Tz::Asia__Tokyo, &overnight),
+            quiet_until(
+                datetime!(2026-01-15 02:00 UTC),
+                &"Asia/Tokyo".parse().unwrap(),
+                &overnight
+            ),
             None
         );
     }
@@ -137,10 +172,10 @@ mod tests {
     fn the_period_starts_inclusive_and_ends_exclusive() {
         let overnight = quiet(time!(21:00), time!(08:00), &EVERY_DAY);
 
-        assert!(quiet_until(datetime!(2026-01-14 20:00 UTC), COPENHAGEN, &overnight).is_some());
-        assert!(quiet_until(datetime!(2026-01-14 19:59 UTC), COPENHAGEN, &overnight).is_none());
-        assert!(quiet_until(datetime!(2026-01-15 07:00 UTC), COPENHAGEN, &overnight).is_none());
-        assert!(quiet_until(datetime!(2026-01-15 06:59 UTC), COPENHAGEN, &overnight).is_some());
+        assert!(quiet_until(datetime!(2026-01-14 20:00 UTC), &COPENHAGEN, &overnight).is_some());
+        assert!(quiet_until(datetime!(2026-01-14 19:59 UTC), &COPENHAGEN, &overnight).is_none());
+        assert!(quiet_until(datetime!(2026-01-15 07:00 UTC), &COPENHAGEN, &overnight).is_none());
+        assert!(quiet_until(datetime!(2026-01-15 06:59 UTC), &COPENHAGEN, &overnight).is_some());
     }
 
     #[test]
@@ -149,20 +184,20 @@ mod tests {
         let fridays = quiet(time!(21:00), time!(08:00), &["fri"]);
 
         assert!(
-            quiet_until(datetime!(2026-01-16 22:30 UTC), COPENHAGEN, &fridays).is_some(),
+            quiet_until(datetime!(2026-01-16 22:30 UTC), &COPENHAGEN, &fridays).is_some(),
             "Friday 23:30"
         );
         assert_eq!(
-            quiet_until(datetime!(2026-01-17 02:00 UTC), COPENHAGEN, &fridays),
+            quiet_until(datetime!(2026-01-17 02:00 UTC), &COPENHAGEN, &fridays),
             Some(datetime!(2026-01-17 07:00 UTC)),
             "Saturday 03:00 is still Friday's period"
         );
         assert!(
-            quiet_until(datetime!(2026-01-16 02:00 UTC), COPENHAGEN, &fridays).is_none(),
+            quiet_until(datetime!(2026-01-16 02:00 UTC), &COPENHAGEN, &fridays).is_none(),
             "Friday 03:00 is Thursday's period, which is not a quiet day"
         );
         assert!(
-            quiet_until(datetime!(2026-01-17 22:30 UTC), COPENHAGEN, &fridays).is_none(),
+            quiet_until(datetime!(2026-01-17 22:30 UTC), &COPENHAGEN, &fridays).is_none(),
             "Saturday 23:30"
         );
     }
@@ -172,10 +207,10 @@ mod tests {
         let lunch = quiet(time!(12:00), time!(13:30), &EVERY_DAY);
 
         assert_eq!(
-            quiet_until(datetime!(2026-01-14 11:15 UTC), COPENHAGEN, &lunch),
+            quiet_until(datetime!(2026-01-14 11:15 UTC), &COPENHAGEN, &lunch),
             Some(datetime!(2026-01-14 12:30 UTC))
         );
-        assert!(quiet_until(datetime!(2026-01-14 12:30 UTC), COPENHAGEN, &lunch).is_none());
+        assert!(quiet_until(datetime!(2026-01-14 12:30 UTC), &COPENHAGEN, &lunch).is_none());
     }
 
     #[test]
@@ -186,10 +221,10 @@ mod tests {
         let night = quiet(time!(22:00), time!(02:30), &EVERY_DAY);
 
         assert_eq!(
-            quiet_until(datetime!(2026-03-28 23:00 UTC), COPENHAGEN, &night),
+            quiet_until(datetime!(2026-03-28 23:00 UTC), &COPENHAGEN, &night),
             Some(datetime!(2026-03-29 01:30 UTC))
         );
-        assert!(quiet_until(datetime!(2026-03-29 01:30 UTC), COPENHAGEN, &night).is_none());
+        assert!(quiet_until(datetime!(2026-03-29 01:30 UTC), &COPENHAGEN, &night).is_none());
     }
 
     #[test]
@@ -199,11 +234,11 @@ mod tests {
         let night = quiet(time!(22:00), time!(02:30), &EVERY_DAY);
 
         assert_eq!(
-            quiet_until(datetime!(2026-10-24 22:00 UTC), COPENHAGEN, &night),
+            quiet_until(datetime!(2026-10-24 22:00 UTC), &COPENHAGEN, &night),
             Some(datetime!(2026-10-25 00:30 UTC))
         );
         // The second 02:30 (01:45 UTC shows 02:45) is after the end: not quiet.
-        assert!(quiet_until(datetime!(2026-10-25 01:45 UTC), COPENHAGEN, &night).is_none());
+        assert!(quiet_until(datetime!(2026-10-25 01:45 UTC), &COPENHAGEN, &night).is_none());
     }
 
     #[test]
@@ -211,9 +246,9 @@ mod tests {
         // A period from 02:30 to 05:00 on the spring-forward night starts at 01:30 UTC.
         let early = quiet(time!(2:30), time!(5:00), &EVERY_DAY);
 
-        assert!(quiet_until(datetime!(2026-03-29 01:29 UTC), COPENHAGEN, &early).is_none());
+        assert!(quiet_until(datetime!(2026-03-29 01:29 UTC), &COPENHAGEN, &early).is_none());
         assert_eq!(
-            quiet_until(datetime!(2026-03-29 01:30 UTC), COPENHAGEN, &early),
+            quiet_until(datetime!(2026-03-29 01:30 UTC), &COPENHAGEN, &early),
             Some(datetime!(2026-03-29 03:00 UTC))
         );
     }

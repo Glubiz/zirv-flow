@@ -4,8 +4,8 @@ use std::fmt;
 use std::str::FromStr;
 use std::time::Duration;
 
+use crate::zone::Zone;
 use chrono::{DateTime, Utc};
-use chrono_tz::Tz;
 use croner::Cron;
 use croner::parser::{CronParser, Seconds};
 use time::OffsetDateTime;
@@ -63,7 +63,7 @@ pub fn next_after(
 ) -> Result<OffsetDateTime, ScheduleError> {
     let pattern = parse_cron(cron)?;
     let zone = parse_timezone(timezone)?;
-    let start = in_zone(after, zone)?;
+    let start = in_zone(after, &zone)?;
 
     let next = pattern
         .find_next_occurrence(&start, false)
@@ -105,7 +105,7 @@ pub fn latest_slot(
     // Too far behind to walk: take the last slot at or before `now` directly.
     let pattern = parse_cron(cron)?;
     let zone = parse_timezone(timezone)?;
-    let at = in_zone(now, zone)?;
+    let at = in_zone(now, &zone)?;
     let latest = pattern
         .find_previous_occurrence(&at, true)
         .map_err(|_| ScheduleError::NoNextSlot)?;
@@ -141,14 +141,14 @@ fn parse_cron(cron: &str) -> Result<Cron, ScheduleError> {
         .map_err(|_| ScheduleError::InvalidCron)
 }
 
-fn in_zone(instant: OffsetDateTime, zone: Tz) -> Result<DateTime<Tz>, ScheduleError> {
+fn in_zone(instant: OffsetDateTime, zone: &Zone) -> Result<DateTime<Zone>, ScheduleError> {
     DateTime::<Utc>::from_timestamp(instant.unix_timestamp(), instant.nanosecond())
-        .map(|utc| utc.with_timezone(&zone))
+        .map(|utc| utc.with_timezone(zone))
         .ok_or(ScheduleError::NoNextSlot)
 }
 
-fn parse_timezone(timezone: &str) -> Result<Tz, ScheduleError> {
-    Tz::from_str(timezone).map_err(|_| ScheduleError::InvalidTimezone)
+fn parse_timezone(timezone: &str) -> Result<Zone, ScheduleError> {
+    Zone::from_str(timezone).map_err(|_| ScheduleError::InvalidTimezone)
 }
 
 /// The UTC cron of a segment refresh every `cadence_minutes`, shifted by a stable phase taken
@@ -440,5 +440,59 @@ mod tests {
         );
         assert_eq!(validate("5 * * * * *", "UTC"), Ok(()));
         assert_eq!(validate("* * * * *", "UTC"), Ok(()));
+    }
+
+    #[test]
+    fn zone_names_are_accepted_and_refused_as_the_tz_database_spells_them() {
+        // Exact names, including the Etc offsets and the backward links.
+        for name in [
+            "UTC",
+            "Etc/UTC",
+            "GMT",
+            "Zulu",
+            "Etc/GMT+5",
+            "US/Eastern",
+            "Europe/Copenhagen",
+            "America/Argentina/Buenos_Aires",
+            "Asia/Kolkata",
+        ] {
+            assert_eq!(validate("0 9 * * *", name), Ok(()), "{name}");
+        }
+        // The lookup is case-sensitive, and nothing is trimmed or guessed.
+        for name in [
+            "europe/copenhagen",
+            "EUROPE/COPENHAGEN",
+            "Europe/copenhagen",
+            "utc",
+            "Utc",
+            "us/eastern",
+            "",
+            " UTC",
+            "UTC ",
+            "Etc/Unknown",
+            "etc/unknown",
+            "Not/AZone",
+            "+02:00",
+            "Europe/Copenhagen\0",
+        ] {
+            assert_eq!(
+                validate("0 9 * * *", name),
+                Err(ScheduleError::InvalidTimezone),
+                "{name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_backward_link_zone_gives_the_same_slot_as_its_target() {
+        let after = datetime!(2030-07-01 12:00 UTC);
+        assert_eq!(
+            next_after("0 9 * * *", "US/Eastern", after),
+            Ok(datetime!(2030-07-01 13:00 UTC))
+        );
+        assert_eq!(
+            next_after("0 9 * * *", "Etc/GMT+5", after),
+            Ok(datetime!(2030-07-01 14:00 UTC))
+        );
     }
 }

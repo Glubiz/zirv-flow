@@ -34,6 +34,7 @@ mod trace;
 pub mod tracking;
 mod validation;
 mod workspace;
+pub mod zone;
 
 pub use email::Email;
 pub use freshness::{Freshness, FreshnessInput, Threshold, effective_threshold, freshness};

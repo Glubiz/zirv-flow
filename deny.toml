@@ -6,7 +6,6 @@ yanked = "deny"
 ignore = [
     { id = "RUSTSEC-2023-0071", reason = "rsa via openidconnect verifies public keys; DKIM signing uses ring. Reviewed 2026-10-27 in SECURITY.md; remove when rsa is fixed or absent." },
     { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained, not vulnerable; also pulled in by oauth2, openidconnect, croner and rskafka. Reviewed 2026-11-17 in SECURITY.md; exit tracked in #830." },
-    { id = "RUSTSEC-2026-0555", reason = "chrono-tz is unmaintained, not vulnerable; used only by workspace crates. Reviewed 2026-11-17 in SECURITY.md; exit tracked in #830." },
 ]
 
 [licenses]
@@ -53,9 +52,7 @@ skip = [
     { crate = "getrandom@0.3.4", reason = "mysql_common and rand_core 0.9" },
     { crate = "hashbrown@0.16.1", reason = "hashlink, metrics-util and sqlx-core" },
     { crate = "hmac@0.12.1", reason = "OIDC, hkdf 0.12, rfc6979 and SASL" },
-    { crate = "phf@0.12.1", reason = "chrono-tz" },
     { crate = "phf@0.13.1", reason = "tokio-postgres alongside web_atoms" },
-    { crate = "phf_shared@0.12.1", reason = "phf 0.12" },
     { crate = "phf_shared@0.13.1", reason = "phf 0.13" },
     { crate = "r-efi@5.3.0", reason = "getrandom 0.3" },
     { crate = "rand@0.8.8", reason = "OIDC, RSA key generation, SASL and Kafka" },
