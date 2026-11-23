@@ -2658,13 +2658,14 @@ mod tests {
     /// Sets the state of the flow the env queues for.
     async fn set_flow_state(env: &Env, state: &str) {
         sqlx::query(
-            "UPDATE flows SET state = $2, \n                 archived_at = CASE WHEN $2 = 'archived' THEN now() END WHERE id = $1",
+            "UPDATE flows SET state = $2, \
+                 archived_at = CASE WHEN $2 = 'archived' THEN now() END WHERE id = $1",
         )
-            .bind(env.flow)
-            .bind(state)
-            .execute(&env.pool)
-            .await
-            .unwrap();
+        .bind(env.flow)
+        .bind(state)
+        .execute(&env.pool)
+        .await
+        .unwrap();
     }
 
     /// What a resume or an archive batch does to the parked sends: takes them and queues the jobs.
