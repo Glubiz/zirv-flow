@@ -314,6 +314,44 @@ describe("sending limits", () => {
   });
 });
 
+describe("a save with edits in flight", () => {
+  it("keeps what was typed while a save was in flight and adopts the saved value of a field not edited meanwhile", async () => {
+    let release: () => void = () => {};
+    let stored: unknown = STORED;
+    mockApi({
+      ...access("admin"),
+      [`GET ${WS}/sending/settings`]: () => json(stored),
+      [`PUT ${WS}/sending/settings`]: async (request) => {
+        const body = (await request.json()) as { frequency_caps: { limit: number }[] };
+        // The server normalizes the limit it was sent, so the saved value differs from the one typed.
+        stored = { ...body, frequency_caps: body.frequency_caps.map((cap) => ({ ...cap, limit: cap.limit + 1 })), revision: 5 };
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return json(stored);
+      },
+    });
+    const user = userEvent.setup();
+    mount();
+    const cap = await screen.findByRole("group", { name: "Cap 1" });
+    const limit = within(cap).getByLabelText("Limit of cap 1");
+    await user.clear(limit);
+    await user.type(limit, "7");
+    await user.click(screen.getByRole("button", { name: "Save limits" }));
+    const hours = within(screen.getByRole("group", { name: "Cap 1" })).getByLabelText("Window of cap 1 in hours");
+    await user.clear(hours);
+    await user.type(hours, "12");
+    release();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Save limits" })).toBeEnabled());
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    const after = within(screen.getByRole("group", { name: "Cap 1" }));
+    expect(after.getByLabelText("Window of cap 1 in hours")).toHaveValue(12);
+    expect(after.getByLabelText("Limit of cap 1")).toHaveValue(8);
+    expect(screen.queryByText(/Saved\./)).not.toBeInTheDocument();
+  });
+});
+
 describe("window text", () => {
   it("reads and writes whole hours and days", () => {
     expect(hoursOf("P1D")).toBe(24);

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { client, describeError, unwrap, usePaged, type ErrorSummary, type Page } from "../../api";
+import { client, describeError, unwrap, usePaged, usePolling, type ErrorSummary, type Page } from "../../api";
 import { Button, EmptyState, formatDateTime, InlineError, Pill, ResourceView } from "../../ui";
 import { isActiveRun, runKindLabel, runStateLabel, runStateTone, triggerLabel, type Run } from "./labels";
 import { RunDialog } from "./RunDialog";
@@ -54,11 +54,7 @@ export function RunsPanel({ workspaceId, sourceId, canManage, version, pollMs = 
     if (was.current && !active) settled.current?.();
     was.current = active;
   }, [ready, active]);
-  useEffect(() => {
-    if (!active) return;
-    const timer = setInterval(reload, pollMs);
-    return () => clearInterval(timer);
-  }, [active, reload, pollMs]);
+  usePolling(active, ready && resource.refreshing, reload, pollMs);
 
   async function cancel(run: Run) {
     setBusy(true);

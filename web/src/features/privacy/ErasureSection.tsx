@@ -1,6 +1,6 @@
 import { useCallback, useState, type SyntheticEvent } from "react";
 
-import { client, describeError, unwrap, type ErrorSummary, usePaged } from "../../api";
+import { client, describeError, unwrap, type ErrorSummary, usePaged, usePolling } from "../../api";
 import {
   Button,
   Dialog,
@@ -16,7 +16,6 @@ import {
 import { CONFIRM_PHRASE, erasureStatus } from "./labels";
 import { TargetForm, type PersonTarget } from "./TargetForm";
 import { ShowMore } from "./ShowMore";
-import { usePolling } from "./usePolling";
 
 const PAGE_SIZE = 50;
 
