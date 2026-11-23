@@ -17,6 +17,14 @@ Rehearse on a restored copy with the same PostgreSQL major version, storage and 
 small CI drill below proves correctness; it does not size a production maintenance window. Allow
 time for the backup, the migration, verification, and a full restore if verification fails.
 
+Check that the new image was built by this repository's release pipeline before pulling it into
+production. Each image published from 1.0.34 on carries a signed build provenance attestation (#607):
+
+    gh attestation verify oci://ghcr.io/glubiz/zirv-flow:<version> --repo Glubiz/zirv-flow
+
+A pass names the CD workflow and the release commit. A failure means the image did not come from
+this repository's pipeline: do not deploy it.
+
 ## Upgrade, in this order
 
 1. **Back up.** Follow the backup guide, including the separate master key, config and ledger.

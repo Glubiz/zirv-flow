@@ -149,9 +149,13 @@ jobs:
     # Runs on every successful release job, including a re-run of an
     # already-published version: pushing the same tags again is idempotent and
     # lets a failed image push be retried.
+    # id-token and attestations let the attest step sign the image's build
+    # provenance (#607).
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4.4.0
@@ -162,7 +166,10 @@ jobs:
         id: image
         env:
           VERSION: ${{ needs.release.outputs.version }}
-        run: bash scripts/release-flags.sh "$VERSION" "ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/zirv-flow" >> "$GITHUB_OUTPUT"
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/zirv-flow"
+          echo "name=$image" >> "$GITHUB_OUTPUT"
+          bash scripts/release-flags.sh "$VERSION" "$image" >> "$GITHUB_OUTPUT"
 
       - name: Set Up Docker Buildx
         uses: docker/setup-buildx-action@v3.11.1
@@ -175,6 +182,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build And Push
+        id: build
         uses: docker/build-push-action@v6.18.0
         with:
           context: .
@@ -188,3 +196,15 @@ jobs:
             org.opencontainers.image.licenses=MIT
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Signs the build provenance of the pushed digest and stores it with the
+      # image, so `gh attestation verify oci://<image>:<version> --repo
+      # Glubiz/zirv-flow` checks it. A storage record needs an
+      # organization-owned repository, and this one is user-owned.
+      - name: Attest Build Provenance
+        uses: actions/attest@v4.2.2
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
