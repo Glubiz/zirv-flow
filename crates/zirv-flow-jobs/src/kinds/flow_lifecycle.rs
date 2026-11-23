@@ -9,17 +9,26 @@
 //! never read twice; a run that is retried does the same batch again. A held enrollment that
 //! cannot be resumed is failed with an error, never left held.
 //!
+//! The sends a pause parked (`held_sends`, one row per `delivery.send` that met the paused flow,
+//! #589) are drained by the same rounds, [`LIFECYCLE_BATCH`] a round: each round deletes its rows
+//! and enqueues their jobs in the same transaction (`zirv_flow_store::release_held_sends`). The rows
+//! leave the table as they are taken, so the drain needs no cursor, and a round that took a full
+//! page enqueues the next.
+//!
 //! - `archive` exits every active, waiting, held and failed enrollment with reason
-//!   `flow_archived`.
-//! - `resume` runs every held enrollment again (see `zirv_flow_store::resume_batch`). It stops when
-//!   the flow is no longer published: a flow paused again holds its steps once more.
+//!   `flow_archived`, and queues the parked sends again: each finds the flow archived and ends
+//!   `skipped: flow_inactive`.
+//! - `resume` runs every held enrollment and queues every parked send again (see
+//!   `zirv_flow_store::resume_batch`); a queued send runs every gate again. It stops when the flow
+//!   is no longer published: a flow paused again holds its steps once more and its sends park
+//!   again.
 //! - `exit_version` exits the in-flight enrollments pinned to one older version with reason
 //!   `manual` (ruling 469cfc51).
 
 use serde_json::Value;
 use zirv_flow_store::{
     ExitBatch, FlowState, LIFECYCLE_BATCH, LIFECYCLE_JOB_KIND, LifecycleAction, LifecyclePayload,
-    enqueue, exit_batch, find_flow, resume_batch,
+    enqueue, exit_batch, find_flow, release_held_sends, resume_batch,
 };
 
 use crate::{JobContext, JobError, JobKind};
@@ -44,13 +53,13 @@ impl JobKind for FlowLifecycle {
         let Some(flow) = find_flow(&mut *conn, job.workspace, job.flow).await? else {
             return Ok(());
         };
-        let batch = match job.action {
+        let (batch, sends) = match job.action {
             LifecycleAction::Archive | LifecycleAction::ExitVersion { .. } => {
                 let (version, reason) = match job.action {
                     LifecycleAction::ExitVersion { version } => (Some(version), "manual"),
                     _ => (None, "flow_archived"),
                 };
-                exit_batch(
+                let batch = exit_batch(
                     conn,
                     &ExitBatch {
                         workspace: job.workspace,
@@ -63,13 +72,23 @@ impl JobKind for FlowLifecycle {
                     now,
                     LIFECYCLE_BATCH,
                 )
-                .await?
+                .await?;
+                // An archive queues the parked sends again, to end skipped (the flow is archived
+                // when they run); a bulk exit of one version leaves them parked.
+                let sends = if job.action == LifecycleAction::Archive {
+                    release_held_sends(conn, job.workspace, job.flow, LIFECYCLE_BATCH)
+                        .await?
+                        .released
+                } else {
+                    0
+                };
+                (batch, sends)
             }
             LifecycleAction::Resume => {
                 if flow.state != FlowState::Published {
                     return Ok(());
                 }
-                resume_batch(
+                let batch = resume_batch(
                     conn,
                     job.workspace,
                     job.flow,
@@ -77,16 +96,23 @@ impl JobKind for FlowLifecycle {
                     job.after,
                     LIFECYCLE_BATCH,
                 )
-                .await?
+                .await?;
+                // Read after the held enrollments are resumed, in the same transaction: a resume
+                // that finds the flow paused again returned above and leaves the sends parked.
+                let sends = release_held_sends(conn, job.workspace, job.flow, LIFECYCLE_BATCH)
+                    .await?
+                    .released;
+                (batch, sends)
             }
         };
         // A full page may leave more behind, whatever it changed: its rows may have been ended by
         // another transaction first, or been unresumable. The cursor moves past the page, so the
-        // next round never reads it again.
-        if batch.read >= LIFECYCLE_BATCH {
+        // next round never reads it again. The parked sends have no cursor: the rows a round took
+        // are gone, so a full page of them is the sign that more may be left.
+        if batch.read >= LIFECYCLE_BATCH || sends >= LIFECYCLE_BATCH {
             let next = LifecyclePayload {
                 round: job.round.saturating_add(1),
-                after: batch.last,
+                after: batch.last.or(job.after),
                 ..job
             };
             enqueue(&mut *conn, &next.job(&trace)).await?;
@@ -914,6 +940,106 @@ mod tests {
         assert_eq!(
             causes_of(&env, &failed.trace, "retried").await,
             by_operator()
+        );
+    }
+
+    /// Parks `count` pending sends of the flow: a message row each (the foreign key) and the row a
+    /// held send leaves. The payload is not a real send: the tests only count the jobs.
+    async fn park(env: &Env, flow: Uuid, count: i32) {
+        let person = env.person("held@example.com", json!({})).await;
+        sqlx::query(
+            "INSERT INTO messages (id, workspace_id, person_id, enrollment_id, flow_id, node_id, \
+                 template_id, destination_id, status) \
+             SELECT gen_random_uuid(), $1, $2, gen_random_uuid(), $3, 'mail', \
+                 gen_random_uuid(), gen_random_uuid(), 'pending' FROM generate_series(1, $4)",
+        )
+        .bind(env.ws.as_uuid())
+        .bind(person)
+        .bind(flow)
+        .bind(count)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO held_sends (message_id, workspace_id, flow_id, payload, max_attempts, \
+                 unique_key, trace_id, cause_kind, cause_id) \
+             SELECT id, workspace_id, flow_id, '{}'::jsonb, 5, 'held:' || id, \
+                 gen_random_uuid(), 'api', 'pause' FROM messages WHERE flow_id = $1",
+        )
+        .bind(flow)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    }
+
+    async fn count_of(env: &Env, sql: &'static str) -> i64 {
+        sqlx::query_scalar(sql).fetch_one(&env.pool).await.unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_resume_queues_the_parked_sends_in_rounds_and_a_flow_paused_again_keeps_them(
+        pool: PgPool,
+    ) {
+        let env = Env::new(pool).await;
+        let flow = env.flow("Wait", parked()).await;
+        let total = i32::try_from(LIFECYCLE_BATCH).unwrap() + 3;
+        env.pause(flow).await;
+        park(&env, flow, total).await;
+
+        // The resume is followed by a pause before its batch runs: the sends stay parked.
+        env.resume(flow).await;
+        env.pause(flow).await;
+        assert_eq!(lifecycle_jobs(&env).await, 1);
+        assert_eq!(
+            count_of(&env, "SELECT count(*) FROM held_sends").await,
+            i64::from(total)
+        );
+        assert_eq!(
+            count_of(
+                &env,
+                "SELECT count(*) FROM jobs WHERE kind = 'delivery.send'"
+            )
+            .await,
+            0
+        );
+
+        env.resume(flow).await;
+        assert_eq!(
+            lifecycle_jobs(&env).await,
+            2,
+            "a full page has a next round"
+        );
+        assert_eq!(count_of(&env, "SELECT count(*) FROM held_sends").await, 0);
+        assert_eq!(
+            count_of(
+                &env,
+                "SELECT count(*) FROM jobs WHERE kind = 'delivery.send'"
+            )
+            .await,
+            i64::from(total)
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_archive_queues_the_parked_sends_to_end_skipped(pool: PgPool) {
+        let env = Env::new(pool).await;
+        let flow = env.flow("Wait", parked()).await;
+        env.pause(flow).await;
+        park(&env, flow, 3).await;
+
+        env.archive(flow).await;
+        assert_eq!(lifecycle_jobs(&env).await, 1);
+
+        assert_eq!(count_of(&env, "SELECT count(*) FROM held_sends").await, 0);
+        assert_eq!(
+            count_of(
+                &env,
+                "SELECT count(*) FROM jobs WHERE kind = 'delivery.send'"
+            )
+            .await,
+            3
         );
     }
 }

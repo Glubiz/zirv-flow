@@ -469,6 +469,109 @@ pub async fn resume_batch(
     })
 }
 
+/// A `delivery.send` job a paused flow holds: what the job that carries the message on would have
+/// been enqueued with.
+#[derive(Clone, Debug)]
+pub struct HeldSend<'a> {
+    pub workspace: WorkspaceId,
+    pub flow: Uuid,
+    /// The message, whose `pending` row exists: the parked row goes with it on an erasure.
+    pub message: Uuid,
+    pub payload: &'a Value,
+    pub max_attempts: i32,
+    pub unique_key: &'a str,
+    pub trace: &'a TraceContext,
+}
+
+/// Parks a send in the caller's transaction, the job's own: the job that ends here and the row that
+/// replaces it commit together. A message parks once; a second park of it (a send released and
+/// held again) replaces the row.
+pub async fn park_send(
+    connection: &mut PgConnection,
+    held: &HeldSend<'_>,
+) -> Result<(), StoreError> {
+    sqlx::query(
+        "INSERT INTO held_sends (message_id, workspace_id, flow_id, payload, max_attempts, unique_key, \
+             trace_id, cause_kind, cause_id) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
+         ON CONFLICT (message_id) DO UPDATE SET \
+             flow_id = EXCLUDED.flow_id, payload = EXCLUDED.payload, \
+             max_attempts = EXCLUDED.max_attempts, unique_key = EXCLUDED.unique_key, \
+             trace_id = EXCLUDED.trace_id, cause_kind = EXCLUDED.cause_kind, \
+             cause_id = EXCLUDED.cause_id, held_at = now()",
+    )
+    .bind(held.message)
+    .bind(held.workspace.as_uuid())
+    .bind(held.flow)
+    .bind(held.payload)
+    .bind(held.max_attempts)
+    .bind(held.unique_key)
+    .bind(held.trace.trace_id.as_uuid())
+    .bind(held.trace.cause.kind.as_str())
+    .bind(&held.trace.cause.id)
+    .execute(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(())
+}
+
+/// What `release_held_sends` found.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ReleasedSends {
+    /// The parked sends it took: a full batch means there may be more.
+    pub released: usize,
+}
+
+/// Takes up to `limit` of a flow's parked sends, in message id order, and enqueues each one's
+/// `delivery.send` job to run now, in the caller's transaction: the rows are deleted and the jobs
+/// inserted together, so a send is parked or queued, never both and never neither. Every gate runs
+/// again when a released send runs. A row another batch holds is waited for, then found gone. There
+/// is no cursor: the rows taken are gone, so the next call starts after them.
+pub async fn release_held_sends(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    flow: Uuid,
+    limit: usize,
+) -> Result<ReleasedSends, StoreError> {
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    let mut rows: Vec<(Uuid, Value, i32, String, Uuid, String, String)> = sqlx::query_as(
+        "DELETE FROM held_sends WHERE message_id IN ( \
+             SELECT message_id FROM held_sends \
+             WHERE workspace_id = $1 AND flow_id = $2 \
+             ORDER BY message_id LIMIT $3 FOR UPDATE) \
+         RETURNING message_id, payload, max_attempts, unique_key, trace_id, cause_kind, cause_id",
+    )
+    .bind(workspace.as_uuid())
+    .bind(flow)
+    .bind(limit)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    rows.sort_by_key(|row| row.0);
+    let mut jobs = Vec::with_capacity(rows.len());
+    for (_, payload, max_attempts, unique_key, trace_id, cause_kind, cause_id) in &rows {
+        let Ok(kind) = cause_kind.parse::<CauseKind>() else {
+            return Err(StoreError::query(sqlx::Error::Decode(
+                "a held send names an unknown cause".into(),
+            )));
+        };
+        let trace = TraceContext {
+            trace_id: TraceId::from_uuid(*trace_id),
+            cause: Cause::from_stored(kind, cause_id.clone()),
+        };
+        let mut job = NewJob::new(super::send::SEND_JOB_KIND, trace);
+        job.workspace_id = Some(workspace);
+        job.payload = payload.clone();
+        job.max_attempts = *max_attempts;
+        job.unique_key = Some(unique_key.clone());
+        jobs.push(job);
+    }
+    enqueue_many(&mut *connection, &jobs).await?;
+    Ok(ReleasedSends {
+        released: rows.len(),
+    })
+}
+
 /// What an operator's retry or skip was refused for.
 #[derive(Debug)]
 pub enum ControlError {

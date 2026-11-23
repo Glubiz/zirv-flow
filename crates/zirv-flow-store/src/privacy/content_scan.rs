@@ -82,6 +82,10 @@ const BY_VALUE: &[(&str, &str)] = &[
         "no person column: DELETIONS drops the steps of the person's enrollments",
     ),
     (
+        "held_sends",
+        "no person column: the foreign key to messages drops the parked send with the message DELETIONS removes; the payload holds ids, never an address",
+    ),
+    (
         "jobs",
         "purge_jobs by person and enrollment id inside delete_person",
     ),

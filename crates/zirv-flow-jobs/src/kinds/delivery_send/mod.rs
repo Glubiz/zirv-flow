@@ -8,8 +8,13 @@
 //!
 //! The gates, in the order they run (the `gate` of each entry in `messages.gate_results`):
 //!
-//! 1. `enrollment`: the enrollment is not over and its flow is not paused or archived; otherwise
-//!    the message is dropped (a decision, no row).
+//! 1. `enrollment`: the enrollment is not over and its flow is not archived; otherwise the
+//!    message is dropped (a decision, no row; a message that has a row ends `skipped`). A flow
+//!    that is paused holds the message instead (#589): its row is `pending`, its continuation is
+//!    parked in `held_sends` in the job's transaction (the flow is read again `FOR KEY SHARE`, so
+//!    a resume waits for the hold to commit), and the resume of the flow queues it again in
+//!    batches, every gate running once more. An archive queues it again to end `skipped:
+//!    flow_inactive`. A `sending` message is never held: it keeps the unconfirmed ending.
 //! 2. `template`: the template is a live email template with a published version; otherwise
 //!    `failed: template_unavailable`.
 //! 3. `sender`: the version's sender identity is live and its domain verified; otherwise
@@ -72,15 +77,16 @@ use zirv_flow_core::consent::{Dimensions, SuppressionReason};
 use zirv_flow_core::decision_actions;
 use zirv_flow_core::{HmacKey, TraceContext};
 use zirv_flow_store::{
-    Admission, DELIVERY_UNCONFIRMED, Destination, FlowState, GateRecord, HARD_BOUNCE,
+    Admission, DELIVERY_UNCONFIRMED, Destination, FlowState, GateRecord, HARD_BOUNCE, HeldSend,
     MessageStatus, NewJob, NewMessage, NewSuppression, PgConnection, PgPool, SEND_JOB_KIND,
     SOFT_BOUNCE, SendOutcome, SubjectKind, WebhookPerson, WebhookSubject,
     add_organization_suppression, clear_message_in_flight, document_sender, find_destination,
     find_flow, find_message_links, find_template, find_template_version, find_trigger_event,
-    insert_message, lock_webhook_person, mark_message_sending, mark_message_unconfirmed,
-    message_address_hash, message_in_flight, message_status, message_unconfirmed,
-    read_template_field_catalog, read_webhook_subject, record_message_deferral,
-    record_message_links, record_send_outcome, release_message_slot, throttle_bucket,
+    flow_state_for_step, insert_message, lock_webhook_person, mark_message_sending,
+    mark_message_unconfirmed, message_address_hash, message_in_flight, message_status,
+    message_unconfirmed, park_send, read_template_field_catalog, read_webhook_subject,
+    record_message_deferral, record_message_links, record_send_outcome, release_message_slot,
+    throttle_bucket,
 };
 
 pub(crate) use payload::Queued;
@@ -276,7 +282,11 @@ async fn decide(
         return stopped(ctx, job, trail, resuming, "flow_inactive").await;
     };
     match flow.state {
-        FlowState::Paused => return stopped(ctx, job, trail, resuming, "flow_paused").await,
+        FlowState::Paused => match paused(ctx, job, payload, now).await? {
+            Paused::Held => return Ok(Step::Over),
+            Paused::Stopped(reason) => return stopped(ctx, job, trail, resuming, reason).await,
+            Paused::Go => {}
+        },
         FlowState::Archived => return stopped(ctx, job, trail, resuming, "flow_inactive").await,
         FlowState::Draft | FlowState::Published => {}
     }
@@ -647,6 +657,94 @@ pub(crate) async fn slow_down(
     }
 }
 
+/// What a send does at gate 1 when the unlocked read found its flow paused.
+enum Paused {
+    /// The message is held: this job is over and its continuation is parked.
+    Held,
+    /// The message is stopped here for this reason (`stopped`).
+    Stopped(&'static str),
+    /// The flow was resumed since the read: the send goes on through the gates.
+    Go,
+}
+
+/// The flow read paused: reads it again with `FOR KEY SHARE`, so a resume, which locks it `FOR
+/// UPDATE`, waits until this job's transaction commits and then finds the parked send. Still
+/// paused, the message is held: its row is `pending` (written now on a first run), the
+/// continuation a deferral would have queued is parked in the job's transaction, and the message
+/// log and a decision say why. A message that is `sending` is never held: an earlier call may
+/// have been accepted, so it keeps the path of `stopped`.
+async fn paused(
+    ctx: &mut JobContext<'_>,
+    job: &SendJob,
+    payload: &serde_json::Value,
+    now: OffsetDateTime,
+) -> Result<Paused, JobError> {
+    if message_status(ctx.conn(), job.workspace, job.message).await? == Some(MessageStatus::Sending)
+    {
+        return Ok(Paused::Stopped("flow_paused"));
+    }
+    match flow_state_for_step(ctx.conn(), job.workspace, job.flow).await? {
+        Some(FlowState::Paused) => {}
+        Some(FlowState::Draft | FlowState::Published) => return Ok(Paused::Go),
+        Some(FlowState::Archived) | None => return Ok(Paused::Stopped("flow_inactive")),
+    }
+    let pool = ctx
+        .pool()
+        .cloned()
+        .ok_or_else(|| JobError::new("the worker has no pool"))?;
+    start_message(&pool, job, now).await?;
+    record_message_deferral(
+        &pool,
+        job.workspace,
+        job.message,
+        "enrollment",
+        now,
+        Some("flow_paused"),
+        false,
+    )
+    .await?;
+    let next = continuation(ctx, job, payload, now, false);
+    park_send(
+        ctx.conn(),
+        &HeldSend {
+            workspace: job.workspace,
+            flow: job.flow,
+            message: job.message,
+            payload: &next.payload,
+            max_attempts: next.max_attempts,
+            unique_key: next.unique_key.as_deref().unwrap_or_default(),
+            trace: &next.trace,
+        },
+    )
+    .await?;
+    ctx.record_decision(
+        &decision_actions::MESSAGE_SEND_DEFERRED,
+        Some("flow_paused"),
+        decision_ids(job),
+    )
+    .await?;
+    Ok(Paused::Held)
+}
+
+/// The job that carries this send on after the run that holds it ends: the payload of a deferral
+/// (one more, the attempts so far, the rate clock started or cleared by `rate`), the budget of
+/// attempts that is left, and the next `:defer:N` key. It has no `run_at`.
+fn continuation(
+    ctx: &JobContext<'_>,
+    job: &SendJob,
+    payload: &serde_json::Value,
+    now: OffsetDateTime,
+    rate: bool,
+) -> NewJob {
+    let attempts = ctx.attempts();
+    let mut next = NewJob::new(SEND_JOB_KIND, ctx.trace().clone());
+    next.workspace_id = Some(job.workspace);
+    next.payload = job.deferred(payload, attempts, now, rate);
+    next.max_attempts = (ctx.max_attempts() - (attempts - 1)).max(1);
+    next.unique_key = Some(format!("{}:defer:{}", job.key, job.deferrals + 1));
+    next
+}
+
 /// Gate 1 stopped the message. On the first run nobody is waiting for it: it is dropped, and a
 /// decision says so (ids only) with no row, event or attempt. A later run finds the row the first
 /// one wrote, pending: that message ends as skipped, for the same reason, so no row stays pending.
@@ -767,7 +865,6 @@ async fn defer(
     wait: Wait,
     now: OffsetDateTime,
 ) -> Result<Step, JobError> {
-    let attempts = ctx.attempts();
     let (run_at, reason, rate) = match &wait {
         Wait::RateLimit(wait) => (now + *wait, "rate_limit", true),
         Wait::Gate(deferral) => (deferral.until, deferral.gate, false),
@@ -788,12 +885,8 @@ async fn defer(
         )
         .await?;
     }
-    let mut next = NewJob::new(SEND_JOB_KIND, ctx.trace().clone());
-    next.workspace_id = Some(job.workspace);
-    next.payload = job.deferred(payload, attempts, now, rate);
+    let mut next = continuation(ctx, job, payload, now, rate);
     next.run_at = Some(run_at);
-    next.max_attempts = (ctx.max_attempts() - (attempts - 1)).max(1);
-    next.unique_key = Some(format!("{}:defer:{}", job.key, job.deferrals + 1));
     ctx.enqueue(&next).await?;
     ctx.record_decision(
         &decision_actions::MESSAGE_SEND_DEFERRED,
@@ -951,7 +1044,7 @@ mod tests {
         ClaimedJob, Clock, ConsentChange, EnrollRequest, Enrolled, ManualClock, NewDestination,
         NewFlow, NewSuppression, NewTemplate, Occurrence, ProfileRecord,
         add_organization_suppression, add_suppression, create_destination, create_template,
-        end_orphaned_messages, lock_template, publish_template, set_consent,
+        end_orphaned_messages, lock_template, publish_template, release_held_sends, set_consent,
     };
 
     use super::*;
@@ -2562,11 +2655,30 @@ mod tests {
         .await;
     }
 
+    /// Sets the state of the flow the env queues for.
+    async fn set_flow_state(env: &Env, state: &str) {
+        sqlx::query(
+            "UPDATE flows SET state = $2, \n                 archived_at = CASE WHEN $2 = 'archived' THEN now() END WHERE id = $1",
+        )
+            .bind(env.flow)
+            .bind(state)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+    }
+
+    /// What a resume or an archive batch does to the parked sends: takes them and queues the jobs.
+    async fn release_parked(env: &Env) -> usize {
+        let mut connection = env.pool.acquire().await.unwrap();
+        release_held_sends(&mut connection, env.ws, env.flow, 500)
+            .await
+            .unwrap()
+            .released
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_send_for_an_ended_enrollment_or_a_paused_flow_is_dropped_with_a_decision_only(
-        pool: PgPool,
-    ) {
+    async fn a_send_for_an_ended_enrollment_is_dropped_with_a_decision_only(pool: PgPool) {
         zirv_flow_store::decision_testing::checked(pool, |pool| async move {
             let mut env = Env::new(pool, "one").await;
             env.render = Some(start_pool("serve", "").await);
@@ -2574,11 +2686,7 @@ mod tests {
             let person = env.person(PERSONAL_DATA.email).await;
             env.subscribe(person).await;
             env.queue(person, template, 5).await;
-            sqlx::query("UPDATE flows SET state = 'paused' WHERE id = $1")
-                .bind(env.flow)
-                .execute(&env.pool)
-                .await
-                .unwrap();
+            set_flow_state(&env, "archived").await;
 
             env.attempt().await.unwrap();
 
@@ -2594,9 +2702,179 @@ mod tests {
                 [(
                     "message.send".to_owned(),
                     "dropped".to_owned(),
+                    Some("flow_inactive".to_owned())
+                )]
+            );
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_first_run_on_a_paused_flow_is_held_and_sent_after_the_resume(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let mut env = Env::new(pool, "one").await;
+            env.render = Some(start_pool("serve", "").await);
+            let template = env.plain_template("transactional").await;
+            let person = env.person(PERSONAL_DATA.email).await;
+            env.subscribe(person).await;
+            let queued = env.queue(person, template, 5).await;
+            set_flow_state(&env, "paused").await;
+
+            env.attempt().await.unwrap();
+
+            assert_eq!(env.message(queued.message).await.status, "pending");
+            assert_eq!(env.count("SELECT count(*) FROM held_sends").await, 1);
+            assert_eq!(
+                env.count(
+                    "SELECT count(*) FROM jobs WHERE kind = 'delivery.send' AND state = 'ready'"
+                )
+                .await,
+                0
+            );
+            assert!(env.sent().is_empty());
+            assert_eq!(
+                env.decisions(&["message.send"]).await,
+                [(
+                    "message.send".to_owned(),
+                    "deferred".to_owned(),
                     Some("flow_paused".to_owned())
                 )]
             );
+            let log = env.message(queued.message).await.gate_results.to_string();
+            assert!(
+                log.contains("flow_paused") && log.contains("enrollment"),
+                "{log}"
+            );
+
+            set_flow_state(&env, "published").await;
+            assert_eq!(release_parked(&env).await, 1);
+            assert_eq!(env.count("SELECT count(*) FROM held_sends").await, 0);
+            env.attempt().await.unwrap();
+
+            assert_eq!(env.message(queued.message).await.status, "sent");
+            assert_eq!(env.sent().len(), 1);
+            assert_eq!(env.sent()[0].key, queued.message.to_string());
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_send_waiting_for_a_token_is_held_by_a_pause_and_sent_after_the_resume(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let mut env = Env::with(pool, "one", json!({"mode": "ok"}), 1, 1).await;
+            env.render = Some(start_pool("serve", "").await);
+            let template = env.plain_template("transactional").await;
+            let first = env.person("first@example.com").await;
+            let second = env.person("second@example.com").await;
+            assert_eq!(env.send(first, template).await.status, "sent");
+            let queued = env.queue(second, template, 5).await;
+            env.attempt().await.unwrap();
+            assert_eq!(env.message(queued.message).await.status, "pending");
+
+            // The flow is paused while the copy waits for its token.
+            set_flow_state(&env, "paused").await;
+            env.clock.advance(Span::seconds(5));
+            sqlx::query("UPDATE jobs SET run_at = now() WHERE kind = 'delivery.send'")
+                .execute(&env.pool)
+                .await
+                .unwrap();
+            env.attempt().await.unwrap();
+
+            let held = env.message(queued.message).await;
+            assert_eq!(held.status, "pending", "it is not skipped");
+            assert_eq!(env.count("SELECT count(*) FROM held_sends").await, 1);
+            assert_eq!(env.sent().len(), 1);
+            let parked: (Value, i32, String) =
+                sqlx::query_as("SELECT payload, max_attempts, unique_key FROM held_sends")
+                    .fetch_one(&env.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(parked.0["deferrals"], 2);
+            assert!(
+                parked.0["first_wait"].is_null(),
+                "the rate clock starts again"
+            );
+            assert_eq!(parked.1, 5);
+            assert!(parked.2.ends_with(":defer:2"), "{}", parked.2);
+
+            set_flow_state(&env, "published").await;
+            assert_eq!(release_parked(&env).await, 1);
+            env.attempt().await.unwrap();
+
+            assert_eq!(env.message(queued.message).await.status, "sent");
+            assert_eq!(env.sent().len(), 2);
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_held_send_of_an_archived_flow_ends_skipped_as_flow_inactive(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let mut env = Env::new(pool, "one").await;
+            env.render = Some(start_pool("serve", "").await);
+            let template = env.plain_template("transactional").await;
+            let person = env.person(PERSONAL_DATA.email).await;
+            env.subscribe(person).await;
+            let queued = env.queue(person, template, 5).await;
+            set_flow_state(&env, "paused").await;
+            env.attempt().await.unwrap();
+            assert_eq!(env.count("SELECT count(*) FROM held_sends").await, 1);
+
+            set_flow_state(&env, "archived").await;
+            assert_eq!(release_parked(&env).await, 1);
+            env.attempt().await.unwrap();
+
+            let message = env.message(queued.message).await;
+            assert_eq!(
+                (message.status.as_str(), message.reason.as_deref()),
+                ("skipped", Some("flow_inactive"))
+            );
+            assert!(env.sent().is_empty());
+            assert_eq!(env.count("SELECT count(*) FROM held_sends").await, 0);
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_released_send_that_meets_a_paused_flow_again_is_parked_again(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let mut env = Env::new(pool, "one").await;
+            env.render = Some(start_pool("serve", "").await);
+            let template = env.plain_template("transactional").await;
+            let person = env.person(PERSONAL_DATA.email).await;
+            env.subscribe(person).await;
+            let queued = env.queue(person, template, 5).await;
+            set_flow_state(&env, "paused").await;
+            env.attempt().await.unwrap();
+
+            // The resume released it, and the flow was paused again before it ran.
+            assert_eq!(release_parked(&env).await, 1);
+            env.attempt().await.unwrap();
+
+            assert_eq!(env.message(queued.message).await.status, "pending");
+            assert_eq!(env.count("SELECT count(*) FROM held_sends").await, 1);
+            assert_eq!(
+                env.count(
+                    "SELECT count(*) FROM jobs WHERE kind = 'delivery.send' AND state = 'ready'"
+                )
+                .await,
+                0
+            );
+            let key: String = sqlx::query_scalar("SELECT unique_key FROM held_sends")
+                .fetch_one(&env.pool)
+                .await
+                .unwrap();
+            assert!(key.ends_with(":defer:2"), "{key}");
+
+            set_flow_state(&env, "published").await;
+            assert_eq!(release_parked(&env).await, 1);
+            env.attempt().await.unwrap();
+            assert_eq!(env.message(queued.message).await.status, "sent");
+            assert_eq!(env.sent().len(), 1);
         })
         .await;
     }

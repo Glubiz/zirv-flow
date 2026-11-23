@@ -127,7 +127,7 @@ mod tests {
         ("MESSAGE_SEND_SENT", Test(SEND_PATH)),
         ("MESSAGE_SEND_SKIPPED", Test(SEND_PATH)),
         ("MESSAGE_SEND_FAILED", Test("message_send_retry_exhausted")),
-        ("MESSAGE_SEND_DROPPED", Test("a_send_for_an_ended_enrollment_or_a_paused_flow_is_dropped_with_a_decision_only")),
+        ("MESSAGE_SEND_DROPPED", Test("a_send_for_an_ended_enrollment_is_dropped_with_a_decision_only")),
         ("MESSAGE_SEND_DEFERRED", Test("a_send_that_finds_no_token_runs_again_when_the_bucket_will_hold_one")),
         ("MESSAGE_SEND_NOTED", Test("a_person_zone_overrides_the_workspace_zone_and_an_invalid_one_falls_back_and_says_so")),
         ("MESSAGE_FEEDBACK_DELIVERED", Test(SEND_PATH)),
