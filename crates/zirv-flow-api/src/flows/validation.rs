@@ -19,6 +19,8 @@ use zirv_flow_core::flow::{
 use zirv_flow_core::segment::{self, code as segment_code};
 use zirv_flow_segments::{Catalog, TraitStorage, compile};
 
+use crate::segments::{Sends, TemplateSend, TraitSend};
+
 /// The issue codes this module adds to the structural ones of `core::flow::code`.
 pub(crate) mod code {
     pub(crate) const UNKNOWN_SEGMENT: &str = "unknown_segment";
@@ -106,6 +108,8 @@ pub(crate) struct Checked {
     /// The root of every condition and event match that compiled, for the personal-value guard. One
     /// that did not compile is already an issue and never runs, so it is not judged.
     pub(crate) probe_roots: Vec<segment::Node>,
+    /// What the webhook and sync nodes send out, for the personal-data guard.
+    pub(crate) sends: Sends,
 }
 
 /// Validates the flow: the structure first, then the catalog and the rest.
@@ -119,6 +123,7 @@ pub(crate) fn check(
         issues: validate(graph, settings),
         reads: Reads::default(),
         probe_roots: Vec::new(),
+        sends: Sends::default(),
     };
     checker.nodes(graph);
     checker.settings(settings);
@@ -127,6 +132,7 @@ pub(crate) fn check(
         issues: checker.issues,
         reads: checker.reads.to_value(),
         probe_roots: checker.probe_roots,
+        sends: checker.sends,
     }
 }
 
@@ -172,6 +178,7 @@ struct Checker<'a> {
     issues: Vec<Issue>,
     reads: Reads,
     probe_roots: Vec<segment::Node>,
+    sends: Sends,
 }
 
 /// The flow code for a segment issue that names something the workspace does not have.
@@ -415,6 +422,10 @@ impl Checker<'_> {
         for (index, key) in trait_keys.iter().enumerate().take(MAX_SYNC_TRAIT_KEYS) {
             if self.environment.catalog.traits.contains_key(key) {
                 self.reads.add("traits", key.clone());
+                self.sends.traits.push(TraitSend {
+                    node: node.to_owned(),
+                    key: key.clone(),
+                });
             } else {
                 self.issue(
                     code::UNKNOWN_TRAIT,
@@ -427,6 +438,14 @@ impl Checker<'_> {
 
     fn webhook(&mut self, url: &str, trait_keys: &[String], template: Option<Uuid>, node: &str) {
         let id = Some(node);
+        if let Some(template) =
+            template.filter(|template| self.environment.webhook_templates.contains(template))
+        {
+            self.sends.templates.push(TemplateSend {
+                node: node.to_owned(),
+                template,
+            });
+        }
         if template.is_some_and(|template| !self.environment.webhook_templates.contains(&template))
         {
             self.issue(
@@ -441,6 +460,10 @@ impl Checker<'_> {
         for (index, key) in trait_keys.iter().enumerate().take(MAX_TRAIT_KEYS) {
             if self.environment.catalog.traits.contains_key(key) {
                 self.reads.add("traits", key.clone());
+                self.sends.traits.push(TraitSend {
+                    node: node.to_owned(),
+                    key: key.clone(),
+                });
             } else {
                 self.issue(
                     code::UNKNOWN_TRAIT,

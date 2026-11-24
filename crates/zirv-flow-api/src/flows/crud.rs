@@ -270,7 +270,8 @@ fn check_name(name: &str) -> Result<&str, ApiError> {
 
 /// Refuses a flow that probes personal values for a caller who may not see them: a condition or
 /// event match that orders, prefixes or aggregates a personal trait or event property, the same
-/// rule segments apply at save. Every condition the check compiled is judged; one that did not
+/// rule segments apply at save, or a webhook or sync node that would send a personal trait or a
+/// personal template field out (403 `pii_not_sendable`). Every condition the check compiled is judged; one that did not
 /// compile is already an issue.
 pub(super) async fn refuse_flow_probes(
     connection: &mut zirv_flow_store::PgConnection,
@@ -284,7 +285,8 @@ pub(super) async fn refuse_flow_probes(
         &checked.probe_roots,
         reveal,
     )
-    .await
+    .await?;
+    crate::segments::refuse_personal_sends(connection, workspace, &checked.sends, reveal).await
 }
 
 /// Reads the workspace facts the checks need on `connection` and checks the draft of `flow`.
@@ -736,7 +738,7 @@ pub(crate) async fn update(
     responses(
         (status = 200, description = "The issues; none means the draft can be published", body = ValidationBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
-        (status = 403, description = "A key without the write scope, a missing CSRF token, or a condition that orders, prefixes or aggregates a personal trait or event property for a caller without access to personal values (`pii_trait_not_searchable`, `pii_property_not_explorable`)", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "A key without the write scope, a missing CSRF token, or a condition that orders, prefixes or aggregates a personal trait or event property, or a webhook or sync node that would send personal data, for a caller without access to personal values (`pii_trait_not_searchable`, `pii_property_not_explorable`, `pii_not_sendable`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or flow, or no access", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))

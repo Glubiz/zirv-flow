@@ -5697,7 +5697,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow"
-version = "1.0.34"
+version = "1.0.36"
 dependencies = [
  "axum",
  "clap",
@@ -5732,7 +5732,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-ai"
-version = "1.0.34"
+version = "1.0.36"
 dependencies = [
  "axum",
  "hashbrown 0.17.1",
@@ -5749,7 +5749,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-api"
-version = "1.0.34"
+version = "1.0.36"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -5791,7 +5791,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-connectors"
-version = "1.0.34"
+version = "1.0.36"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -5830,7 +5830,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-core"
-version = "1.0.34"
+version = "1.0.36"
 dependencies = [
  "argon2",
  "base64 0.23.1",
@@ -5859,7 +5859,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-engine"
-version = "1.0.34"
+version = "1.0.36"
 dependencies = [
  "chrono",
  "proptest",
@@ -5872,7 +5872,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-identity"
-version = "1.0.34"
+version = "1.0.36"
 dependencies = [
  "axum",
  "chrono",
@@ -5888,7 +5888,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-jobs"
-version = "1.0.34"
+version = "1.0.36"
 dependencies = [
  "axum",
  "chrono",
@@ -5916,7 +5916,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-loadgen"
-version = "1.0.34"
+version = "1.0.36"
 dependencies = [
  "clap",
  "hashbrown 0.17.1",
@@ -5933,7 +5933,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-render"
-version = "1.0.34"
+version = "1.0.36"
 dependencies = [
  "metrics",
  "rlimit",
@@ -5946,7 +5946,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-renderbench"
-version = "1.0.34"
+version = "1.0.36"
 dependencies = [
  "clap",
  "serde_json",
@@ -5957,7 +5957,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-segments"
-version = "1.0.34"
+version = "1.0.36"
 dependencies = [
  "hashbrown 0.17.1",
  "proptest",
@@ -5969,7 +5969,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-store"
-version = "1.0.34"
+version = "1.0.36"
 dependencies = [
  "flate2",
  "futures-util",
@@ -5989,7 +5989,7 @@ dependencies = [
 
 [[package]]
 name = "zirv-flow-templates"
-version = "1.0.34"
+version = "1.0.36"
 dependencies = [
  "ammonia",
  "hashbrown 0.17.1",

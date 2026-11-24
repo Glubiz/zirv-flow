@@ -3425,6 +3425,8 @@ shows personal data; the grant does not confer editing or publishing rights.
 Admin-scoped API keys keep personal-data values; other keys need the additive
 `pii` scope as well as the scope for the operation.
 
+**Sending personal data (#593).** The grant also governs what a flow sends out, judged by the request principal at the same places as the probe guard (validate, the publish dry run and publish; not draft save). `refuse_personal_sends` refuses, for a caller without the grant, a webhook or sync node whose `trait_keys` names a personal trait and a webhook node whose template, as published, reads a personal trait, the reserved `person.email` or a personal event property as a merge field; the template fields are found by validating the document against a catalog with the personal fields removed. Publishing a webhook template with such a field is refused the same way in `publish_template`. The refusal is 403 `pii_not_sendable` and names the node and the field. Already-published versions keep running, the job path is not changed, and literal values in definitions are not masked (#866). An email template is not covered.
+
 **Key scopes (ruling 90506547).** The four existing scopes `ingest`, `read`,
 `write` and `admin` stay; no scope implies another. `write` means Editor-level
 draft operations, including validation, test mode and the API trigger. The new

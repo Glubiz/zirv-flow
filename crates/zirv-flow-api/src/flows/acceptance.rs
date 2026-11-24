@@ -876,7 +876,9 @@ mod tests {
                 ),
             ];
             for (label, graph, settings, code) in probes {
-                let id = f.create(label, graph, settings).await;
+                let id = f
+                    .create(&format!("{label} {}", Uuid::now_v7()), graph, settings)
+                    .await;
                 for (what, uri, auth) in [
                     ("validate", format!("/{id}/validate"), Auth::Key(&f.write)),
                     (
@@ -3901,6 +3903,526 @@ mod tests {
                     .await,
                 0
             );
+        })
+        .await;
+    }
+
+    /// What the send checks need: a personal trait `ssn`, an event `order` with a personal
+    /// `total` and a clear `sku`, a workspace that can sign, a destination that syncs profiles,
+    /// and callers with and without the grant.
+    struct Sending {
+        destination: Uuid,
+        /// Without the grant: a key and a publisher member.
+        refused: Vec<Caller>,
+        /// With the grant, by the same two means plus an admin and the instance owner.
+        granted: Vec<Caller>,
+    }
+
+    /// One way to call: a name, a session, or a key.
+    struct Caller {
+        name: &'static str,
+        login: Login,
+        key: Option<String>,
+    }
+
+    impl Caller {
+        fn auth(&self) -> Auth<'_> {
+            match &self.key {
+                Some(key) => Auth::Key(key),
+                None => Auth::Session(&self.login),
+            }
+        }
+    }
+
+    async fn sending_world(f: &Fixture, pool: &PgPool) -> Sending {
+        zirv_flow_store::create_trait_definition(
+            pool,
+            f.ws,
+            &NewTraitDefinition {
+                key: "ssn".into(),
+                trait_type: TraitType::String,
+                precedence: Precedence::Latest,
+                source_order: Vec::new(),
+                pii: true,
+                channel_address: false,
+                inferred: false,
+                description: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+        zirv_flow_store::create_event_schema(
+            pool,
+            f.ws,
+            &zirv_flow_store::NewEventSchema {
+                name: "order".into(),
+                mode: zirv_flow_core::events::EventMode::Warn,
+                description: String::new(),
+                properties: serde_json::from_value(json!([
+                    {"name": "total", "type": "number", "pii": true},
+                    {"name": "sku", "type": "string"}
+                ]))
+                .unwrap(),
+            },
+        )
+        .await
+        .unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        zirv_flow_store::publish_schema_draft(&mut connection, f.ws, "order", None)
+            .await
+            .unwrap();
+        drop(connection);
+        plant_signing_secret(f, pool).await;
+        let manifest: Value = serde_json::from_str(include_str!(
+            "../../../zirv-flow-connectors/tests/fixtures/providers/profile_sync.json"
+        ))
+        .unwrap();
+        let destination = Uuid::now_v7();
+        zirv_flow_store::create_destination(
+            pool,
+            f.ws,
+            &zirv_flow_store::NewDestination {
+                id: destination,
+                kind: "provider",
+                name: "Profiles",
+                config: &json!({"manifest": manifest}),
+                credential_id: None,
+                rate: 10,
+                burst: 10,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+        let publisher = |name: &'static str, email: &'static str, grant: bool| {
+            let pool = pool.clone();
+            let router = f.router.clone();
+            let ws = f.ws;
+            async move {
+                let user = admin::create_user(&pool, &Context::system(), email, PASSWORD)
+                    .await
+                    .unwrap();
+                admin::set_member_grant(
+                    &pool,
+                    &Context::system(),
+                    ws,
+                    user.id,
+                    Role::Publisher,
+                    Some(grant),
+                )
+                .await
+                .unwrap();
+                Caller {
+                    name,
+                    login: login_as(&router, email).await,
+                    key: None,
+                }
+            }
+        };
+        let key_caller = |name: &'static str, scopes: Vec<Scope>| {
+            let pool = pool.clone();
+            let ws = f.ws;
+            async move {
+                let key = admin::create_api_key(&pool, &Context::system(), ws, "flows", &scopes)
+                    .await
+                    .unwrap()
+                    .plaintext;
+                Caller {
+                    name,
+                    login: Login {
+                        cookie: String::new(),
+                        csrf: String::new(),
+                    },
+                    key: Some(key),
+                }
+            }
+        };
+        admin::create_owner(pool, &Context::system(), "owner@example.com", PASSWORD)
+            .await
+            .unwrap();
+        Sending {
+            destination,
+            refused: vec![
+                key_caller("publisher key", vec![Scope::Write, Scope::Publish]).await,
+                publisher("publisher member", "nogrant@example.com", false).await,
+            ],
+            granted: vec![
+                key_caller(
+                    "key with pii",
+                    vec![Scope::Write, Scope::Publish, Scope::Pii],
+                )
+                .await,
+                publisher("member with view_pii", "grant@example.com", true).await,
+                Caller {
+                    name: "admin",
+                    login: Login {
+                        cookie: f.lead.cookie.clone(),
+                        csrf: f.lead.csrf.clone(),
+                    },
+                    key: None,
+                },
+                Caller {
+                    name: "owner",
+                    login: login_as(&f.router, "owner@example.com").await,
+                    key: None,
+                },
+            ],
+        }
+    }
+
+    async fn plant_signing_secret(f: &Fixture, pool: &PgPool) {
+        sqlx::query(
+            "INSERT INTO encrypted_secrets \
+                (id, workspace_id, purpose, key_id, wrapped_key, nonce, ciphertext) \
+             VALUES ($1, $2, 'webhook_signing', 'k', '\\x00', decode(repeat('00', 24), 'hex'), \
+                '\\x00')",
+        )
+        .bind(Uuid::now_v7())
+        .bind(f.ws.as_uuid())
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// A published webhook template with `body`.
+    async fn webhook_template(pool: &PgPool, f: &Fixture, name: &str, body: &str) -> Uuid {
+        let template = Uuid::now_v7();
+        let mut connection = pool.acquire().await.unwrap();
+        zirv_flow_store::create_template(
+            &mut connection,
+            f.ws,
+            &zirv_flow_store::NewTemplate {
+                id: template,
+                name: name.to_owned(),
+                channel: "webhook".to_owned(),
+                category: "transactional".to_owned(),
+                document: json!({"schema": 1, "channel": "webhook", "mode": "code",
+                    "webhook": {"headers": {}, "body": body}}),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let locked = zirv_flow_store::lock_template(&mut connection, f.ws, template)
+            .await
+            .unwrap();
+        zirv_flow_store::publish_template(
+            &mut connection,
+            f.ws,
+            &locked,
+            &json!([]),
+            None,
+            None,
+            &zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("t")),
+        )
+        .await
+        .unwrap();
+        template
+    }
+
+    fn one_node(node: Value) -> Value {
+        json!({"v": 1, "nodes": [node, {"id": "end", "type": "exit"}],
+               "edges": [{"id": "e1", "from": "n", "port": "next", "to": "end"}]})
+    }
+
+    /// Every way a caller meets the guard: validate, the publish dry run and publish.
+    async fn is_refused_as_not_sendable(f: &Fixture, flow: &str, caller: &Caller) {
+        for (what, uri) in [
+            ("validate", format!("/{flow}/validate")),
+            ("dry run", format!("/{flow}/publish?dry_run=true")),
+            ("publish", format!("/{flow}/publish")),
+        ] {
+            let reply = f.call("POST", &f.flows(&uri), None, caller.auth()).await;
+            assert_eq!(
+                reply.status,
+                StatusCode::FORBIDDEN,
+                "{} {what}: {:?}",
+                caller.name,
+                reply.body
+            );
+            assert_eq!(
+                reply.body["code"], "pii_not_sendable",
+                "{} {what}",
+                caller.name
+            );
+        }
+    }
+
+    async fn publishes(f: &Fixture, flow: &str, caller: &Caller) -> Reply {
+        f.call(
+            "POST",
+            &f.flows(&format!("/{flow}/publish")),
+            None,
+            caller.auth(),
+        )
+        .await
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_webhook_or_sync_node_that_sends_a_personal_trait_is_refused_without_the_grant(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let f = fixture(&pool).await;
+            let world = sending_world(&f, &pool).await;
+            let webhook = |key: &str| {
+                one_node(json!({"id": "n", "type": "action.webhook",
+                    "url": "https://hooks.example.com/hook", "trait_keys": [key]}))
+            };
+            let sync = |key: &str| {
+                one_node(json!({"id": "n", "type": "action.sync",
+                    "destination": world.destination, "operation": "upsert",
+                    "trait_keys": [key]}))
+            };
+            for (label, personal, clear) in [
+                ("webhook", webhook("ssn"), webhook("plan")),
+                ("sync", sync("ssn"), sync("plan")),
+            ] {
+                for caller in &world.refused {
+                    let flow = f
+                        .create(
+                            &format!("{label} {}", Uuid::now_v7()),
+                            personal.clone(),
+                            manual(),
+                        )
+                        .await;
+                    is_refused_as_not_sendable(&f, &flow, caller).await;
+                    let state: String =
+                        sqlx::query_scalar("SELECT state FROM flows WHERE id::text = $1")
+                            .bind(&flow)
+                            .fetch_one(&pool)
+                            .await
+                            .unwrap();
+                    assert_eq!(state, "draft", "{label} {} stays a draft", caller.name);
+                    // A clear trait is sent by anyone who may publish.
+                    let flow = f
+                        .create(
+                            &format!("{label} {}", Uuid::now_v7()),
+                            clear.clone(),
+                            manual(),
+                        )
+                        .await;
+                    let reply = publishes(&f, &flow, caller).await;
+                    assert_eq!(
+                        reply.status,
+                        StatusCode::CREATED,
+                        "{label} {} clear: {:?}",
+                        caller.name,
+                        reply.body
+                    );
+                }
+                for caller in &world.granted {
+                    let flow = f
+                        .create(
+                            &format!("{label} {}", Uuid::now_v7()),
+                            personal.clone(),
+                            manual(),
+                        )
+                        .await;
+                    for uri in [
+                        format!("/{flow}/validate"),
+                        format!("/{flow}/publish?dry_run=true"),
+                    ] {
+                        let reply = f.call("POST", &f.flows(&uri), None, caller.auth()).await;
+                        assert_eq!(
+                            reply.status,
+                            StatusCode::OK,
+                            "{label} {} {uri}: {:?}",
+                            caller.name,
+                            reply.body
+                        );
+                        assert_eq!(reply.body["issues"], json!([]), "{label} {}", caller.name);
+                    }
+                    let reply = publishes(&f, &flow, caller).await;
+                    assert_eq!(
+                        reply.status,
+                        StatusCode::CREATED,
+                        "{label} {} publish: {:?}",
+                        caller.name,
+                        reply.body
+                    );
+                }
+            }
+            // The refusal names the node and the trait.
+            let flow = f.create("detail", webhook("ssn"), manual()).await;
+            let reply = f
+                .call(
+                    "POST",
+                    &f.flows(&format!("/{flow}/validate")),
+                    None,
+                    world.refused[0].auth(),
+                )
+                .await;
+            let detail = reply.body["detail"].as_str().unwrap();
+            assert!(detail.contains("`n`") && detail.contains("ssn"), "{detail}");
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_trait_flagged_personal_after_the_draft_was_saved_is_refused_at_publish(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let f = fixture(&pool).await;
+            plant_signing_secret(&f, &pool).await;
+            let flow = f
+                .create(
+                    "drift",
+                    one_node(json!({"id": "n", "type": "action.webhook",
+                        "url": "https://hooks.example.com/hook", "trait_keys": ["plan"]})),
+                    manual(),
+                )
+                .await;
+            let uri = f.flows(&format!("/{flow}/validate"));
+            let clear = f.call("POST", &uri, None, Auth::Key(&f.write)).await;
+            assert_eq!(clear.status, StatusCode::OK, "{:?}", clear.body);
+
+            sqlx::query("UPDATE trait_definitions SET pii = true WHERE key = 'plan'")
+                .execute(&pool)
+                .await
+                .unwrap();
+
+            let reply = f
+                .call(
+                    "POST",
+                    &f.flows(&format!("/{flow}/publish")),
+                    None,
+                    Auth::Key(&f.publish),
+                )
+                .await;
+            assert_eq!(reply.status, StatusCode::FORBIDDEN, "{:?}", reply.body);
+            assert_eq!(reply.body["code"], "pii_not_sendable");
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_webhook_template_with_a_personal_merge_field_is_refused_at_flow_publish_without_the_grant(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let f = fixture(&pool).await;
+            let world = sending_world(&f, &pool).await;
+            let node = |template: Uuid| {
+                one_node(json!({"id": "n", "type": "action.webhook",
+                    "url": "https://hooks.example.com/hook", "template": template}))
+            };
+            let clear = webhook_template(
+                &pool,
+                &f,
+                "clear",
+                r#"{"p": "{{ person.plan }}", "s": "{{ event.sku }}"}"#,
+            )
+            .await;
+            for (label, body) in [
+                ("personal trait", r#"{"x": "{{ person.ssn }}"}"#),
+                ("person email", r#"{"x": "{{ person.email }}"}"#),
+                ("personal event property", r#"{"x": "{{ event.total }}"}"#),
+            ] {
+                let template = webhook_template(&pool, &f, label, body).await;
+                for caller in &world.refused {
+                    let flow = f
+                        .create(
+                            &format!("{label} {}", Uuid::now_v7()),
+                            node(template),
+                            manual(),
+                        )
+                        .await;
+                    is_refused_as_not_sendable(&f, &flow, caller).await;
+                    let reply = f
+                        .call(
+                            "POST",
+                            &f.flows(&format!("/{flow}/validate")),
+                            None,
+                            caller.auth(),
+                        )
+                        .await;
+                    let detail = reply.body["detail"].as_str().unwrap();
+                    assert!(detail.contains("`n`"), "{label}: {detail}");
+                }
+                for caller in &world.granted {
+                    let flow = f
+                        .create(
+                            &format!("{label} {}", Uuid::now_v7()),
+                            node(template),
+                            manual(),
+                        )
+                        .await;
+                    let reply = publishes(&f, &flow, caller).await;
+                    assert_eq!(
+                        reply.status,
+                        StatusCode::CREATED,
+                        "{label} {}: {:?}",
+                        caller.name,
+                        reply.body
+                    );
+                }
+            }
+            for caller in &world.refused {
+                let flow = f
+                    .create(&format!("clear {}", Uuid::now_v7()), node(clear), manual())
+                    .await;
+                let reply = publishes(&f, &flow, caller).await;
+                assert_eq!(
+                    reply.status,
+                    StatusCode::CREATED,
+                    "clear fields {}: {:?}",
+                    caller.name,
+                    reply.body
+                );
+            }
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_version_already_published_with_a_personal_trait_keeps_running_for_a_caller_without_the_grant(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let f = fixture(&pool).await;
+            let world = sending_world(&f, &pool).await;
+            let flow = f
+                .create(
+                    "grandfathered",
+                    one_node(json!({"id": "n", "type": "action.webhook",
+                        "url": "https://hooks.example.com/hook", "trait_keys": ["ssn"]})),
+                    manual(),
+                )
+                .await;
+            let published = f.lead("POST", &format!("/{flow}/publish"), None).await;
+            assert_eq!(
+                published.status,
+                StatusCode::CREATED,
+                "{:?}",
+                published.body
+            );
+            let paused = f.lead("POST", &format!("/{flow}/pause"), None).await;
+            assert_eq!(paused.status, StatusCode::OK, "{:?}", paused.body);
+
+            // Resume adds no content, so it is not judged again.
+            let resumed = f
+                .call(
+                    "POST",
+                    &f.flows(&format!("/{flow}/resume")),
+                    None,
+                    world.refused[0].auth(),
+                )
+                .await;
+
+            assert_eq!(resumed.status, StatusCode::OK, "{:?}", resumed.body);
+            let state: String = sqlx::query_scalar("SELECT state FROM flows WHERE id::text = $1")
+                .bind(&flow)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(state, "published");
+            assert_eq!(f.count("SELECT count(*) FROM flow_versions").await, 1);
         })
         .await;
     }

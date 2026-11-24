@@ -3674,4 +3674,106 @@ mod tests {
         );
         assert_eq!(published.body["version"]["version"], 1);
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_webhook_template_with_a_personal_merge_field_is_not_published_by_a_caller_without_the_grant(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        zirv_flow_store::create_trait_definition(
+            &pool,
+            f.ws,
+            &NewTraitDefinition {
+                key: "ssn".into(),
+                trait_type: TraitType::String,
+                precedence: Precedence::Latest,
+                source_order: Vec::new(),
+                pii: true,
+                channel_address: false,
+                inferred: false,
+                description: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+        let with_pii = admin::create_api_key(
+            &pool,
+            &Context::system(),
+            f.ws,
+            "templates",
+            &[Scope::Publish, Scope::Pii],
+        )
+        .await
+        .unwrap()
+        .plaintext;
+        let personal = f
+            .create("Personal", webhook_doc(r#"{"x": "{{ person.ssn }}"}"#))
+            .await;
+        let email = f
+            .create(
+                "Email address",
+                webhook_doc(r#"{"x": "{{ person.email }}"}"#),
+            )
+            .await;
+        let clear = f
+            .create("Clear", webhook_doc(r#"{"x": "{{ person.plan }}"}"#))
+            .await;
+        let uri = |id: &str| f.templates(&format!("/{id}/publish"));
+
+        for id in [&personal, &email] {
+            let refused = f.call("POST", &uri(id), None, Auth::Key(&f.publish)).await;
+            assert_eq!(refused.status, StatusCode::FORBIDDEN, "{:?}", refused.body);
+            assert_eq!(refused.body["code"], "pii_not_sendable");
+        }
+        assert_eq!(f.versions_written().await, 0, "a refusal writes nothing");
+        let allowed = f
+            .call("POST", &uri(&clear), None, Auth::Key(&f.publish))
+            .await;
+        assert_eq!(allowed.status, StatusCode::CREATED, "{:?}", allowed.body);
+        // With the grant, by a key with the `pii` scope or as an admin, the same templates publish.
+        let by_key = f
+            .call("POST", &uri(&personal), None, Auth::Key(&with_pii))
+            .await;
+        assert_eq!(by_key.status, StatusCode::CREATED, "{:?}", by_key.body);
+        let by_admin = f.lead("POST", &format!("/{email}/publish"), None).await;
+        assert_eq!(by_admin.status, StatusCode::CREATED, "{:?}", by_admin.body);
+        assert_eq!(f.versions_written().await, 3);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_email_template_is_not_refused_for_a_personal_merge_field(pool: PgPool) {
+        let f = fixture(&pool).await;
+        zirv_flow_store::create_trait_definition(
+            &pool,
+            f.ws,
+            &NewTraitDefinition {
+                key: "ssn".into(),
+                trait_type: TraitType::String,
+                precedence: Precedence::Latest,
+                source_order: Vec::new(),
+                pii: true,
+                channel_address: false,
+                inferred: false,
+                description: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+        let id = f
+            .create("Mail", email_doc("Hi {{ person.ssn }}", "x"))
+            .await;
+
+        let reply = f
+            .call(
+                "POST",
+                &f.templates(&format!("/{id}/publish")),
+                None,
+                Auth::Key(&f.publish),
+            )
+            .await;
+
+        assert_eq!(reply.status, StatusCode::CREATED, "{:?}", reply.body);
+    }
 }
