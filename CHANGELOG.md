@@ -15,3 +15,15 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v1.0.36 (2026-11-24)
+
+### Fixes
+
+- judge a sync key on the anonymous_id identity as personal (#593)
+- judge a sync destination's external key for the personal-data grant (#593)
+- sending a personal trait or merge field needs the personal-data grant (#593)
+
+### Chores
+
+- one personal-field check per template publish (#593)
+
