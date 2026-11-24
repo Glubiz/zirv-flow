@@ -15,3 +15,20 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v1.0.37 (2026-11-24)
+
+### Fixes
+
+- lock the erased group's own records before its people (#554)
+- lock other records before the people, and rename erased tombstone keys (#554)
+- an erasure reaches every record that lists the value (#554)
+
+### Documentation
+
+- reflow the erase lock-order comment (#554)
+
+### Chores
+
+- drop the unused held argument of lock_matching_records (#554)
+- read the erased pairs from one CTE (#554)
+
