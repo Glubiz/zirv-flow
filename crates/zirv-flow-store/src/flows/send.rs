@@ -235,10 +235,12 @@ struct OpenMessage {
 
 /// The `messages` row that is open and has no live `delivery.send` job. A running job counts as
 /// live, even with an expired lease, until the reaper buries it, so the sweep never races a
-/// retry. The job is found by the message id in its payload, which a deferral copy carries.
+/// retry. The job is found by the message id in its payload, which a deferral copy carries. A
+/// send a paused flow holds (`held_sends`, #589) has no job until the resume, and is not open.
 const NO_LIVE_JOB: &str = "m.status IN ('pending', 'sending') AND NOT EXISTS ( \
     SELECT 1 FROM jobs j WHERE j.kind = 'delivery.send' AND j.state IN ('ready', 'running') \
-    AND j.payload ->> 'message_id' = m.id::text)";
+    AND j.payload ->> 'message_id' = m.id::text) \
+    AND NOT EXISTS (SELECT 1 FROM held_sends h WHERE h.message_id = m.id)";
 
 /// Ends the open messages whose `delivery.send` job is dead or gone, each with its event and
 /// decisions through [`record_send_outcome`]. The ending follows the row's marks
@@ -1154,6 +1156,35 @@ mod tests {
             assert_eq!(ended, [ids[0], ids[2]]);
             assert_eq!(sweep.next, None);
             assert!(rest.is_empty(), "the live job's message is never ended");
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_message_a_paused_flow_holds_is_not_ended_by_the_sweep(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let seeded = seeded(&pool).await;
+            let ws = seeded.0;
+            let ids = open_messages(&pool, seeded, 2).await;
+            sqlx::query(
+                "INSERT INTO held_sends (message_id, workspace_id, flow_id, payload, max_attempts, \
+                    unique_key, trace_id, cause_kind, cause_id) \
+                 VALUES ($1, $2, gen_random_uuid(), '{}', 5, 'held', gen_random_uuid(), 'api', 't')",
+            )
+            .bind(ids[0])
+            .bind(ws.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            let ended = end_orphaned_messages(&pool, OffsetDateTime::now_utc())
+                .await
+                .unwrap();
+
+            let ended: Vec<Uuid> = ended.iter().map(|e| e.message).collect();
+            assert_eq!(ended, [ids[1]], "the held message waits for the resume");
+            assert_eq!(stored(&pool, ws, ids[0]).await.status, "pending");
         })
         .await;
     }
