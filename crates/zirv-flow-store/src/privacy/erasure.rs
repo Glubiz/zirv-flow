@@ -319,8 +319,7 @@ pub async fn erase_person(
             // The other people's records that list a value of the group are locked here too,
             // before the people: an identify locks a record and then the people who own its
             // identities, so the erase must not hold a person and wait for a record.
-            let mut records =
-                lock_matching_records(connection, workspace, &known, &read, &[]).await?;
+            let mut records = lock_matching_records(connection, workspace, &known, &read).await?;
             let group = lock_group(connection, workspace, person).await?;
             let identities = match &group {
                 Some(group) => group_identities(connection, workspace, group.current).await?,
@@ -635,12 +634,11 @@ async fn lock_matching_records(
     workspace: WorkspaceId,
     group: &[Uuid],
     pairs: &[(String, String)],
-    held: &[Uuid],
 ) -> Result<Vec<Uuid>, StoreError> {
     if pairs.is_empty() {
         return Ok(Vec::new());
     }
-    let ids = matching_records(connection, workspace, group, pairs, held).await?;
+    let ids = matching_records(connection, workspace, group, pairs, &[]).await?;
     if ids.is_empty() {
         return Ok(ids);
     }
