@@ -53,6 +53,8 @@ Each enforced claim (E1 to E20) of the [compliance guide](compliance.md) maps to
 | E8 | A record keyed by the value is renamed; a record with no conflict is reached | `a_record_keyed_by_the_erased_value_is_renamed_and_a_record_without_a_conflict_is_reached` | `crates/zirv-flow-store/src/privacy/erasure.rs` |
 | E8 | A value skipped by the identity limit is removed from the other record | `a_value_skipped_by_the_identity_limit_is_removed_from_the_other_record_when_the_erased_person_acquired_it` | `crates/zirv-flow-store/src/privacy/erasure.rs` |
 | E8 | A conflict deleted with a released identity does not hide the value | `a_conflict_deleted_with_a_released_identity_does_not_hide_the_value_from_erasure` | `crates/zirv-flow-store/src/privacy/erasure.rs` |
+| E8 | An erase and an identify of a record listing the erased value do not deadlock | `an_erase_and_an_identify_of_a_record_listing_the_erased_value_do_not_deadlock` | `crates/zirv-flow-store/src/privacy/erasure.rs` |
+| E8 | A tombstone keyed by the erased value is renamed | `a_tombstone_keyed_by_the_erased_value_is_renamed` | `crates/zirv-flow-store/src/privacy/erasure.rs` |
 | E8 | An event conflict leaves no value | `an_event_conflict_leaves_no_value_for_erasure_to_find` | `crates/zirv-flow-store/src/privacy/content_scan.rs` |
 | E9 | Merged people are erased with the survivor | `erasing_a_person_with_every_data_class_leaves_only_the_ledger` | `crates/zirv-flow-store/src/privacy/erasure.rs` |
 | E9 | A backup before a merge is erased too | `replay_erases_every_id_the_group_had_when_a_backup_predates_the_merge` | `crates/zirv-flow-store/src/privacy/erasure.rs` |

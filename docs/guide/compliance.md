@@ -110,7 +110,8 @@ removes the person's identities, source records, events in all partitions, inges
 segment memberships, consent and its history, enrollments and their steps and waits, flow entries,
 messages, test-send entries, decision records, stored assistant transcripts and drafts, pending and dead
 forwarding payloads, pending exports and saved preview people. It also takes the person's identifier
-values off every live source record of other people in the workspace that lists them, whether or
+values off every source record of other people in the workspace that lists them (a tombstone
+keyed by a value is renamed too; the records are locked before the person, as an identify does), whether or
 not an identity conflict names it (such a record keeps its other identifiers and stays that
 person's). It then deletes the person. A failure
 rolls everything back and the request retries. What remains, by design and nothing else:
