@@ -129,6 +129,9 @@ pub(crate) struct PublishInput {
     note: Option<String>,
     /// The draft revision the caller reviewed.
     reviewed: Option<i32>,
+    /// Whether the caller may see personal values; a caller who may not cannot publish a webhook
+    /// template that reads them. A request starts without it and the handler sets it.
+    reveal: bool,
 }
 
 /// The note and reviewed revision of a publish request: an absent body or a blank note is no note,
@@ -154,10 +157,12 @@ fn input_of(body: &[u8]) -> Result<PublishInput, ApiError> {
         Some(note) if !note.is_empty() => Ok(PublishInput {
             note: Some(note),
             reviewed: revision,
+            reveal: false,
         }),
         _ => Ok(PublishInput {
             note: None,
             reviewed: revision,
+            reveal: false,
         }),
     }
 }
@@ -253,6 +258,11 @@ pub(crate) async fn publish_template(
             return Err(ApiError::template_draft_changed());
         }
         let doc = stored_document(&draft.document)?;
+        // A webhook template sends what it reads to a URL the flow names, so a caller without
+        // access to personal values cannot publish one that reads them.
+        if !input.reveal {
+            super::refuse_personal_document(&mut connection, workspace, &doc).await?;
+        }
         let (catalog, inputs) = publish_inputs(state, &mut connection, workspace, &doc).await?;
         (draft, catalog, inputs)
     };
@@ -374,7 +384,7 @@ pub(crate) async fn publish_template(
         (status = 201, description = "The template and its new version", body = TemplatePublishedBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 400, description = "The body is not valid JSON, or the note is longer than 500 characters (`errors` names `note`)", body = Problem, content_type = "application/problem+json"),
-        (status = 403, description = "Not a publisher, a key without the publish scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "Not a publisher, a key without the publish scope, a missing CSRF token, or a webhook template that reads personal data (a personal trait, `person.email` or a personal event property) for a caller without access to personal values (`pii_not_sendable`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or template, or no access", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "The template is archived (`code` is `template_archived`), or its draft was saved while it was being validated, or after the `revision` the caller reviewed (`template_draft_changed`)", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "The draft has blocking issues (`code` is `template_invalid`, with `template_issues`), no registered content type handles it (`template_content_unsupported`), or its sender is unknown, archived or on a domain that is not verified (`sender_unverified`)", body = Problem, content_type = "application/problem+json")
@@ -388,7 +398,8 @@ pub(crate) async fn publish(
     body: Bytes,
 ) -> Result<(StatusCode, Json<TemplatePublishedBody>), ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Publish).await?;
-    let input = input_of(&body)?;
+    let mut input = input_of(&body)?;
+    input.reveal = crate::auth::may_view_pii(&state, &principal, workspace.id).await;
     let render = state
         .render_pool()
         .ok_or_else(ApiError::render_unavailable)?;

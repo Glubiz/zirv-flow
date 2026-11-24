@@ -1,6 +1,6 @@
 //! The merge fields a template may use: the facts a publish validates the document against.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use sqlx::PgConnection;
 use sqlx::types::Json;
@@ -19,6 +19,9 @@ pub struct TemplateFieldCatalog {
     /// which event starts its flow, so the properties of all events are offered; when two events
     /// give one name different types, the event that sorts first by name decides.
     pub event_properties: BTreeMap<String, PropertyType>,
+    /// The events whose current schema declares each property name: what decides whether a
+    /// template that reads the property reads personal data, which is flagged per event.
+    pub event_property_events: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// Reads the field catalog on `connection`. Run it inside the transaction that uses the result,
@@ -43,8 +46,13 @@ pub async fn read_template_field_catalog(
     .fetch_all(connection)
     .await
     .map_err(StoreError::query)?;
-    for (_, Json(properties)) in schemas {
+    for (event, Json(properties)) in schemas {
         for property in properties {
+            catalog
+                .event_property_events
+                .entry(property.name.clone())
+                .or_default()
+                .insert(event.clone());
             catalog
                 .event_properties
                 .entry(property.name)

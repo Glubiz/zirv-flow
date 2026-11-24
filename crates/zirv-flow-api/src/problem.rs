@@ -330,6 +330,22 @@ impl ApiError {
         }
     }
 
+    /// A caller without access to personal values would send them out: a webhook or sync node that
+    /// names a personal trait, or a webhook template that reads a personal field. `node` is the
+    /// flow node, when there is one; `field` is the trait key or merge field.
+    pub(crate) fn pii_not_sendable(node: Option<&str>, field: &str) -> Self {
+        let place = node.map_or_else(String::new, |node| format!("node `{node}`: "));
+        Self {
+            code: Some("pii_not_sendable"),
+            ..Self::new(
+                StatusCode::FORBIDDEN,
+                format!(
+                    "{place}`{field}` is personal data, and only a caller with access to personal values can send it"
+                ),
+            )
+        }
+    }
+
     /// A caller without access to identifiers asked to search contacts by key prefix: the
     /// answer would list keys.
     pub(crate) fn contact_key_not_searchable() -> Self {
