@@ -1,33 +1,22 @@
 import { useState, type SyntheticEvent } from "react";
 import { useParams } from "react-router";
 
-import { ApiError, client, describeError, unwrap, unwrapEmpty, useResource, type ErrorSummary } from "../../api";
+import { ApiError, client, describeError, unwrap, unwrapEmpty, useResource, type components, type ErrorSummary } from "../../api";
 import { Button, Dialog, EmptyState, formatDate, InlineError, PageHeader, Panel, Pill, ResourceView, TextField } from "../../ui";
 import { useSignedInUser } from "../session";
 import { useWorkspaces } from "../workspaces";
+import { InviteDialog } from "./InviteDialog";
+import { ROLE_OPTIONS, roleFrom, roleLabel } from "./roles";
 import { accessFor, useMembers, type Member, type MemberRole } from "./useWorkspaceAccess";
+
+type Invitation = components["schemas"]["InvitationBody"];
 
 export function MembersPage() {
   const { ws = "" } = useParams();
   return <WorkspaceMembers key={ws} ws={ws} />;
 }
 
-const ROLE_OPTIONS = [
-  { value: "admin", label: "Admin", help: "Access, credentials, settings" },
-  { value: "publisher", label: "Publisher", help: "Publishes flows and templates" },
-  { value: "editor", label: "Editor", help: "Edits drafts, runs tests" },
-  { value: "viewer", label: "Viewer", help: "Reads only" },
-];
-
 const LAST_ADMIN = "A workspace needs an admin";
-
-function roleLabel(role: string): string {
-  return ROLE_OPTIONS.find((option) => option.value === role)?.label ?? role;
-}
-
-function roleFrom(value: string): MemberRole {
-  return value === "admin" || value === "publisher" || value === "viewer" ? value : "editor";
-}
 
 function RolesDisclosure() {
   return (
@@ -49,7 +38,14 @@ function WorkspaceMembers({ ws }: { ws: string }) {
   const user = useSignedInUser();
   const workspaces = useWorkspaces();
   const members = useMembers(ws);
+  const canList = members.status === "ready" && accessFor(members.data, user.id, user.is_owner).canAdmin;
+  const invitations = useResource(
+    async () => (canList ? unwrap(client.GET("/api/v1/workspaces/{ws}/invitations", { params: { path: { ws } } })) : []),
+    [ws, canList],
+  );
   const [adding, setAdding] = useState(false);
+  const [inviting, setInviting] = useState(false);
+  const [revoking, setRevoking] = useState<Invitation | null>(null);
   const [removing, setRemoving] = useState<Member | null>(null);
   const [demoting, setDemoting] = useState<{ member: Member; role: string } | null>(null);
   const [busyUser, setBusyUser] = useState<string | null>(null);
@@ -58,6 +54,7 @@ function WorkspaceMembers({ ws }: { ws: string }) {
   const name = workspaces.status === "ready" ? workspaces.data.find((item) => item.id === ws)?.name : undefined;
   const access = members.status === "ready" ? accessFor(members.data, user.id, user.is_owner) : null;
   const canAdmin = access?.canAdmin ?? false;
+  const pending = canAdmin && invitations.status === "ready" ? invitations.data : [];
   const adminCount = members.status === "ready" ? members.data.filter((member) => member.role === "admin").length : 0;
   // The instance owner may remove the last admin, as the server allows.
   const lastAdmin = (member: Member) => member.role === "admin" && adminCount <= 1 && !user.is_owner;
@@ -101,9 +98,12 @@ function WorkspaceMembers({ ws }: { ws: string }) {
         lede={name ? `People who can work in ${name}.` : "People who can work in this workspace."}
         actions={
           canAdmin ? (
-            <Button variant="primary" onClick={() => setAdding(true)}>
-              Add member
-            </Button>
+            <>
+              <Button variant="primary" onClick={() => setAdding(true)}>
+                Add member
+              </Button>
+              <Button onClick={() => setInviting(true)}>Invite</Button>
+            </>
           ) : null
         }
       />
@@ -113,7 +113,7 @@ function WorkspaceMembers({ ws }: { ws: string }) {
         <ResourceView
           resource={members}
           loadingLabel="Loading members"
-          isEmpty={(data) => data.length === 0}
+          isEmpty={(data) => data.length === 0 && pending.length === 0}
           empty={
             <EmptyState title="No members yet">
               {canAdmin ? "Add the first person to this workspace." : "Nobody has been added to this workspace."}
@@ -210,12 +210,45 @@ function WorkspaceMembers({ ws }: { ws: string }) {
                       ) : null}
                     </tr>
                   ))}
+                  {pending.map((invitation) => (
+                    <tr key={invitation.id}>
+                      <td className="strong members-email">{invitation.email}</td>
+                      <td className="members-role">
+                        {roleLabel(invitation.role)} <Pill>Pending</Pill>
+                      </td>
+                      <td className="members-pii" />
+                      <td className="members-added">{formatDate(invitation.created_at)}</td>
+                      <td className="num members-actions">
+                        <Button onClick={() => setRevoking(invitation)} aria-label={`Revoke invitation for ${invitation.email}`}>
+                          Revoke
+                        </Button>
+                      </td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </div>
           )}
         </ResourceView>
       </Panel>
+      {inviting ? (
+        <InviteDialog
+          workspaceId={ws}
+          onClose={() => setInviting(false)}
+          onCreated={() => invitations.reload()}
+        />
+      ) : null}
+      {revoking ? (
+        <RevokeInvitationDialog
+          workspaceId={ws}
+          invitation={revoking}
+          onClose={() => setRevoking(null)}
+          onRevoked={() => {
+            setRevoking(null);
+            invitations.reload();
+          }}
+        />
+      ) : null}
       {adding && members.status === "ready" ? (
         <AddMemberDialog
           workspaceId={ws}
@@ -410,6 +443,51 @@ function RemoveMemberDialog({ workspaceId, member, onClose, onRefused, onRemoved
         <Button onClick={onClose}>Keep member</Button>
         <Button variant="primary" onClick={() => void remove()} disabled={busy}>
           {busy ? "Removing" : `Remove ${member.email}`}
+        </Button>
+      </div>
+    </Dialog>
+  );
+}
+
+interface RevokeInvitationDialogProps {
+  workspaceId: string;
+  invitation: Invitation;
+  onClose: () => void;
+  onRevoked: () => void;
+}
+
+function RevokeInvitationDialog({ workspaceId, invitation, onClose, onRevoked }: RevokeInvitationDialogProps) {
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState<ErrorSummary | null>(null);
+
+  async function revoke() {
+    setBusy(true);
+    setFailure(null);
+    try {
+      await unwrapEmpty(
+        client.DELETE("/api/v1/workspaces/{ws}/invitations/{id}", {
+          params: { path: { ws: workspaceId, id: invitation.id } },
+        }),
+      );
+      onRevoked();
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) {
+        onRevoked();
+        return;
+      }
+      setFailure(describeError(error));
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog title={`Revoke the invitation for ${invitation.email}?`} onClose={onClose}>
+      <p className="muted">Their link stops working at once. You can invite them again later.</p>
+      {failure ? <InlineError {...failure} /> : null}
+      <div className="dialog-actions">
+        <Button onClick={onClose}>Keep invitation</Button>
+        <Button variant="primary" onClick={() => void revoke()} disabled={busy}>
+          {busy ? "Revoking" : "Revoke"}
         </Button>
       </div>
     </Dialog>

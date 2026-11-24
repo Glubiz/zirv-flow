@@ -104,6 +104,7 @@ const VALUE_FREE: &[(&[&str], &str)] = &[
             "oidc_logins",
             "api_keys",
             "memberships",
+            "invitations",
             "deployment_keys",
             "credentials",
             "workspace_credentials",

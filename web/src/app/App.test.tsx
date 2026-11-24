@@ -382,3 +382,30 @@ describe("expired session", () => {
     expect(await screen.findByRole("heading", { name: "Welcome back" })).toBeInTheDocument();
   });
 });
+
+describe("invitations", () => {
+  it("resumes the invitation kept before single sign-on when the home page opens", async () => {
+    window.sessionStorage.setItem("zf-invite", "tok-1");
+    mockApi({
+      "GET /api/v1/session": () => json(session(MEMBER)),
+      "GET /api/v1/workspaces": () => json([WORKSPACE]),
+      "GET /api/v1/session/methods": () => json({ local: false, oidc: true }),
+      "GET /api/v1/invitations/tok-1": () => json({ workspace_name: "Acme", role: "viewer", email_hint: "m***@example.test" }),
+    });
+    renderApp("/");
+
+    expect(await screen.findByRole("heading", { name: "Join Acme" })).toBeInTheDocument();
+    window.sessionStorage.clear();
+  });
+
+  it("opens the invitation page without a session, outside the protected routes", async () => {
+    mockApi({
+      "GET /api/v1/session": () => problem(401, "Unauthorized", "not signed in"),
+      "GET /api/v1/session/methods": () => json({ local: true, oidc: false }),
+      "GET /api/v1/invitations/tok-2": () => problem(404, "Not Found", "no such resource"),
+    });
+    renderApp("/invite/tok-2");
+
+    expect(await screen.findByText("This invitation is no longer valid")).toBeInTheDocument();
+  });
+});

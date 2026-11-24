@@ -10,6 +10,7 @@ import { DebuggerPage, EventSchemaPage, EventSettingsPage, EventsPage, ExplorerP
 import { HealthPage } from "../features/health";
 import { HomePage } from "../features/home";
 import { ImportPage, ImportsPage, NewImportPage } from "../features/imports";
+import { InvitePage, peekPendingInvite } from "../features/invitations";
 import { JobsPage } from "../features/jobs";
 import { ListDetailPage, ListsPage } from "../features/lists";
 import { FlowPage, FlowsPage, NewFlowPage } from "../features/flows";
@@ -119,6 +120,9 @@ function NotFound() {
 function WorkspaceLanding() {
   const current = useCurrentWorkspace();
   const workspaces = useWorkspaces();
+  // Single sign-on drops the return path, so an invitation that was waiting is picked up here.
+  const invite = peekPendingInvite();
+  if (invite) return <Navigate to={`/invite/${invite}`} replace />;
   if (workspaces.status === "loading") return <LoadingState label="Loading workspaces" />;
   if (workspaces.status === "error") return <ErrorState {...describeError(workspaces.error)} onRetry={workspaces.reload} />;
   return <Navigate to={current ? `/w/${current.id}` : "/w"} replace />;
@@ -131,6 +135,7 @@ export function AppRoutes() {
       <Routes>
         <Route path="/setup" element={<SetupPage />} />
         <Route path="/sign-in" element={<SignInRoute />} />
+        <Route path="/invite/:token" element={<InvitePage />} />
         <Route element={<Protected />}>
           <Route index element={<WorkspaceLanding />} />
           <Route path="w" element={<WorkspacesPage />} />

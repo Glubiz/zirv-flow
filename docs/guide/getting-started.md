@@ -65,6 +65,19 @@ The instance owner is an account flag, not a workspace role. An admin can grant
 `view_pii` to a publisher, editor or viewer. Editors and publishers need it for
 real-person previews and flow tests; owners and admins already have that access.
 
+**Invite people.** Open **Members** and choose **Invite**. Enter the person's email, pick a
+role and how long the link lasts (1, 7 or 30 days), and tick **Personal data** only if they
+need real values. Choose **Create invite**, copy the link and send it yourself: the server
+sends no mail, and the link is shown once. The person opens the link and either signs in with
+the account that has that email or, when the instance allows passwords, chooses **Create an
+account**. A pending invitation shows in the members table until it is accepted; choose
+**Revoke** to cancel it. An instance that signs in only through single sign-on, with
+automatic account creation off, cannot take in a new address this way: the owner creates the
+user first.
+
+**Common mistake:** opening the link signed in as a different account.
+**Fix:** sign out and open it again as the account the invitation was sent to.
+
 **Common mistake:** expecting an editor to publish a finished draft.
 **Fix:** have a publisher, admin or the owner review and publish it.
 

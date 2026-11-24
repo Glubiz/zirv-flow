@@ -11,6 +11,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 use uuid::Uuid;
+use zirv_flow_core::token::{random_token, sha256};
 use zirv_flow_core::{
     ApiKeyId, Cause, Email, HmacPurpose, HmacRoot, Keyring, Role, Scope, SecretBytes, SecretError,
     SecretId, SecretPurpose, Slug, TraceContext, UserId, ValidationError, WorkspaceId,
@@ -125,6 +126,8 @@ pub enum AdminError {
     /// An archive of a trait that live segments read; the problem carries the code
     /// `trait_referenced` and names the segments.
     TraitReferenced(Vec<String>),
+    /// An invitation that was refused; the problem carries the code of the [`InvitationRefusal`].
+    Invitation(InvitationRefusal),
 }
 
 impl fmt::Display for AdminError {
@@ -143,6 +146,7 @@ impl fmt::Display for AdminError {
             | Self::RetentionBounds(detail)
             | Self::SourceOrder(detail) => formatter.write_str(detail),
             Self::TraitReferenced(names) => write!(formatter, "read by {}", names.join(", ")),
+            Self::Invitation(refusal) => formatter.write_str(refusal.detail()),
         }
     }
 }
@@ -162,7 +166,8 @@ impl Error for AdminError {
             | Self::Utm { .. }
             | Self::RetentionBounds(_)
             | Self::SourceOrder(_)
-            | Self::TraitReferenced(_) => None,
+            | Self::TraitReferenced(_)
+            | Self::Invitation(_) => None,
         }
     }
 }
@@ -473,6 +478,288 @@ pub async fn remove_member(
     .await?;
     zirv_flow_store::commit(tx).await?;
     Ok(())
+}
+
+/// Why an invitation was refused. Each case has its own problem code; the messages never carry the
+/// address or the token.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InvitationRefusal {
+    /// The address already has a live invitation to this workspace (`invitation_pending`).
+    Pending,
+    /// The address already belongs to a member of the workspace (`already_member`).
+    AlreadyMember,
+    /// The signed-in user's address is not the invited one (`invitation_address_mismatch`).
+    AddressMismatch,
+    /// A password was sent for an address that already has an account (`account_exists`).
+    AccountExists,
+    /// A new account was asked for while local sign-in is off (`local_sign_in_disabled`).
+    LocalSignInDisabled,
+}
+
+impl InvitationRefusal {
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::Pending => "invitation_pending",
+            Self::AlreadyMember => "already_member",
+            Self::AddressMismatch => "invitation_address_mismatch",
+            Self::AccountExists => "account_exists",
+            Self::LocalSignInDisabled => "local_sign_in_disabled",
+        }
+    }
+
+    pub(crate) fn detail(self) -> &'static str {
+        match self {
+            Self::Pending => "this address already has a pending invitation to the workspace",
+            Self::AlreadyMember => "this address already belongs to a member of the workspace",
+            Self::AddressMismatch => "the signed-in account is not the one this invitation is for",
+            Self::AccountExists => "an account for this address exists; sign in to accept",
+            Self::LocalSignInDisabled => "this instance does not create accounts with a password",
+        }
+    }
+}
+
+/// The days an invitation may be valid for, and the default.
+pub(crate) const INVITATION_DAYS: [i32; 3] = [1, 7, 30];
+pub(crate) const INVITATION_DEFAULT_DAYS: i32 = 7;
+
+/// A new invitation. The token exists only here and in the response that creates it.
+pub struct CreatedInvitation {
+    pub invitation: zirv_flow_store::Invitation,
+    pub token: String,
+}
+
+impl fmt::Debug for CreatedInvitation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CreatedInvitation")
+            .field("id", &self.invitation.id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Invites an address into a workspace. The token is returned once; only its hash is stored. A
+/// workspace admin may invite up to admin, and an admin's personal-data grant is implied, so it is
+/// never stored for one.
+pub async fn create_invitation(
+    pool: &PgPool,
+    context: &Context,
+    workspace: WorkspaceId,
+    email: &str,
+    role: Role,
+    view_pii: bool,
+    expires_in_days: Option<i32>,
+) -> Result<CreatedInvitation, AdminError> {
+    let email = Email::parse(email)?;
+    let days = expires_in_days.unwrap_or(INVITATION_DEFAULT_DAYS);
+    if !INVITATION_DAYS.contains(&days) {
+        return Err(ValidationError::new("expires_in_days", "must be 1, 7 or 30").into());
+    }
+    let view_pii = view_pii && role != Role::Admin;
+    let token = random_token(32);
+    let invited_by = match context.actor.kind {
+        ActorKind::User => context.actor.id.map(UserId::from_uuid),
+        _ => None,
+    };
+
+    let mut tx = zirv_flow_store::begin(pool).await?;
+    if let Some(user) = zirv_flow_store::find_user_by_email(&mut *tx, &email).await?
+        && zirv_flow_store::find_membership(&mut *tx, workspace, user.id)
+            .await?
+            .is_some()
+    {
+        return Err(AdminError::Invitation(InvitationRefusal::AlreadyMember));
+    }
+    let invitation = zirv_flow_store::create_invitation(
+        &mut tx,
+        &zirv_flow_store::NewInvitation {
+            id: Uuid::now_v7(),
+            workspace,
+            email: email.as_str(),
+            role,
+            view_pii,
+            token_hash: &sha256(&token),
+            invited_by,
+            expires_in_days: days,
+        },
+    )
+    .await
+    .map_err(|error| {
+        if error.is_conflict() {
+            AdminError::Invitation(InvitationRefusal::Pending)
+        } else {
+            error.into()
+        }
+    })?;
+    audit(
+        &mut tx,
+        context,
+        Some(workspace),
+        "invitation.created",
+        Some(("invitation", invitation.id)),
+        json!({ "role": role.as_str(), "view_pii": view_pii, "expires_in_days": days }),
+    )
+    .await?;
+    zirv_flow_store::commit(tx).await?;
+    Ok(CreatedInvitation { invitation, token })
+}
+
+/// Revokes a pending invitation of this workspace.
+pub async fn revoke_invitation(
+    pool: &PgPool,
+    context: &Context,
+    workspace: WorkspaceId,
+    id: Uuid,
+) -> Result<(), AdminError> {
+    let mut tx = zirv_flow_store::begin(pool).await?;
+    if !zirv_flow_store::revoke_invitation(&mut tx, workspace, id).await? {
+        return Err(AdminError::NotFound("invitation"));
+    }
+    audit(
+        &mut tx,
+        context,
+        Some(workspace),
+        "invitation.revoked",
+        Some(("invitation", id)),
+        json!({}),
+    )
+    .await?;
+    zirv_flow_store::commit(tx).await?;
+    Ok(())
+}
+
+/// What accepting an invitation did.
+#[derive(Debug)]
+pub struct AcceptedInvitation {
+    pub workspace: WorkspaceId,
+    pub role: Role,
+    /// The account the acceptance created, when the invitee had none.
+    pub created: Option<User>,
+}
+
+/// Accepts an invitation as the signed-in `user`, or, with a `password` and no user, creates the
+/// account for the invited address and accepts as it. A dead token (unknown, revoked, expired or
+/// used) is one `NotFound`. Everything happens in one transaction under a lock on the invitation,
+/// so two accepts of one token give one membership.
+pub async fn accept_invitation(
+    pool: &PgPool,
+    context: &Context,
+    user: Option<&User>,
+    token: &str,
+    password: Option<&str>,
+    local_sign_in: bool,
+) -> Result<AcceptedInvitation, AdminError> {
+    let token_hash = sha256(token);
+    let new_hash = match (user, password) {
+        (None, Some(plain)) => {
+            if !local_sign_in {
+                return Err(AdminError::Invitation(
+                    InvitationRefusal::LocalSignInDisabled,
+                ));
+            }
+            password::validate(plain)?;
+            // A dead token costs no hashing.
+            let mut connection = zirv_flow_store::begin(pool).await?;
+            zirv_flow_store::find_live_invitation(&mut connection, &token_hash)
+                .await?
+                .ok_or(AdminError::NotFound("invitation"))?;
+            drop(connection);
+            Some(passwords::hash(plain.to_owned()).await)
+        }
+        _ => None,
+    };
+
+    let mut tx = zirv_flow_store::begin(pool).await?;
+    let invitation = zirv_flow_store::find_live_invitation_for_update(&mut tx, &token_hash)
+        .await?
+        .ok_or(AdminError::NotFound("invitation"))?;
+    let mut created = None;
+    let (member, context) = match (user, new_hash) {
+        (Some(user), _) => {
+            if user.email.to_lowercase() != invitation.email.to_lowercase() {
+                return Err(AdminError::Invitation(InvitationRefusal::AddressMismatch));
+            }
+            (user.id, context.clone())
+        }
+        (None, Some(hash)) => {
+            let email = Email::parse(&invitation.email)?;
+            if zirv_flow_store::find_user_by_email(&mut *tx, &email)
+                .await?
+                .is_some()
+            {
+                return Err(AdminError::Invitation(InvitationRefusal::AccountExists));
+            }
+            let new = zirv_flow_store::create_user(&mut *tx, &email, Some(&hash), false)
+                .await
+                .map_err(|error| {
+                    if error.is_conflict() {
+                        AdminError::Invitation(InvitationRefusal::AccountExists)
+                    } else {
+                        error.into()
+                    }
+                })?;
+            let acting = Context::user(new.id).with_request_id(context.request_id.clone());
+            audit(
+                &mut tx,
+                &acting,
+                None,
+                "user.created",
+                Some(("user", new.id.as_uuid())),
+                json!({ "owner": false, "via": "invitation" }),
+            )
+            .await?;
+            let id = new.id;
+            created = Some(new);
+            (id, acting)
+        }
+        (None, None) => return Err(AdminError::NotFound("invitation")),
+    };
+
+    zirv_flow_store::lock_memberships(&mut tx, invitation.workspace_id).await?;
+    if zirv_flow_store::find_membership(&mut *tx, invitation.workspace_id, member)
+        .await?
+        .is_some()
+    {
+        return Err(AdminError::Invitation(InvitationRefusal::AlreadyMember));
+    }
+    zirv_flow_store::set_membership(
+        &mut *tx,
+        invitation.workspace_id,
+        member,
+        invitation.role,
+        Some(invitation.view_pii),
+    )
+    .await?;
+    if !zirv_flow_store::mark_invitation_accepted(&mut tx, invitation.id, member).await? {
+        return Err(AdminError::NotFound("invitation"));
+    }
+    audit(
+        &mut tx,
+        &context,
+        Some(invitation.workspace_id),
+        "membership.set",
+        Some(("user", member.as_uuid())),
+        json!({ "role": invitation.role.as_str(), "view_pii": invitation.view_pii }),
+    )
+    .await?;
+    audit(
+        &mut tx,
+        &context,
+        Some(invitation.workspace_id),
+        "invitation.accepted",
+        Some(("invitation", invitation.id)),
+        json!({
+            "role": invitation.role.as_str(),
+            "view_pii": invitation.view_pii,
+            "account_created": created.is_some(),
+        }),
+    )
+    .await?;
+    zirv_flow_store::commit(tx).await?;
+    Ok(AcceptedInvitation {
+        workspace: invitation.workspace_id,
+        role: invitation.role,
+        created,
+    })
 }
 
 /// Creates an API key. Returns the plaintext once; only its hash is stored.

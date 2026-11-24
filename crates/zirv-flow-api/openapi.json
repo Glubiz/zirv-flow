@@ -1068,6 +1068,191 @@
         ]
       }
     },
+    "/api/v1/invitations/{token}": {
+      "get": {
+        "tags": [
+          "invitations"
+        ],
+        "summary": "What a link is for, so its page can name the workspace. Public: the token is the authority.",
+        "description": "A token that is unknown, revoked, expired or used answers one identical 404. Past a burst of 10\nrequests the two token routes share, they answer `429 rate_limited`.",
+        "operationId": "get_invitation",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "description": "The token of the invitation link",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The invitation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvitationLookupBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The link is not valid",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
+    "/api/v1/invitations/{token}/accept": {
+      "post": {
+        "tags": [
+          "invitations"
+        ],
+        "summary": "Accepts an invitation and makes the signed-in user a member with the invited role.",
+        "description": "The session's address must equal the invited one, ignoring case; otherwise\n`403 invitation_address_mismatch` and the invitation stays usable. With no session and a\n`password`, an address that has no account gets one, is signed in (the `zf_session` cookie is\nset) and accepts, all in one transaction; that needs local sign-in (`403\nlocal_sign_in_disabled` otherwise) and fails with `409 account_exists` for an address that\nalready has an account. A dead link is the same 404 as on lookup.",
+        "operationId": "accept_invitation",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "description": "The token of the invitation link",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AcceptInvitationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedInvitationBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body is empty or is not valid JSON",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "An API key, a missing CSRF token, `invitation_address_mismatch` or `local_sign_in_disabled`",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The link is not valid",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`already_member` or `account_exists`",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The content type is not application/json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The password is too short or too long",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {}
+        ]
+      }
+    },
     "/api/v1/oauth/callback": {
       "get": {
         "tags": [
@@ -14608,6 +14793,274 @@
           },
           "503": {
             "description": "The dry run ran past its time limit (`code` is `query_timeout`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/invitations": {
+      "get": {
+        "tags": [
+          "invitations"
+        ],
+        "summary": "The pending invitations of a workspace. Workspace admins and the owner only.",
+        "operationId": "list_invitations",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The pending invitations, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/InvitationBody"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, or a key without the admin scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "invitations"
+        ],
+        "summary": "Invites an address and returns the link, once. Workspace admins and the owner only.",
+        "description": "The server sends no mail: copy the `link` to the invitee. A workspace admin may invite up to\nthe admin role. The invitation is valid for `expires_in_days` (1, 7 or 30; default 7) and for\none use. An address with a live invitation is `409 invitation_pending`; one that already\nbelongs to a member is `409 already_member`.",
+        "operationId": "create_invitation",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateInvitationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The invitation, with its link",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedInvitationBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body is empty or is not valid JSON",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`invitation_pending` or `already_member`",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The content type is not application/json",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid email, role or expiry",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/invitations/{id}": {
+      "delete": {
+        "tags": [
+          "invitations"
+        ],
+        "summary": "Revokes a pending invitation. Its link stops working at once; the address may be invited again.",
+        "operationId": "revoke_invitation",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Invitation id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Revoked"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or pending invitation, or no access",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -30714,6 +31167,18 @@
   },
   "components": {
     "schemas": {
+      "AcceptInvitationRequest": {
+        "type": "object",
+        "properties": {
+          "password": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Only for someone with no session: creates the account for the invited address with this\npassword (12 to 1024 characters), signs it in and accepts. Ignored when a session is sent."
+          }
+        }
+      },
       "AcceptedBody": {
         "type": "object",
         "required": [
@@ -30800,6 +31265,23 @@
               "string",
               "null"
             ],
+            "format": "uuid"
+          }
+        }
+      },
+      "AcceptedInvitationBody": {
+        "type": "object",
+        "required": [
+          "workspace_id",
+          "role"
+        ],
+        "properties": {
+          "role": {
+            "type": "string",
+            "example": "viewer"
+          },
+          "workspace_id": {
+            "type": "string",
             "format": "uuid"
           }
         }
@@ -32886,6 +33368,38 @@
           }
         }
       },
+      "CreateInvitationRequest": {
+        "type": "object",
+        "required": [
+          "email",
+          "role"
+        ],
+        "properties": {
+          "email": {
+            "type": "string",
+            "example": "cy@acme.com"
+          },
+          "expires_in_days": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "1, 7 or 30; 7 when left out."
+          },
+          "role": {
+            "type": "string",
+            "description": "`admin`, `publisher`, `editor` or `viewer`."
+          },
+          "view_pii": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Grants the personal-values grant to a publisher, editor or viewer; ignored for an admin."
+          }
+        }
+      },
       "CreateListRequest": {
         "type": "object",
         "required": [
@@ -33354,6 +33868,41 @@
             }
           }
         ]
+      },
+      "CreatedInvitationBody": {
+        "type": "object",
+        "required": [
+          "id",
+          "email",
+          "role",
+          "view_pii",
+          "expires_at",
+          "link"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "link": {
+            "type": "string",
+            "description": "The link to send to the invitee. It is shown here once and never again."
+          },
+          "role": {
+            "type": "string",
+            "example": "viewer"
+          },
+          "view_pii": {
+            "type": "boolean"
+          }
+        }
       },
       "CreatedWebhookBody": {
         "allOf": [
@@ -38639,6 +39188,72 @@
             "type": "integer",
             "description": "The 1-based line of the file the row starts on, the header being line 1. Blank lines are\nskipped but counted, and a line break inside a quoted value counts as a line.",
             "minimum": 0
+          }
+        }
+      },
+      "InvitationBody": {
+        "type": "object",
+        "required": [
+          "id",
+          "email",
+          "role",
+          "view_pii",
+          "created_at",
+          "expires_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "email": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "invited_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The user who made the invitation, when they still exist."
+          },
+          "role": {
+            "type": "string",
+            "description": "`admin`, `publisher`, `editor` or `viewer`.",
+            "example": "viewer"
+          },
+          "view_pii": {
+            "type": "boolean",
+            "description": "Whether the member sees personal values unmasked. Always false for an admin, who sees them\nanyway."
+          }
+        }
+      },
+      "InvitationLookupBody": {
+        "type": "object",
+        "required": [
+          "workspace_name",
+          "role",
+          "email_hint"
+        ],
+        "properties": {
+          "email_hint": {
+            "type": "string",
+            "description": "The invited address with all but its first letter hidden, such as `c***@acme.com`."
+          },
+          "role": {
+            "type": "string",
+            "example": "viewer"
+          },
+          "workspace_name": {
+            "type": "string"
           }
         }
       },

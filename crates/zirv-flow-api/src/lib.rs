@@ -19,6 +19,7 @@ mod health;
 mod idempotency;
 mod imports;
 mod ingest;
+mod invitations;
 mod jobs_admin;
 mod json;
 mod keys;
@@ -178,6 +179,19 @@ fn routes() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{ws}",
             get(workspaces::get).patch(workspaces::update),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/invitations",
+            get(invitations::list).post(invitations::create),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/invitations/{id}",
+            delete(invitations::revoke),
+        )
+        .route("/api/v1/invitations/{token}", get(invitations::lookup))
+        .route(
+            "/api/v1/invitations/{token}/accept",
+            post(invitations::accept),
         )
         .route("/api/v1/workspaces/{ws}/members", get(members::list))
         .route(

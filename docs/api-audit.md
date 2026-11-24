@@ -187,6 +187,11 @@ The problem codes in use are listed in [the policy](api.md#problem-codes), and a
 | GET | `/api/v1/workspaces/{ws}/members` | `list_members` | not a creating POST | bounded collection | ok | strings G8: 1 | ok | no |
 | PUT | `/api/v1/workspaces/{ws}/members/{user_id}` | `set_member_role` | not a creating POST | n/a | ok | strings G8: 1 | ok | no |
 | DELETE | `/api/v1/workspaces/{ws}/members/{user_id}` | `remove_member` | not a creating POST | n/a | ok | ok | ok | no |
+| GET | `/api/v1/workspaces/{ws}/invitations` | `list_invitations` | not a creating POST | bounded collection | ok | ok | ok | no |
+| POST | `/api/v1/workspaces/{ws}/invitations` | `create_invitation` | guarded | n/a | ok | ok | ok | no |
+| DELETE | `/api/v1/workspaces/{ws}/invitations/{id}` | `revoke_invitation` | not a creating POST | n/a | ok | ok | ok | no |
+| GET | `/api/v1/invitations/{token}` | `get_invitation` | not a creating POST | n/a | ok | ok | ok | no |
+| POST | `/api/v1/invitations/{token}/accept` | `accept_invitation` | not a creating POST | n/a | ok | ok | ok | no |
 | POST | `/api/v1/workspaces/{ws}/people/search` | `search_people` | not a creating POST | n/a | generic (1) | strings G8: 1 | ok | no |
 | GET | `/api/v1/workspaces/{ws}/people/{id}` | `get_person` | not a creating POST | n/a | ok | strings G8: 3 | ok | no |
 | DELETE | `/api/v1/workspaces/{ws}/people/{id}` | `delete_person` | not a creating POST | n/a | ok | ok | ok | no |

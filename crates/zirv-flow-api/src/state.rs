@@ -99,6 +99,8 @@ pub struct AppState {
     pub(crate) tracking_limiter: Arc<RateLimiter>,
     /// The process-wide budget of audit rows for sign-in failures nobody can be blamed for.
     pub(crate) unattributed_audit: Arc<RateLimiter>,
+    /// The shared budget of the two public invitation-token routes, which no client address keys.
+    pub(crate) invitation_limiter: Arc<RateLimiter>,
     /// The API keys this process recently recorded as used.
     pub(crate) key_touches: Arc<KeyTouches>,
     /// The node counts of recently read flow versions, for a few seconds.
@@ -155,6 +157,7 @@ impl AppState {
             prefetch_user_agents: Vec::new(),
             tracking_limiter: Arc::new(crate::tracking::limiter()),
             unattributed_audit: Arc::new(crate::session::unattributed_audit_limiter()),
+            invitation_limiter: Arc::new(crate::invitations::limiter()),
             key_touches: Arc::default(),
             counts_cache: Arc::default(),
         }
