@@ -276,7 +276,7 @@ async fn publish_now(
         (status = 201, description = "The flow and its new version", body = PublishedBody),
         (status = 400, description = "dry_run is not true or false", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
-        (status = 403, description = "Not a publisher, a key without the publish scope, a missing CSRF token, or a condition that orders, prefixes or aggregates a personal trait or event property for a caller without access to personal values (`pii_trait_not_searchable`, `pii_property_not_explorable`)", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "Not a publisher, a key without the publish scope, a missing CSRF token, or a condition that orders, prefixes or aggregates a personal trait or event property, or a webhook or sync node that would send personal data, for a caller without access to personal values (`pii_trait_not_searchable`, `pii_property_not_explorable`, `pii_not_sendable`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or flow, or no access", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "The flow is archived (`code` is `flow_state`)", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "The draft has issues (`code` is `flow_invalid`, with `flow_issues`)", body = Problem, content_type = "application/problem+json")

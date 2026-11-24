@@ -19,6 +19,8 @@ use zirv_flow_core::flow::{
 use zirv_flow_core::segment::{self, code as segment_code};
 use zirv_flow_segments::{Catalog, TraitStorage, compile};
 
+use crate::segments::{Sends, TemplateSend, TraitSend};
+
 /// The issue codes this module adds to the structural ones of `core::flow::code`.
 pub(crate) mod code {
     pub(crate) const UNKNOWN_SEGMENT: &str = "unknown_segment";
@@ -77,6 +79,11 @@ pub(crate) struct SyncFacts {
     /// The destinations a sync node may name: of the workspace and not archived, with the profile
     /// operations their manifest declares. A destination of a type with none declares none.
     pub(crate) destinations: BTreeMap<Uuid, ProfileSupport>,
+    /// The key each operation of those destinations sends as the external key, named as the trait
+    /// key the personal-data guard judges: a `{trait}` key as itself, an
+    /// `{identity: email|phone|anonymous_id}` key as that name. An operation keyed on an
+    /// `external:<namespace>` identity has none.
+    pub(crate) keys: hashbrown::HashMap<(Uuid, SyncOperation), String>,
 }
 
 /// What the checks read from the workspace, all taken in one transaction.
@@ -106,6 +113,8 @@ pub(crate) struct Checked {
     /// The root of every condition and event match that compiled, for the personal-value guard. One
     /// that did not compile is already an issue and never runs, so it is not judged.
     pub(crate) probe_roots: Vec<segment::Node>,
+    /// What the webhook and sync nodes send out, for the personal-data guard.
+    pub(crate) sends: Sends,
 }
 
 /// Validates the flow: the structure first, then the catalog and the rest.
@@ -119,6 +128,7 @@ pub(crate) fn check(
         issues: validate(graph, settings),
         reads: Reads::default(),
         probe_roots: Vec::new(),
+        sends: Sends::default(),
     };
     checker.nodes(graph);
     checker.settings(settings);
@@ -127,6 +137,7 @@ pub(crate) fn check(
         issues: checker.issues,
         reads: checker.reads.to_value(),
         probe_roots: checker.probe_roots,
+        sends: checker.sends,
     }
 }
 
@@ -172,6 +183,7 @@ struct Checker<'a> {
     issues: Vec<Issue>,
     reads: Reads,
     probe_roots: Vec<segment::Node>,
+    sends: Sends,
 }
 
 /// The flow code for a segment issue that names something the workspace does not have.
@@ -412,9 +424,20 @@ impl Checker<'_> {
             }
             Some(_) => {}
         }
+        // The destination's `key_from` is sent whatever the node lists, so it is judged with them.
+        if let Some(key) = self.environment.sync.keys.get(&(destination, operation)) {
+            self.sends.traits.push(TraitSend {
+                node: node.to_owned(),
+                key: key.clone(),
+            });
+        }
         for (index, key) in trait_keys.iter().enumerate().take(MAX_SYNC_TRAIT_KEYS) {
             if self.environment.catalog.traits.contains_key(key) {
                 self.reads.add("traits", key.clone());
+                self.sends.traits.push(TraitSend {
+                    node: node.to_owned(),
+                    key: key.clone(),
+                });
             } else {
                 self.issue(
                     code::UNKNOWN_TRAIT,
@@ -427,13 +450,19 @@ impl Checker<'_> {
 
     fn webhook(&mut self, url: &str, trait_keys: &[String], template: Option<Uuid>, node: &str) {
         let id = Some(node);
-        if template.is_some_and(|template| !self.environment.webhook_templates.contains(&template))
-        {
-            self.issue(
-                code::WEBHOOK_TEMPLATE_UNUSABLE,
-                id,
-                Some("/template".to_owned()),
-            );
+        if let Some(template) = template {
+            if self.environment.webhook_templates.contains(&template) {
+                self.sends.templates.push(TemplateSend {
+                    node: node.to_owned(),
+                    template,
+                });
+            } else {
+                self.issue(
+                    code::WEBHOOK_TEMPLATE_UNUSABLE,
+                    id,
+                    Some("/template".to_owned()),
+                );
+            }
         }
         if let Some(refused) = self.refused(url) {
             self.issue(refused, id, Some("/url".to_owned()));
@@ -441,6 +470,10 @@ impl Checker<'_> {
         for (index, key) in trait_keys.iter().enumerate().take(MAX_TRAIT_KEYS) {
             if self.environment.catalog.traits.contains_key(key) {
                 self.reads.add("traits", key.clone());
+                self.sends.traits.push(TraitSend {
+                    node: node.to_owned(),
+                    key: key.clone(),
+                });
             } else {
                 self.issue(
                     code::UNKNOWN_TRAIT,
@@ -860,6 +893,7 @@ mod tests {
                         },
                     ),
                 ]),
+                ..SyncFacts::default()
             },
             ..Setup::default()
         };
@@ -900,6 +934,50 @@ mod tests {
         assert!(
             codes(&setup.check(node(destination, "upsert", json!(many)), manual()))
                 .contains(&"too_many_trait_keys s /trait_keys".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_sync_destination_key_is_sent_for_judging_with_the_node_trait_keys() {
+        let destination = Uuid::from_u128(50);
+        let setup = Setup {
+            sync: SyncFacts {
+                destinations: BTreeMap::from([(
+                    destination,
+                    ProfileSupport {
+                        upsert: true,
+                        remove: true,
+                        email: false,
+                    },
+                )]),
+                keys: [((destination, SyncOperation::Upsert), "email".to_owned())].into(),
+            },
+            ..Setup::default()
+        };
+        let node = |operation: &str| {
+            json!({"v": 1, "nodes": [
+                {"id": "s", "type": "action.sync", "destination": destination,
+                    "operation": operation, "trait_keys": ["plan"]},
+                {"id": "end", "type": "exit"}
+            ], "edges": [{"id": "e", "from": "s", "port": "next", "to": "end"}]})
+        };
+        let sent = |checked: Checked| -> Vec<String> {
+            checked
+                .sends
+                .traits
+                .into_iter()
+                .map(|send| send.key)
+                .collect()
+        };
+        assert_eq!(
+            sent(setup.check(node("upsert"), manual())),
+            ["email", "plan"]
+        );
+        // The remove operation has no key to judge here, so only the node's own keys are.
+        assert!(
+            sent(setup.check(node("remove"), manual()))
+                .iter()
+                .all(|key| key != "email")
         );
     }
 

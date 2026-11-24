@@ -46,6 +46,55 @@ pub(crate) async fn refuse_personal_probe_roots(
     roots.iter().try_for_each(|root| check(root, &clear))
 }
 
+/// A trait key a webhook or sync node sends out.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TraitSend {
+    pub(crate) node: String,
+    pub(crate) key: String,
+}
+
+/// A published webhook template a webhook node sends.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TemplateSend {
+    pub(crate) node: String,
+    pub(crate) template: uuid::Uuid,
+}
+
+/// What a flow check found that leaves the system, for the guard to judge.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Sends {
+    pub(crate) traits: Vec<TraitSend>,
+    pub(crate) templates: Vec<TemplateSend>,
+}
+
+/// Refuses a flow that would send personal values out for a caller who may not see them: a
+/// webhook or sync node whose `trait_keys` names a personal trait, or a webhook node whose
+/// published template reads a personal field. 403 `pii_not_sendable`. A caller who may see
+/// personal values (`reveal`) is never refused, and nothing is read for them.
+pub(crate) async fn refuse_personal_sends(
+    connection: &mut zirv_flow_store::PgConnection,
+    workspace: zirv_flow_core::WorkspaceId,
+    sends: &Sends,
+    reveal: bool,
+) -> Result<(), ApiError> {
+    if reveal || (sends.traits.is_empty() && sends.templates.is_empty()) {
+        return Ok(());
+    }
+    let clear = zirv_flow_store::explain_clear_fields(connection, workspace)
+        .await
+        .map_err(super::preview::read_error)?;
+    check_trait_sends(&sends.traits, &clear)?;
+    crate::templates::refuse_personal_templates(connection, workspace, &sends.templates, &clear)
+        .await
+}
+
+fn check_trait_sends(sends: &[TraitSend], clear: &ClearFields) -> Result<(), ApiError> {
+    match sends.iter().find(|send| clear.is_trait_pii(&send.key)) {
+        Some(send) => Err(ApiError::pii_not_sendable(Some(&send.node), &send.key)),
+        None => Ok(()),
+    }
+}
+
 fn check(node: &Node, clear: &ClearFields) -> Result<(), ApiError> {
     match node {
         Node::All(children) | Node::Any(children) => {
@@ -188,6 +237,23 @@ mod tests {
         let count = json!({"v": 1, "event": "order",
                            "agg": {"fn": "count", "op": "gte", "value": 1}});
         verdict(count, false).unwrap();
+    }
+
+    #[test]
+    fn a_personal_trait_key_is_not_sendable_and_a_clear_or_unknown_one_is_judged_by_the_registry() {
+        let send = |node: &str, key: &str| TraitSend {
+            node: node.to_owned(),
+            key: key.to_owned(),
+        };
+
+        check_trait_sends(&[send("a", "plan")], &clear()).unwrap();
+        let error =
+            check_trait_sends(&[send("a", "plan"), send("b", "ssn")], &clear()).unwrap_err();
+        assert_eq!(error.status(), StatusCode::FORBIDDEN);
+        assert_eq!(error.code(), Some("pii_not_sendable"));
+        assert!(error.detail().contains("`b`"), "{}", error.detail());
+        // A key the registry does not know counts as personal.
+        assert!(check_trait_sends(&[send("c", "nope")], &clear()).is_err());
     }
 
     #[test]

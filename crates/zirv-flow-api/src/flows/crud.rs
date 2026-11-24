@@ -13,9 +13,12 @@ use utoipa::ToSchema;
 use utoipa::openapi::schema::{ArrayBuilder, ObjectBuilder, SchemaType, Type};
 use utoipa::openapi::{Ref, RefOr, Schema};
 use uuid::Uuid;
-use zirv_flow_connectors::destinations::{Registry, provider_profile_support};
+use zirv_flow_connectors::destinations::{
+    Registry, provider_profile_key_source, provider_profile_support,
+};
+use zirv_flow_connectors::manifest::KeySource;
 use zirv_flow_core::consent::Channel;
-use zirv_flow_core::flow::{FlowGraph, FlowSettings, MAX_NODES, NodeKind};
+use zirv_flow_core::flow::{FlowGraph, FlowSettings, MAX_NODES, NodeKind, SyncOperation};
 use zirv_flow_core::{ValidationError, WorkspaceId};
 use zirv_flow_store::{
     Destination, Flow, FlowPatch, FlowState, FlowVersion, NewFlow, Template, Warmup, WarmupCounts,
@@ -270,8 +273,9 @@ fn check_name(name: &str) -> Result<&str, ApiError> {
 
 /// Refuses a flow that probes personal values for a caller who may not see them: a condition or
 /// event match that orders, prefixes or aggregates a personal trait or event property, the same
-/// rule segments apply at save. Every condition the check compiled is judged; one that did not
-/// compile is already an issue.
+/// rule segments apply at save, or a webhook or sync node that would send a personal trait or a
+/// personal template field out (403 `pii_not_sendable`). Every condition the check compiled is
+/// judged; one that did not compile is already an issue.
 pub(super) async fn refuse_flow_probes(
     connection: &mut zirv_flow_store::PgConnection,
     workspace: zirv_flow_core::WorkspaceId,
@@ -284,7 +288,8 @@ pub(super) async fn refuse_flow_probes(
         &checked.probe_roots,
         reveal,
     )
-    .await
+    .await?;
+    crate::segments::refuse_personal_sends(connection, workspace, &checked.sends, reveal).await
 }
 
 /// Reads the workspace facts the checks need on `connection` and checks the draft of `flow`.
@@ -397,9 +402,31 @@ fn sync_facts(destinations: &BTreeMap<Uuid, Destination>, graph: &FlowGraph) -> 
             facts
                 .destinations
                 .insert(*destination, provider_profile_support(&found.config));
+            for operation in [SyncOperation::Upsert, SyncOperation::Remove] {
+                let key = provider_profile_key_source(&found.config, operation)
+                    .and_then(|source| judged_key(&source));
+                if let Some(key) = key {
+                    facts.keys.insert((*destination, operation), key);
+                }
+            }
         }
     }
     facts
+}
+
+/// The trait key the personal-data guard judges for an external key source: a trait as itself,
+/// the `email`, `phone` and `anonymous_id` identities as those names (clear once an Admin declares
+/// a clear trait of that name), and nothing for an `external:<namespace>` identity.
+fn judged_key(source: &KeySource) -> Option<String> {
+    match source {
+        KeySource::Trait(key) => Some(key.clone()),
+        KeySource::Identity(kind)
+            if matches!(kind.as_str(), "email" | "phone" | "anonymous_id") =>
+        {
+            Some(kind.clone())
+        }
+        KeySource::Identity(_) => None,
+    }
 }
 
 /// The templates `graph` names that a webhook node may send: of the workspace, not archived, of the
@@ -736,7 +763,7 @@ pub(crate) async fn update(
     responses(
         (status = 200, description = "The issues; none means the draft can be published", body = ValidationBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
-        (status = 403, description = "A key without the write scope, a missing CSRF token, or a condition that orders, prefixes or aggregates a personal trait or event property for a caller without access to personal values (`pii_trait_not_searchable`, `pii_property_not_explorable`)", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "A key without the write scope, a missing CSRF token, or a condition that orders, prefixes or aggregates a personal trait or event property, or a webhook or sync node that would send personal data, for a caller without access to personal values (`pii_trait_not_searchable`, `pii_property_not_explorable`, `pii_not_sendable`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or flow, or no access", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
@@ -828,6 +855,28 @@ pub(crate) async fn version(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sync_key_is_judged_as_the_trait_it_sends() {
+        let judged = |source| judged_key(&source);
+        assert_eq!(
+            judged(KeySource::Trait("ssn".into())).as_deref(),
+            Some("ssn")
+        );
+        assert_eq!(
+            judged(KeySource::Identity("email".into())).as_deref(),
+            Some("email")
+        );
+        assert_eq!(
+            judged(KeySource::Identity("phone".into())).as_deref(),
+            Some("phone")
+        );
+        assert_eq!(
+            judged(KeySource::Identity("anonymous_id".into())).as_deref(),
+            Some("anonymous_id")
+        );
+        assert_eq!(judged(KeySource::Identity("external:crm".into())), None);
+    }
 
     #[test]
     fn a_name_is_trimmed_and_bounded_to_100_characters() {

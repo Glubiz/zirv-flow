@@ -40,7 +40,7 @@ candidate. CI cannot accept a risk on the operator's behalf.
 | AI provider | Receives the permitted request context and returns arbitrary output. Provider selection and personal-data opt-in are administrative choices. |
 | Model output | Has no independent authority. It is input to a fixed tool and deterministic validators, even when it is structurally valid. |
 
-The personal-data grant governs reading personal values through the API and the UI. A published flow reads and sends personal values on the server by design: branch conditions, webhook trait keys and message content. Publishing is trusted with them, and whether publishing should need the grant is open in [#593](https://github.com/Glubiz/zirv-flow/issues/593).
+The personal-data grant governs reading personal values through the API and the UI. A published flow reads personal values on the server by design (branch conditions) and sends message content to the person it describes. What it sends elsewhere is held to the grant: a caller without it cannot validate or publish a flow whose webhook or sync node sends a personal trait, or whose webhook template reads a personal merge field, and cannot publish such a webhook template (403 `pii_not_sendable`). Versions published before the rule keep running, and a value an author typed into a rule or condition is author input and is not masked ([#866](https://github.com/Glubiz/zirv-flow/issues/866)).
 
 The role hierarchy is [`crates/zirv-flow-core/src/role.rs:43`](../crates/zirv-flow-core/src/role.rs#L43), `allows`. Workspace and key
 checks are [`crates/zirv-flow-api/src/auth.rs:259`](../crates/zirv-flow-api/src/auth.rs#L259), `authorize`; personal-data grants are

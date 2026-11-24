@@ -19512,7 +19512,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not a publisher, a key without the publish scope, a missing CSRF token, or a condition that orders, prefixes or aggregates a personal trait or event property for a caller without access to personal values (`pii_trait_not_searchable`, `pii_property_not_explorable`) */
+            /** @description Not a publisher, a key without the publish scope, a missing CSRF token, or a condition that orders, prefixes or aggregates a personal trait or event property, or a webhook or sync node that would send personal data, for a caller without access to personal values (`pii_trait_not_searchable`, `pii_property_not_explorable`, `pii_not_sendable`) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -19836,7 +19836,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description A key without the write scope, a missing CSRF token, or a condition that orders, prefixes or aggregates a personal trait or event property for a caller without access to personal values (`pii_trait_not_searchable`, `pii_property_not_explorable`) */
+            /** @description A key without the write scope, a missing CSRF token, or a condition that orders, prefixes or aggregates a personal trait or event property, or a webhook or sync node that would send personal data, for a caller without access to personal values (`pii_trait_not_searchable`, `pii_property_not_explorable`, `pii_not_sendable`) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -29622,7 +29622,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not a publisher, a key without the publish scope, or a missing CSRF token */
+            /** @description Not a publisher, a key without the publish scope, a missing CSRF token, or a webhook template that reads personal data (a personal trait, `person.email` or a personal event property) for a caller without access to personal values (`pii_not_sendable`) */
             403: {
                 headers: {
                     [name: string]: unknown;

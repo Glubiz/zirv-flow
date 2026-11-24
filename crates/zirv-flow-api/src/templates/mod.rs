@@ -12,6 +12,7 @@
 pub(crate) mod crud;
 pub(crate) mod dependents;
 pub(crate) mod inputs;
+mod personal;
 pub(crate) mod preview;
 pub(crate) mod preview_people;
 pub(crate) mod publish;
@@ -23,6 +24,8 @@ use zirv_flow_templates::{
     BlocksError, Category, Channel, EmailContent, FieldCatalog, Issue, Mode, Severity,
     TemplateDocument, WebhookContent, parse_template_document,
 };
+
+pub(crate) use personal::{refuse_personal_document, refuse_personal_templates};
 
 use crate::AppState;
 use crate::auth::{Need, Principal, authorize, may_view_pii};
