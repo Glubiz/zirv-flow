@@ -3546,10 +3546,13 @@ the identity limit skipped. Before the delete, the erase scans the workspace's l
 `identity_conflicts` row names it. It keeps the row, and renames a record keyed by one of the
 values to `erased:<record id>`; a tombstone has no identifiers but keeps its key, so it is
 renamed too. The scan is O(records of the workspace) and takes row locks only on the records it
-changes. Those records are locked before the group's people, in id order, inside the same
-scan-then-lock savepoint retry as the inbox rows, because an identify locks a ledger row before
-the people who own its identities: a record that began to match after the people were locked is
-locked with `NOWAIT`, and one held by someone else undoes the attempt and reads again. Event conflicts store no identifier, so they leave nothing to find.
+changes. The erase takes its locks in the order an identify does, ledger rows before people: the
+call lock, the inbox rows, the group's own source records (found through the `person_id` index,
+tombstones included) together with the matching records of other people in one id-ordered
+`FOR UPDATE`, then the people, then, with `NOWAIT`, any such record that appeared since. This runs
+inside the same scan-then-lock savepoint retry as the inbox rows, and a record held by someone
+else undoes the attempt and reads again. The group's own records are locked early because an
+identify locks a record and then its person, and `delete_person` deletes those records. Event conflicts store no identifier, so they leave nothing to find.
 
 **Ledger outside the database (OQ-13, ruling cae7a407).** `privacy.ledger_dir`
 names the directory holding one JSON file per completed erasure entry.

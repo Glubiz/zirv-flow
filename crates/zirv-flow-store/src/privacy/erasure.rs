@@ -225,9 +225,11 @@ pub enum EraseOutcome {
 }
 
 /// Carries an erasure request out, in the caller's transaction. After the shared segment guard,
-/// it locks the pending inbox rows it will delete, then the other people's source records that
-/// list a value of the group ([`lock_matching_records`]), then the group's people: the order a
-/// drain and an identify use (ledger rows before people; see [`lock_scanned`]). An identity insert
+/// takes the locks in the order a drain and an identify use (ledger rows before people; see
+/// [`lock_scanned`]): the call lock, the pending inbox rows it will delete, the group's own
+/// source records and the other people's records that list a value of the group
+/// ([`lock_matching_records`], one id-ordered statement), the group's people, and last, with
+/// `NOWAIT`, any such record that appeared since ([`lock_late_records`]). An identity insert
 /// takes a key-share lock on its person, so a concurrent attach waits for this transaction and
 /// then fails on the foreign key. Then:
 ///
@@ -279,8 +281,9 @@ pub async fn erase_person(
         return Ok(EraseOutcome::AlreadyCompleted);
     }
 
-    // Lock in the drain's order: the pending inbox rows, then the matching records of other
-    // people, then the people. An identity insert takes
+    // Lock in the drain's order: the call lock, the pending inbox rows, the group's own records
+    // and the matching records of other people, the people, then the records found late with
+    // `NOWAIT`. An identity insert takes
     // a key-share lock on its person, so once the group is locked a concurrent attach waits, and
     // after this commits the drain finds its locked person gone, which is a retryable race, and the
     // batch retries into a new person.
@@ -316,9 +319,10 @@ pub async fn erase_person(
             let scanned = scan_inbox(connection, workspace, key, &target, 0).await?;
             erasure_calls::lock_person_calls_exclusive(connection, workspace, &known).await?;
             let inbox = lock_scanned(connection, workspace, key, &target, scanned).await?;
-            // The other people's records that list a value of the group are locked here too,
-            // before the people: an identify locks a record and then the people who own its
-            // identities, so the erase must not hold a person and wait for a record.
+            // The group's own records and the other people's records that list a value of the
+            // group are locked here too, before the people: an identify locks a record and then
+            // the people who own its identities, and `delete_person` deletes the group's records,
+            // so the erase must not hold a person and wait for a record.
             let mut records = lock_matching_records(connection, workspace, &known, &read).await?;
             let group = lock_group(connection, workspace, person).await?;
             let identities = match &group {
@@ -588,7 +592,7 @@ async fn group_ids(
 
 /// The ids of the workspace's source records, tombstones included, that belong to a person
 /// outside `group` and list one of `pairs` (kind and value) in `identifiers` or are keyed by one
-/// (`kind:value`), in id order. Nothing is locked.
+/// (`kind:value`). Nothing is locked.
 // `MATERIALIZED`: referenced once, `erased` would be inlined and its jsonb rebuilt per row.
 const MATCHING_RECORDS: &str = "WITH erased AS MATERIALIZED ( \
          SELECT jsonb_build_array(jsonb_build_object('kind', p.kind, 'value', p.value)) AS doc, \
@@ -597,48 +601,64 @@ const MATCHING_RECORDS: &str = "WITH erased AS MATERIALIZED ( \
      SELECT s.id FROM source_records s \
       WHERE s.workspace_id = $1 AND s.person_id <> ALL($2) \
         AND EXISTS (SELECT 1 FROM erased \
-                     WHERE s.identifiers @> erased.doc OR s.record_key = erased.key) \
-      ORDER BY s.id";
+                     WHERE s.identifiers @> erased.doc OR s.record_key = erased.key)";
 
-/// The ids [`MATCHING_RECORDS`] finds now that are not in `held`.
-async fn matching_records(
+/// The ids of the workspace's source records, tombstones included, of the people in `group`,
+/// found through the `(workspace_id, person_id)` index.
+const GROUP_RECORDS: &str =
+    "SELECT id FROM source_records WHERE workspace_id = $1 AND person_id = ANY($2)";
+
+/// The ids of the records to lock now, in id order and without those in `held`: the group's own
+/// records ([`GROUP_RECORDS`]) and the other people's matches of `pairs` ([`MATCHING_RECORDS`]).
+async fn records_to_lock(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     group: &[Uuid],
     pairs: &[(String, String)],
     held: &[Uuid],
 ) -> Result<Vec<Uuid>, StoreError> {
-    let (kinds, values): (Vec<&str>, Vec<&str>) = pairs
-        .iter()
-        .map(|(kind, value)| (kind.as_str(), value.as_str()))
-        .unzip();
-    let ids: Vec<Uuid> = sqlx::query_scalar(MATCHING_RECORDS)
+    let mut ids: Vec<Uuid> = sqlx::query_scalar(GROUP_RECORDS)
         .bind(workspace.as_uuid())
         .bind(group)
-        .bind(&kinds)
-        .bind(&values)
-        .fetch_all(connection)
+        .fetch_all(&mut *connection)
         .await
         .map_err(StoreError::query)?;
+    if !pairs.is_empty() {
+        let (kinds, values): (Vec<&str>, Vec<&str>) = pairs
+            .iter()
+            .map(|(kind, value)| (kind.as_str(), value.as_str()))
+            .unzip();
+        ids.extend(
+            sqlx::query_scalar::<_, Uuid>(MATCHING_RECORDS)
+                .bind(workspace.as_uuid())
+                .bind(group)
+                .bind(&kinds)
+                .bind(&values)
+                .fetch_all(connection)
+                .await
+                .map_err(StoreError::query)?,
+        );
+    }
     let held: HashSet<&Uuid> = held.iter().collect();
-    Ok(ids.into_iter().filter(|id| !held.contains(id)).collect())
+    ids.retain(|id| !held.contains(id));
+    ids.sort_unstable();
+    ids.dedup();
+    Ok(ids)
 }
 
-/// Locks, `FOR UPDATE` in id order, the workspace's source records of people outside `group`
-/// that match `pairs` as they are read now, and returns their ids. The scan is read first and the
-/// rows are locked by primary key, like the inbox rows ([`lock_inbox_rows`]). The erase calls this
-/// before it locks the people, because an identify locks a record before the people who own its
-/// identities.
+/// Locks, `FOR UPDATE` in id order, the group's own source records and the workspace's records of
+/// people outside `group` that match `pairs`, as they are read now, and returns their ids. The
+/// ids are read first and the rows are locked by primary key, like the inbox rows
+/// ([`lock_inbox_rows`]). The erase calls this before it locks the people, because an identify
+/// locks a record before the people who own its identities, and `delete_person` deletes the
+/// group's records.
 async fn lock_matching_records(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     group: &[Uuid],
     pairs: &[(String, String)],
 ) -> Result<Vec<Uuid>, StoreError> {
-    if pairs.is_empty() {
-        return Ok(Vec::new());
-    }
-    let ids = matching_records(connection, workspace, group, pairs, &[]).await?;
+    let ids = records_to_lock(connection, workspace, group, pairs, &[]).await?;
     if ids.is_empty() {
         return Ok(ids);
     }
@@ -653,10 +673,10 @@ async fn lock_matching_records(
     .map_err(StoreError::query)
 }
 
-/// After the people are locked: locks the matching records that `held` does not cover, with
-/// `NOWAIT`, because an identify that holds one of them may be waiting for a person of the
-/// group. `None` when one is locked by someone else (55P03): the caller undoes the attempt and
-/// makes it again.
+/// After the people are locked: locks the group's own records and the matching records that
+/// `held` does not cover, with `NOWAIT`, because an identify that holds one of them may be
+/// waiting for a person of the group. `None` when one is locked by someone else (55P03): the
+/// caller undoes the attempt and makes it again.
 async fn lock_late_records(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -664,10 +684,7 @@ async fn lock_late_records(
     pairs: &[(String, String)],
     held: &[Uuid],
 ) -> Result<Option<Vec<Uuid>>, StoreError> {
-    if pairs.is_empty() {
-        return Ok(Some(Vec::new()));
-    }
-    let ids = matching_records(connection, workspace, group, pairs, held).await?;
+    let ids = records_to_lock(connection, workspace, group, pairs, held).await?;
     if ids.is_empty() {
         return Ok(Some(ids));
     }
@@ -2823,6 +2840,103 @@ mod tests {
             let (id, renamed) = tombstone(ws).await;
             assert_eq!(renamed, format!("erased:{id}"));
             assert_eq!(tombstone(elsewhere).await.1, key, "another workspace stays");
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_erase_and_an_identify_of_the_erased_persons_own_record_do_not_deadlock(
+        pool: PgPool,
+    ) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            let (owner, _, _) = conflict_loser(&pool, ws).await;
+            let own: Uuid = sqlx::query_scalar(
+                "SELECT id FROM source_records WHERE workspace_id = $1 AND person_id = $2",
+            )
+            .bind(ws.as_uuid())
+            .bind(owner)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let request = request(&pool, ws, owner).await;
+
+            // A direct identify of the person's record locks the record, then the person.
+            let mut identify = begin(&pool).await.unwrap();
+            sqlx::query("SET LOCAL lock_timeout = '10s'")
+                .execute(&mut *identify)
+                .await
+                .unwrap();
+            sqlx::query("SELECT id FROM source_records WHERE id = $1 FOR UPDATE")
+                .bind(own)
+                .execute(&mut *identify)
+                .await
+                .unwrap();
+            let erasure = tokio::spawn({
+                let pool = pool.clone();
+                async move {
+                    let mut tx = begin(&pool).await.unwrap();
+                    erase_person(&mut tx, ws, request.id, &identifier_key(), &[], &trace()).await?;
+                    commit(tx).await
+                }
+            });
+            wait_for_a_lock_wait(&pool).await;
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+            let owner_lock = sqlx::query("SELECT id FROM people WHERE id = $1 FOR UPDATE")
+                .bind(owner)
+                .execute(&mut *identify)
+                .await;
+            let identify_end = match owner_lock {
+                Ok(_) => commit(identify).await,
+                Err(error) => Err(StoreError::query(error)),
+            };
+            let erase_end = erasure.await.unwrap();
+
+            assert!(
+                identify_end.is_ok() && erase_end.is_ok(),
+                "identify: {identify_end:?}; erase: {erase_end:?}"
+            );
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_late_record_held_by_another_transaction_is_not_waited_for(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            let (owner, _, record) = conflict_loser(&pool, ws).await;
+            let pairs = [("email".to_owned(), EMAIL.to_owned())];
+            let mut holder = begin(&pool).await.unwrap();
+            sqlx::query("SELECT id FROM source_records WHERE id = $1 FOR UPDATE")
+                .bind(record)
+                .execute(&mut *holder)
+                .await
+                .unwrap();
+
+            let mut tx = begin(&pool).await.unwrap();
+            let busy = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                lock_late_records(&mut tx, ws, &[owner], &pairs, &[]),
+            )
+            .await
+            .expect("the held record was waited for")
+            .unwrap();
+            assert_eq!(busy, None);
+            drop(tx);
+            commit(holder).await.unwrap();
+
+            let mut tx = begin(&pool).await.unwrap();
+            let free = lock_late_records(&mut tx, ws, &[owner], &pairs, &[])
+                .await
+                .unwrap();
+            let free = free.expect("a free record is locked");
+            assert!(
+                free.contains(&record),
+                "the matching record is locked: {free:?}"
+            );
         })
         .await;
     }
