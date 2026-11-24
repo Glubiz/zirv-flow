@@ -909,4 +909,68 @@ mod tests {
 
         assert_eq!(hits, ["audit_log.summary: 1 rows"]);
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_event_conflict_leaves_no_value_for_erasure_to_find(pool: PgPool) {
+        let ws = crate::privacy::testing::workspace(&pool, "one").await;
+        let value = "event-conflict-zq@example.com";
+        let key = HmacRoot::bootstrap_from(&master_key()).hmac_key(HmacPurpose::Redaction);
+        let event = |identifiers: &[(&str, &str)], message_id: &str| EventRecord {
+            source_record_id: None,
+            source: "web".into(),
+            identifiers: identifiers
+                .iter()
+                .map(|(kind, value)| ((*kind).into(), (*value).into()))
+                .collect(),
+            name: "seen".into(),
+            properties: json!({}).as_object().cloned().unwrap(),
+            timestamp: Some(datetime!(2026-01-01 00:00 UTC)),
+            received_at: datetime!(2026-01-01 00:00 UTC),
+            message_id: Some(message_id.into()),
+            trace: trace(),
+        };
+        // Two people that hold different external ids cannot be merged by an email, so the
+        // event that names both records a conflict with no source record.
+        let outcomes = apply_event_batch(
+            &pool,
+            ws,
+            &key,
+            &[
+                event(&[("external:crm", "zq1"), ("email", value)], "m-1"),
+                event(&[("external:crm", "zq2")], "m-2"),
+                event(&[("external:crm", "zq2"), ("email", value)], "m-3"),
+            ],
+        )
+        .await
+        .unwrap();
+        let owner = match &outcomes[0] {
+            crate::EventOutcome::Accepted { person_id, .. } => *person_id,
+            other => panic!("not accepted: {other:?}"),
+        };
+        let event_conflicts: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM identity_conflicts WHERE workspace_id = $1 \
+               AND source_record_id IS NULL",
+        )
+        .bind(ws.as_uuid())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(event_conflicts, 1, "the event recorded a conflict");
+        let mut tx = begin(&pool).await.unwrap();
+        let request = request_erasure(&mut tx, ws, owner, &identifier_key(), None, &trace())
+            .await
+            .unwrap()
+            .unwrap();
+        commit(tx).await.unwrap();
+        let mut tx = begin(&pool).await.unwrap();
+        erase_person(&mut tx, ws, request.id, &identifier_key(), &[], &trace())
+            .await
+            .unwrap();
+        commit(tx).await.unwrap();
+
+        let found = leftovers(&pool, &all_forms(&[value]), &[]).await;
+
+        assert_eq!(found, Vec::<String>::new());
+    }
 }

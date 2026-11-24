@@ -3541,15 +3541,20 @@ windows (30 days, 7 days, 24 hours) bound the rest; the ledger file under `priva
 outside the database and the scan does not cover it.
 
 Another person's `source_records` can list an erased value: the record that lost an identity
-conflict keeps the identifier off its person but still lists it. Before the delete, the erase
-removes the group's `(kind, value)` pairs from `identifiers` of every record named by an
-`identity_conflicts` row against the group (found through the `(workspace_id, person_id)` and
-`(workspace_id, other_person_id)` indexes, then the primary key, never a scan of `source_records`),
-keeps the row, and renames a record keyed by one of the values to `erased:<record id>`. A record
-that lists the value with no recorded conflict is not reached. Three cases therefore stay
-uncovered: a value the identity limit skipped on another person's record, which the erased
-person acquired later; a conflict removed after the owner's contact write released the identity;
-and event conflicts, which name no source record. A follow-up covers them.
+conflict keeps the identifier off its person but still lists it, and so can a record whose value
+the identity limit skipped. Before the delete, the erase scans the workspace's live
+`source_records` once, inside its transaction, and removes the group's `(kind, value)` pairs from
+`identifiers` of every record of another person that lists one, whether or not an
+`identity_conflicts` row names it. It keeps the row, and renames a record keyed by one of the
+values to `erased:<record id>`; a tombstone has no identifiers but keeps its key, so it is
+renamed too. The scan is O(records of the workspace) and takes row locks only on the records it
+changes. The erase takes its locks in the order an identify does, ledger rows before people: the
+call lock, the inbox rows, the group's own source records (found through the `person_id` index,
+tombstones included) together with the matching records of other people in one id-ordered
+`FOR UPDATE`, then the people, then, with `NOWAIT`, any such record that appeared since. This runs
+inside the same scan-then-lock savepoint retry as the inbox rows, and a record held by someone
+else undoes the attempt and reads again. The group's own records are locked early because an
+identify locks a record and then its person, and `delete_person` deletes those records. Event conflicts store no identifier, so they leave nothing to find.
 
 **Ledger outside the database (OQ-13, ruling cae7a407).** `privacy.ledger_dir`
 names the directory holding one JSON file per completed erasure entry.

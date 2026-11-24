@@ -110,8 +110,11 @@ removes the person's identities, source records, events in all partitions, inges
 segment memberships, consent and its history, enrollments and their steps and waits, flow entries,
 messages, test-send entries, decision records, stored assistant transcripts and drafts, pending and dead
 forwarding payloads, pending exports and saved preview people. It also takes the person's identifier
-values off the source records of other people that an identity conflict names against them (the
-record that lost the conflict keeps its other identifiers and stays that person's). It then deletes the person. A failure
+values off every source record of other people in the workspace that lists them (a tombstone
+keyed by a value is renamed too; the erase locks in an identify's order: the call lock, the inbox
+rows, the person's own and those matching records, the people, then late records with `NOWAIT`), whether or
+not an identity conflict names it (such a record keeps its other identifiers and stays that
+person's). It then deletes the person. A failure
 rolls everything back and the request retries. What remains, by design and nothing else:
 
 - the keyed hash of each email and phone as an `erased` suppression (E4);
@@ -133,11 +136,7 @@ substring on the person's id and identifier values, within that workspace only. 
 can therefore remove another person's transcript or draft (a draft is deleted, so accepting it
 afterwards is a `404`), and a spelling that is not among the person's
 identifiers is missed. A changed spelling is missed everywhere. A value on another person's source
-record is found through the identity conflict that record lost; a record that lists the value with
-no recorded conflict is not found. This leaves three cases uncovered: a value the identity limit
-skipped on another person's record, which the erased person acquired later; a conflict removed
-after the owner's contact write released the identity; and event conflicts, which name no source
-record. A follow-up covers them. The retention windows bound what
+record is found by what the record lists, so a record with no recorded conflict is reached too. The retention windows bound what
 the by-value search cannot reach. Deleting a person (`DELETE /api/v1/workspaces/{ws}/people/{id}`)
 is not erasure: it adds no suppression and no ledger entry.
 
