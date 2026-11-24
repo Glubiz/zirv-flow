@@ -186,6 +186,12 @@ pub(crate) const ROUTES: &[Route] = table! {
     Get    "/api/v1/workspaces/{ws}/members" => READ_MEMBERS;
     Put    "/api/v1/workspaces/{ws}/members/{user_id}" => ADMIN @ audited("membership.set");
     Delete "/api/v1/workspaces/{ws}/members/{user_id}" => ADMIN @ audited("membership.removed");
+    // invitations
+    Get    "/api/v1/workspaces/{ws}/invitations" => ADMIN;
+    Post   "/api/v1/workspaces/{ws}/invitations" => ADMIN @ audited("invitation.created");
+    Delete "/api/v1/workspaces/{ws}/invitations/{id}" => ADMIN @ audited("invitation.revoked");
+    Get    "/api/v1/invitations/{token}" => PUBLIC;
+    Post   "/api/v1/invitations/{token}/accept" => INSTANCE, "a session; the link authorises" @ audited("invitation.accepted");
     // keys
     Get    "/api/v1/workspaces/{ws}/api-keys" => ADMIN;
     Post   "/api/v1/workspaces/{ws}/api-keys" => ADMIN @ audited("api_key.created");

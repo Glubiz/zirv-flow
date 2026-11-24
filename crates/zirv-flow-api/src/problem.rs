@@ -1432,7 +1432,7 @@ impl From<&zirv_flow_store::StoreError> for ApiError {
 
 impl From<crate::admin::AdminError> for ApiError {
     fn from(error: crate::admin::AdminError) -> Self {
-        use crate::admin::AdminError;
+        use crate::admin::{AdminError, InvitationRefusal};
 
         match error {
             AdminError::Invalid(error) => error.into(),
@@ -1452,6 +1452,15 @@ impl From<crate::admin::AdminError> for ApiError {
                 ..Self::unprocessable(detail)
             },
             AdminError::TraitReferenced(names) => Self::trait_referenced(&names),
+            AdminError::Invitation(refusal) => {
+                let status = match refusal {
+                    InvitationRefusal::AddressMismatch | InvitationRefusal::LocalSignInDisabled => {
+                        StatusCode::FORBIDDEN
+                    }
+                    _ => StatusCode::CONFLICT,
+                };
+                Self::new(status, refusal.detail()).with_code(refusal.code())
+            }
             AdminError::SourceOrder(detail) => Self {
                 code: Some("source_order_invalid"),
                 ..Self::unprocessable(detail)

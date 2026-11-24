@@ -20,6 +20,10 @@ use crate::imports;
 use crate::ingest::{
     self, AcceptedBody, BatchItemRequest, BatchRequest, IdentifyRequest, TrackRequest,
 };
+use crate::invitations::{
+    self, AcceptInvitationRequest, AcceptedInvitationBody, CreateInvitationRequest,
+    CreatedInvitationBody, InvitationBody, InvitationLookupBody,
+};
 use crate::jobs_admin::{self, DeadJobsBody, DepthBody, JobBody, KindDepthBody};
 use crate::keys::{self, ApiKeyBody, CreateApiKeyRequest, CreatedApiKeyBody};
 use crate::lists;
@@ -83,6 +87,11 @@ use crate::workspaces::{
         members::list,
         members::set,
         members::remove,
+        invitations::list,
+        invitations::create,
+        invitations::revoke,
+        invitations::lookup,
+        invitations::accept,
         keys::list,
         keys::create,
         keys::revoke,
@@ -384,6 +393,12 @@ use crate::workspaces::{
         MemberBody,
         SetRoleRequest,
         RoleBody,
+        InvitationBody,
+        CreateInvitationRequest,
+        CreatedInvitationBody,
+        InvitationLookupBody,
+        AcceptInvitationRequest,
+        AcceptedInvitationBody,
         ApiKeyBody,
         CreatedApiKeyBody,
         assistant::settings::AiSettingsBody,
@@ -1185,6 +1200,7 @@ mod tests {
         "list_flow_versions",
         "list_forwarding_rules",
         "list_lists",
+        "list_invitations",
         "list_members",
         "list_person_lists",
         "list_segments",

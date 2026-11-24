@@ -196,6 +196,53 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/invitations/{token}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * What a link is for, so its page can name the workspace. Public: the token is the authority.
+         * @description A token that is unknown, revoked, expired or used answers one identical 404. Past a burst of 10
+         *     requests the two token routes share, they answer `429 rate_limited`.
+         */
+        get: operations["get_invitation"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/invitations/{token}/accept": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Accepts an invitation and makes the signed-in user a member with the invited role.
+         * @description The session's address must equal the invited one, ignoring case; otherwise
+         *     `403 invitation_address_mismatch` and the invitation stays usable. With no session and a
+         *     `password`, an address that has no account gets one, is signed in (the `zf_session` cookie is
+         *     set) and accepts. The account, the membership and the acceptance commit together and the
+         *     session starts after that commit; that needs local sign-in (`403
+         *     local_sign_in_disabled` otherwise) and fails with `409 account_exists` for an address that
+         *     already has an account. A dead link is the same 404 as on lookup.
+         */
+        post: operations["accept_invitation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/oauth/callback": {
         parameters: {
             query?: never;
@@ -2326,6 +2373,47 @@ export interface paths {
          */
         post: operations["replay_ingest_rejects"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/invitations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The pending invitations of a workspace. Workspace admins and the owner only. */
+        get: operations["list_invitations"];
+        put?: never;
+        /**
+         * Invites an address and returns the link, once. Workspace admins and the owner only.
+         * @description The server sends no mail: copy the `link` to the invitee. A workspace admin may invite up to
+         *     the admin role. The invitation is valid for `expires_in_days` (1, 7 or 30; default 7) and for
+         *     one use. An address with a live invitation is `409 invitation_pending`; one that already
+         *     belongs to a member is `409 already_member`.
+         */
+        post: operations["create_invitation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/invitations/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Revokes a pending invitation. Its link stops working at once; the address may be invited again. */
+        delete: operations["revoke_invitation"];
         options?: never;
         head?: never;
         patch?: never;
@@ -4702,6 +4790,13 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        AcceptInvitationRequest: {
+            /**
+             * @description Only for someone with no session: creates the account for the invited address with this
+             *     password (12 to 1024 characters), signs it in and accepts. Ignored when a session is sent.
+             */
+            password?: string | null;
+        };
         AcceptedBody: {
             /** @description Items appended to the inbox. They are durable, not yet applied. */
             accepted: number;
@@ -4723,6 +4818,12 @@ export interface components {
             template?: null | components["schemas"]["TemplateDetailBody"];
             /** Format: uuid */
             template_id?: string | null;
+        };
+        AcceptedInvitationBody: {
+            /** @example viewer */
+            role: string;
+            /** Format: uuid */
+            workspace_id: string;
         };
         AddMembersBody: {
             /** @description People newly added. */
@@ -5635,6 +5736,19 @@ export interface components {
             name: string;
             settings?: components["schemas"]["FlowSettings"];
         };
+        CreateInvitationRequest: {
+            /** @example cy@acme.com */
+            email: string;
+            /**
+             * Format: int32
+             * @description 1, 7 or 30; 7 when left out.
+             */
+            expires_in_days?: number | null;
+            /** @description `admin`, `publisher`, `editor` or `viewer`. */
+            role: string;
+            /** @description Grants the personal-values grant to a publisher, editor or viewer; ignored for an admin. */
+            view_pii?: boolean | null;
+        };
         CreateListRequest: {
             /** @description At most 500 characters. */
             description?: string;
@@ -5870,6 +5984,18 @@ export interface components {
              *     of its secret is stored.
              */
             key: string;
+        };
+        CreatedInvitationBody: {
+            email: string;
+            /** Format: date-time */
+            expires_at: string;
+            /** Format: uuid */
+            id: string;
+            /** @description The link to send to the invitee. It is shown here once and never again. */
+            link: string;
+            /** @example viewer */
+            role: string;
+            view_pii: boolean;
         };
         /** @description A hook with its shared secret, shown once. */
         CreatedWebhookBody: components["schemas"]["WebhookBody"] & {
@@ -7982,6 +8108,37 @@ export interface components {
              *     skipped but counted, and a line break inside a quoted value counts as a line.
              */
             row: number;
+        };
+        InvitationBody: {
+            /** Format: date-time */
+            created_at: string;
+            email: string;
+            /** Format: date-time */
+            expires_at: string;
+            /** Format: uuid */
+            id: string;
+            /**
+             * Format: uuid
+             * @description The user who made the invitation, when they still exist.
+             */
+            invited_by?: string | null;
+            /**
+             * @description `admin`, `publisher`, `editor` or `viewer`.
+             * @example viewer
+             */
+            role: string;
+            /**
+             * @description Whether the member sees personal values unmasked. Always false for an admin, who sees them
+             *     anyway.
+             */
+            view_pii: boolean;
+        };
+        InvitationLookupBody: {
+            /** @description The invited address with all but its first letter hidden, such as `c***@acme.com`. */
+            email_hint: string;
+            /** @example viewer */
+            role: string;
+            workspace_name: string;
         };
         /** @description One problem of a manifest: a code and the JSON pointer of the key it concerns. Never a value. */
         IssueBody: {
@@ -12477,6 +12634,146 @@ export interface operations {
             };
             /** @description The database is unavailable; nothing was stored */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_invitation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The token of the invitation link */
+                token: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The invitation */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InvitationLookupBody"];
+                };
+            };
+            /** @description The link is not valid */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    accept_invitation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The token of the invitation link */
+                token: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AcceptInvitationRequest"];
+            };
+        };
+        responses: {
+            /** @description Accepted */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AcceptedInvitationBody"];
+                };
+            };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not signed in */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An API key, a missing CSRF token, `invitation_address_mismatch` or `local_sign_in_disabled` */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The link is not valid */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description `already_member` or `account_exists` */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The password is too short or too long */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests */
+            429: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -21789,6 +22086,196 @@ export interface operations {
             };
             /** @description The dry run ran past its time limit (`code` is `query_timeout`) */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_invitations: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The pending invitations, newest first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InvitationBody"][];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, or a key without the admin scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    create_invitation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateInvitationRequest"];
+            };
+        };
+        responses: {
+            /** @description The invitation, with its link */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreatedInvitationBody"];
+                };
+            };
+            /** @description The body is empty or is not valid JSON */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description `invitation_pending` or `already_member` */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The content type is not application/json */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Invalid email, role or expiry */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    revoke_invitation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Invitation id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Revoked */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or pending invitation, or no access */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

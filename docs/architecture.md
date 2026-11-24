@@ -3440,8 +3440,42 @@ personal-data values. `admin` is unchanged. A key needs each scope required by
 the operations it performs; `pii` alone grants no operation.
 
 **Last-admin rule.** Removing or demoting the last workspace Admin is refused
-unless the caller is the owner. **Invitations** are deferred past 1.0: the
-owner creates users, and workspace Admins add existing users as members.
+unless the caller is the owner. The rule limits removal and demotion only; it never
+limits who may grant Admin, so a workspace Admin may invite up to Admin, as
+`PUT /members` already lets an Admin make an Admin.
+
+**Invitations** (issue 605). A workspace Admin invites an address with a role, a
+personal-data grant (`view_pii`, never stored true for an Admin) and an expiry of 1, 7 or 30
+days (default 7). The server sends no mail, because the instance has no system mail
+path: the create response carries the link `{public_url}/invite/{token}` once, and the
+Admin copies it to the invitee. The token is `random_token(32)`; only its SHA-256 is stored
+(`invitations.token_hash`), and it never reaches a log, an audit row or a list response.
+One live invitation per workspace and `lower(email)`: a second is `409
+invitation_pending`, and an address that is already a member is `409 already_member`.
+Expiry is derived from `expires_at` with no sweep job and no audit row; creating for an
+address whose invitation expired revokes the stale row in the same transaction. Revoking
+keeps the row and frees the address. A dead link (unknown, revoked, expired or used) is
+one identical 404, and the two token routes share a rate limit (a burst of 10, then one
+a second, process-wide as no client address is available, so sustained anonymous
+lookups can 429 every invitee; an accepted risk) that answers `429 rate_limited`.
+
+Accepting needs a session, and the session user's address must equal the invited one
+under `lower()`, the rule of `users_email_key`; otherwise `403
+invitation_address_mismatch` and the invitation stays usable. An OIDC address that the
+provider did not verify never resolves to a user, so it never matches. When the address
+has no user and local sign-in is on, accepting may instead create the account (address
+fixed, 12 to 1024 character password), sign it in and accept in one transaction;
+an address that already has an account is `409 account_exists`, and the link is the only
+proof of ownership of a new local account. An instance that signs in only through OIDC with
+auto-create off cannot accept for a new address: the owner creates the user first.
+Accepting locks the invitation row, sets the membership with the invitation's role and
+grant, and audits `invitation.accepted` and `membership.set` (and `user.created` with
+`via: "invitation"` for a new account) in that one transaction, so two accepts of one link
+give one membership. The session starts afterwards in its own transaction: if that fails the
+request is a 500 and the link is spent, but the account and membership exist and the
+invitee signs in with the password they set. `invitation.created` and `invitation.revoked` carry ids only. An
+Admin learns that an address already has an account from `already_member`; this is an
+accepted risk (threat model).
 
 As built (issue 365): `core::Role` is `Admin`, `Publisher`, `Editor` and `Viewer`, with a
 capability lattice `Role::allows(Capability)` (`Read` < `Edit` < `Publish` < `Admin`), and
@@ -4022,7 +4056,7 @@ they were ruled as their capabilities were added to the plan.
   stays in `jsonb`. `string_list` traits stay in `jsonb`. The promotion is built in the
   segment milestone (M4); until the slots exist the `jsonb_path_ops` index stays, and it is reconsidered once promoted
   traits cover the equality searches. The slots are live (#125): states `backfilling`, `ready` and `retiring`; writers take the shared slot lock before they read the assignments and assignment changes take the exclusive one, so a backfill never leaves a stale value (`people/slots.rs`); the routes are `POST` and `DELETE /traits/{key}/index`.
-  Known limitation and upgrade decision: keep released migration 0033 and its checksum. Its initial `ALTER TABLE` holds ACCESS EXCLUSIVE on `people` through all 30 partial index builds, blocking reads and writes. Populated upgrades stop all roles and budget the full build when upgrading from before 0033; `v0.187.0` already contains it. No populated build timing is recorded. Rehearse at the installation's row counts before setting the downtime window; see the [lock review](operations/upgrade.md#lock-review-through-0114). This supports stopped upgrades only; online and mixed-version upgrades remain OQ-17.
+  Known limitation and upgrade decision: keep released migration 0033 and its checksum. Its initial `ALTER TABLE` holds ACCESS EXCLUSIVE on `people` through all 30 partial index builds, blocking reads and writes. Populated upgrades stop all roles and budget the full build when upgrading from before 0033; `v0.187.0` already contains it. No populated build timing is recorded. Rehearse at the installation's row counts before setting the downtime window; see the [lock review](operations/upgrade.md#lock-review-through-0115). This supports stopped upgrades only; online and mixed-version upgrades remain OQ-17.
   Details in [docs/benchmarks/m2-ingestion.md](benchmarks/m2-ingestion.md).
 
 - **OQ-8:** A per-workspace running cap in the claim query

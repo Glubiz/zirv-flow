@@ -22,6 +22,7 @@ mod forwarding;
 mod identities;
 mod imports;
 mod ingest;
+mod invitations;
 mod jobs;
 mod lists;
 mod messages;
@@ -211,6 +212,11 @@ pub use ingest::{
     append_inbox_in, backfill_affinity, drain_batch, drain_batch_singly, drain_shards,
     enqueue_drain_if_pending, enqueue_drain_shard, enqueue_pending_drains, inbox_heads,
     payload_shard, set_drain_shards, shard_pending,
+};
+pub use invitations::{
+    Invitation, NewInvitation, create_invitation, find_live_invitation,
+    find_live_invitation_for_update, list_pending_invitations, mark_invitation_accepted,
+    revoke_invitation,
 };
 pub use jobs::{
     ClaimFloors, ClaimedJob, DEFAULT_MAX_ATTEMPTS, DeadCursor, FailOutcome, Heard, Job,

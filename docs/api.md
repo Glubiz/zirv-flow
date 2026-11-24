@@ -62,7 +62,7 @@ Two kinds of list are not paged, and are named here so the difference is on reco
   `list_destination_kinds`, `list_source_kinds`, `list_users`, `list_workspaces`, `list_api_keys`,
   `list_consent_dimensions`, `list_consent_policy_versions`, `list_credential_kinds`,
   `list_credentials`, `list_destinations`, `list_destination_options`, `list_event_schemas`,
-  `list_flows`, `list_flow_versions`, `list_forwarding_rules`, `list_lists`, `list_members`,
+  `list_flows`, `list_flow_versions`, `list_forwarding_rules`, `list_lists`, `list_members`, `list_invitations`,
   `list_person_lists`, `list_segments`, `list_segment_versions`, `list_sender_identities`,
   `list_sender_identity_options`, `list_sending_domains`, `list_snippets`, `list_snippet_versions`,
   `list_sources`, `list_source_streams`, `list_templates`, `list_template_preview_people`,
@@ -168,7 +168,8 @@ These creating operations already have retry guards and take no header:
   `create_segment`, `create_template`, `create_source`, `create_destination`,
   `create_credential`, `create_webhook`, `create_consent_dimension`,
   `add_consent_dimension_value`, `create_event_schema`, `create_forwarding_rule`,
-  `create_list`, `create_sender_identity`, `create_sending_domain`, `create_snippet`,
+  `create_invitation` (one live invitation per workspace and address), `create_list`,
+  `create_sender_identity`, `create_sending_domain`, `create_snippet`,
   `create_theme`, `create_topic` and `create_trait`. A duplicate answers `409`.
 - Consumed draft: `publish_event_schema` answers `409` until another draft is saved.
 - Set additions: `add_list_members`, `add_suppression`, `add_template_preview_person` and
@@ -230,6 +231,11 @@ A test reads the sources and fails when a code used there is missing from this l
 | `too_deep` | A body nests arrays or objects deeper than 100 levels (generic 400) |
 | `dedupe_missing` | The webhook payload has no usable value at the de-duplication field |
 | `last_admin` | The change would leave the workspace with no admin |
+| `invitation_pending` | The address already has a live invitation to the workspace |
+| `already_member` | The address already belongs to a member of the workspace |
+| `invitation_address_mismatch` | The signed-in account is not the address the invitation is for; the invitation stays usable |
+| `account_exists` | A password was sent to create an account for an address that already has one; sign in to accept |
+| `local_sign_in_disabled` | An account was asked for with a password while local sign-in is off |
 | `owner_exists` | First-run setup was asked for after an owner exists |
 | `name_taken` | A live resource already has that name |
 | `secrets_unavailable` | Secrets cannot be stored until the master key is configured |
@@ -471,6 +477,11 @@ values.
 | GET | `/api/v1/workspaces/{ws}/members` | member | read or admin |
 | PUT | `/api/v1/workspaces/{ws}/members/{user_id}` | admin | admin |
 | DELETE | `/api/v1/workspaces/{ws}/members/{user_id}` | admin | admin |
+| GET | `/api/v1/workspaces/{ws}/invitations` | admin | admin |
+| POST | `/api/v1/workspaces/{ws}/invitations` | admin | admin |
+| DELETE | `/api/v1/workspaces/{ws}/invitations/{id}` | admin | admin |
+| GET | `/api/v1/invitations/{token}` | none | none |
+| POST | `/api/v1/invitations/{token}/accept` | none or any signed-in user | none |
 | GET | `/api/v1/workspaces/{ws}/api-keys` | admin | admin |
 | POST | `/api/v1/workspaces/{ws}/api-keys` | admin | admin |
 | DELETE | `/api/v1/workspaces/{ws}/api-keys/{id}` | admin | admin |

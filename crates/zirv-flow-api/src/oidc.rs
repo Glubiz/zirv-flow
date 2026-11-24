@@ -717,6 +717,49 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_unverified_address_never_gets_a_session_to_accept_an_invitation_with(pool: PgPool) {
+        let setup = setup(&pool, true).await;
+        let owner =
+            admin::create_owner(&pool, &admin::Context::system(), "o@example.com", PASSWORD)
+                .await
+                .unwrap();
+        let workspace = admin::create_workspace(&pool, &admin::Context::system(), "Acme", None)
+            .await
+            .unwrap();
+        let invitation = admin::create_invitation(
+            &pool,
+            &admin::Context::user(owner.id),
+            workspace.id,
+            "jane@example.com",
+            zirv_flow_core::Role::Viewer,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let unverified = sign_in_as(&setup, "subject-1", Some("jane@example.com"), false).await;
+        let accepted = send(
+            &setup.router,
+            Request::post(format!("/api/v1/invitations/{}/accept", invitation.token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await;
+
+        assert_generic_failure(&unverified);
+        assert_eq!(accepted.status, StatusCode::UNAUTHORIZED);
+        let members: i64 = sqlx::query_scalar("SELECT count(*) FROM memberships")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(members, 0);
+        assert_eq!(zirv_flow_store::list_users(&pool).await.unwrap().len(), 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn auto_create_makes_a_passwordless_user_without_memberships(pool: PgPool) {
         let setup = setup(&pool, true).await;
 

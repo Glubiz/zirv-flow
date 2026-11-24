@@ -205,7 +205,9 @@ pub(in crate::rbac) mod tests {
             Instance::Open
         } else if matches!(
             (row.method, row.path),
-            (Method::Get | Method::Delete, "/api/v1/session") | (Method::Get, "/api/v1/workspaces")
+            (Method::Get | Method::Delete, "/api/v1/session")
+                | (Method::Get, "/api/v1/workspaces")
+                | (Method::Post, "/api/v1/invitations/{token}/accept")
         ) {
             Instance::Session
         } else {

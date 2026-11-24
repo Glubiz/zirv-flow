@@ -316,6 +316,7 @@ mod tests {
             }
             for other in rows.iter().filter(|row| row.action != action) {
                 let companion = secret_companion(action, &other.action)
+                    || (action == "invitation.accepted" && other.action == "membership.set")
                     || (matches!(action, "credential.tested" | "forwarding.rule_created")
                         && other.action == "destination.checked");
                 if !companion {
@@ -595,6 +596,56 @@ mod tests {
             &[u(user_id)],
             None,
             Some(user_id),
+        )
+        .await;
+        let invitation = w
+            .a(
+                "POST",
+                "/invitations",
+                &[],
+                j(json!({"email": "walk.invitee@example.com", "role": "viewer"})),
+                None,
+            )
+            .await;
+        let token = invitation["link"]
+            .as_str()
+            .and_then(|link| link.rsplit('/').next())
+            .unwrap()
+            .to_owned();
+        crate::admin::create_user(
+            &world.pool,
+            &crate::admin::Context::system(),
+            "walk.invitee@example.com",
+            PASSWORD,
+        )
+        .await
+        .unwrap();
+        let invitee = sign_in(&world.router, "walk.invitee@example.com").await;
+        w.audited(
+            Auth::Session(&invitee),
+            "POST",
+            "/api/v1/invitations/{token}/accept",
+            &[token],
+            j(json!({})),
+            None,
+        )
+        .await;
+        let second = w
+            .a(
+                "POST",
+                "/invitations",
+                &[],
+                j(json!({"email": "walk.second@example.com", "role": "viewer"})),
+                None,
+            )
+            .await;
+        let second_id = id_of(&second);
+        w.a(
+            "DELETE",
+            "/invitations/{id}",
+            &[u(second_id)],
+            None,
+            Some(second_id),
         )
         .await;
         let key = w
