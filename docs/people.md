@@ -433,7 +433,7 @@ person and of the people merged into them (never a value) and enqueues `privacy.
 runs in one transaction: it collects the person's group and identities as they are when it runs, adds
 their hashes (and the group's ids) to the ledger row, suppresses every email and phone hash as
 `erased`, deletes the workspace's undrained ingestion inbox rows with an identifier that hashes to any
-of them, so a row drained later cannot create the person again (an `erased` suppression overrides any other reason and can never be removed); it deletes the group exactly as above; it completes the ledger row; and it audits `privacy.erased`
+of them, so a row drained later cannot create the person again (an `erased` suppression overrides any other reason and can never be removed); it deletes the group exactly as above, after taking the group's values off every other live source record of the workspace that lists them; it completes the ledger row; and it audits `privacy.erased`
 with the request id. A failure rolls everything back and the job is retried; a request whose job
 ran out of attempts shows as `failed`. `GET .../privacy/erasures` lists the requests, newest
 first, each with the erase call made to every destination that declares erase and handled the person
