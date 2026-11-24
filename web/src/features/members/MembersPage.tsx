@@ -56,7 +56,12 @@ function WorkspaceMembers({ ws }: { ws: string }) {
   const canAdmin = access?.canAdmin ?? false;
   const pending = canAdmin && invitations.status === "ready" ? invitations.data : [];
   const invitationsLoading = canAdmin && invitations.status === "loading";
-  const invitationsFailure = canAdmin && invitations.status === "error" ? describeError(invitations.error) : null;
+  const failedInvitations = canAdmin && invitations.status === "error" ? describeError(invitations.error) : null;
+  // The failure stays on screen while Retry is in flight, so the focused button is not unmounted.
+  const [retried, setRetried] = useState<ReturnType<typeof describeError> | null>(null);
+  const retrying = invitationsLoading && retried !== null;
+  const invitationsFailure = failedInvitations ?? (retrying ? retried : null);
+  if (!invitationsLoading && retried !== null) setRetried(null);
   const adminCount = members.status === "ready" ? members.data.filter((member) => member.role === "admin").length : 0;
   // The instance owner may remove the last admin, as the server allows.
   const lastAdmin = (member: Member) => member.role === "admin" && adminCount <= 1 && !user.is_owner;
@@ -112,10 +117,19 @@ function WorkspaceMembers({ ws }: { ws: string }) {
       <RolesDisclosure />
       {failure ? <InlineError {...failure} /> : null}
       {invitationsFailure ? (
-        <div className="stack-tight">
+        <div className="stack-tight" aria-busy={retrying}>
           <InlineError {...invitationsFailure} />
           <div>
-            <Button onClick={() => invitations.reload()}>Retry</Button>
+            <Button
+              aria-disabled={retrying}
+              onClick={() => {
+                if (retrying) return;
+                setRetried(invitationsFailure);
+                invitations.reload();
+              }}
+            >
+              Retry
+            </Button>
           </div>
         </div>
       ) : null}

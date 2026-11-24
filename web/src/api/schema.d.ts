@@ -231,7 +231,8 @@ export interface paths {
          * @description The session's address must equal the invited one, ignoring case; otherwise
          *     `403 invitation_address_mismatch` and the invitation stays usable. With no session and a
          *     `password`, an address that has no account gets one, is signed in (the `zf_session` cookie is
-         *     set) and accepts, all in one transaction; that needs local sign-in (`403
+         *     set) and accepts. The account, the membership and the acceptance commit together and the
+         *     session starts after that commit; that needs local sign-in (`403
          *     local_sign_in_disabled` otherwise) and fails with `409 account_exists` for an address that
          *     already has an account. A dead link is the same 404 as on lookup.
          */

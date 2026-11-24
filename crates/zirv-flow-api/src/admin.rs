@@ -638,8 +638,9 @@ pub struct AcceptedInvitation {
 
 /// Accepts an invitation as the signed-in `user`, or, with a `password` and no user, creates the
 /// account for the invited address and accepts as it. A dead token (unknown, revoked, expired or
-/// used) is one `NotFound`. Everything happens in one transaction under a lock on the invitation,
-/// so two accepts of one token give one membership.
+/// used) is one `NotFound`. The account, membership and acceptance commit in one transaction under
+/// a lock on the invitation, so two accepts of one token give one membership; the caller starts
+/// the session after that commit.
 pub async fn accept_invitation(
     pool: &PgPool,
     context: &Context,

@@ -173,6 +173,38 @@ describe("invitations on the members page", () => {
     expect(calls.filter((call) => call.method === "GET" && call.path.endsWith("/invitations"))).toHaveLength(2);
   });
 
+  it("keeps focus on Retry while retrying a failed invitations list", async () => {
+    let reads = 0;
+    let release: () => void = () => undefined;
+    let gate = Promise.resolve();
+    mockApi({
+      "GET /api/v1/session": () => json(session(OWNER)),
+      "GET /api/v1/workspaces": () => json([WORKSPACE]),
+      "GET /api/v1/workspaces/ws1/members": () => json(MEMBERS),
+      "GET /api/v1/workspaces/ws1/invitations": async () => {
+        reads += 1;
+        if (reads > 1) await gate;
+        return problem(500, "Internal error", "The invitations could not be read.");
+      },
+    });
+    const user = userEvent.setup();
+    renderRoute("/w/ws1/members", "/w/:ws/members", page());
+
+    await screen.findByRole("alert");
+    gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+
+    const retry = screen.getByRole("button", { name: "Retry" });
+    expect(document.activeElement).toBe(retry);
+    expect(retry).toHaveAttribute("aria-disabled", "true");
+    release();
+    await waitFor(() => expect(reads).toBe(2));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Retry" })).not.toHaveAttribute("aria-disabled", "true"));
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Retry" }));
+  });
+
   it("does not flash No members yet while a slow invitations list is loading", async () => {
     let release: () => void = () => undefined;
     const gate = new Promise<void>((resolve) => {
