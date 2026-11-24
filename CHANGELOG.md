@@ -15,3 +15,14 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v1.0.38 (2026-11-24)
+
+### Features
+
+- invite a member by a one-time link (#605)
+
+### Fixes
+
+- keep focus on Retry while invitations reload (#605)
+- show the pending-invitation loading and error states (#605)
+
