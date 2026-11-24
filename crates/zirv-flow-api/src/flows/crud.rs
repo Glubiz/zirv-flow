@@ -271,8 +271,8 @@ fn check_name(name: &str) -> Result<&str, ApiError> {
 /// Refuses a flow that probes personal values for a caller who may not see them: a condition or
 /// event match that orders, prefixes or aggregates a personal trait or event property, the same
 /// rule segments apply at save, or a webhook or sync node that would send a personal trait or a
-/// personal template field out (403 `pii_not_sendable`). Every condition the check compiled is judged; one that did not
-/// compile is already an issue.
+/// personal template field out (403 `pii_not_sendable`). Every condition the check compiled is
+/// judged; one that did not compile is already an issue.
 pub(super) async fn refuse_flow_probes(
     connection: &mut zirv_flow_store::PgConnection,
     workspace: zirv_flow_core::WorkspaceId,

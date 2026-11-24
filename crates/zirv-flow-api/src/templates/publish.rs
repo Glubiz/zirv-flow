@@ -260,9 +260,8 @@ pub(crate) async fn publish_template(
         let doc = stored_document(&draft.document)?;
         // A webhook template sends what it reads to a URL the flow names, so a caller without
         // access to personal values cannot publish one that reads them.
-        if !input.reveal && doc.channel == zirv_flow_templates::Channel::Webhook {
-            let clear = zirv_flow_store::explain_clear_fields(&mut connection, workspace).await?;
-            super::refuse_personal_document(&mut connection, workspace, None, &doc, &clear).await?;
+        if !input.reveal {
+            super::refuse_personal_document(&mut connection, workspace, &doc).await?;
         }
         let (catalog, inputs) = publish_inputs(state, &mut connection, workspace, &doc).await?;
         (draft, catalog, inputs)

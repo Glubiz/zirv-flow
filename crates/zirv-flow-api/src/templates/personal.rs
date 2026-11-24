@@ -61,20 +61,19 @@ fn unknown_fields(doc: &TemplateDocument, catalog: &FieldCatalog) -> BTreeSet<St
 }
 
 /// Refuses `doc` when it is a webhook template that reads a personal field: 403
-/// `pii_not_sendable`, naming `node` when the template is judged as part of a flow.
+/// `pii_not_sendable`.
 pub(crate) async fn refuse_personal_document(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
-    node: Option<&str>,
     doc: &TemplateDocument,
-    clear: &ClearFields,
 ) -> Result<(), ApiError> {
     if doc.channel != Channel::Webhook {
         return Ok(());
     }
+    let clear = zirv_flow_store::explain_clear_fields(connection, workspace).await?;
     let read = zirv_flow_store::read_template_field_catalog(connection, workspace).await?;
-    match personal_fields(doc, &read, clear).first() {
-        Some(field) => Err(ApiError::pii_not_sendable(node, field)),
+    match personal_fields(doc, &read, &clear).first() {
+        Some(field) => Err(ApiError::pii_not_sendable(None, field)),
         None => Ok(()),
     }
 }

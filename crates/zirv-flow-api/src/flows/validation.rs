@@ -438,21 +438,19 @@ impl Checker<'_> {
 
     fn webhook(&mut self, url: &str, trait_keys: &[String], template: Option<Uuid>, node: &str) {
         let id = Some(node);
-        if let Some(template) =
-            template.filter(|template| self.environment.webhook_templates.contains(template))
-        {
-            self.sends.templates.push(TemplateSend {
-                node: node.to_owned(),
-                template,
-            });
-        }
-        if template.is_some_and(|template| !self.environment.webhook_templates.contains(&template))
-        {
-            self.issue(
-                code::WEBHOOK_TEMPLATE_UNUSABLE,
-                id,
-                Some("/template".to_owned()),
-            );
+        if let Some(template) = template {
+            if self.environment.webhook_templates.contains(&template) {
+                self.sends.templates.push(TemplateSend {
+                    node: node.to_owned(),
+                    template,
+                });
+            } else {
+                self.issue(
+                    code::WEBHOOK_TEMPLATE_UNUSABLE,
+                    id,
+                    Some("/template".to_owned()),
+                );
+            }
         }
         if let Some(refused) = self.refused(url) {
             self.issue(refused, id, Some("/url".to_owned()));
