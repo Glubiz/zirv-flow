@@ -283,10 +283,9 @@ pub async fn erase_person(
 
     // Lock in the drain's order: the call lock, the pending inbox rows, the group's own records
     // and the matching records of other people, the people, then the records found late with
-    // `NOWAIT`. An identity insert takes
-    // a key-share lock on its person, so once the group is locked a concurrent attach waits, and
-    // after this commits the drain finds its locked person gone, which is a retryable race, and the
-    // batch retries into a new person.
+    // `NOWAIT`. An identity insert takes a key-share lock on its person, so once the group is
+    // locked a concurrent attach waits, and after this commits the drain finds its locked person
+    // gone, which is a retryable race, and the batch retries into a new person.
     let mut values: Vec<String> = Vec::new();
     let mut pairs: Vec<(String, String)> = Vec::new();
     // The call lock comes before every row lock: a sync that holds it shared across its call, and
