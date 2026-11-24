@@ -13,9 +13,12 @@ use utoipa::ToSchema;
 use utoipa::openapi::schema::{ArrayBuilder, ObjectBuilder, SchemaType, Type};
 use utoipa::openapi::{Ref, RefOr, Schema};
 use uuid::Uuid;
-use zirv_flow_connectors::destinations::{Registry, provider_profile_support};
+use zirv_flow_connectors::destinations::{
+    Registry, provider_profile_key_source, provider_profile_support,
+};
+use zirv_flow_connectors::manifest::KeySource;
 use zirv_flow_core::consent::Channel;
-use zirv_flow_core::flow::{FlowGraph, FlowSettings, MAX_NODES, NodeKind};
+use zirv_flow_core::flow::{FlowGraph, FlowSettings, MAX_NODES, NodeKind, SyncOperation};
 use zirv_flow_core::{ValidationError, WorkspaceId};
 use zirv_flow_store::{
     Destination, Flow, FlowPatch, FlowState, FlowVersion, NewFlow, Template, Warmup, WarmupCounts,
@@ -399,9 +402,27 @@ fn sync_facts(destinations: &BTreeMap<Uuid, Destination>, graph: &FlowGraph) -> 
             facts
                 .destinations
                 .insert(*destination, provider_profile_support(&found.config));
+            for operation in [SyncOperation::Upsert, SyncOperation::Remove] {
+                let key = provider_profile_key_source(&found.config, operation)
+                    .and_then(|source| judged_key(&source));
+                if let Some(key) = key {
+                    facts.keys.insert((*destination, operation), key);
+                }
+            }
         }
     }
     facts
+}
+
+/// The trait key the personal-data guard judges for an external key source: a trait as itself,
+/// the `email` and `phone` identities as those names (clear once an Admin declares a clear trait
+/// of that name), and nothing for an `external:<namespace>` identity.
+fn judged_key(source: &KeySource) -> Option<String> {
+    match source {
+        KeySource::Trait(key) => Some(key.clone()),
+        KeySource::Identity(kind) if kind == "email" || kind == "phone" => Some(kind.clone()),
+        KeySource::Identity(_) => None,
+    }
 }
 
 /// The templates `graph` names that a webhook node may send: of the workspace, not archived, of the
@@ -830,6 +851,24 @@ pub(crate) async fn version(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sync_key_is_judged_as_the_trait_it_sends() {
+        let judged = |source| judged_key(&source);
+        assert_eq!(
+            judged(KeySource::Trait("ssn".into())).as_deref(),
+            Some("ssn")
+        );
+        assert_eq!(
+            judged(KeySource::Identity("email".into())).as_deref(),
+            Some("email")
+        );
+        assert_eq!(
+            judged(KeySource::Identity("phone".into())).as_deref(),
+            Some("phone")
+        );
+        assert_eq!(judged(KeySource::Identity("external:crm".into())), None);
+    }
 
     #[test]
     fn a_name_is_trimmed_and_bounded_to_100_characters() {

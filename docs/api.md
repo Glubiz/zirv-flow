@@ -325,7 +325,7 @@ A test reads the sources and fails when a code used there is missing from this l
 | `pii_trait_not_searchable` | The trait holds personal data and cannot be searched, or a segment condition orders or prefixes it, for a caller who may not see personal values |
 | `contact_key_not_searchable` | A caller who may not see identifiers searched contacts by key prefix |
 | `pii_property_not_explorable` | The event property holds personal data and cannot be explored, or a segment condition orders, prefixes or aggregates it, for a caller who may not see personal values |
-| `pii_not_sendable` | A flow node would send personal data (a webhook or sync trait key naming a personal trait, or a webhook template with a personal merge field), or a webhook template uses a personal merge field, for a caller who may not see personal values |
+| `pii_not_sendable` | A flow node would send personal data (a webhook or sync trait key, or a sync destination key, naming a personal trait or the `email` or `phone` identity, or a webhook template with a personal merge field), or a webhook template uses a personal merge field, for a caller who may not see personal values |
 | `debugger_streams_busy` | The workspace has the most debugger streams open on this server |
 | `consent_policy_invalid` | A consent policy draft fails its checks; `issues` lists them |
 | `consent_policy_revision_mismatch` | The consent policy draft changed since it was read |

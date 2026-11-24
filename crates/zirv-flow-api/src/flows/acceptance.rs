@@ -3934,6 +3934,34 @@ mod tests {
         }
     }
 
+    /// A profile-sync destination whose upsert and remove operations both key on `key_from`.
+    async fn profile_destination(f: &Fixture, pool: &PgPool, key_from: Value) -> Uuid {
+        let mut manifest: Value = serde_json::from_str(include_str!(
+            "../../../zirv-flow-connectors/tests/fixtures/providers/profile_sync.json"
+        ))
+        .unwrap();
+        manifest["destination"]["upsert_profile"]["key_from"] = key_from.clone();
+        manifest["destination"]["remove_profile"]["key_from"] = key_from;
+        let destination = Uuid::now_v7();
+        zirv_flow_store::create_destination(
+            pool,
+            f.ws,
+            &zirv_flow_store::NewDestination {
+                id: destination,
+                kind: "provider",
+                name: &format!("Profiles {destination}"),
+                config: &json!({"manifest": manifest}),
+                credential_id: None,
+                rate: 10,
+                burst: 10,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+        destination
+    }
+
     async fn sending_world(f: &Fixture, pool: &PgPool) -> Sending {
         zirv_flow_store::create_trait_definition(
             pool,
@@ -3973,27 +4001,9 @@ mod tests {
             .unwrap();
         drop(connection);
         plant_signing_secret(f, pool).await;
-        let manifest: Value = serde_json::from_str(include_str!(
-            "../../../zirv-flow-connectors/tests/fixtures/providers/profile_sync.json"
-        ))
-        .unwrap();
-        let destination = Uuid::now_v7();
-        zirv_flow_store::create_destination(
-            pool,
-            f.ws,
-            &zirv_flow_store::NewDestination {
-                id: destination,
-                kind: "provider",
-                name: "Profiles",
-                config: &json!({"manifest": manifest}),
-                credential_id: None,
-                rate: 10,
-                burst: 10,
-                created_by: None,
-            },
-        )
-        .await
-        .unwrap();
+        // Keyed on a namespaced identity, which is never personal: the tests that need another
+        // key make their own destination.
+        let destination = profile_destination(f, pool, json!({"identity": "external:crm"})).await;
         let publisher = |name: &'static str, email: &'static str, grant: bool| {
             let pool = pool.clone();
             let router = f.router.clone();
@@ -4256,6 +4266,181 @@ mod tests {
                 .await;
             let detail = reply.body["detail"].as_str().unwrap();
             assert!(detail.contains("`n`") && detail.contains("ssn"), "{detail}");
+        })
+        .await;
+    }
+
+    /// A flow of one sync node on `destination` that lists no trait.
+    fn keyed_sync(destination: Uuid, operation: &str) -> Value {
+        one_node(
+            json!({"id": "n", "type": "action.sync", "destination": destination,
+            "operation": operation, "trait_keys": []}),
+        )
+    }
+
+    /// Validate, dry run and publish all pass for `caller`.
+    async fn passes_every_way(f: &Fixture, flow: &str, caller: &Caller) {
+        for uri in [
+            format!("/{flow}/validate"),
+            format!("/{flow}/publish?dry_run=true"),
+        ] {
+            let reply = f.call("POST", &f.flows(&uri), None, caller.auth()).await;
+            assert_eq!(
+                reply.status,
+                StatusCode::OK,
+                "{} {uri}: {:?}",
+                caller.name,
+                reply.body
+            );
+        }
+        let reply = publishes(f, flow, caller).await;
+        assert_eq!(
+            reply.status,
+            StatusCode::CREATED,
+            "{} publish: {:?}",
+            caller.name,
+            reply.body
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_sync_destination_keyed_on_a_personal_trait_is_refused_without_the_grant(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let f = fixture(&pool).await;
+            let world = sending_world(&f, &pool).await;
+            let destination = profile_destination(&f, &pool, json!({"trait": "ssn"})).await;
+            for operation in ["upsert", "remove"] {
+                for caller in &world.refused {
+                    let flow = f
+                        .create(
+                            &format!("keyed {operation} {}", Uuid::now_v7()),
+                            keyed_sync(destination, operation),
+                            manual(),
+                        )
+                        .await;
+                    is_refused_as_not_sendable(&f, &flow, caller).await;
+                    let reply = f
+                        .call(
+                            "POST",
+                            &f.flows(&format!("/{flow}/validate")),
+                            None,
+                            caller.auth(),
+                        )
+                        .await;
+                    let detail = reply.body["detail"].as_str().unwrap();
+                    assert!(detail.contains("`n`") && detail.contains("ssn"), "{detail}");
+                }
+                for caller in &world.granted {
+                    let flow = f
+                        .create(
+                            &format!("keyed {operation} {}", Uuid::now_v7()),
+                            keyed_sync(destination, operation),
+                            manual(),
+                        )
+                        .await;
+                    passes_every_way(&f, &flow, caller).await;
+                }
+            }
+            // A clear trait is a key anyone may send.
+            let clear = profile_destination(&f, &pool, json!({"trait": "plan"})).await;
+            for caller in &world.refused {
+                let flow = f
+                    .create(
+                        &format!("keyed clear {}", Uuid::now_v7()),
+                        keyed_sync(clear, "upsert"),
+                        manual(),
+                    )
+                    .await;
+                passes_every_way(&f, &flow, caller).await;
+            }
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_sync_destination_keyed_on_the_email_identity_needs_the_grant_until_email_is_declared_clear(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let f = fixture(&pool).await;
+            let world = sending_world(&f, &pool).await;
+            let by_email = profile_destination(&f, &pool, json!({"identity": "email"})).await;
+            let by_phone = profile_destination(&f, &pool, json!({"identity": "phone"})).await;
+            let cases = [
+                (by_email, "upsert"),
+                (by_email, "remove"),
+                (by_phone, "upsert"),
+            ];
+            for (destination, operation) in cases {
+                for caller in &world.refused {
+                    let flow = f
+                        .create(
+                            &format!("identity {}", Uuid::now_v7()),
+                            keyed_sync(destination, operation),
+                            manual(),
+                        )
+                        .await;
+                    is_refused_as_not_sendable(&f, &flow, caller).await;
+                }
+                for caller in &world.granted {
+                    let flow = f
+                        .create(
+                            &format!("identity {}", Uuid::now_v7()),
+                            keyed_sync(destination, operation),
+                            manual(),
+                        )
+                        .await;
+                    passes_every_way(&f, &flow, caller).await;
+                }
+            }
+            // An identity in a namespace is never personal.
+            for caller in &world.refused {
+                let flow = f
+                    .create(
+                        &format!("external {}", Uuid::now_v7()),
+                        keyed_sync(world.destination, "upsert"),
+                        manual(),
+                    )
+                    .await;
+                passes_every_way(&f, &flow, caller).await;
+            }
+            // An Admin declaring a clear `email` trait unblocks the email identity, not the phone.
+            zirv_flow_store::create_trait_definition(
+                &pool,
+                f.ws,
+                &NewTraitDefinition {
+                    key: "email".into(),
+                    trait_type: TraitType::String,
+                    precedence: Precedence::Latest,
+                    source_order: Vec::new(),
+                    pii: false,
+                    channel_address: false,
+                    inferred: false,
+                    description: String::new(),
+                },
+            )
+            .await
+            .unwrap();
+            for (destination, operation) in cases {
+                for caller in &world.refused {
+                    let flow = f
+                        .create(
+                            &format!("declared {}", Uuid::now_v7()),
+                            keyed_sync(destination, operation),
+                            manual(),
+                        )
+                        .await;
+                    if destination == by_email {
+                        passes_every_way(&f, &flow, caller).await;
+                    } else {
+                        is_refused_as_not_sendable(&f, &flow, caller).await;
+                    }
+                }
+            }
         })
         .await;
     }
