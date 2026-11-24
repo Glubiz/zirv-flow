@@ -4370,10 +4370,13 @@ mod tests {
             let world = sending_world(&f, &pool).await;
             let by_email = profile_destination(&f, &pool, json!({"identity": "email"})).await;
             let by_phone = profile_destination(&f, &pool, json!({"identity": "phone"})).await;
+            let by_anonymous_id =
+                profile_destination(&f, &pool, json!({"identity": "anonymous_id"})).await;
             let cases = [
                 (by_email, "upsert"),
                 (by_email, "remove"),
                 (by_phone, "upsert"),
+                (by_anonymous_id, "upsert"),
             ];
             for (destination, operation) in cases {
                 for caller in &world.refused {
@@ -4408,7 +4411,7 @@ mod tests {
                     .await;
                 passes_every_way(&f, &flow, caller).await;
             }
-            // An Admin declaring a clear `email` trait unblocks the email identity, not the phone.
+            // An Admin declaring a clear `email` trait unblocks the email identity, not the others.
             zirv_flow_store::create_trait_definition(
                 &pool,
                 f.ws,

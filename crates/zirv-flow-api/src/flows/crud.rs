@@ -415,12 +415,16 @@ fn sync_facts(destinations: &BTreeMap<Uuid, Destination>, graph: &FlowGraph) -> 
 }
 
 /// The trait key the personal-data guard judges for an external key source: a trait as itself,
-/// the `email` and `phone` identities as those names (clear once an Admin declares a clear trait
-/// of that name), and nothing for an `external:<namespace>` identity.
+/// the `email`, `phone` and `anonymous_id` identities as those names (clear once an Admin declares
+/// a clear trait of that name), and nothing for an `external:<namespace>` identity.
 fn judged_key(source: &KeySource) -> Option<String> {
     match source {
         KeySource::Trait(key) => Some(key.clone()),
-        KeySource::Identity(kind) if kind == "email" || kind == "phone" => Some(kind.clone()),
+        KeySource::Identity(kind)
+            if matches!(kind.as_str(), "email" | "phone" | "anonymous_id") =>
+        {
+            Some(kind.clone())
+        }
         KeySource::Identity(_) => None,
     }
 }
@@ -866,6 +870,10 @@ mod tests {
         assert_eq!(
             judged(KeySource::Identity("phone".into())).as_deref(),
             Some("phone")
+        );
+        assert_eq!(
+            judged(KeySource::Identity("anonymous_id".into())).as_deref(),
+            Some("anonymous_id")
         );
         assert_eq!(judged(KeySource::Identity("external:crm".into())), None);
     }

@@ -80,8 +80,9 @@ pub(crate) struct SyncFacts {
     /// operations their manifest declares. A destination of a type with none declares none.
     pub(crate) destinations: BTreeMap<Uuid, ProfileSupport>,
     /// The key each operation of those destinations sends as the external key, named as the trait
-    /// key the personal-data guard judges: a `{trait}` key as itself, an `{identity: email|phone}`
-    /// key as `email` or `phone`. An operation keyed on another identity has none.
+    /// key the personal-data guard judges: a `{trait}` key as itself, an
+    /// `{identity: email|phone|anonymous_id}` key as that name. An operation keyed on an
+    /// `external:<namespace>` identity has none.
     pub(crate) keys: hashbrown::HashMap<(Uuid, SyncOperation), String>,
 }
 
