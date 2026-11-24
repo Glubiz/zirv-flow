@@ -595,16 +595,17 @@ async fn redact_other_source_records(
         .unzip();
     let done = sqlx::query(
         "WITH erased AS ( \
-             SELECT jsonb_build_array(jsonb_build_object('kind', p.kind, 'value', p.value)) AS doc, \
+             SELECT p.kind, p.value, \
+                    jsonb_build_array(jsonb_build_object('kind', p.kind, 'value', p.value)) AS doc, \
                     p.kind || ':' || p.value AS key \
                FROM unnest($3::text[], $4::text[]) AS p(kind, value)) \
          UPDATE source_records s SET \
              identifiers = COALESCE(( \
                  SELECT jsonb_agg(e.item ORDER BY e.position) \
                    FROM jsonb_array_elements(s.identifiers) WITH ORDINALITY AS e(item, position) \
-                  WHERE NOT EXISTS (SELECT 1 FROM unnest($3::text[], $4::text[]) AS p(kind, value) \
-                                     WHERE p.kind = e.item ->> 'kind' \
-                                       AND p.value = e.item ->> 'value')), '[]'::jsonb), \
+                  WHERE NOT EXISTS (SELECT 1 FROM erased \
+                                     WHERE erased.kind = e.item ->> 'kind' \
+                                       AND erased.value = e.item ->> 'value')), '[]'::jsonb), \
              record_key = CASE WHEN EXISTS (SELECT 1 FROM erased WHERE erased.key = s.record_key) \
                                THEN 'erased:' || s.id ELSE s.record_key END \
          WHERE s.workspace_id = $1 AND s.deleted_at IS NULL AND s.person_id <> ALL($2) \
