@@ -55,6 +55,8 @@ function WorkspaceMembers({ ws }: { ws: string }) {
   const access = members.status === "ready" ? accessFor(members.data, user.id, user.is_owner) : null;
   const canAdmin = access?.canAdmin ?? false;
   const pending = canAdmin && invitations.status === "ready" ? invitations.data : [];
+  const invitationsLoading = canAdmin && invitations.status === "loading";
+  const invitationsFailure = canAdmin && invitations.status === "error" ? describeError(invitations.error) : null;
   const adminCount = members.status === "ready" ? members.data.filter((member) => member.role === "admin").length : 0;
   // The instance owner may remove the last admin, as the server allows.
   const lastAdmin = (member: Member) => member.role === "admin" && adminCount <= 1 && !user.is_owner;
@@ -109,11 +111,19 @@ function WorkspaceMembers({ ws }: { ws: string }) {
       />
       <RolesDisclosure />
       {failure ? <InlineError {...failure} /> : null}
+      {invitationsFailure ? (
+        <div className="stack-tight">
+          <InlineError {...invitationsFailure} />
+          <div>
+            <Button onClick={() => invitations.reload()}>Retry</Button>
+          </div>
+        </div>
+      ) : null}
       <Panel flush>
         <ResourceView
           resource={members}
           loadingLabel="Loading members"
-          isEmpty={(data) => data.length === 0 && pending.length === 0}
+          isEmpty={(data) => data.length === 0 && pending.length === 0 && !invitationsLoading}
           empty={
             <EmptyState title="No members yet">
               {canAdmin ? "Add the first person to this workspace." : "Nobody has been added to this workspace."}

@@ -1115,7 +1115,7 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn an_admin_may_invite_an_admin_and_accepting_does_not_bypass_the_last_admin_rule(
+    async fn an_admin_may_invite_an_admin_and_the_last_admin_rule_still_holds_after_accept(
         pool: PgPool,
     ) {
         let router = app(&pool).await;

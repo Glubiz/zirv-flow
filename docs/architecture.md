@@ -3456,7 +3456,8 @@ Expiry is derived from `expires_at` with no sweep job and no audit row; creating
 address whose invitation expired revokes the stale row in the same transaction. Revoking
 keeps the row and frees the address. A dead link (unknown, revoked, expired or used) is
 one identical 404, and the two token routes share a rate limit (a burst of 10, then one
-a second) that answers `429 rate_limited`.
+a second, process-wide as no client address is available, so sustained anonymous
+lookups can 429 every invitee; an accepted risk) that answers `429 rate_limited`.
 
 Accepting needs a session, and the session user's address must equal the invited one
 under `lower()`, the rule of `users_email_key`; otherwise `403
@@ -3470,7 +3471,9 @@ auto-create off cannot accept for a new address: the owner creates the user firs
 Accepting locks the invitation row, sets the membership with the invitation's role and
 grant, and audits `invitation.accepted` and `membership.set` (and `user.created` with
 `via: "invitation"` for a new account) in that one transaction, so two accepts of one link
-give one membership. `invitation.created` and `invitation.revoked` carry ids only. An
+give one membership. The session starts afterwards in its own transaction: if that fails the
+request is a 500 and the link is spent, but the account and membership exist and the
+invitee signs in with the password they set. `invitation.created` and `invitation.revoked` carry ids only. An
 Admin learns that an address already has an account from `already_member`; this is an
 accepted risk (threat model).
 

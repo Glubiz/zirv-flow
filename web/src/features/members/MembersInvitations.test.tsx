@@ -2,7 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { json, MEMBER, mockApi, OWNER, session, WORKSPACE } from "../../test/mockApi";
+import { json, MEMBER, mockApi, OWNER, problem, session, WORKSPACE } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
 import { WorkspacesProvider } from "../workspaces";
 import { MembersPage } from "./MembersPage";
@@ -149,5 +149,50 @@ describe("invitations on the members page", () => {
 
     expect(box).toBeChecked();
     expect(box).toBeDisabled();
+  });
+
+  it("shows a one-line error with Retry when the invitations fail, keeps the members usable and refetches on Retry", async () => {
+    let reads = 0;
+    const calls = mockApi({
+      "GET /api/v1/session": () => json(session(OWNER)),
+      "GET /api/v1/workspaces": () => json([WORKSPACE]),
+      "GET /api/v1/workspaces/ws1/members": () => json(MEMBERS),
+      "GET /api/v1/workspaces/ws1/invitations": () =>
+        (reads += 1) === 1 ? problem(500, "Internal error", "The invitations could not be read.") : json([PENDING]),
+    });
+    const user = userEvent.setup();
+    renderRoute("/w/ws1/members", "/w/:ws/members", page());
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Internal error");
+    expect(screen.getByText("boss@example.test")).toBeInTheDocument();
+    await user.click(within(alert.parentElement as HTMLElement).getByRole("button", { name: "Retry" }));
+
+    expect(await screen.findByText("cy@acme.test")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(calls.filter((call) => call.method === "GET" && call.path.endsWith("/invitations"))).toHaveLength(2);
+  });
+
+  it("does not flash No members yet while a slow invitations list is loading", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    mockApi({
+      "GET /api/v1/session": () => json(session(OWNER)),
+      "GET /api/v1/workspaces": () => json([WORKSPACE]),
+      "GET /api/v1/workspaces/ws1/members": () => json([]),
+      "GET /api/v1/workspaces/ws1/invitations": async () => {
+        await gate;
+        return json([PENDING]);
+      },
+    });
+    renderRoute("/w/ws1/members", "/w/:ws/members", page());
+
+    await screen.findByRole("button", { name: "Invite" });
+    expect(screen.queryByText("No members yet")).not.toBeInTheDocument();
+    release();
+    expect(await screen.findByText("cy@acme.test")).toBeInTheDocument();
+    expect(screen.queryByText("No members yet")).not.toBeInTheDocument();
   });
 });
