@@ -322,7 +322,8 @@ struct Accepted {
         (status = 413, description = "The body is over ingest.max_request_bytes", body = Problem, content_type = "application/problem+json"),
         (status = 429, description = "The key is over its rate limit", body = Problem, content_type = "application/problem+json",
             headers(("Retry-After" = u64, description = "Whole seconds until the request's items fit"))),
-        (status = 503, description = "The database is unavailable; nothing was stored", body = Problem, content_type = "application/problem+json")
+        (status = 503, description = "The database is unavailable; nothing was stored", body = Problem, content_type = "application/problem+json",
+            headers(("Retry-After" = u64, description = "Whole seconds to wait before retrying")))
     ),
     security(("api_key" = []))
 )]
@@ -349,7 +350,8 @@ pub(crate) async fn identify(
         (status = 413, description = "The body is over ingest.max_request_bytes", body = Problem, content_type = "application/problem+json"),
         (status = 429, description = "The key is over its rate limit", body = Problem, content_type = "application/problem+json",
             headers(("Retry-After" = u64, description = "Whole seconds until the request's items fit"))),
-        (status = 503, description = "The database is unavailable; nothing was stored", body = Problem, content_type = "application/problem+json")
+        (status = 503, description = "The database is unavailable; nothing was stored", body = Problem, content_type = "application/problem+json",
+            headers(("Retry-After" = u64, description = "Whole seconds to wait before retrying")))
     ),
     security(("api_key" = []))
 )]
@@ -377,7 +379,8 @@ pub(crate) async fn track(
         (status = 413, description = "The body is over ingest.max_request_bytes", body = Problem, content_type = "application/problem+json"),
         (status = 429, description = "The key is over its rate limit", body = Problem, content_type = "application/problem+json",
             headers(("Retry-After" = u64, description = "Whole seconds until the request's items fit"))),
-        (status = 503, description = "The database is unavailable; nothing was stored", body = Problem, content_type = "application/problem+json")
+        (status = 503, description = "The database is unavailable; nothing was stored", body = Problem, content_type = "application/problem+json",
+            headers(("Retry-After" = u64, description = "Whole seconds to wait before retrying")))
     ),
     security(("api_key" = []))
 )]
@@ -519,7 +522,11 @@ pub(crate) fn unavailable() -> ApiError {
         StatusCode::SERVICE_UNAVAILABLE,
         "ingestion is unavailable; nothing was stored, so retry",
     )
+    .with_retry_after(UNAVAILABLE_RETRY_AFTER)
 }
+
+/// Seconds a client waits after a 503: the pool's acquire timeout, so one retry meets a freed pool.
+const UNAVAILABLE_RETRY_AFTER: u64 = 5;
 
 /// A 400 that lists the invalid fields.
 fn invalid(errors: Vec<ItemError>) -> ApiError {
@@ -1268,6 +1275,43 @@ mod tests {
 
         assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(reply.body["status"], 503);
+    }
+
+    /// An overloaded server refuses within the acquire timeout of the production pool, with a
+    /// `Retry-After`, and does not hold the request until a client gives up.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_request_that_cannot_get_a_connection_is_a_503_with_retry_after_within_seconds(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        let base = std::env::var("DATABASE_URL").unwrap();
+        let (server, _) = base.rsplit_once('/').unwrap();
+        let database = pool.connect_options().get_database().unwrap().to_owned();
+        let tight = zirv_flow_store::connect(&format!("{server}/{database}"), 1)
+            .await
+            .unwrap();
+        let held = tight.acquire().await.unwrap();
+        let router = router(AppState::new(tight.clone(), Arc::new(String::new)));
+        let auth = format!("Bearer {}", fx.key);
+
+        let started = std::time::Instant::now();
+        let reply = post(
+            &router,
+            "/api/v1/ingest/track",
+            Some(&auth),
+            Body::from(json!({"userId": "u", "event": "e"}).to_string()),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        drop(held);
+
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "the request waited {elapsed:?} for a connection"
+        );
+        assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(reply.headers["retry-after"], "5");
     }
 
     #[sqlx::test]

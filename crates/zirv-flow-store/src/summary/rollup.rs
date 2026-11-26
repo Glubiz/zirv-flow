@@ -363,8 +363,8 @@ async fn refresh_flows(conn: &mut PgConnection, workspace: Uuid) -> Result<(), S
 }
 
 /// The flow ids come from the workspace's own published flows, and an enrollment's flow belongs
-/// to its workspace by foreign key, so the count needs no workspace predicate; with one, the
-/// planner cannot answer from `enrollments_in_flight_idx`, whose predicate the state list matches.
+/// to its workspace by foreign key, so the count needs no workspace predicate; one would cost a heap filter
+/// on every counted row, as `workspace_id` is not in `enrollments_flow_state_idx`.
 const IN_FLOW_SNAPSHOT: &str = "INSERT INTO summary_flows (workspace_id, flow_id, people_in_flow, has_goal) \
      SELECT $1, p.flow_id, \
             (SELECT count(*) FROM enrollments e \
@@ -823,7 +823,7 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn the_in_flight_count_is_answered_from_an_index_alone(pool: PgPool) {
+    async fn the_in_flight_count_is_answered_from_the_flow_state_index(pool: PgPool) {
         crate::migrate(&pool).await.unwrap();
         let mut flows = Vec::new();
         for slug in ["ours", "other"] {
@@ -873,9 +873,11 @@ mod tests {
             !plan.contains("Seq Scan on enrollments"),
             "the in-flight count scans every enrollment\n{plan}"
         );
+        // The planner picks an index-only or a bitmap scan of it on both 16 and 18 (0116 moved
+        // `person_id` first in the partial index).
         assert!(
-            plan.contains("Index Only Scan using enrollments_") && !plan.contains("Heap Scan"),
-            "the in-flight count reads the enrollment rows\n{plan}"
+            plan.contains("enrollments_flow_state_idx"),
+            "the in-flight count does not use the flow index\n{plan}"
         );
     }
 

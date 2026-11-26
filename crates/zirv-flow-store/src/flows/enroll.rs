@@ -570,20 +570,23 @@ async fn entries_of(
     Ok(rows.into_iter().collect())
 }
 
+/// The people of `$2` who have an in-flight enrollment of the flow `$1`. One probe per person: a
+/// set-wide plan reads every in-flight enrollment when the statistics were taken with none in flight.
+const IN_FLIGHT_SQL: &str = "SELECT p.id FROM unnest($2::uuid[]) AS p(id) \
+     CROSS JOIN LATERAL (SELECT 1 FROM enrollments e WHERE e.flow_id = $1 AND e.person_id = p.id \
+                         AND e.state IN ('active', 'waiting', 'held', 'failed') LIMIT 1) AS f";
+
 async fn in_flight_of(
     connection: &mut PgConnection,
     request: &EnrollEntries<'_>,
     people: &[Uuid],
 ) -> Result<HashSet<Uuid>, StoreError> {
-    let rows: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT person_id FROM enrollments \
-         WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')",
-    )
-    .bind(request.flow)
-    .bind(people)
-    .fetch_all(connection)
-    .await
-    .map_err(StoreError::query)?;
+    let rows: Vec<Uuid> = sqlx::query_scalar(IN_FLIGHT_SQL)
+        .bind(request.flow)
+        .bind(people)
+        .fetch_all(connection)
+        .await
+        .map_err(StoreError::query)?;
     Ok(rows.into_iter().collect())
 }
 
@@ -774,7 +777,7 @@ mod tests {
     use zirv_flow_core::Cause;
 
     use super::*;
-    use crate::flows::tests_support::{create, publish, workspace};
+    use crate::flows::tests_support::{create, publish, trace, uuid_list, workspace};
     use crate::flows::{FlowPatch, update_flow_draft};
 
     const NOW: OffsetDateTime = datetime!(2030-01-01 00:00 UTC);
@@ -892,6 +895,52 @@ mod tests {
         .unwrap();
         crate::commit(tx).await.unwrap();
         outcome
+    }
+
+    /// The re-entry check reads a bounded number of buffers when the statistics were taken with
+    /// nothing in flight, in both plan modes.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_reentry_check_reads_a_bounded_number_of_buffers_under_stale_statistics(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "stale-reentry").await;
+        let flow = flow(&pool, ws, json!({"mode": "once"})).await;
+        let seeded = crate::flows::tests_support::seed_stale_in_flight(&pool, ws, flow).await;
+        let mut asked: Vec<Uuid> = seeded.in_flight[..25].to_vec();
+        asked.extend(&seeded.completed[..25]);
+        let args = format!("'{flow}', {}", uuid_list(&asked));
+        for mode in ["force_generic_plan", "force_custom_plan"] {
+            let buffers = crate::flows::tests_support::plan_buffers(
+                &pool,
+                IN_FLIGHT_SQL,
+                "uuid, uuid[]",
+                &args,
+                mode,
+            )
+            .await;
+            eprintln!("in_flight_of {mode}: {buffers} buffers");
+            assert!(
+                buffers < 500,
+                "{mode}: the re-entry check read {buffers} buffers for 50 people"
+            );
+        }
+        let trace = trace();
+        let request = EnrollEntries {
+            workspace: ws,
+            flow,
+            version: 1,
+            trigger: "manual",
+            entries: &[],
+            now: NOW,
+            trace: &trace,
+        };
+        let mut connection = pool.acquire().await.unwrap();
+        let found = in_flight_of(&mut connection, &request, &asked)
+            .await
+            .unwrap();
+        let wanted: HashSet<Uuid> = seeded.in_flight[..25].iter().copied().collect();
+        assert_eq!(found, wanted);
     }
 
     #[sqlx::test]
