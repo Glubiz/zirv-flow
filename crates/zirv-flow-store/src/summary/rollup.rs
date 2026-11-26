@@ -873,10 +873,10 @@ mod tests {
             !plan.contains("Seq Scan on enrollments"),
             "the in-flight count scans every enrollment\n{plan}"
         );
-        // With fresh statistics PostgreSQL 16 answers from the index alone and 18 reads the heap by
-        // a bitmap scan of the same index (0116 moved `person_id` first in the partial index).
+        // The planner picks an index-only or a bitmap scan of it on both 16 and 18 (0116 moved
+        // `person_id` first in the partial index).
         assert!(
-            plan.contains("using enrollments_flow_state_idx"),
+            plan.contains("enrollments_flow_state_idx"),
             "the in-flight count does not use the flow index\n{plan}"
         );
     }
