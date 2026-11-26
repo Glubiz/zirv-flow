@@ -194,11 +194,13 @@ pub(crate) mod tests_support {
         pub(crate) completed: Vec<Uuid>,
         /// People with one active enrollment of the flow.
         pub(crate) in_flight: Vec<Uuid>,
+        /// People with one held enrollment of the flow, in id order.
+        pub(crate) held: Vec<Uuid>,
     }
 
     /// Seeds 20,000 completed enrollments of `flow`, analyzes `enrollments` (autovacuum off, so
-    /// nothing refreshes the statistics), then adds 50,000 active ones for other people: the state
-    /// of a table analyzed between two bench steps.
+    /// nothing refreshes the statistics), then adds 50,000 active and 5,000 held ones for other
+    /// people: the state of a table analyzed between two bench steps.
     pub(crate) async fn seed_stale_in_flight(pool: &PgPool, ws: WorkspaceId, flow: Uuid) -> Seeded {
         sqlx::query("ALTER TABLE enrollments SET (autovacuum_enabled = false)")
             .execute(pool)
@@ -206,7 +208,7 @@ pub(crate) mod tests_support {
             .unwrap();
         sqlx::query(
             "INSERT INTO people (id, workspace_id) \
-             SELECT gen_random_uuid(), $1 FROM generate_series(1, 70000)",
+             SELECT gen_random_uuid(), $1 FROM generate_series(1, 75000)",
         )
         .bind(ws.as_uuid())
         .execute(pool)
@@ -218,36 +220,48 @@ pub(crate) mod tests_support {
                 .fetch_all(pool)
                 .await
                 .unwrap();
-        let (completed, in_flight) = people.split_at(20_000);
-        let insert = |state: &'static str| {
+        let (completed, rest) = people.split_at(20_000);
+        let (in_flight, held) = rest.split_at(50_000);
+        // One statement per phase; the second is in random order, so held and active rows are
+        // spread over the heap as they are when enrollments arrive over a step.
+        let insert = |state: &str, order: &str| {
             format!(
                 "INSERT INTO enrollments \
                     (id, workspace_id, flow_id, flow_version, person_id, state, node, \
-                     occurrence_id, trace_id, cause_kind, cause_id, ended_at) \
-                 SELECT gen_random_uuid(), $1, $2, 1, p, '{state}', 'draft', gen_random_uuid(), \
+                     occurrence_id, trace_id, cause_kind, cause_id, ended_at, resume_input) \
+                 SELECT gen_random_uuid(), $1, $2, 1, p, {state}, 'draft', gen_random_uuid(), \
                         gen_random_uuid(), 'api', 't', \
-                        CASE WHEN '{state}' = 'completed' THEN now() END \
-                 FROM unnest($3::uuid[]) AS p"
+                        CASE WHEN {state} = 'completed' THEN now() END, \
+                        CASE WHEN {state} = 'held' THEN '{{}}'::jsonb END \
+                 FROM unnest($3::uuid[]) AS p {order}"
             )
         };
-        for (state, group) in [("completed", completed), ("active", in_flight)] {
-            sqlx::query(sqlx::AssertSqlSafe(insert(state)))
-                .bind(ws.as_uuid())
-                .bind(flow)
-                .bind(group)
-                .execute(pool)
-                .await
-                .unwrap();
-            if state == "completed" {
-                sqlx::query("ANALYZE enrollments")
-                    .execute(pool)
-                    .await
-                    .unwrap();
-            }
-        }
+        sqlx::query(sqlx::AssertSqlSafe(insert("'completed'", "")))
+            .bind(ws.as_uuid())
+            .bind(flow)
+            .bind(completed)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("ANALYZE enrollments")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(insert(
+            "CASE WHEN p = ANY($4) THEN 'held' ELSE 'active' END",
+            "ORDER BY random()",
+        )))
+        .bind(ws.as_uuid())
+        .bind(flow)
+        .bind(rest)
+        .bind(held)
+        .execute(pool)
+        .await
+        .unwrap();
         Seeded {
             completed: completed.to_vec(),
             in_flight: in_flight.to_vec(),
+            held: held.to_vec(),
         }
     }
 
@@ -278,6 +292,11 @@ pub(crate) mod tests_support {
             .await
             .unwrap();
         let plan: Value = row.try_get(0).unwrap();
+        // PREPARE outlives a rollback, and the connection goes back to the pool.
+        sqlx::query("DEALLOCATE probe")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
         tx.rollback().await.unwrap();
         let top = &plan[0]["Plan"];
         top["Shared Hit Blocks"].as_i64().unwrap() + top["Shared Read Blocks"].as_i64().unwrap()

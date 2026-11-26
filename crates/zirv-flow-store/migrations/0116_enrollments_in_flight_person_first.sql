@@ -20,8 +20,16 @@
 -- stale statistics they still scan an index in full, as before.
 --
 -- The old index keeps its name, so the swap is one drop and one rename: the new index is built
--- under a temporary name and takes the old name when the old one is dropped. The table has no more
--- indexes than before.
+-- under a temporary name and takes the old name when the old one is dropped.
+--
+-- One index is added: `enrollments_held_idx (flow_id, person_id) WHERE state = 'held'`. The resume
+-- walk (`resume_batch`: `flow_id = $2 AND state = 'held' AND person_id > cursor ORDER BY person_id,
+-- id LIMIT 500`) was served by the flow-first in-flight index, which walks the held rows of a flow in
+-- person order. With the person-first index the planner, under statistics taken with nothing held,
+-- picks `enrollments_flow_state_list_idx` and sorts every held row of the flow on each batch: 9,228
+-- buffers a batch against 1,067 (PostgreSQL 16.16 and 18.6, 5,000 held, 20,000 in flight). With the
+-- held index it reads 502. The index holds only held rows (pause and resume write it, nothing else
+-- does) and serves only statements whose WHERE implies `state = 'held'`.
 --
 -- UPGRADE COST: the build takes SHARE on `enrollments` until the migration commits, which blocks
 -- every enrollment insert and update (every flow step) for the build, which scans the table once;
@@ -35,7 +43,11 @@
 -- or cancelled build left invalid, or a different index under the name, is dropped and built again
 -- here, so a failed pre-build never replaces the old index with an unusable one. The migration
 -- then only drops the old index and renames the new one, which takes ACCESS EXCLUSIVE on the
--- table for an instant.
+-- table for an instant. The held index is built the same way, under its own name (it needs no
+-- swap), so its pre-build is the whole of its cost on a large installation:
+--     CREATE INDEX CONCURRENTLY IF NOT EXISTS enrollments_held_idx
+--         ON enrollments (flow_id, person_id) WHERE state = 'held';
+-- The migration keeps an index of that name only when it is valid and is this index, as above.
 DO $$
 BEGIN
     IF to_regclass('enrollments_in_flight_person_idx') IS NOT NULL AND NOT EXISTS (
@@ -54,3 +66,18 @@ CREATE UNIQUE INDEX IF NOT EXISTS enrollments_in_flight_person_idx
     WHERE state IN ('active', 'waiting', 'held', 'failed');
 DROP INDEX enrollments_in_flight_idx;
 ALTER INDEX enrollments_in_flight_person_idx RENAME TO enrollments_in_flight_idx;
+DO $$
+BEGIN
+    IF to_regclass('enrollments_held_idx') IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM pg_index
+        WHERE indexrelid = to_regclass('enrollments_held_idx')
+          AND indisvalid AND NOT indisunique AND indrelid = 'enrollments'::regclass
+          AND split_part(pg_get_indexdef(indexrelid), ' USING ', 2)
+              = 'btree (flow_id, person_id) WHERE (state = ''held''::text)'
+    ) THEN
+        DROP INDEX enrollments_held_idx;
+    END IF;
+END
+$$;
+CREATE INDEX IF NOT EXISTS enrollments_held_idx
+    ON enrollments (flow_id, person_id) WHERE state = 'held';

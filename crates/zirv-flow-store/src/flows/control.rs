@@ -337,6 +337,12 @@ struct HeldRow {
     cause_id: String,
 }
 
+/// One batch of the resume walk: the held enrollments of the flow after the cursor `$4`, by person.
+const RESUME_WALK_SQL: &str = "SELECT id, person_id FROM enrollments \
+     WHERE workspace_id = $1 AND flow_id = $2 AND state = 'held' \
+       AND ($4::uuid IS NULL OR person_id > $4) \
+     ORDER BY person_id, id LIMIT $3";
+
 /// Resumes up to `limit` held enrollments of a flow in the caller's transaction: each goes back
 /// to the state it was held from and gets the `flow.step` job it was held for, under its own
 /// trace, with a unique key that carries `trace`. A `flow.enrollment` decision under `trace`
@@ -355,19 +361,14 @@ pub async fn resume_batch(
     limit: usize,
 ) -> Result<LifecycleBatch, StoreError> {
     let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-    let found: Vec<(Uuid, Uuid)> = sqlx::query_as(
-        "SELECT id, person_id FROM enrollments \
-         WHERE workspace_id = $1 AND flow_id = $2 AND state = 'held' \
-           AND ($4::uuid IS NULL OR person_id > $4) \
-         ORDER BY person_id, id LIMIT $3",
-    )
-    .bind(workspace.as_uuid())
-    .bind(flow)
-    .bind(limit)
-    .bind(after)
-    .fetch_all(&mut *connection)
-    .await
-    .map_err(StoreError::query)?;
+    let found: Vec<(Uuid, Uuid)> = sqlx::query_as(RESUME_WALK_SQL)
+        .bind(workspace.as_uuid())
+        .bind(flow)
+        .bind(limit)
+        .bind(after)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
     if found.is_empty() {
         return Ok(LifecycleBatch::default());
     }
@@ -1000,29 +1001,17 @@ pub(crate) async fn enqueue_segment_settles(
         }
         let people: Vec<Uuid> = list.iter().map(|(person, _)| *person).collect();
         let condition = match signal {
-            Signal::GoalSegment => {
-                "v.settings -> 'goal' ->> 'type' = 'segment' \
-                 AND v.settings -> 'goal' ->> 'segment_id' = $3"
-            }
-            _ => {
-                "v.settings -> 'trigger' ->> 'type' = 'segment' \
-                 AND v.settings -> 'trigger' ->> 'segment_id' = $3 \
-                 AND v.settings -> 'exit_criteria' @> '[{\"type\": \"leaves_segment\"}]'::jsonb"
-            }
+            Signal::GoalSegment => SEGMENT_GOAL_CONDITION,
+            _ => SEGMENT_LEFT_CONDITION,
         };
-        let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-            "SELECT e.id, e.person_id FROM unnest($2::uuid[]) AS t(person_id) \
-             JOIN enrollments e ON e.workspace_id = $1 AND e.person_id = t.person_id \
-                               AND e.state IN ('active', 'waiting', 'held') \
-             JOIN flow_versions v ON v.flow_id = e.flow_id AND v.version = e.flow_version \
-             WHERE {condition} ORDER BY e.person_id, e.id"
-        )))
-        .bind(workspace.as_uuid())
-        .bind(&people)
-        .bind(segment.to_string())
-        .fetch_all(&mut *connection)
-        .await
-        .map_err(StoreError::query)?;
+        let rows: Vec<(Uuid, Uuid)> =
+            sqlx::query_as(sqlx::AssertSqlSafe(segment_lookup_sql(condition)))
+                .bind(workspace.as_uuid())
+                .bind(&people)
+                .bind(segment.to_string())
+                .fetch_all(&mut *connection)
+                .await
+                .map_err(StoreError::query)?;
         if first_trace.is_none()
             && !rows.is_empty()
             && let Some(change) = source
@@ -1055,6 +1044,30 @@ pub(crate) async fn enqueue_segment_settles(
         }
     }
     Ok(enqueued)
+}
+
+/// The flow versions whose goal is the segment `$3`.
+const SEGMENT_GOAL_CONDITION: &str = "v.settings -> 'goal' ->> 'type' = 'segment' \
+     AND v.settings -> 'goal' ->> 'segment_id' = $3";
+
+/// The flow versions that exit a person who leaves the segment `$3` they are triggered by.
+const SEGMENT_LEFT_CONDITION: &str = "v.settings -> 'trigger' ->> 'type' = 'segment' \
+     AND v.settings -> 'trigger' ->> 'segment_id' = $3 \
+     AND v.settings -> 'exit_criteria' @> '[{\"type\": \"leaves_segment\"}]'::jsonb";
+
+/// The in-flight enrollments of the people `$2` in workspace `$1` whose flow version matches
+/// `condition`. One probe per person (`OFFSET 0` keeps the planner from flattening it): a set-wide
+/// plan reads every in-flight enrollment when the statistics were taken with none in flight.
+fn segment_lookup_sql(condition: &str) -> String {
+    format!(
+        "SELECT e.id, e.person_id FROM unnest($2::uuid[]) AS t(person_id) \
+         CROSS JOIN LATERAL (SELECT e.id, e.person_id, e.flow_id, e.flow_version \
+                             FROM enrollments e \
+                             WHERE e.workspace_id = $1 AND e.person_id = t.person_id \
+                               AND e.state IN ('active', 'waiting', 'held') OFFSET 0) AS e \
+         JOIN flow_versions v ON v.flow_id = e.flow_id AND v.version = e.flow_version \
+         WHERE {condition} ORDER BY e.person_id, e.id"
+    )
 }
 
 /// What a `flow.lifecycle` job does to the enrollments of a flow.
@@ -1258,6 +1271,117 @@ mod tests {
                 "{mode}: the event lookup read {buffers} buffers for 50 arrivals"
             );
         }
+    }
+
+    /// A published flow whose goal is a segment, seeded with stale statistics.
+    async fn segment_goal_flow(pool: &PgPool, ws: WorkspaceId, segment: Uuid) -> Uuid {
+        let flow = create(pool, ws, "Segment goal").await;
+        let mut connection = pool.acquire().await.unwrap();
+        update_flow_draft(
+            &mut connection,
+            ws,
+            flow.id,
+            &FlowPatch {
+                settings: Some(json!({
+                    "trigger": {"type": "segment", "segment_id": segment, "on": "entered"},
+                    "reentry": {"mode": "once"},
+                    "goal": {"type": "segment", "segment_id": segment},
+                    "exit_criteria": [{"type": "leaves_segment"}]
+                })),
+                ..FlowPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        drop(connection);
+        publish(pool, ws, flow.id).await.unwrap();
+        flow.id
+    }
+
+    fn uuid_list(items: &[Uuid]) -> String {
+        let list: Vec<String> = items.iter().map(Uuid::to_string).collect();
+        format!("'{{{}}}'", list.join(","))
+    }
+
+    /// The segment goal and leave lookups read a bounded number of buffers when the statistics
+    /// were taken with nothing in flight, in both plan modes.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_segment_lookups_read_a_bounded_number_of_buffers_under_stale_statistics(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "stale-segment").await;
+        let segment = Uuid::now_v7();
+        let flow = segment_goal_flow(&pool, ws, segment).await;
+        let seeded = crate::flows::tests_support::seed_stale_in_flight(&pool, ws, flow).await;
+        let mut people: Vec<Uuid> = seeded.in_flight[..25].to_vec();
+        people.extend(&seeded.completed[..25]);
+        let args = format!("'{}', {}, '{segment}'", ws.as_uuid(), uuid_list(&people));
+        let mut failures = Vec::new();
+        for (kind, condition) in [
+            ("goal", SEGMENT_GOAL_CONDITION),
+            ("left", SEGMENT_LEFT_CONDITION),
+        ] {
+            for mode in ["force_generic_plan", "force_custom_plan"] {
+                let buffers = crate::flows::tests_support::plan_buffers(
+                    &pool,
+                    &segment_lookup_sql(condition),
+                    "uuid, uuid[], text",
+                    &args,
+                    mode,
+                )
+                .await;
+                eprintln!("segment {kind} {mode}: {buffers} buffers");
+                if buffers >= 500 {
+                    failures.push(format!("{kind} {mode}: {buffers} buffers for 50 people"));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "the segment lookup read too much: {failures:?}"
+        );
+    }
+
+    /// A batch of the resume walk reads a bounded number of buffers when the statistics were
+    /// taken with nothing in flight: the first batch in both plan modes, one mid-walk in custom.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_resume_batch_reads_a_bounded_number_of_buffers_under_stale_statistics(pool: PgPool) {
+        let ws = workspace(&pool, "stale-resume").await;
+        let flow = create(&pool, ws, "Resume").await;
+        publish(&pool, ws, flow.id).await.unwrap();
+        let seeded = crate::flows::tests_support::seed_stale_in_flight(&pool, ws, flow.id).await;
+        let first = format!("'{}', '{}', 500, NULL", ws.as_uuid(), flow.id);
+        let mid = format!(
+            "'{}', '{}', 500, '{}'",
+            ws.as_uuid(),
+            flow.id,
+            seeded.held[2_000]
+        );
+        let mut failures = Vec::new();
+        for (label, mode, args) in [
+            ("first", "force_generic_plan", &first),
+            ("first", "force_custom_plan", &first),
+            ("mid-walk", "force_custom_plan", &mid),
+        ] {
+            let buffers = crate::flows::tests_support::plan_buffers(
+                &pool,
+                RESUME_WALK_SQL,
+                "uuid, uuid, bigint, uuid",
+                args,
+                mode,
+            )
+            .await;
+            eprintln!("resume {label} {mode}: {buffers} buffers");
+            if buffers >= 800 {
+                failures.push(format!("{label} {mode}: {buffers} buffers"));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "a resume batch read too much: {failures:?}"
+        );
     }
 
     #[sqlx::test]

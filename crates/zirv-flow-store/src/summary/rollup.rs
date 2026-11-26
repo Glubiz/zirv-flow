@@ -363,8 +363,8 @@ async fn refresh_flows(conn: &mut PgConnection, workspace: Uuid) -> Result<(), S
 }
 
 /// The flow ids come from the workspace's own published flows, and an enrollment's flow belongs
-/// to its workspace by foreign key, so the count needs no workspace predicate; with one, the
-/// planner cannot answer from `enrollments_flow_state_idx (flow_id, state, flow_version)`.
+/// to its workspace by foreign key, so the count needs no workspace predicate; one would cost a heap filter
+/// on every counted row, as `workspace_id` is not in `enrollments_flow_state_idx`.
 const IN_FLOW_SNAPSHOT: &str = "INSERT INTO summary_flows (workspace_id, flow_id, people_in_flow, has_goal) \
      SELECT $1, p.flow_id, \
             (SELECT count(*) FROM enrollments e \
