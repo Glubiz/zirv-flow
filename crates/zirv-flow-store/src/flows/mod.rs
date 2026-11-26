@@ -188,6 +188,101 @@ pub(crate) mod tests_support {
         id
     }
 
+    /// The people of a flow seeded by [`seed_stale_in_flight`].
+    pub(crate) struct Seeded {
+        /// People whose only enrollment of the flow is completed.
+        pub(crate) completed: Vec<Uuid>,
+        /// People with one active enrollment of the flow.
+        pub(crate) in_flight: Vec<Uuid>,
+    }
+
+    /// Seeds 20,000 completed enrollments of `flow`, analyzes `enrollments` (autovacuum off, so
+    /// nothing refreshes the statistics), then adds 50,000 active ones for other people: the state
+    /// of a table analyzed between two bench steps.
+    pub(crate) async fn seed_stale_in_flight(pool: &PgPool, ws: WorkspaceId, flow: Uuid) -> Seeded {
+        sqlx::query("ALTER TABLE enrollments SET (autovacuum_enabled = false)")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO people (id, workspace_id) \
+             SELECT gen_random_uuid(), $1 FROM generate_series(1, 70000)",
+        )
+        .bind(ws.as_uuid())
+        .execute(pool)
+        .await
+        .unwrap();
+        let people: Vec<Uuid> =
+            sqlx::query_scalar("SELECT id FROM people WHERE workspace_id = $1 ORDER BY id")
+                .bind(ws.as_uuid())
+                .fetch_all(pool)
+                .await
+                .unwrap();
+        let (completed, in_flight) = people.split_at(20_000);
+        let insert = |state: &'static str| {
+            format!(
+                "INSERT INTO enrollments \
+                    (id, workspace_id, flow_id, flow_version, person_id, state, node, \
+                     occurrence_id, trace_id, cause_kind, cause_id, ended_at) \
+                 SELECT gen_random_uuid(), $1, $2, 1, p, '{state}', 'draft', gen_random_uuid(), \
+                        gen_random_uuid(), 'api', 't', \
+                        CASE WHEN '{state}' = 'completed' THEN now() END \
+                 FROM unnest($3::uuid[]) AS p"
+            )
+        };
+        for (state, group) in [("completed", completed), ("active", in_flight)] {
+            sqlx::query(sqlx::AssertSqlSafe(insert(state)))
+                .bind(ws.as_uuid())
+                .bind(flow)
+                .bind(group)
+                .execute(pool)
+                .await
+                .unwrap();
+            if state == "completed" {
+                sqlx::query("ANALYZE enrollments")
+                    .execute(pool)
+                    .await
+                    .unwrap();
+            }
+        }
+        Seeded {
+            completed: completed.to_vec(),
+            in_flight: in_flight.to_vec(),
+        }
+    }
+
+    /// The shared buffers (hits and reads) the top plan node of `sql` touches when it runs with
+    /// the literal `args` as a prepared statement of parameter `types`, in the given
+    /// `plan_cache_mode`.
+    pub(crate) async fn plan_buffers(
+        pool: &PgPool,
+        sql: &str,
+        types: &str,
+        args: &str,
+        plan_cache_mode: &str,
+    ) -> i64 {
+        use sqlx::Row;
+        let mut tx = pool.begin().await.unwrap();
+        for statement in [
+            format!("SET LOCAL plan_cache_mode = {plan_cache_mode}"),
+            format!("PREPARE probe({types}) AS {sql}"),
+        ] {
+            sqlx::query(sqlx::AssertSqlSafe(statement))
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+        }
+        let explain = format!("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE probe({args})");
+        let row = sqlx::query(sqlx::AssertSqlSafe(explain))
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        let plan: Value = row.try_get(0).unwrap();
+        tx.rollback().await.unwrap();
+        let top = &plan[0]["Plan"];
+        top["Shared Hit Blocks"].as_i64().unwrap() + top["Shared Read Blocks"].as_i64().unwrap()
+    }
+
     pub(crate) async fn decisions(pool: &PgPool, ws: WorkspaceId, action: &str) -> i64 {
         sqlx::query_scalar(
             "SELECT count(*) FROM decision_records WHERE workspace_id = $1 AND action = $2",

@@ -863,6 +863,23 @@ pub async fn hand_on_settle_rest(
     Ok(enqueued)
 }
 
+/// The in-flight enrollments of the arrivals' people whose flow version names the event.
+const SETTLE_LOOKUP_SQL: &str = "SELECT e.id, e.person_id, t.event_id, t.name, \
+            COALESCE(v.settings -> 'goal' ->> 'type' = 'event' \
+                     AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, \
+            COALESCE(v.settings -> 'exit_criteria' @> \
+                     jsonb_build_array(jsonb_build_object('type', 'event', 'event', t.name)), \
+                     false) AS exit \
+     FROM unnest($2::uuid[], $3::uuid[], $4::text[]) AS t(event_id, person_id, name) \
+     JOIN enrollments e ON e.workspace_id = $1 AND e.person_id = t.person_id \
+                       AND e.state IN ('active', 'waiting', 'held') \
+     JOIN flow_versions v ON v.flow_id = e.flow_id AND v.version = e.flow_version \
+     WHERE (v.settings -> 'goal' ->> 'type' = 'event' \
+            AND v.settings -> 'goal' ->> 'event' = t.name) \
+        OR v.settings -> 'exit_criteria' @> \
+           jsonb_build_array(jsonb_build_object('type', 'event', 'event', t.name)) \
+     ORDER BY e.person_id, e.id, t.event_id";
+
 /// Enqueues the `flow.settle` jobs for the events of a batch: one query finds the in-flight
 /// enrollments of the people whose flow version names the event as its goal or as an event exit
 /// criterion, by name. Property filters are not applied here (the store cannot read the segment
@@ -878,23 +895,7 @@ pub(crate) async fn enqueue_event_settles(
     let events: Vec<Uuid> = arrivals.iter().map(|a| a.event_id).collect();
     let people: Vec<Uuid> = arrivals.iter().map(|a| a.person_id).collect();
     let names: Vec<&str> = arrivals.iter().map(|a| a.name.as_str()).collect();
-    let rows: Vec<(Uuid, Uuid, Uuid, String, bool, bool)> = sqlx::query_as(
-        "SELECT e.id, e.person_id, t.event_id, t.name, \
-                COALESCE(v.settings -> 'goal' ->> 'type' = 'event' \
-                         AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, \
-                COALESCE(v.settings -> 'exit_criteria' @> \
-                         jsonb_build_array(jsonb_build_object('type', 'event', 'event', t.name)), \
-                         false) AS exit \
-         FROM unnest($2::uuid[], $3::uuid[], $4::text[]) AS t(event_id, person_id, name) \
-         JOIN enrollments e ON e.workspace_id = $1 AND e.person_id = t.person_id \
-                           AND e.state IN ('active', 'waiting', 'held') \
-         JOIN flow_versions v ON v.flow_id = e.flow_id AND v.version = e.flow_version \
-         WHERE (v.settings -> 'goal' ->> 'type' = 'event' \
-                AND v.settings -> 'goal' ->> 'event' = t.name) \
-            OR v.settings -> 'exit_criteria' @> \
-               jsonb_build_array(jsonb_build_object('type', 'event', 'event', t.name)) \
-         ORDER BY e.person_id, e.id, t.event_id",
-    )
+    let rows: Vec<(Uuid, Uuid, Uuid, String, bool, bool)> = sqlx::query_as(SETTLE_LOOKUP_SQL)
     .bind(workspace.as_uuid())
     .bind(&events)
     .bind(&people)
@@ -1199,6 +1200,61 @@ mod tests {
             .fetch_one(pool)
             .await
             .unwrap()
+    }
+
+    /// The goal and exit lookup reads a bounded number of buffers when the statistics were taken
+    /// with nothing in flight, in both plan modes.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_event_lookup_reads_a_bounded_number_of_buffers_under_stale_statistics(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "stale-settle").await;
+        let flow = create(&pool, ws, "Goal").await;
+        let mut connection = pool.acquire().await.unwrap();
+        update_flow_draft(
+            &mut connection,
+            ws,
+            flow.id,
+            &FlowPatch {
+                settings: Some(json!({
+                    "trigger": {"type": "manual"},
+                    "reentry": {"mode": "once"},
+                    "goal": {"type": "event", "event": "order"}
+                })),
+                ..FlowPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        drop(connection);
+        publish(&pool, ws, flow.id).await.unwrap();
+        let seeded = crate::flows::tests_support::seed_stale_in_flight(&pool, ws, flow.id).await;
+        let mut people: Vec<Uuid> = seeded.in_flight[..25].to_vec();
+        people.extend(&seeded.completed[..25]);
+        let list = |items: Vec<String>| format!("'{{{}}}'", items.join(","));
+        let args = format!(
+            "'{}', {}, {}, {}",
+            ws.as_uuid(),
+            list(people.iter().map(|_| Uuid::now_v7().to_string()).collect()),
+            list(people.iter().map(Uuid::to_string).collect()),
+            list(people.iter().map(|_| "order".to_owned()).collect()),
+        );
+        for mode in ["force_generic_plan", "force_custom_plan"] {
+            let buffers = crate::flows::tests_support::plan_buffers(
+                &pool,
+                SETTLE_LOOKUP_SQL,
+                "uuid, uuid[], uuid[], text[]",
+                &args,
+                mode,
+            )
+            .await;
+            eprintln!("enqueue_event_settles {mode}: {buffers} buffers");
+            assert!(
+                buffers < 500,
+                "{mode}: the event lookup read {buffers} buffers for 50 arrivals"
+            );
+        }
     }
 
     #[sqlx::test]
