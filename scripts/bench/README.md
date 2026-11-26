@@ -317,8 +317,8 @@ scripts/bench/flows.sh down
   node's start + 30 s and is counted in `wake_times_estimated`.
 - A ramp step fails when trigger -> enrollment p95 exceeds 60 s, enrollments are below 95% of the
   accepted triggers (minus re-entry refusals), the oldest due job is older than 30 s at the
-  generators' stop and older than mid-window, or the trigger generator is late (`late_dispatch` above
-  0 or achieved below 98% of target). At high trigger rates many triggers are refused as
+  generators' stop and older than mid-window, either generator is late (`late_dispatch` above 0 or
+  achieved below 98% of target), or the window has no queue sample. At high trigger rates many triggers are refused as
   `already_active` (about rate x 31 s / 100,000 of them); they are counted, not failures.
 
 ## 9. Segment benchmarks (M4, issue #127)

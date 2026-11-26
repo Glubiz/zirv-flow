@@ -68,14 +68,14 @@ wake lateness):
 |---|---|---|---|---|---|---|
 | `soak60-100` (pass 2) | 100, 1,000 | 3,600 s | 349,557 | 0.015 / 0.027 / 0.040 | 0.035 / 0.060 / 0.108 | 0.005 / 0.015 / 0.029 |
 | `soak-150` (pass 1) | 150, 1,000 | 900 s | 129,292 | 0.018 / 0.043 / 0.071 | 0.046 / 0.109 / 0.675 | 0.006 / 0.025 / 0.611 |
-| `idle` (pass 1) | 50, 0 | 300 s | 14,804 | 0.007 / 0.014 / 0.017 | 0.503 / 0.872 / 1.025 | 0.005 / 0.477 / 0.833 |
-| `bg1000` (pass 1) | 50, 1,000 | 300 s | 14,783 | 0.013 / 0.022 / 0.031 | 0.518 / 0.886 / 1.039 | 0.007 / 0.481 / 0.829 |
-| `bg1000-repeat` (pass 2) | 50, 1,000 | 300 s | 14,780 | 0.013 / 0.023 / 0.031 | 0.511 / 0.881 / 1.033 | 0.007 / 0.475 / 0.823 |
-| `bg2000` (pass 1) | 50, 2,000 | 300 s | 14,785 | 0.017 / 0.028 / 0.038 | 0.520 / 0.891 / 1.059 | 0.008 / 0.475 / 0.827 |
+| `idle` (pass 1) | 50, 0 | 300 s | 14,804 | 0.007 / 0.014 / 0.017 | 0.020 / 0.503 / 0.872 | 0.005 / 0.477 / 0.833 |
+| `bg1000` (pass 1) | 50, 1,000 | 300 s | 14,783 | 0.013 / 0.022 / 0.031 | 0.031 / 0.518 / 0.886 | 0.007 / 0.481 / 0.829 |
+| `bg1000-repeat` (pass 2) | 50, 1,000 | 300 s | 14,780 | 0.013 / 0.023 / 0.031 | 0.032 / 0.511 / 0.881 | 0.007 / 0.475 / 0.823 |
+| `bg2000` (pass 1) | 50, 2,000 | 300 s | 14,785 | 0.017 / 0.028 / 0.038 | 0.038 / 0.520 / 0.891 | 0.008 / 0.475 / 0.827 |
 
 Sources: the window JSON files named in the first column (`flows/` for pass 1, `flows-run2/flows/` for
 pass 2), key `latency_s`. All windows had 0 failed enrollments and 0 dead jobs. In the 50 triggers/s
-windows wake lateness has a floor near 0.5 to 0.8 s (section 4.3).
+windows wake lateness has a tail of 0.5 to 0.8 s at p95 and p99, which depends on the window length (section 4.3).
 
 CPU at the knees (cores; average / peak during the generators, from `containers` in the step files):
 PostgreSQL 5.76 / 6.56 and worker 1.81 / 2.32 at 1,000 events/s background and 250 triggers/s;
@@ -104,7 +104,8 @@ to 6.5 on average (peak 5.0 to 6.8). Section 5 gives the same measurements at wo
   generator late dispatch or achieved rate below target, inbox age at or above 5 s or growing, or
   transport errors above 1e-4 of accepted requests. Docker Desktop's Windows port proxy drops an
   isolated connection now and then; the tolerance covers that, and `L/strict/` holds zero-tolerance
-  runs for comparison. Track and identify send one item per request; batch sends 100 items per
+  runs for comparison. The pool 10 batch ramp ran without the tolerance (`transport_tolerance` null in
+  `L/batch1-ceiling.json`) and had 0 transport errors in every step. Track and identify send one item per request; batch sends 100 items per
   request. Ramp start and step: track pool 10 from 2,250 by 250; identify pool 10 from 1,250 by 250;
   track pool 32 from 2,750 by 250; identify pool 32 from 2,000 by 250; batch from 2,000 by 2,000
   (both pools).
@@ -347,13 +348,23 @@ p50 / p95 / p99 of 0.013 / 0.022 / 0.031 s and 0.013 / 0.023 / 0.031 s.
 
 ### 4.3 Wake lateness at light load
 
-New jobs wake the worker through LISTEN/NOTIFY, but a delayed job (the wake after the wait) is picked
-up by the worker's 1 s `poll_interval` (`crates/zirv-flow-jobs/src/worker.rs:143`) when the worker is
-otherwise idle. At 50 triggers/s the wake lateness p99 is therefore 0.82 to 0.83 s (windows `idle`,
-`bg1000`, `bg1000-repeat`, `bg2000`; max 0.97 to 0.99 s). At 100 triggers/s in the soak the worker is
-rarely idle and p99 is 29 ms. The ramps show the same: in every ramp step whose trigger-to-enrollment
-p95 is under 0.15 s, wake lateness p99 is 0.81 to 0.90 s. This number reflects the poll interval at light
-load, not capacity.
+Wake lateness has a tail near the worker's 1 s `poll_interval` (`crates/zirv-flow-jobs/src/worker.rs:143`)
+whose size depends on the window length, not on the load:
+
+| Window | Rate, triggers/s | Generator time | Share of wakes due after the generators stop | Wake lateness p95 / p99 (s) |
+|---|---|---|---|---|
+| `soak60-100` | 100 | 3,600 s | 0.8% | 0.015 / 0.029 |
+| `soak-150` | 150 | 900 s | 3.3% | 0.025 / 0.611 |
+| `bg1000` | 50 | 300 s | 10% | 0.481 / 0.829 |
+| `flows/ramp-1000-100` | 100 | 120 s | 25% | 0.593 / 0.871 |
+
+The share is the flow's 30 s wait divided by the generator time. The percentile at which lateness jumps
+to about 0.5 to 0.9 s follows that share. The hypothesis, not measured here: while triggers arrive, each
+new job wakes the worker through LISTEN/NOTIFY and due wakes are claimed at once; the wakes that come due
+after the generators stop find an idle worker and wait for its next 1 s poll. If so, in steady production
+traffic wake lateness is the soak's (29 ms at p99), and an idle system adds up to 1 s. Pass 3 does not fit
+the pattern exactly: at concurrency 16 and 32 the ramp steps have lower wake p99 (for example 0.210 s at
+c16 step 500 and 0.114 s at c32 step 600, both 120 s steps); the data does not say why.
 
 ## 5. Worker concurrency
 
@@ -444,14 +455,13 @@ and 32 (`flows-conc32/flows/bg1000.json`); 14,783 enrollments in each, 0 failed,
 
 | Concurrency | trig-to-enroll p50 / p95 / p99 | e2e-w p50 / p95 / p99 | wake lateness p50 / p95 / p99 | Worker average cores | PostgreSQL average cores |
 |---|---|---|---|---|---|
-| 4 | 0.013 / 0.022 / 0.031 | 0.518 / 0.886 / 1.039 | 0.007 / 0.481 / 0.829 | 1.74 | 4.07 |
+| 4 | 0.013 / 0.022 / 0.031 | 0.031 / 0.518 / 0.886 | 0.007 / 0.481 / 0.829 | 1.74 | 4.07 |
 | 16 | 0.014 / 0.025 / 0.033 | 0.034 / 0.506 / 0.856 | 0.007 / 0.463 / 0.800 | 1.77 | 4.42 |
 | 32 | 0.014 / 0.025 / 0.032 | 0.034 / 0.378 / 0.766 | 0.007 / 0.340 / 0.699 | 1.74 | 4.41 |
 
 Trigger-to-enrollment is unchanged by concurrency at this load. End-to-end minus wait and wake lateness
 are slightly lower at c16 and c32 in the upper percentiles (p99 wake 0.829, 0.800, 0.699 s), and all
-stay under the 1 s poll interval of section 4.3. The end-to-end p50 differs (0.518 s at c4 against 0.034
-s at c16 and c32); the data does not say why. The soak of section 4 was not repeated at concurrency 16
+stay under the 1 s poll interval of section 4.3. The soak of section 4 was not repeated at concurrency 16
 or 32.
 
 ## 6. Anomalies and limits of this run

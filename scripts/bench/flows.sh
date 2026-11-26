@@ -428,7 +428,11 @@ step_reasons() {
         (if (.backlog.oldest_due_age_at_generators_stop_s > 30 and .backlog.oldest_due_age_at_generators_stop_s > .backlog.oldest_due_age_mid_window_s)
            then "oldest_due_job_age_gt_30s_and_rising" else empty end),
         (if ((.trigger_generator.late_dispatch // 0) > 0) then "generator_late_dispatch" else empty end),
-        (if ((.trigger_generator.achieved_rate // 0) < 0.98 * $t) then "generator_achieved_below_98pct" else empty end) ]' "$1"
+        (if ((.trigger_generator.achieved_rate // 0) < 0.98 * $t) then "generator_achieved_below_98pct" else empty end),
+        (if .target_background_rate > 0 and ((.background_generator.late_dispatch // 0) > 0
+             or (.background_generator.achieved_rate // 0) < 0.98 * .target_background_rate)
+           then "background_generator_late_or_below_98pct" else empty end),
+        (if (.backlog.samples // 0) == 0 then "no_queue_samples" else empty end) ]' "$1"
 }
 
 cmd_ramp() {
