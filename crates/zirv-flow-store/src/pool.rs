@@ -213,6 +213,7 @@ mod tests {
             Duration::from_secs(5)
         );
     }
+
     /// `connect` keeps trying for the startup wait, not only for the acquire timeout: a database
     /// that starts accepting connections 7 s in (a restart beside the app) is still reached.
     #[tokio::test]
