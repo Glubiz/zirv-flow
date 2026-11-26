@@ -17,7 +17,13 @@
 -- the flow-scoped in-flight counts (`count_in_flight_enrollments`, the `summary.rollup` flow
 -- snapshot) no longer have `flow_id` leading in this index, so they are answered by
 -- `enrollments_flow_state_idx (flow_id, state, flow_version)` when the statistics are fresh. Under
--- stale statistics they still scan an index in full, as before.
+-- stale statistics they still scan an index in full, as before. The exit walk (`exit_batch`, a flow
+-- archive or a version exit) moves too, under stale statistics: a custom plan reads 583 buffers a
+-- batch on PostgreSQL 16 against 507 before; on 18 a mid-walk batch reads 3,327 against 507, because
+-- it picks `enrollments_occurrence_idx` and walks the flow's completed history as well (first batch
+-- 589 to 591 against 506 on both). That is at most one pass over the flow's enrollments, in a rare
+-- admin operation, and it takes no new index. Separately, and before this migration, a generic plan
+-- reads 12,276 buffers a batch against 10,550, because the cursor cannot be an index condition in it.
 --
 -- The old index keeps its name, so the swap is one drop and one rename: the new index is built
 -- under a temporary name and takes the old name when the old one is dropped.
@@ -31,9 +37,9 @@
 -- held index it reads 502. The index holds only held rows (pause and resume write it, nothing else
 -- does) and serves only statements whose WHERE implies `state = 'held'`.
 --
--- UPGRADE COST: the build takes SHARE on `enrollments` until the migration commits, which blocks
--- every enrollment insert and update (every flow step) for the build, which scans the table once;
--- reads go on. `CREATE INDEX CONCURRENTLY` cannot run in a migration, because sqlx runs each file in
+-- UPGRADE COST: both builds (the in-flight index and the held index, each one scan of the table) take
+-- SHARE on `enrollments` until the migration commits, which blocks every enrollment insert and
+-- update (every flow step) for the builds; reads go on. `CREATE INDEX CONCURRENTLY` cannot run in a migration, because sqlx runs each file in
 -- a transaction. To keep the stop short on a large installation, build the new index before it,
 -- under the temporary name (the statement below skips an index that exists):
 --     CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS enrollments_in_flight_person_idx
@@ -42,8 +48,9 @@
 -- The migration keeps an index of that name only when it is valid and is this index; one a failed
 -- or cancelled build left invalid, or a different index under the name, is dropped and built again
 -- here, so a failed pre-build never replaces the old index with an unusable one. The migration
--- then only drops the old index and renames the new one, which takes ACCESS EXCLUSIVE on the
--- table for an instant. The held index is built the same way, under its own name (it needs no
+-- then only drops the old index and renames the new one. Those are the last two statements, so the
+-- ACCESS EXCLUSIVE lock of the drop, which blocks reads too, is held only until the commit that
+-- follows the rename: an instant. The held index is built the same way, under its own name (it needs no
 -- swap), so its pre-build is the whole of its cost on a large installation:
 --     CREATE INDEX CONCURRENTLY IF NOT EXISTS enrollments_held_idx
 --         ON enrollments (flow_id, person_id) WHERE state = 'held';
@@ -64,8 +71,6 @@ $$;
 CREATE UNIQUE INDEX IF NOT EXISTS enrollments_in_flight_person_idx
     ON enrollments (person_id, flow_id)
     WHERE state IN ('active', 'waiting', 'held', 'failed');
-DROP INDEX enrollments_in_flight_idx;
-ALTER INDEX enrollments_in_flight_person_idx RENAME TO enrollments_in_flight_idx;
 DO $$
 BEGIN
     IF to_regclass('enrollments_held_idx') IS NOT NULL AND NOT EXISTS (
@@ -81,3 +86,5 @@ END
 $$;
 CREATE INDEX IF NOT EXISTS enrollments_held_idx
     ON enrollments (flow_id, person_id) WHERE state = 'held';
+DROP INDEX enrollments_in_flight_idx;
+ALTER INDEX enrollments_in_flight_person_idx RENAME TO enrollments_in_flight_idx;

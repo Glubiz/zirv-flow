@@ -37,13 +37,24 @@ pub async fn commit(tx: Tx) -> Result<(), StoreError> {
 /// gets its 503 in seconds, not after sqlx's default 30 s, when clients have given up.
 const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long `connect` waits for the database to accept the first connection (a restart or a
+/// recovery beside the app), as sqlx's default acquire timeout did before requests got their own.
+const STARTUP_WAIT: Duration = Duration::from_secs(30);
+
 pub async fn connect(url: &str, max_connections: u32) -> Result<PgPool, StoreError> {
-    PgPoolOptions::new()
+    let pool = PgPoolOptions::new()
         .max_connections(max_connections)
         .acquire_timeout(ACQUIRE_TIMEOUT)
-        .connect(url)
-        .await
-        .map_err(StoreError::connect)
+        .connect_lazy(url)
+        .map_err(StoreError::connect)?;
+    let deadline = tokio::time::Instant::now() + STARTUP_WAIT;
+    loop {
+        match pool.acquire().await {
+            Ok(_) => return Ok(pool),
+            Err(sqlx::Error::PoolTimedOut) if tokio::time::Instant::now() < deadline => {}
+            Err(error) => return Err(StoreError::connect(error)),
+        }
+    }
 }
 
 /// A separate pool to the same database, with its own `max_connections`,
@@ -201,6 +212,43 @@ mod tests {
             sibling.options().get_acquire_timeout(),
             Duration::from_secs(5)
         );
+    }
+    /// `connect` keeps trying for the startup wait, not only for the acquire timeout: a database
+    /// that starts accepting connections 7 s in (a restart beside the app) is still reached.
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn connect_waits_for_a_database_that_starts_accepting_after_the_acquire_timeout() {
+        let url = std::env::var("DATABASE_URL").unwrap();
+        let (scheme, remainder) = url.split_once("://").unwrap();
+        let (credentials, address) = remainder.rsplit_once('@').unwrap();
+        let (server, database) = address.split_once('/').unwrap();
+        let free = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = free.local_addr().unwrap().port();
+        drop(free);
+        let late_url = format!("{scheme}://{credentials}@127.0.0.1:{port}/{database}");
+        let server = server.to_owned();
+        let forwarder = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(7)).await;
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+                .await
+                .unwrap();
+            loop {
+                let (mut client, _) = listener.accept().await.unwrap();
+                let server = server.clone();
+                tokio::spawn(async move {
+                    let mut upstream = tokio::net::TcpStream::connect(server).await.unwrap();
+                    let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+                });
+            }
+        });
+
+        let started = std::time::Instant::now();
+        let pool = connect(&late_url, 1).await;
+        let elapsed = started.elapsed();
+        forwarder.abort();
+
+        assert!(pool.is_ok(), "connect gave up after {elapsed:?}: {pool:?}");
+        assert!(elapsed >= Duration::from_secs(7), "{elapsed:?}");
     }
 
     #[sqlx::test]
