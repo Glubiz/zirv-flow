@@ -256,6 +256,15 @@ scripts/bench/tier.sh M decappend                                 # tier M only
   request at 2,000 items/s for 10 minutes.
 - Every test recreates the stack on a fresh volume, samples `docker stats` and the inbox, and writes
   to `docs/benchmarks/data/<tier>/`. Peak CPU is in percent of one core.
+- Ramp knobs: `BENCH_WARMUP_SECONDS` (default 0) runs `BENCH_WARMUP_RATE` (default the first rung)
+  for that long before step 1, then `ANALYZE`; without it a fresh database plans on empty-table
+  statistics and stalls the first minute. `BENCH_TRANSPORT_TOLERANCE` (default 0) is the share of
+  accepted requests that may end with no response before a step fails (Docker Desktop's Windows port
+  proxy drops an isolated connection now and then).
+- Stack knobs: `BENCH_SERVE_DB_CONNECTIONS` (serve `database.max_connections`, default 10),
+  `BENCH_WORKER_CONCURRENCY` (default 4) and `BENCH_PG_MAX_CONNECTIONS` (PostgreSQL
+  `max_connections`, default 100; a worker's pools reach D + 3 x C + 1 connections, see
+  `docs/operations/sizing.md`). The tier L report is [`tier-l-capacity.md`](../../docs/benchmarks/tier-l-capacity.md).
 
 Clients on the host aim at `127.0.0.1` (`BENCH_HOST`): through the name `localhost`, Docker Desktop on Windows
 makes new connections about 140 ms slower at p99 and each PostgreSQL round trip about 4.4 ms. The decision
@@ -265,6 +274,52 @@ the deployment-shaped figure is the same 500-insert transaction timed with `pgbe
 `scripts/bench/ab.sh <on|off> <n> <zirv-flow-binary> <loadgen-binary>` is the decision-log A/B:
 native release builds (the `off` one built as in section 6), unconstrained, against the tier PostgreSQL;
 it preloads a backlog with no worker, then times the drain to empty. Run each side at least twice.
+
+### Flow execution under ingest load (`flows.sh`)
+
+`scripts/bench/flows.sh` measures trigger event -> enrollment -> each step -> completion of one
+event-triggered flow while a second generator loads the ingest path, on the tier L stack with
+PostgreSQL on cpuset `8-15` and a 16 GB limit (`BENCH_PG_CPUSET`, `BENCH_PG_MEMORY`). The flow:
+trigger `bench_flow_trigger`, `branch` on trait `plan` = `pro`, `action.update_trait` (pro) or
+`action.list` add (everyone else), `wait.duration` 30 s, `action.update_trait` increment, `exit`;
+warm-up off, re-entry `once_at_a_time` (a person triggered again while in flight is refused with the
+`flow.enroll` decision reason `already_active`; once finished they may enter again). No node needs
+an external fixture. Needs `loadgen` with `--event` (build it first), jq, awk and curl.
+
+```sh
+export BENCH_LOADGEN=target/release/loadgen BENCH_SCRATCH=/tmp/zirv-bench-flows
+scripts/bench/flows.sh up                      # fresh stack, owner, workspace, ingest key; stack facts
+scripts/bench/flows.sh seed 100000             # identify people (3 items per person), wait for the inbox
+scripts/bench/flows.sh setup                   # create and publish the flow; definition saved
+scripts/bench/flows.sh window smoke 0 5 60     # <label> <background items/s> <trigger events/s> [s=300]
+scripts/bench/flows.sh window bg2000-t50 2000 50 300
+scripts/bench/flows.sh ramp 2000 25 25 400 180 # <background> <start> <step> <max> [s per step]
+scripts/bench/flows.sh down
+```
+
+- Results go to `docs/benchmarks/data/tier-l-1.0.38/flows/` (`BENCH_DATA`): `stack.txt`,
+  `flow-definition.json`, `<label>.json` per window, `ramp-<background>.json`, plus the docker stats
+  and the 5-second queue/inbox samples (ndjson) of every window. The key, cookies and raw generator
+  reports stay in `BENCH_SCRATCH`.
+- A window starts the background generator (built-in event mix) and the trigger generator
+  (`--event bench_flow_trigger`) together, both over 100,000 people, then waits until the inbox is
+  empty, no `flow.enroll` job is queued and no enrollment is `active` or `waiting` (cap
+  `BENCH_FLOW_DRAIN_CAP`, default 300 s). Its SQL is scoped to the trigger events that arrived after
+  the window's start, so earlier windows are never counted. Percentiles are nearest-rank
+  (`percentile_disc`).
+- `step_executions` records only a start time (the transaction start of the job that ran the node), so
+  nodes run by one job share it: the per-node figure is the queue delay (start minus the previous
+  node's start, the enrollment's creation, or the wake time), and the execution duration per job kind
+  comes from the worker's `zirv_flow_job_duration_seconds` and `zirv_flow_job_claim_lag_seconds`
+  histograms (deltas over the window, as the upper bound of the bucket holding each percentile). The
+  wake time is the `run_at` of the wake job, sampled every 2 s into `flowbench.wakes` while the job
+  waits (the runtime clears `wake_at` and deletes the job); an unsampled one falls back to the wait
+  node's start + 30 s and is counted in `wake_times_estimated`.
+- A ramp step fails when trigger -> enrollment p95 exceeds 60 s, enrollments are below 95% of the
+  accepted triggers (minus re-entry refusals), the oldest due job is older than 30 s at the
+  generators' stop and older than mid-window, either generator is late (`late_dispatch` above 0 or
+  achieved below 98% of target), or the window has no queue sample. At high trigger rates many triggers are refused as
+  `already_active` (about rate x 31 s / 100,000 of them); they are counted, not failures.
 
 ## 9. Segment benchmarks (M4, issue #127)
 

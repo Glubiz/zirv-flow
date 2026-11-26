@@ -28,6 +28,12 @@ ramp_max="${BENCH_RAMP_MAX:-8000}"  # last ramp step, items/s
 host="${BENCH_HOST:-127.0.0.1}"          # the generator's target; "localhost" costs ~140 ms of API p99 on Windows + Docker Desktop
 ramp_min="${BENCH_RAMP_MIN:-250}"   # first ramp step, items/s
 ramp_step="${BENCH_RAMP_STEP:-250}" # rung size, items/s
+# Ramps only: seconds of load at the first rung before the ramp, then ANALYZE. A fresh database plans
+# on empty-table statistics until autoanalyze runs, which stalls the first minute of load.
+warmup_s="${BENCH_WARMUP_SECONDS:-0}"
+# Ramps only: share of accepted requests that may end with no response (transport errors) before a
+# step fails. Default 0; Docker Desktop's port proxy on Windows drops an isolated connection now and then.
+transport_tol="${BENCH_TRANSPORT_TOLERANCE:-0}"
 burst_s="${BENCH_BURST_SECONDS:-120}"  # burst test: seconds at 10,000 items/s (the section 19 case is 600); the drain cap stays 1800 s
 # Output files are prefixed with run_name; a burst of a non-default length is kept apart from the 2-minute run
 run_name="$test_name"; [ "$test_name" != burst ] || [ "$burst_s" = 120 ] || run_name="burst$burst_s"
@@ -72,7 +78,9 @@ stack_up() {
       synchronous_commit wal_level fsync work_mem max_wal_size checkpoint_timeout; do
       echo "pg.$s=$(q -Atc "show $s")"
     done
-    $c exec -T zirv-flow printenv | grep '^ZIRV_FLOW_' | grep -v -E 'URL|SECRET|MASTER' | sort
+    # The image has no printenv; read the environment from the container config.
+    docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$($c ps -q zirv-flow)" \
+      | grep '^ZIRV_FLOW_' | grep -v -E 'URL|SECRET|MASTER' | sort
   } >"$data/$run_name-stack.txt"
 }
 
@@ -173,10 +181,24 @@ pg_facts() {
   } >"$data/$1-pg-facts.txt"
 }
 
+# warmup <mode> <people> [extra]: the BENCH_WARMUP_SECONDS load at BENCH_WARMUP_RATE (default the first
+# rung), the drain, then ANALYZE.
+warmup() {
+  [ "$warmup_s" -gt 0 ] || return 0
+  local rate="${BENCH_WARMUP_RATE:-$ramp_min}"
+  log "warm-up ${warmup_s}s at $rate/s"
+  "$loadgen" --url "http://$host:8080" --key-file "$scratch/key-1" --mode "$1" --rate "$rate" \
+    --duration "$warmup_s" --people "$2" ${3:-} --run-id "$test_name-warmup" \
+    --out "$data/$test_name-warmup.json" 2>/dev/null || die "the warm-up generator failed"
+  [ "$(wait_empty 300)" != null ] || die "inbox not empty after the warm-up"
+  q -qc 'ANALYZE' || die "ANALYZE after the warm-up failed"
+}
+
 # ramp <name> <mode> <workspaces> <people>
 ramp() {
   local name="$1" mode="$2" nws="$3" people="$4" extra="${5:-}" prev=0 ceiling=0 verdict_all=held
   stack_up; for i in $(seq 1 "$nws"); do mkkey "$i"; done
+  warmup "$mode" "$people" "$extra"
   start_samplers
   : >"$data/$name-steps.jsonl"
   for rate in $(seq "$ramp_min" "$ramp_step" "$ramp_max"); do
@@ -199,7 +221,7 @@ ramp() {
     pk=$(peaks "$t0" "$t1")
     jq -nc --argjson tot "$tot" --argjson peaks "$pk" --arg ap "${ap:-}" --arg age "$age_end" \
       --argjson mid "$age_mid" --argjson drain "$drain_s" --argjson rate "$rate" --argjson nws "$nws" \
-      --arg since "$since" '
+      --arg since "$since" --argjson tol "$transport_tol" '
       ($age | split(",")) as $a | ($a[0] | tonumber) as $age_end | ($a[1] | tonumber) as $rows_end
       | (if $ap == "" then [] else ($ap | split(",") | map(tonumber)) end) as $p
       | {target_rate: $rate, workspaces: $nws, since: $since} + $tot
@@ -211,7 +233,8 @@ ramp() {
             (if .late_dispatch > 0 then "generator_late_dispatch" else empty end),
             (if .achieved < 0.98 * .target_rate then "achieved_below_target" else empty end),
             (if .p99_schedule_ms >= 100 then "api_p99_ge_100ms" else empty end),
-            (if (.s5xx + .transport + .other + .s429) > 0 then "errors_or_429" else empty end),
+            (if (.s5xx + .s429 + .other - .transport) > 0 then "errors_or_429" else empty end),
+            (if .transport > $tol * .accepted then "transport_errors" else empty end),
             (if .inbox_age_end_s >= 5 then "inbox_age_ge_5s" else empty end),
             (if .inbox_age_end_s > .inbox_age_mid_s + 3 then "inbox_age_growing" else empty end)
           ])}
@@ -222,8 +245,9 @@ ramp() {
     if [ "$(jq -r .held <<<"$last")" = true ]; then ceiling=$rate; else break; fi
   done
   stop_samplers; pg_facts "$name"
-  jq -nc --arg name "$name" --argjson ceiling "$ceiling" --arg note "$verdict_all" \
-    '{test: $name, ceiling_items_per_s: $ceiling, note: $note}' >"$data/$name-ceiling.json"
+  jq -nc --arg name "$name" --argjson ceiling "$ceiling" --arg note "$verdict_all" --argjson warmup "$warmup_s" \
+    --argjson tol "$transport_tol" \
+    '{test: $name, ceiling_items_per_s: $ceiling, warmup_s: $warmup, transport_tolerance: $tol, note: $note}' >"$data/$name-ceiling.json"
   log "ceiling $ceiling"
 }
 

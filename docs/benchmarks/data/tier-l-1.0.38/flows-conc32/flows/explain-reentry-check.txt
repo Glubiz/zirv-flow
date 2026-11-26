@@ -1,0 +1,33 @@
+# The flow.enroll re-entry check that the worker logged as slow (1.00-1.43 s) during step 700,
+# run with EXPLAIN (ANALYZE, BUFFERS) on the live concurrency-32 database at about 00:01Z on
+# 2026-11-26, after step 700 had drained. 20 random people stand in for the job's person ids
+# (the InitPlan's seq scan and sort of people is that stand-in, not part of the check).
+# Indexes on enrollments at that time:
+#   enrollments_pkey (id); enrollments_occurrence_idx (flow_id, person_id, occurrence_id) unique;
+#   enrollments_flow_state_idx (flow_id, state, flow_version);
+#   enrollments_in_flight_idx (flow_id, person_id) unique WHERE state IN (active, waiting, held, failed);
+#   enrollments_flow_list_idx; enrollments_flow_state_list_idx; enrollments_flow_version_list_idx;
+#   enrollments_live_idx (state, wake_at) WHERE state IN (active, waiting); enrollments_person_id_idx.
+# Table then: 360,595 enrollments, 20,100 active or waiting.
+
+EXPLAIN (ANALYZE, BUFFERS) SELECT person_id FROM enrollments WHERE flow_id = '01a2150e-d74a-7666-bd84-686bea57221b'
+  AND person_id = ANY(array(select id from people order by random() limit 20))
+  AND state IN ('active', 'waiting', 'held', 'failed');
+
+ Index Only Scan using enrollments_in_flight_idx on enrollments  (cost=8962.42..9010.23 rows=2 width=16) (actual time=112.287..112.467 rows=5 loops=1)
+   Index Cond: ((flow_id = '01a2150e-d74a-7666-bd84-686bea57221b'::uuid) AND (person_id = ANY ($0)))
+   Heap Fetches: 17
+   Buffers: shared hit=5131
+   InitPlan 1 (returns $0)
+     ->  Limit  (cost=8961.96..8962.01 rows=20 width=24) (actual time=112.174..112.177 rows=20 loops=1)
+           Buffers: shared hit=5054
+           ->  Sort  (cost=8961.96..9211.96 rows=100000 width=24) (actual time=112.173..112.175 rows=20 loops=1)
+                 Sort Key: (random())
+                 Sort Method: top-N heapsort  Memory: 27kB
+                 Buffers: shared hit=5054
+                 ->  Seq Scan on people  (cost=0.00..6301.00 rows=100000 width=24) (actual time=0.049..98.962 rows=100000 loops=1)
+                       Buffers: shared hit=5051
+ Planning:
+   Buffers: shared hit=1073
+ Planning Time: 5.985 ms
+ Execution Time: 112.487 ms

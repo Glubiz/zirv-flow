@@ -1,0 +1,729 @@
+{
+  "tool": "zirv-flow-loadgen",
+  "mode": "identify",
+  "seed": 1,
+  "run_id": "identify1-warmup",
+  "started_unix_s": 1795551599,
+  "batch_size": 1,
+  "max_in_flight": 10000,
+  "latency_note": "One sample per request at its final outcome of any status (202, 4xx, 5xx, timeout or transport error, 429 retries exhausted). latency_from_schedule runs from the request's scheduled due time to its final response, retry waits and dispatch lag included: judge API latency targets on it. dispatch_lag is the final send minus the scheduled time and service_latency the final attempt's send to response, so latency_from_schedule is about dispatch_lag plus service_latency.",
+  "people": 5000000,
+  "total": {
+    "name": "total",
+    "target_rate": 1250,
+    "planned_duration_s": 90.0,
+    "elapsed_s": 90.0063451,
+    "requests": 112500,
+    "items_offered": 112500,
+    "items_accepted": 112500,
+    "achieved_rate": 1249.9118798236814,
+    "retries_after_429": 0,
+    "status": {
+      "accepted_202": 112500,
+      "rate_limited_429": 0,
+      "server_5xx": 0,
+      "other": 0,
+      "transport_errors": 0
+    },
+    "latency_from_schedule": {
+      "count": 112500,
+      "p50_ms": 5628.007,
+      "p95_ms": 20226.165,
+      "p99_ms": 21537.623,
+      "max_ms": 26885.624
+    },
+    "service_latency": {
+      "count": 112500,
+      "p50_ms": 3460.202,
+      "p95_ms": 16110.849,
+      "p99_ms": 16917.56,
+      "max_ms": 26884.782
+    },
+    "dispatch_lag": {
+      "count": 112500,
+      "p50_ms": 2.758,
+      "p95_ms": 12225.964,
+      "p99_ms": 13536.748,
+      "max_ms": 13830.811
+    },
+    "late_dispatch": 42313,
+    "abandoned_requests": 0,
+    "gave_up_after_retries": 0
+  },
+  "phases": [
+    {
+      "name": "base",
+      "target_rate": 1250,
+      "planned_duration_s": 90.0,
+      "elapsed_s": 90.0063451,
+      "requests": 112500,
+      "items_offered": 112500,
+      "items_accepted": 112500,
+      "achieved_rate": 1249.9118798236814,
+      "retries_after_429": 0,
+      "status": {
+        "accepted_202": 112500,
+        "rate_limited_429": 0,
+        "server_5xx": 0,
+        "other": 0,
+        "transport_errors": 0
+      },
+      "latency_from_schedule": {
+        "count": 112500,
+        "p50_ms": 5628.007,
+        "p95_ms": 20226.165,
+        "p99_ms": 21537.623,
+        "max_ms": 26885.624
+      },
+      "service_latency": {
+        "count": 112500,
+        "p50_ms": 3460.202,
+        "p95_ms": 16110.849,
+        "p99_ms": 16917.56,
+        "max_ms": 26884.782
+      },
+      "dispatch_lag": {
+        "count": 112500,
+        "p50_ms": 2.758,
+        "p95_ms": 12225.964,
+        "p99_ms": 13536.748,
+        "max_ms": 13830.811
+      },
+      "late_dispatch": 42313,
+      "abandoned_requests": 0,
+      "gave_up_after_retries": 0
+    }
+  ],
+  "timeline_from_schedule": [
+    {
+      "second": 0,
+      "requests": 1250,
+      "p50_ms": 3.988,
+      "p99_ms": 9.331,
+      "max_ms": 20.556
+    },
+    {
+      "second": 1,
+      "requests": 1250,
+      "p50_ms": 4.321,
+      "p99_ms": 7.279,
+      "max_ms": 9.48
+    },
+    {
+      "second": 2,
+      "requests": 1250,
+      "p50_ms": 4.449,
+      "p99_ms": 13.814,
+      "max_ms": 18.966
+    },
+    {
+      "second": 3,
+      "requests": 1250,
+      "p50_ms": 4.935,
+      "p99_ms": 9.499,
+      "max_ms": 12.3
+    },
+    {
+      "second": 4,
+      "requests": 1250,
+      "p50_ms": 6.735,
+      "p99_ms": 29.233,
+      "max_ms": 65.288
+    },
+    {
+      "second": 5,
+      "requests": 1250,
+      "p50_ms": 5.167,
+      "p99_ms": 8.882,
+      "max_ms": 11.107
+    },
+    {
+      "second": 6,
+      "requests": 1250,
+      "p50_ms": 6.084,
+      "p99_ms": 16.016,
+      "max_ms": 21.709
+    },
+    {
+      "second": 7,
+      "requests": 1250,
+      "p50_ms": 6.313,
+      "p99_ms": 11.439,
+      "max_ms": 12.944
+    },
+    {
+      "second": 8,
+      "requests": 1250,
+      "p50_ms": 6.949,
+      "p99_ms": 12.863,
+      "max_ms": 15.388
+    },
+    {
+      "second": 9,
+      "requests": 1250,
+      "p50_ms": 8.328,
+      "p99_ms": 22.096,
+      "max_ms": 28.147
+    },
+    {
+      "second": 10,
+      "requests": 1250,
+      "p50_ms": 8.276,
+      "p99_ms": 15.482,
+      "max_ms": 18.844
+    },
+    {
+      "second": 11,
+      "requests": 1250,
+      "p50_ms": 13.605,
+      "p99_ms": 40.644,
+      "max_ms": 47.917
+    },
+    {
+      "second": 12,
+      "requests": 1250,
+      "p50_ms": 29.718,
+      "p99_ms": 42.764,
+      "max_ms": 45.352
+    },
+    {
+      "second": 13,
+      "requests": 1250,
+      "p50_ms": 47.48,
+      "p99_ms": 125.843,
+      "max_ms": 130.489
+    },
+    {
+      "second": 14,
+      "requests": 1250,
+      "p50_ms": 209.571,
+      "p99_ms": 287.912,
+      "max_ms": 293.271
+    },
+    {
+      "second": 15,
+      "requests": 1250,
+      "p50_ms": 366.793,
+      "p99_ms": 434.665,
+      "max_ms": 472.511
+    },
+    {
+      "second": 16,
+      "requests": 1250,
+      "p50_ms": 537.281,
+      "p99_ms": 627.686,
+      "max_ms": 638.974
+    },
+    {
+      "second": 17,
+      "requests": 1250,
+      "p50_ms": 730.637,
+      "p99_ms": 850.934,
+      "max_ms": 860.01
+    },
+    {
+      "second": 18,
+      "requests": 1250,
+      "p50_ms": 994.45,
+      "p99_ms": 1177.867,
+      "max_ms": 1187.503
+    },
+    {
+      "second": 19,
+      "requests": 1250,
+      "p50_ms": 1352.38,
+      "p99_ms": 1535.542,
+      "max_ms": 1555.811
+    },
+    {
+      "second": 20,
+      "requests": 1250,
+      "p50_ms": 1762.392,
+      "p99_ms": 1943.117,
+      "max_ms": 1957.545
+    },
+    {
+      "second": 21,
+      "requests": 1250,
+      "p50_ms": 2180.985,
+      "p99_ms": 2470.172,
+      "max_ms": 2486.407
+    },
+    {
+      "second": 22,
+      "requests": 1250,
+      "p50_ms": 2735.398,
+      "p99_ms": 3041.812,
+      "max_ms": 3049.042
+    },
+    {
+      "second": 23,
+      "requests": 1250,
+      "p50_ms": 3362.33,
+      "p99_ms": 3638.252,
+      "max_ms": 3650.166
+    },
+    {
+      "second": 24,
+      "requests": 1250,
+      "p50_ms": 3924.805,
+      "p99_ms": 4233.468,
+      "max_ms": 4244.617
+    },
+    {
+      "second": 25,
+      "requests": 1250,
+      "p50_ms": 4582.422,
+      "p99_ms": 4930.89,
+      "max_ms": 4941.679
+    },
+    {
+      "second": 26,
+      "requests": 1250,
+      "p50_ms": 5300.944,
+      "p99_ms": 5656.213,
+      "max_ms": 5668.648
+    },
+    {
+      "second": 27,
+      "requests": 1250,
+      "p50_ms": 6064.382,
+      "p99_ms": 6483.402,
+      "max_ms": 10768.053
+    },
+    {
+      "second": 28,
+      "requests": 1250,
+      "p50_ms": 6901.818,
+      "p99_ms": 7292.036,
+      "max_ms": 7297.623
+    },
+    {
+      "second": 29,
+      "requests": 1250,
+      "p50_ms": 7714.458,
+      "p99_ms": 8144.258,
+      "max_ms": 8166.975
+    },
+    {
+      "second": 30,
+      "requests": 1250,
+      "p50_ms": 8612.655,
+      "p99_ms": 9095.145,
+      "max_ms": 9111.621
+    },
+    {
+      "second": 31,
+      "requests": 1250,
+      "p50_ms": 9587.426,
+      "p99_ms": 10066.984,
+      "max_ms": 10078.647
+    },
+    {
+      "second": 32,
+      "requests": 1250,
+      "p50_ms": 10515.807,
+      "p99_ms": 11039.953,
+      "max_ms": 11051.977
+    },
+    {
+      "second": 33,
+      "requests": 1250,
+      "p50_ms": 11521.519,
+      "p99_ms": 11968.743,
+      "max_ms": 11984.689
+    },
+    {
+      "second": 34,
+      "requests": 1250,
+      "p50_ms": 12450.965,
+      "p99_ms": 12887.681,
+      "max_ms": 12902.032
+    },
+    {
+      "second": 35,
+      "requests": 1250,
+      "p50_ms": 13333.251,
+      "p99_ms": 13806.134,
+      "max_ms": 13818.506
+    },
+    {
+      "second": 36,
+      "requests": 1250,
+      "p50_ms": 14294.509,
+      "p99_ms": 14812.859,
+      "max_ms": 14823.178
+    },
+    {
+      "second": 37,
+      "requests": 1250,
+      "p50_ms": 15326.468,
+      "p99_ms": 15956.744,
+      "max_ms": 26885.624
+    },
+    {
+      "second": 38,
+      "requests": 1250,
+      "p50_ms": 16605.905,
+      "p99_ms": 17199.012,
+      "max_ms": 17216.941
+    },
+    {
+      "second": 39,
+      "requests": 1250,
+      "p50_ms": 17885.453,
+      "p99_ms": 18475.96,
+      "max_ms": 18491.589
+    },
+    {
+      "second": 40,
+      "requests": 1250,
+      "p50_ms": 19096.139,
+      "p99_ms": 19715.354,
+      "max_ms": 19753.096
+    },
+    {
+      "second": 41,
+      "requests": 1250,
+      "p50_ms": 20326.946,
+      "p99_ms": 20877.428,
+      "max_ms": 20891.133
+    },
+    {
+      "second": 42,
+      "requests": 1250,
+      "p50_ms": 21542.374,
+      "p99_ms": 21826.113,
+      "max_ms": 21843.99
+    },
+    {
+      "second": 43,
+      "requests": 1250,
+      "p50_ms": 21483.802,
+      "p99_ms": 21714.002,
+      "max_ms": 21722.731
+    },
+    {
+      "second": 44,
+      "requests": 1250,
+      "p50_ms": 20972.515,
+      "p99_ms": 21246.789,
+      "max_ms": 21252.659
+    },
+    {
+      "second": 45,
+      "requests": 1250,
+      "p50_ms": 20435.462,
+      "p99_ms": 20695.166,
+      "max_ms": 22011.215
+    },
+    {
+      "second": 46,
+      "requests": 1250,
+      "p50_ms": 19941.28,
+      "p99_ms": 20178.666,
+      "max_ms": 20185.55
+    },
+    {
+      "second": 47,
+      "requests": 1250,
+      "p50_ms": 19448.907,
+      "p99_ms": 19703.19,
+      "max_ms": 19708.765
+    },
+    {
+      "second": 48,
+      "requests": 1250,
+      "p50_ms": 18883.96,
+      "p99_ms": 19170.457,
+      "max_ms": 19176.964
+    },
+    {
+      "second": 49,
+      "requests": 1250,
+      "p50_ms": 18297.78,
+      "p99_ms": 18593.331,
+      "max_ms": 18599.842
+    },
+    {
+      "second": 50,
+      "requests": 1250,
+      "p50_ms": 17702.931,
+      "p99_ms": 17998.403,
+      "max_ms": 18002.814
+    },
+    {
+      "second": 51,
+      "requests": 1250,
+      "p50_ms": 17102.551,
+      "p99_ms": 17393.534,
+      "max_ms": 17399.794
+    },
+    {
+      "second": 52,
+      "requests": 1250,
+      "p50_ms": 16515.715,
+      "p99_ms": 16810.561,
+      "max_ms": 16816.276
+    },
+    {
+      "second": 53,
+      "requests": 1250,
+      "p50_ms": 15933.871,
+      "p99_ms": 16221.85,
+      "max_ms": 16228.311
+    },
+    {
+      "second": 54,
+      "requests": 1250,
+      "p50_ms": 15409.082,
+      "p99_ms": 15665.49,
+      "max_ms": 15670.308
+    },
+    {
+      "second": 55,
+      "requests": 1250,
+      "p50_ms": 14887.642,
+      "p99_ms": 15144.81,
+      "max_ms": 15150.661
+    },
+    {
+      "second": 56,
+      "requests": 1250,
+      "p50_ms": 14330.58,
+      "p99_ms": 14607.373,
+      "max_ms": 14612.923
+    },
+    {
+      "second": 57,
+      "requests": 1250,
+      "p50_ms": 13765.956,
+      "p99_ms": 14049.913,
+      "max_ms": 14054.222
+    },
+    {
+      "second": 58,
+      "requests": 1250,
+      "p50_ms": 13172.855,
+      "p99_ms": 13456.726,
+      "max_ms": 13462.997
+    },
+    {
+      "second": 59,
+      "requests": 1250,
+      "p50_ms": 12615.027,
+      "p99_ms": 12888.817,
+      "max_ms": 12893.69
+    },
+    {
+      "second": 60,
+      "requests": 1250,
+      "p50_ms": 12026.41,
+      "p99_ms": 12325.13,
+      "max_ms": 12332.576
+    },
+    {
+      "second": 61,
+      "requests": 1250,
+      "p50_ms": 11434.512,
+      "p99_ms": 11728.83,
+      "max_ms": 11734.769
+    },
+    {
+      "second": 62,
+      "requests": 1250,
+      "p50_ms": 10934.72,
+      "p99_ms": 11184.276,
+      "max_ms": 11189.756
+    },
+    {
+      "second": 63,
+      "requests": 1250,
+      "p50_ms": 10409.688,
+      "p99_ms": 10670.021,
+      "max_ms": 10677.224
+    },
+    {
+      "second": 64,
+      "requests": 1250,
+      "p50_ms": 9906.487,
+      "p99_ms": 10173.263,
+      "max_ms": 10180.521
+    },
+    {
+      "second": 65,
+      "requests": 1250,
+      "p50_ms": 9342.899,
+      "p99_ms": 9638.258,
+      "max_ms": 9643.137
+    },
+    {
+      "second": 66,
+      "requests": 1250,
+      "p50_ms": 8758.829,
+      "p99_ms": 9041.086,
+      "max_ms": 9048.048
+    },
+    {
+      "second": 67,
+      "requests": 1250,
+      "p50_ms": 8158.912,
+      "p99_ms": 8455.694,
+      "max_ms": 8461.314
+    },
+    {
+      "second": 68,
+      "requests": 1250,
+      "p50_ms": 7550.72,
+      "p99_ms": 7853.119,
+      "max_ms": 7859.275
+    },
+    {
+      "second": 69,
+      "requests": 1250,
+      "p50_ms": 6959.49,
+      "p99_ms": 7263.794,
+      "max_ms": 7269.025
+    },
+    {
+      "second": 70,
+      "requests": 1250,
+      "p50_ms": 6431.749,
+      "p99_ms": 6691.169,
+      "max_ms": 6697.88
+    },
+    {
+      "second": 71,
+      "requests": 1250,
+      "p50_ms": 5894.685,
+      "p99_ms": 6164.235,
+      "max_ms": 6170.72
+    },
+    {
+      "second": 72,
+      "requests": 1250,
+      "p50_ms": 5275.328,
+      "p99_ms": 5574.432,
+      "max_ms": 5580.65
+    },
+    {
+      "second": 73,
+      "requests": 1250,
+      "p50_ms": 4628.903,
+      "p99_ms": 4947.886,
+      "max_ms": 4954.143
+    },
+    {
+      "second": 74,
+      "requests": 1250,
+      "p50_ms": 3970.058,
+      "p99_ms": 4293.608,
+      "max_ms": 4300.632
+    },
+    {
+      "second": 75,
+      "requests": 1250,
+      "p50_ms": 3325.477,
+      "p99_ms": 3646.337,
+      "max_ms": 3652.759
+    },
+    {
+      "second": 76,
+      "requests": 1250,
+      "p50_ms": 2686.983,
+      "p99_ms": 2996.48,
+      "max_ms": 3002.573
+    },
+    {
+      "second": 77,
+      "requests": 1250,
+      "p50_ms": 2112.713,
+      "p99_ms": 2389.404,
+      "max_ms": 2396.835
+    },
+    {
+      "second": 78,
+      "requests": 1250,
+      "p50_ms": 1471.542,
+      "p99_ms": 1786.218,
+      "max_ms": 1791.359
+    },
+    {
+      "second": 79,
+      "requests": 1250,
+      "p50_ms": 851.039,
+      "p99_ms": 1153.423,
+      "max_ms": 1159.787
+    },
+    {
+      "second": 80,
+      "requests": 1250,
+      "p50_ms": 223.019,
+      "p99_ms": 533.223,
+      "max_ms": 538.475
+    },
+    {
+      "second": 81,
+      "requests": 1250,
+      "p50_ms": 4.172,
+      "p99_ms": 10.896,
+      "max_ms": 15.373
+    },
+    {
+      "second": 82,
+      "requests": 1250,
+      "p50_ms": 4.195,
+      "p99_ms": 7.568,
+      "max_ms": 10.42
+    },
+    {
+      "second": 83,
+      "requests": 1250,
+      "p50_ms": 4.27,
+      "p99_ms": 7.189,
+      "max_ms": 9.122
+    },
+    {
+      "second": 84,
+      "requests": 1250,
+      "p50_ms": 4.319,
+      "p99_ms": 13.975,
+      "max_ms": 17.919
+    },
+    {
+      "second": 85,
+      "requests": 1250,
+      "p50_ms": 4.066,
+      "p99_ms": 6.734,
+      "max_ms": 8.698
+    },
+    {
+      "second": 86,
+      "requests": 1250,
+      "p50_ms": 4.031,
+      "p99_ms": 11.715,
+      "max_ms": 15.89
+    },
+    {
+      "second": 87,
+      "requests": 1250,
+      "p50_ms": 3.892,
+      "p99_ms": 6.914,
+      "max_ms": 9.183
+    },
+    {
+      "second": 88,
+      "requests": 1250,
+      "p50_ms": 3.813,
+      "p99_ms": 8.202,
+      "max_ms": 15.098
+    },
+    {
+      "second": 89,
+      "requests": 1250,
+      "p50_ms": 3.864,
+      "p99_ms": 6.333,
+      "max_ms": 7.275
+    }
+  ]
+}

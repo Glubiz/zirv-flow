@@ -1,0 +1,146 @@
+2026-11-25T22:58:00.697417353Z The files belonging to this database system will be owned by user "postgres".
+2026-11-25T22:58:00.697440686Z This user must also own the server process.
+2026-11-25T22:58:00.697442282Z 
+2026-11-25T22:58:00.697443112Z The database cluster will be initialized with locale "en_US.utf8".
+2026-11-25T22:58:00.697443936Z The default database encoding has accordingly been set to "UTF8".
+2026-11-25T22:58:00.697444733Z The default text search configuration will be set to "english".
+2026-11-25T22:58:00.697445672Z 
+2026-11-25T22:58:00.697446389Z Data page checksums are disabled.
+2026-11-25T22:58:00.697447105Z 
+2026-11-25T22:58:00.697448879Z fixing permissions on existing directory /var/lib/postgresql/data ... ok
+2026-11-25T22:58:00.698907212Z creating subdirectories ... ok
+2026-11-25T22:58:00.698924077Z selecting dynamic shared memory implementation ... posix
+2026-11-25T22:58:00.705488773Z selecting default max_connections ... 100
+2026-11-25T22:58:00.714156476Z selecting default shared_buffers ... 128MB
+2026-11-25T22:58:00.719657576Z selecting default time zone ... Etc/UTC
+2026-11-25T22:58:00.719942976Z creating configuration files ... ok
+2026-11-25T22:58:00.773873362Z running bootstrap script ... ok
+2026-11-25T22:58:00.944804616Z performing post-bootstrap initialization ... ok
+2026-11-25T22:58:01.107540977Z initdb: warning: enabling "trust" authentication for local connections
+2026-11-25T22:58:01.107559419Z initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
+2026-11-25T22:58:01.107550994Z syncing data to disk ... ok
+2026-11-25T22:58:01.107563881Z 
+2026-11-25T22:58:01.107564887Z 
+2026-11-25T22:58:01.107565771Z Success. You can now start the database server using:
+2026-11-25T22:58:01.107566708Z 
+2026-11-25T22:58:01.107567571Z     pg_ctl -D /var/lib/postgresql/data -l logfile start
+2026-11-25T22:58:01.107568500Z 
+2026-11-25T22:58:01.158339185Z waiting for server to start....2026-11-25 22:58:01.158 UTC [48] LOG:  starting PostgreSQL 16.16 (Debian 16.16-1.pgdg13+1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+2026-11-25T22:58:01.159315761Z 2026-11-25 22:58:01.159 UTC [48] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-11-25T22:58:01.161915400Z 2026-11-25 22:58:01.161 UTC [51] LOG:  database system was shut down at 2026-11-25 22:58:00 UTC
+2026-11-25T22:58:01.164886313Z 2026-11-25 22:58:01.164 UTC [48] LOG:  database system is ready to accept connections
+2026-11-25T22:58:01.217927032Z  done
+2026-11-25T22:58:01.217948481Z server started
+2026-11-25T22:58:01.279602974Z CREATE DATABASE
+2026-11-25T22:58:01.279885113Z 
+2026-11-25T22:58:01.279945541Z 
+2026-11-25T22:58:01.279956090Z /usr/local/bin/docker-entrypoint.sh: ignoring /docker-entrypoint-initdb.d/*
+2026-11-25T22:58:01.279957323Z 
+2026-11-25T22:58:01.280601971Z waiting for server to shut down....2026-11-25 22:58:01.280 UTC [48] LOG:  received fast shutdown request
+2026-11-25T22:58:01.281924726Z 2026-11-25 22:58:01.281 UTC [48] LOG:  aborting any active transactions
+2026-11-25T22:58:01.282917927Z 2026-11-25 22:58:01.282 UTC [48] LOG:  background worker "logical replication launcher" (PID 54) exited with exit code 1
+2026-11-25T22:58:01.283136412Z 2026-11-25 22:58:01.283 UTC [49] LOG:  shutting down
+2026-11-25T22:58:01.284344744Z 2026-11-25 22:58:01.284 UTC [49] LOG:  checkpoint starting: shutdown immediate
+2026-11-25T22:58:01.361524292Z 2026-11-25 22:58:01.361 UTC [49] LOG:  checkpoint complete: wrote 935 buffers (0.2%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.014 s, sync=0.061 s, total=0.079 s; sync files=301, longest=0.012 s, average=0.001 s; distance=4346 kB, estimate=4346 kB; lsn=0/19430C0, redo lsn=0/19430C0
+2026-11-25T22:58:01.372806615Z 2026-11-25 22:58:01.372 UTC [48] LOG:  database system is shut down
+2026-11-25T22:58:01.380802221Z  done
+2026-11-25T22:58:01.380827293Z server stopped
+2026-11-25T22:58:01.381605561Z 
+2026-11-25T22:58:01.381620343Z PostgreSQL init process complete; ready for start up.
+2026-11-25T22:58:01.381622322Z 
+2026-11-25T22:58:01.426695253Z 2026-11-25 22:58:01.426 UTC [1] LOG:  starting PostgreSQL 16.16 (Debian 16.16-1.pgdg13+1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+2026-11-25T22:58:01.426771630Z 2026-11-25 22:58:01.426 UTC [1] LOG:  listening on IPv4 address "0.0.0.0", port 5432
+2026-11-25T22:58:01.426777803Z 2026-11-25 22:58:01.426 UTC [1] LOG:  listening on IPv6 address "::", port 5432
+2026-11-25T22:58:01.428708053Z 2026-11-25 22:58:01.428 UTC [1] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-11-25T22:58:01.431205994Z 2026-11-25 22:58:01.431 UTC [64] LOG:  database system was shut down at 2026-11-25 22:58:01 UTC
+2026-11-25T22:58:01.433620279Z 2026-11-25 22:58:01.433 UTC [1] LOG:  database system is ready to accept connections
+2026-11-25T22:58:06.320189595Z 2026-11-25 22:58:06.320 UTC [77] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T22:58:06.783846503Z 2026-11-25 22:58:06.783 UTC [79] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T22:58:07.264415042Z 2026-11-25 22:58:07.264 UTC [81] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T22:58:07.454199804Z 2026-11-25 22:58:07.454 UTC [82] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:00:52.461472597Z 2026-11-25 23:00:52.461 UTC [272] ERROR:  duplicate key value violates unique constraint "trait_definitions_pkey"
+2026-11-25T23:00:52.461492353Z 2026-11-25 23:00:52.461 UTC [272] DETAIL:  Key (workspace_id, key)=(f02bb2e1-a352-403d-90e7-f8ed03c58ffc, plan) already exists.
+2026-11-25T23:00:52.461495570Z 2026-11-25 23:00:52.461 UTC [272] STATEMENT:  INSERT INTO trait_definitions (workspace_id, key, type, precedence, source_order, pii, channel_address, inferred, description) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING workspace_id, key, type, precedence, source_order, pii, channel_address, inferred, archived, description, created_at, updated_at
+2026-11-25T23:00:52.599388466Z 2026-11-25 23:00:52.599 UTC [263] ERROR:  duplicate key value violates unique constraint "trait_definitions_pkey"
+2026-11-25T23:00:52.599406296Z 2026-11-25 23:00:52.599 UTC [263] DETAIL:  Key (workspace_id, key)=(f02bb2e1-a352-403d-90e7-f8ed03c58ffc, seats) already exists.
+2026-11-25T23:00:52.599407796Z 2026-11-25 23:00:52.599 UTC [263] STATEMENT:  INSERT INTO trait_definitions (workspace_id, key, type, precedence, source_order, pii, channel_address, inferred, description) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING workspace_id, key, type, precedence, source_order, pii, channel_address, inferred, archived, description, created_at, updated_at
+2026-11-25T23:00:52.736505643Z 2026-11-25 23:00:52.736 UTC [245] ERROR:  duplicate key value violates unique constraint "trait_definitions_pkey"
+2026-11-25T23:00:52.736529427Z 2026-11-25 23:00:52.736 UTC [245] DETAIL:  Key (workspace_id, key)=(f02bb2e1-a352-403d-90e7-f8ed03c58ffc, score) already exists.
+2026-11-25T23:00:52.736530802Z 2026-11-25 23:00:52.736 UTC [245] STATEMENT:  INSERT INTO trait_definitions (workspace_id, key, type, precedence, source_order, pii, channel_address, inferred, description) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING workspace_id, key, type, precedence, source_order, pii, channel_address, inferred, archived, description, created_at, updated_at
+2026-11-25T23:00:52.878384910Z 2026-11-25 23:00:52.878 UTC [248] ERROR:  duplicate key value violates unique constraint "trait_definitions_pkey"
+2026-11-25T23:00:52.878409285Z 2026-11-25 23:00:52.878 UTC [248] DETAIL:  Key (workspace_id, key)=(f02bb2e1-a352-403d-90e7-f8ed03c58ffc, bench_flow_tier) already exists.
+2026-11-25T23:00:52.878410740Z 2026-11-25 23:00:52.878 UTC [248] STATEMENT:  INSERT INTO trait_definitions (workspace_id, key, type, precedence, source_order, pii, channel_address, inferred, description) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING workspace_id, key, type, precedence, source_order, pii, channel_address, inferred, archived, description, created_at, updated_at
+2026-11-25T23:00:53.015437437Z 2026-11-25 23:00:53.015 UTC [258] ERROR:  duplicate key value violates unique constraint "trait_definitions_pkey"
+2026-11-25T23:00:53.015454526Z 2026-11-25 23:00:53.015 UTC [258] DETAIL:  Key (workspace_id, key)=(f02bb2e1-a352-403d-90e7-f8ed03c58ffc, bench_flow_runs) already exists.
+2026-11-25T23:00:53.015455871Z 2026-11-25 23:00:53.015 UTC [258] STATEMENT:  INSERT INTO trait_definitions (workspace_id, key, type, precedence, source_order, pii, channel_address, inferred, description) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING workspace_id, key, type, precedence, source_order, pii, channel_address, inferred, archived, description, created_at, updated_at
+2026-11-25T23:00:53.155372890Z 2026-11-25 23:00:53.155 UTC [259] ERROR:  duplicate key value violates unique constraint "event_schemas_pkey"
+2026-11-25T23:00:53.155388921Z 2026-11-25 23:00:53.155 UTC [259] DETAIL:  Key (workspace_id, name)=(f02bb2e1-a352-403d-90e7-f8ed03c58ffc, bench_flow_trigger) already exists.
+2026-11-25T23:00:53.155390211Z 2026-11-25 23:00:53.155 UTC [259] STATEMENT:  INSERT INTO event_schemas (workspace_id, name, mode, description, draft) VALUES ($1, $2, $3, $4, $5) RETURNING workspace_id, name, mode, draft, current_version, retention_days, description, inferred, created_at, updated_at
+2026-11-25T23:12:20.988273738Z 2026-11-25 23:12:20.988 UTC [62] LOG:  checkpoint starting: wal
+2026-11-25T23:19:36.758994491Z 2026-11-25 23:19:36.758 UTC [62] LOG:  checkpoint complete: wrote 172973 buffers (33.0%); 0 WAL file(s) added, 0 removed, 269 recycled; write=434.166 s, sync=0.874 s, total=435.771 s; sync files=1561, longest=0.005 s, average=0.001 s; distance=4397863 kB, estimate=4397863 kB; lsn=2/CEC908, redo lsn=1/E00D060
+2026-11-25T23:20:08.357311650Z 2026-11-25 23:20:08.357 UTC [62] LOG:  checkpoint starting: wal
+2026-11-25T23:24:15.844527816Z 2026-11-25 23:24:15.844 UTC [62] LOG:  checkpoint complete: wrote 236833 buffers (45.2%); 0 WAL file(s) added, 0 removed, 269 recycled; write=246.401 s, sync=0.371 s, total=247.488 s; sync files=406, longest=0.008 s, average=0.001 s; distance=4407284 kB, estimate=4407284 kB; lsn=3/D928970, redo lsn=2/1B00A2B8
+2026-11-25T23:25:16.813763635Z 2026-11-25 23:25:16.813 UTC [62] LOG:  checkpoint starting: wal
+2026-11-25T23:28:20.617467920Z 2026-11-25 23:28:20.617 UTC [8496] ERROR:  canceling statement due to statement timeout
+2026-11-25T23:28:20.617486316Z 2026-11-25 23:28:20.617 UTC [8496] STATEMENT:  SELECT EXTRACT(EPOCH FROM now() - min(wake_at))::bigint FROM enrollments          WHERE state = 'waiting' AND wake_at <= now()
+2026-11-25T23:28:48.801788102Z 2026-11-25 23:28:48.801 UTC [11611] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:48.802350288Z 2026-11-25 23:28:48.801 UTC [11591] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:49.058882981Z 2026-11-25 23:28:49.058 UTC [11490] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:49.066605922Z 2026-11-25 23:28:49.066 UTC [11613] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:49.316455810Z 2026-11-25 23:28:49.316 UTC [11589] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:49.317634501Z 2026-11-25 23:28:49.317 UTC [11597] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:49.317680509Z 2026-11-25 23:28:49.317 UTC [11598] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:49.321217568Z 2026-11-25 23:28:49.321 UTC [11805] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:49.577285480Z 2026-11-25 23:28:49.570 UTC [11606] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:50.082736465Z 2026-11-25 23:28:50.082 UTC [11826] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:50.085828202Z 2026-11-25 23:28:50.082 UTC [11592] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:50.085854789Z 2026-11-25 23:28:50.082 UTC [11819] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:50.085858524Z 2026-11-25 23:28:50.083 UTC [11810] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:50.085871464Z 2026-11-25 23:28:50.085 UTC [11829] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:50.338119363Z 2026-11-25 23:28:50.337 UTC [11862] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:50.338558589Z 2026-11-25 23:28:50.338 UTC [11859] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:50.338569435Z 2026-11-25 23:28:50.338 UTC [11863] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:50.338628223Z 2026-11-25 23:28:50.338 UTC [11860] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:50.339222034Z 2026-11-25 23:28:50.339 UTC [11845] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:50.340267209Z 2026-11-25 23:28:50.340 UTC [11852] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:50.343766937Z 2026-11-25 23:28:50.343 UTC [11857] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:50.344378800Z 2026-11-25 23:28:50.344 UTC [11830] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:50.344395477Z 2026-11-25 23:28:50.344 UTC [11848] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:50.345329937Z 2026-11-25 23:28:50.345 UTC [11847] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:50.594049116Z 2026-11-25 23:28:50.593 UTC [11868] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:50.594091986Z 2026-11-25 23:28:50.593 UTC [11871] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:50.594692898Z 2026-11-25 23:28:50.594 UTC [11875] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:50.594750086Z 2026-11-25 23:28:50.594 UTC [11888] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:50.600550807Z 2026-11-25 23:28:50.600 UTC [11872] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:50.849701035Z 2026-11-25 23:28:50.849 UTC [11909] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:50.850611196Z 2026-11-25 23:28:50.850 UTC [11855] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:50.853252497Z 2026-11-25 23:28:50.853 UTC [11899] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:50.853875394Z 2026-11-25 23:28:50.853 UTC [11911] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:50.858895066Z 2026-11-25 23:28:50.858 UTC [11879] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:51.107656631Z 2026-11-25 23:28:51.107 UTC [11881] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:51.107718344Z 2026-11-25 23:28:51.107 UTC [11937] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:51.362613484Z 2026-11-25 23:28:51.362 UTC [11928] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:51.362677851Z 2026-11-25 23:28:51.362 UTC [11920] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:51.363108198Z 2026-11-25 23:28:51.362 UTC [11913] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:51.363671357Z 2026-11-25 23:28:51.363 UTC [11925] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:51.617815459Z 2026-11-25 23:28:51.617 UTC [11941] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:51.618627009Z 2026-11-25 23:28:51.618 UTC [11927] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:51.618640122Z 2026-11-25 23:28:51.618 UTC [11955] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:51.620249004Z 2026-11-25 23:28:51.620 UTC [11953] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:51.621950376Z 2026-11-25 23:28:51.621 UTC [11938] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:51.622249450Z 2026-11-25 23:28:51.622 UTC [11942] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:51.874204905Z 2026-11-25 23:28:51.873 UTC [11977] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:51.874231511Z 2026-11-25 23:28:51.874 UTC [11974] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:51.874535826Z 2026-11-25 23:28:51.874 UTC [11978] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:28:51.876922824Z 2026-11-25 23:28:51.876 UTC [11989] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:29:22.336388761Z 2026-11-25 23:29:22.336 UTC [11976] LOG:  could not receive data from client: Connection reset by peer
+2026-11-25T23:29:49.468860663Z 2026-11-25 23:29:49.468 UTC [62] LOG:  checkpoint complete: wrote 233253 buffers (44.5%); 0 WAL file(s) added, 1 removed, 268 recycled; write=271.313 s, sync=0.397 s, total=272.656 s; sync files=375, longest=0.012 s, average=0.002 s; distance=4407282 kB, estimate=4407284 kB; lsn=4/1B338060, redo lsn=3/28006C10
+2026-11-25T23:30:00.583279607Z 2026-11-25 23:30:00.583 UTC [62] LOG:  checkpoint starting: wal
+2026-11-25T23:30:46.721714143Z 2026-11-25 23:30:46.721 UTC [1] LOG:  received fast shutdown request
+2026-11-25T23:30:46.723278032Z 2026-11-25 23:30:46.723 UTC [1] LOG:  aborting any active transactions
+2026-11-25T23:30:46.723723086Z 2026-11-25 23:30:46.723 UTC [12756] FATAL:  terminating autovacuum process due to administrator command
+2026-11-25T23:30:46.723743320Z 2026-11-25 23:30:46.723 UTC [12756] CONTEXT:  while vacuuming block 298 of relation "public.people"
+2026-11-25T23:30:46.725416276Z 2026-11-25 23:30:46.725 UTC [1] LOG:  background worker "logical replication launcher" (PID 67) exited with exit code 1
+2026-11-25T23:30:47.655831490Z 2026-11-25 23:30:47.655 UTC [62] LOG:  checkpoint complete: wrote 289737 buffers (55.3%); 0 WAL file(s) added, 0 removed, 269 recycled; write=46.807 s, sync=0.022 s, total=47.073 s; sync files=153, longest=0.001 s, average=0.001 s; distance=4407299 kB, estimate=4407299 kB; lsn=4/77845A48, redo lsn=4/35007A08
+2026-11-25T23:30:47.655863087Z 2026-11-25 23:30:47.655 UTC [62] LOG:  shutting down
+2026-11-25T23:30:47.656808442Z 2026-11-25 23:30:47.656 UTC [62] LOG:  checkpoint starting: shutdown immediate

@@ -1,0 +1,343 @@
+# PostgreSQL log excerpts, pass 3 concurrency 32 (log_autovacuum_min_duration=0, log_lock_waits=on, log_min_duration_statement=2000 set at 23:31:13Z)
+## step 700 (since 2026-11-25T23:57:45Z), 23:57:40-23:59:30
+2026-11-25T23:57:40.759079987Z 2026-11-25 23:57:40.758 UTC [10117] LOG:  duration: 3464.139 ms  statement: WITH ev AS (
+2026-11-25T23:57:40.759098134Z 	  SELECT id, received_at, message_id FROM events
+2026-11-25T23:57:40.759099495Z 	  WHERE workspace_id = '2240cb6b-57b0-4eb3-b15a-6c62f606b895'::uuid AND name = 'bench_flow_trigger' AND received_at >= '2026-11-25T23:55:01.415116Z'::timestamptz
+2026-11-25T23:57:40.759107948Z 	),
+2026-11-25T23:57:40.759108712Z 	enr AS (
+2026-11-25T23:57:40.759109449Z 	  SELECT e.id, e.state, e.created_at, e.ended_at, ev.received_at AS arrived
+2026-11-25T23:57:40.759110285Z 	  FROM enrollments e JOIN ev ON ev.id = e.occurrence_id
+2026-11-25T23:57:40.759110996Z 	  WHERE e.flow_id = '01a2150e-d74a-7666-bd84-686bea57221b'::uuid
+2026-11-25T23:57:40.759111728Z 	),
+2026-11-25T23:57:40.759112384Z 	st AS (
+2026-11-25T23:57:40.759113088Z 	  SELECT s.enrollment_id,
+2026-11-25T23:57:40.759113821Z 	         min(s.started_at) FILTER (WHERE s.node_id = 'b1')      AS t_b1,
+2026-11-25T23:57:40.759114564Z 	         min(s.started_at) FILTER (WHERE s.node_id = 'a_trait') AS t_trait,
+2026-11-25T23:57:40.759115270Z 	         min(s.started_at) FILTER (WHERE s.node_id = 'a_list')  AS t_list,
+2026-11-25T23:57:40.759116066Z 	         min(s.started_at) FILTER (WHERE s.node_id = 'w1')      AS t_w1,
+2026-11-25T23:57:40.759116775Z 	         min(s.started_at) FILTER (WHERE s.node_id = 'a_after') AS t_after,
+2026-11-25T23:57:40.759117629Z 	         min(s.started_at) FILTER (WHERE s.node_id = 'x1')      AS t_x1
+2026-11-25T23:57:40.759118367Z 	  FROM step_executions s JOIN enr ON enr.id = s.enrollment_id
+2026-11-25T23:57:40.759119083Z 	  GROUP BY s.enrollment_id
+2026-11-25T23:57:40.759119804Z 	),
+2026-11-25T23:57:40.759120449Z 	j AS (
+2026-11-25T23:57:40.759121112Z 	  SELECT enr.id, enr.state, enr.created_at, enr.ended_at, enr.arrived,
+2026-11-25T23:57:40.759121832Z 	         st.t_b1, st.t_trait, st.t_list, st.t_w1, st.t_after, st.t_x1,
+2026-11-25T23:57:40.759122527Z 	         coalesce(w.wake_at, st.t_w1 + make_interval(secs => 30)) AS wake_at,
+2026-11-25T23:57:40.759123331Z 	         (w.wake_at IS NOT NULL) AS wake_captured
+2026-11-25T23:57:40.759124029Z 	  FROM enr LEFT JOIN st ON st.enrollment_id = enr.id
+2026-11-25T23:57:40.759124722Z 	           LEFT JOIN flowbench.wakes w ON w.enrollment_id = enr.id
+2026-11-25T23:57:40.759125443Z 	),
+2026-11-25T23:57:40.759127019Z 	stats AS (
+2026-11-25T23:57:40.759127740Z 	  SELECT 'trigger_to_enrollment' AS m, extract(epoch FROM created_at - arrived)::float8 AS v FROM j
+2026-11-25T23:57:40.759128516Z 	  UNION ALL SELECT 'end_to_end', extract(epoch FROM ended_at - arrived)::float8 FROM j WHERE state = 'completed'
+2026-11-25T23:57:40.759129290Z 	  UNION ALL SELECT 'end_to_end_minus_wait', extract(epoch FROM ended_at - arrived)::float8 - 30 FROM j WHERE state = 'completed'
+2026-11-25T23:57:40.759130079Z 	  UNION ALL SELECT 'wake_lateness', extract(epoch FROM t_after - wake_at)::float8 FROM j WHERE t_after IS NOT NULL AND wake_at IS NOT NULL
+2026-11-25T23:57:40.759131406Z 	  UNION ALL SELECT 'wake_lateness_captured_only', extract(epoch FROM t_after - wake_at)::float8 FROM j WHERE t_after IS NOT NULL AND wake_captured
+2026-11-25T23:57:40.759133274Z 	  UNION ALL SELECT 'queue:b1', extract(epoch FROM t_b1 - created_at)::float8 FROM j
+2026-11-25T23:57:40.759134083Z 	  UNION ALL SELECT 'queue:a_trait', extract(epoch FROM t_trait - t_b1)::float8 FROM j
+2026-11-25T23:57:40.759134800Z 	  UNION ALL SELECT 'queue:a_list', extract(epoch FROM t_list - t_b1)::float8 FROM j
+2026-11-25T23:57:40.759135564Z 	  UNION ALL SELECT 'queue:w1', extract(epoch FROM t_w1 - coalesce(t_trait, t_list))::float8 FROM j
+2026-11-25T23:57:40.759136311Z 	  UNION ALL SELECT 'queue:a_after', extract(epoch FROM t_after - wake_at)::float8 FROM j WHERE wake_at IS NOT NULL
+2026-11-25T23:57:40.759137069Z 	  UNION ALL SELECT 'queue:x1', extract(epoch FROM t_x1 - t_after)::float8 FROM j
+2026-11-25T23:57:40.759137791Z 	),
+2026-11-25T23:57:40.759138445Z 	agg AS (
+2026-11-25T23:57:40.759139095Z 	  SELECT m, count(v) AS n,
+2026-11-25T23:57:40.759139773Z 	         round(percentile_disc(0.50) WITHIN GROUP (ORDER BY v)::numeric, 3) AS p50,
+2026-11-25T23:57:40.759140501Z 	         round(percentile_disc(0.95) WITHIN GROUP (ORDER BY v)::numeric, 3) AS p95,
+2026-11-25T23:57:40.759141210Z 	         round(percentile_disc(0.99) WITHIN GROUP (ORDER BY v)::numeric, 3) AS p99,
+2026-11-25T23:57:40.759141946Z 	         round(max(v)::numeric, 3) AS max,
+2026-11-25T23:57:40.759142633Z 	         round(min(v)::numeric, 3) AS min
+2026-11-25T23:57:40.759143321Z 	  FROM stats WHERE v IS NOT NULL GROUP BY m
+2026-11-25T23:57:40.759144007Z 	),
+2026-11-25T23:57:40.759148870Z 	refused AS (
+2026-11-25T23:57:40.759149680Z 	  SELECT coalesce(reason, 'none') AS reason, count(*) AS c FROM decision_records
+2026-11-25T23:57:40.759150452Z 	  WHERE workspace_id = '2240cb6b-57b0-4eb3-b15a-6c62f606b895'::uuid AND action = 'flow.enroll' AND outcome = 'skipped'
+2026-11-25T23:57:40.759151219Z 	    AND recorded_at >= '2026-11-25T23:55:01.415116Z'::timestamptz AND subject_ids ->> 'flow' = '01a2150e-d74a-7666-bd84-686bea57221b'
+2026-11-25T23:57:40.759152138Z 	  GROUP BY 1
+2026-11-25T23:57:40.759152804Z 	),
+2026-11-25T23:57:40.759153458Z 	by_state AS (SELECT state, count(*) AS c FROM enr GROUP BY state)
+2026-11-25T23:57:40.759154190Z 	SELECT json_build_object(
+2026-11-25T23:57:40.759154880Z 	  'since', '2026-11-25T23:55:01.415116Z', 'generators_stopped', '2026-11-25T23:57:01.878049Z',
+2026-11-25T23:57:40.759155644Z 	  'counts', json_build_object(
+2026-11-25T23:57:40.759156315Z 	    'trigger_events_stored', (SELECT count(*) FROM ev),
+2026-11-25T23:57:40.759157041Z 	    'trigger_events_with_run_prefix', (SELECT count(*) FROM ev WHERE message_id LIKE 'lg-ramp-1000-600-trig-' || '%'),
+2026-11-25T23:57:40.759157788Z 	    'enrollments_created', (SELECT count(*) FROM enr),
+2026-11-25T23:57:40.759159526Z 	    'enrollments_by_state', (SELECT coalesce(json_object_agg(state, c), '{}'::json) FROM by_state),
+2026-11-25T23:57:40.759160457Z 	    'completed', (SELECT count(*) FROM enr WHERE state = 'completed'),
+2026-11-25T23:57:40.759161175Z 	    'failed', (SELECT count(*) FROM enr WHERE state = 'failed'),
+2026-11-25T23:57:40.759161878Z 	    'still_active_or_waiting', (SELECT count(*) FROM enr WHERE state IN ('active', 'waiting')),
+2026-11-25T23:57:40.759162631Z 	    'refused_by_reason', (SELECT coalesce(json_object_agg(reason, c), '{}'::json) FROM refused),
+2026-11-25T23:57:40.759163349Z 	    'refused_total', (SELECT coalesce(sum(c), 0) FROM refused),
+2026-11-25T23:57:40.759164083Z 	    'refused_reentry', (SELECT coalesce(sum(c), 0) FROM refused WHERE reason IN ('already_active', 'already_entered', 'reentry_interval')),
+2026-11-25T23:57:40.759164866Z 	    'deferred_by_warmup', (SELECT count(*) FROM decision_records WHERE workspace_id = '2240cb6b-57b0-4eb3-b15a-6c62f606b895'::uuid AND action = 'flow.enroll'
+2026-11-25T23:57:40.759165681Z 	        AND outcome = 'deferred' AND recorded_at >= '2026-11-25T23:55:01.415116Z'::timestamptz AND subject_ids ->> 'flow' = '01a2150e-d74a-7666-bd84-686bea57221b'),
+2026-11-25T23:57:40.759166532Z 	    'dead_jobs_since', (SELECT count(*) FROM jobs WHERE state = 'dead' AND dead_at >= '2026-11-25T23:55:01.415116Z'::timestamptz),
+2026-11-25T23:57:40.759167344Z 	    'wake_times_captured', (SELECT count(*) FROM j WHERE wake_captured),
+2026-11-25T23:57:40.759168070Z 	    'wake_times_estimated', (SELECT count(*) FROM j WHERE NOT wake_captured AND t_w1 IS NOT NULL)),
+2026-11-25T23:57:40.759168824Z 	  'seconds', (SELECT coalesce(json_object_agg(m, to_jsonb(agg) - 'm'), '{}'::json) FROM agg),
+2026-11-25T23:57:40.759169552Z 	  'throughput', json_build_object(
+2026-11-25T23:57:40.759170244Z 	    'generator_window_s', 120,
+2026-11-25T23:57:40.759170927Z 	    'enrollments_created_in_window', (SELECT count(*) FROM enr WHERE created_at <= '2026-11-25T23:57:01.878049Z'::timestamptz),
+2026-11-25T23:57:40.759171721Z 	    'enrollments_per_s', round((SELECT count(*) FROM enr WHERE created_at <= '2026-11-25T23:57:01.878049Z'::timestamptz)::numeric / 120, 2),
+2026-11-25T23:57:40.759172526Z 	    'step_executions_in_window', (SELECT count(*) FROM step_executions s JOIN enr ON enr.id = s.enrollment_id
+2026-11-25T23:57:40.759173274Z 	                                  WHERE s.started_at <= '2026-11-25T23:57:01.878049Z'::timestamptz),
+2026-11-25T23:57:40.759174042Z 	    'step_executions_per_s', round((SELECT count(*) FROM step_executions s JOIN enr ON enr.id = s.enrollment_id
+2026-11-25T23:57:40.759174818Z 	                                  WHERE s.started_at <= '2026-11-25T23:57:01.878049Z'::timestamptz)::numeric / 120, 2),
+2026-11-25T23:57:40.759175734Z 	    'step_executions_total', (SELECT count(*) FROM step_executions s JOIN enr ON enr.id = s.enrollment_id),
+2026-11-25T23:57:40.759176491Z 	    'span_first_enrollment_to_last_end_s', (SELECT round(extract(epoch FROM max(ended_at) - min(created_at))::numeric, 1) FROM enr)),
+2026-11-25T23:57:40.759178625Z 	  'step_outcomes', (SELECT coalesce(json_object_agg(node_id || '/' || outcome, c), '{}'::json) FROM (
+2026-11-25T23:57:40.759179384Z 	      SELECT s.node_id, s.outcome, count(*) AS c FROM step_executions s JOIN enr ON enr.id = s.enrollment_id
+2026-11-25T23:57:40.759180136Z 	      GROUP BY s.node_id, s.outcome) o)
+2026-11-25T23:57:40.759180832Z 	);
+2026-11-25T23:58:12.969602208Z 2026-11-25 23:58:12.969 UTC [100] LOG:  process 100 still waiting for ShareLock on transaction 5687483 after 1000.083 ms
+2026-11-25T23:58:12.969619770Z 2026-11-25 23:58:12.969 UTC [100] DETAIL:  Process holding the lock: 108. Wait queue: 100.
+2026-11-25T23:58:12.969621053Z 2026-11-25 23:58:12.969 UTC [100] CONTEXT:  while locking tuple (2086,17) in relation "people"
+2026-11-25T23:58:12.969622261Z 2026-11-25 23:58:12.969 UTC [100] STATEMENT:  WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, created_at FROM locked WHERE workspace_id = $1 ORDER BY id
+2026-11-25T23:58:13.135554293Z 2026-11-25 23:58:13.135 UTC [100] LOG:  process 100 acquired ShareLock on transaction 5687483 after 1166.039 ms
+2026-11-25T23:58:13.135568206Z 2026-11-25 23:58:13.135 UTC [100] CONTEXT:  while locking tuple (2086,17) in relation "people"
+2026-11-25T23:58:13.135569506Z 2026-11-25 23:58:13.135 UTC [100] STATEMENT:  WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, created_at FROM locked WHERE workspace_id = $1 ORDER BY id
+2026-11-25T23:58:13.993894747Z 2026-11-25 23:58:13.993 UTC [127] LOG:  process 127 still waiting for ShareLock on transaction 5690724 after 1000.077 ms
+2026-11-25T23:58:13.993917840Z 2026-11-25 23:58:13.993 UTC [127] DETAIL:  Process holding the lock: 124. Wait queue: 127.
+2026-11-25T23:58:13.993919419Z 2026-11-25 23:58:13.993 UTC [127] CONTEXT:  while locking tuple (550,8) in relation "people"
+2026-11-25T23:58:13.993920827Z 2026-11-25 23:58:13.993 UTC [127] STATEMENT:  WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, created_at FROM locked WHERE workspace_id = $1 ORDER BY id
+2026-11-25T23:58:14.082691725Z 2026-11-25 23:58:14.082 UTC [127] LOG:  process 127 acquired ShareLock on transaction 5690724 after 1088.750 ms
+2026-11-25T23:58:14.082711434Z 2026-11-25 23:58:14.082 UTC [127] CONTEXT:  while locking tuple (550,8) in relation "people"
+2026-11-25T23:58:14.082713400Z 2026-11-25 23:58:14.082 UTC [127] STATEMENT:  WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, created_at FROM locked WHERE workspace_id = $1 ORDER BY id
+2026-11-25T23:58:22.182662445Z 2026-11-25 23:58:22.182 UTC [62] LOG:  checkpoint starting: wal
+2026-11-25T23:58:25.435171578Z 2026-11-25 23:58:25.434 UTC [96] LOG:  process 96 still waiting for ExclusiveLock on advisory lock [16384,2802446813,3457143770,1] after 1000.043 ms
+2026-11-25T23:58:25.435189644Z 2026-11-25 23:58:25.434 UTC [96] DETAIL:  Process holding the lock: 104. Wait queue: 96.
+2026-11-25T23:58:25.435199084Z 2026-11-25 23:58:25.434 UTC [96] STATEMENT:  SELECT pg_advisory_xact_lock(hashtextextended('flow.enroll:' || $1::text || ':' || s.id, 0)) FROM (SELECT p AS id FROM unnest($2::uuid[]) AS p ORDER BY p) AS s
+2026-11-25T23:58:25.539195422Z 2026-11-25 23:58:25.539 UTC [96] LOG:  process 96 acquired ExclusiveLock on advisory lock [16384,2802446813,3457143770,1] after 1104.049 ms
+2026-11-25T23:58:25.539217758Z 2026-11-25 23:58:25.539 UTC [96] STATEMENT:  SELECT pg_advisory_xact_lock(hashtextextended('flow.enroll:' || $1::text || ':' || s.id, 0)) FROM (SELECT p AS id FROM unnest($2::uuid[]) AS p ORDER BY p) AS s
+2026-11-25T23:58:27.755663572Z 2026-11-25 23:58:27.755 UTC [100] LOG:  process 100 still waiting for ShareLock on transaction 5733331 after 1000.044 ms
+2026-11-25T23:58:27.755686246Z 2026-11-25 23:58:27.755 UTC [100] DETAIL:  Process holding the lock: 7242. Wait queue: 100.
+2026-11-25T23:58:27.755687615Z 2026-11-25 23:58:27.755 UTC [100] CONTEXT:  while locking tuple (2131,18) in relation "people"
+2026-11-25T23:58:27.755688639Z 2026-11-25 23:58:27.755 UTC [100] STATEMENT:  WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, created_at FROM locked WHERE workspace_id = $1 ORDER BY id
+2026-11-25T23:58:27.986879390Z 2026-11-25 23:58:27.986 UTC [100] LOG:  process 100 acquired ShareLock on transaction 5733331 after 1231.205 ms
+2026-11-25T23:58:27.986903429Z 2026-11-25 23:58:27.986 UTC [100] CONTEXT:  while locking tuple (2131,18) in relation "people"
+2026-11-25T23:58:27.986906363Z 2026-11-25 23:58:27.986 UTC [100] STATEMENT:  WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, created_at FROM locked WHERE workspace_id = $1 ORDER BY id
+2026-11-25T23:58:30.136595970Z 2026-11-25 23:58:30.136 UTC [7163] LOG:  process 7163 still waiting for ShareLock on transaction 5739702 after 1000.038 ms
+2026-11-25T23:58:30.136612791Z 2026-11-25 23:58:30.136 UTC [7163] DETAIL:  Process holding the lock: 104. Wait queue: 7163.
+2026-11-25T23:58:30.136614044Z 2026-11-25 23:58:30.136 UTC [7163] CONTEXT:  while locking tuple (2204,7) in relation "people"
+2026-11-25T23:58:30.136615095Z 2026-11-25 23:58:30.136 UTC [7163] STATEMENT:  WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked WHERE workspace_id = $1 ORDER BY id
+2026-11-25T23:58:30.497651155Z 2026-11-25 23:58:30.497 UTC [7163] LOG:  process 7163 acquired ShareLock on transaction 5739702 after 1361.047 ms
+2026-11-25T23:58:30.497675152Z 2026-11-25 23:58:30.497 UTC [7163] CONTEXT:  while locking tuple (2204,7) in relation "people"
+2026-11-25T23:58:30.497678329Z 2026-11-25 23:58:30.497 UTC [7163] STATEMENT:  WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked WHERE workspace_id = $1 ORDER BY id
+2026-11-25T23:58:33.814484202Z 2026-11-25 23:58:33.814 UTC [7164] LOG:  process 7164 still waiting for ShareLock on transaction 5748862 after 1000.046 ms
+2026-11-25T23:58:33.814517658Z 2026-11-25 23:58:33.814 UTC [7164] DETAIL:  Process holding the lock: 94. Wait queue: 7164.
+2026-11-25T23:58:33.814520712Z 2026-11-25 23:58:33.814 UTC [7164] CONTEXT:  while locking tuple (879,18) in relation "people"
+2026-11-25T23:58:33.814523006Z 2026-11-25 23:58:33.814 UTC [7164] STATEMENT:  WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, created_at FROM locked WHERE workspace_id = $1 ORDER BY id
+2026-11-25T23:58:33.939282695Z 2026-11-25 23:58:33.939 UTC [7164] LOG:  process 7164 acquired ShareLock on transaction 5748862 after 1124.853 ms
+2026-11-25T23:58:33.939304778Z 2026-11-25 23:58:33.939 UTC [7164] CONTEXT:  while locking tuple (879,18) in relation "people"
+2026-11-25T23:58:33.939307693Z 2026-11-25 23:58:33.939 UTC [7164] STATEMENT:  WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, created_at FROM locked WHERE workspace_id = $1 ORDER BY id
+2026-11-25T23:58:34.518977426Z 2026-11-25 23:58:34.518 UTC [10457] LOG:  automatic vacuum of table "zirv_flow.public.jobs": index scans: 1
+2026-11-25T23:58:34.518997811Z 	pages: 0 removed, 2045 remain, 2045 scanned (100.00% of total)
+2026-11-25T23:58:34.519001029Z 	tuples: 6820 removed, 10992 remain, 3224 are dead but not yet removable
+2026-11-25T23:58:34.519002849Z 	tuples missed: 912 dead from 105 pages not removed due to cleanup lock contention
+2026-11-25T23:58:34.519004420Z 	removable cutoff: 5738799, which was 16244 XIDs old when operation ended
+2026-11-25T23:58:34.519005925Z 	new relfrozenxid: 5624214, which is 1155 XIDs ahead of previous value
+2026-11-25T23:58:34.519007400Z 	new relminmxid: 4677532, which is 4453 MXIDs ahead of previous value
+2026-11-25T23:58:34.519008889Z 	frozen: 122 pages from table (5.97% of total) had 716 tuples frozen
+2026-11-25T23:58:34.519010303Z 	index scan needed: 1791 pages from table (87.58% of total) had 27630 dead item identifiers removed
+2026-11-25T23:58:34.519011738Z 	index "jobs_pkey": pages: 941 in total, 0 newly deleted, 786 currently deleted, 786 reusable
+2026-11-25T23:58:34.519013278Z 	index "jobs_ready_idx": pages: 430 in total, 12 newly deleted, 366 currently deleted, 354 reusable
+2026-11-25T23:58:34.519014747Z 	index "jobs_unique_key_idx": pages: 2589 in total, 162 newly deleted, 2381 currently deleted, 2219 reusable
+2026-11-25T23:58:34.519016211Z 	index "jobs_lease_idx": pages: 331 in total, 1 newly deleted, 314 currently deleted, 313 reusable
+2026-11-25T23:58:34.519017731Z 	index "jobs_workspace_running_idx": pages: 26 in total, 1 newly deleted, 13 currently deleted, 12 reusable
+2026-11-25T23:58:34.519019191Z 	index "jobs_dead_idx": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+2026-11-25T23:58:34.519020632Z 	index "jobs_dead_unique_key_idx": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+2026-11-25T23:58:34.519022048Z 	index "jobs_delivery_send_idx": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+2026-11-25T23:58:34.519031999Z 	index "jobs_delivery_send_message_idx": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+2026-11-25T23:58:34.519033997Z 	index "jobs_event_forward_idx": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+2026-11-25T23:58:34.519035507Z 	index "jobs_ready_kind_idx": pages: 549 in total, 13 newly deleted, 481 currently deleted, 468 reusable
+2026-11-25T23:58:34.519036958Z 	index "jobs_ready_workspace_idx": pages: 1288 in total, 19 newly deleted, 1197 currently deleted, 1178 reusable
+2026-11-25T23:58:34.519038510Z 	index "jobs_ready_instance_idx": pages: 2 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+2026-11-25T23:58:34.519040604Z 	index "jobs_person_idx": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+2026-11-25T23:58:34.519042168Z 	index "jobs_enrollment_idx": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+2026-11-25T23:58:34.519043579Z 	index "jobs_merged_person_idx": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+2026-11-25T23:58:34.519045102Z 	index "jobs_enroll_kind_idx": pages: 108 in total, 0 newly deleted, 101 currently deleted, 101 reusable
+2026-11-25T23:58:34.519046641Z 	index "jobs_consume_run_idx": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+2026-11-25T23:58:34.519051789Z 	avg read rate: 0.000 MB/s, avg write rate: 14.149 MB/s
+2026-11-25T23:58:34.519053337Z 	buffer usage: 19637 hits, 0 misses, 1376 dirtied
+2026-11-25T23:58:34.519054781Z 	WAL usage: 5447 records, 1343 full page images, 2647165 bytes
+2026-11-25T23:58:34.519056217Z 	system usage: CPU: user: 0.03 s, system: 0.05 s, elapsed: 0.75 s
+2026-11-25T23:58:34.738991279Z 2026-11-25 23:58:34.738 UTC [10457] LOG:  automatic analyze of table "zirv_flow.public.jobs"
+2026-11-25T23:58:34.739008204Z 	avg read rate: 0.000 MB/s, avg write rate: 0.675 MB/s
+2026-11-25T23:58:34.739010005Z 	buffer usage: 2904 hits, 0 misses, 19 dirtied
+2026-11-25T23:58:34.739010955Z 	system usage: CPU: user: 0.08 s, system: 0.00 s, elapsed: 0.22 s
+2026-11-25T23:58:34.745929781Z 2026-11-25 23:58:34.745 UTC [125] LOG:  process 125 still waiting for ShareLock on transaction 5751873 after 1000.660 ms
+2026-11-25T23:58:34.745955213Z 2026-11-25 23:58:34.745 UTC [125] DETAIL:  Process holding the lock: 97. Wait queue: 125, 7241.
+2026-11-25T23:58:34.745958338Z 2026-11-25 23:58:34.745 UTC [125] CONTEXT:  while locking tuple (4412,7) in relation "people"
+2026-11-25T23:58:34.745960592Z 2026-11-25 23:58:34.745 UTC [125] STATEMENT:  WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, traits ->> 'timezone' AS zone FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, zone FROM locked WHERE workspace_id = $1 ORDER BY id
+2026-11-25T23:58:34.794501752Z 2026-11-25 23:58:34.794 UTC [125] LOG:  process 125 acquired ShareLock on transaction 5751873 after 1049.262 ms
+2026-11-25T23:58:34.794519036Z 2026-11-25 23:58:34.794 UTC [125] CONTEXT:  while locking tuple (4412,7) in relation "people"
+2026-11-25T23:58:34.794527718Z 2026-11-25 23:58:34.794 UTC [125] STATEMENT:  WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, traits ->> 'timezone' AS zone FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, zone FROM locked WHERE workspace_id = $1 ORDER BY id
+2026-11-25T23:58:35.724842429Z 2026-11-25 23:58:35.724 UTC [10457] LOG:  automatic analyze of table "zirv_flow.public.decision_records_y2026m11"
+2026-11-25T23:58:35.724856345Z 	avg read rate: 0.000 MB/s, avg write rate: 0.182 MB/s
+2026-11-25T23:58:35.724857595Z 	buffer usage: 30383 hits, 0 misses, 23 dirtied
+2026-11-25T23:58:35.724858413Z 	system usage: CPU: user: 0.46 s, system: 0.04 s, elapsed: 0.98 s
+2026-11-25T23:58:35.734136181Z 2026-11-25 23:58:35.733 UTC [10457] LOG:  automatic analyze of table "zirv_flow.public.lists"
+2026-11-25T23:58:35.734158106Z 	avg read rate: 0.000 MB/s, avg write rate: 0.000 MB/s
+2026-11-25T23:58:35.734161112Z 	buffer usage: 164 hits, 0 misses, 0 dirtied
+2026-11-25T23:58:35.734162792Z 	system usage: CPU: user: 0.00 s, system: 0.00 s, elapsed: 0.00 s
+2026-11-25T23:58:35.772129925Z 2026-11-25 23:58:35.771 UTC [10457] LOG:  automatic vacuum of table "zirv_flow.public.ingest_inbox": index scans: 1
+2026-11-25T23:58:35.772150136Z 	pages: 0 removed, 4046 remain, 4046 scanned (100.00% of total)
+2026-11-25T23:58:35.772153362Z 	tuples: 19854 removed, 55941 remain, 550 are dead but not yet removable
+2026-11-25T23:58:35.772155125Z 	removable cutoff: 5750048, which was 11253 XIDs old when operation ended
+2026-11-25T23:58:35.772156704Z 	new relfrozenxid: 5666433, which is 43371 XIDs ahead of previous value
+2026-11-25T23:58:35.772158131Z 	new relminmxid: 4784257, which is 111178 MXIDs ahead of previous value
+2026-11-25T23:58:35.772159537Z 	frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+2026-11-25T23:58:35.772160958Z 	index scan needed: 1453 pages from table (35.91% of total) had 29549 dead item identifiers removed
+2026-11-25T23:58:35.772162458Z 	index "ingest_inbox_pkey": pages: 716 in total, 75 newly deleted, 554 currently deleted, 479 reusable
+2026-11-25T23:58:35.772163951Z 	index "ingest_inbox_workspace_idx": pages: 1286 in total, 136 newly deleted, 995 currently deleted, 859 reusable
+2026-11-25T23:58:35.772165491Z 	index "ingest_inbox_affinity_idx": pages: 853 in total, 224 newly deleted, 242 currently deleted, 18 reusable
+2026-11-25T23:58:35.772166967Z 	index "ingest_inbox_webhook_idx": pages: 1 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+2026-11-25T23:58:35.772168421Z 	avg read rate: 0.000 MB/s, avg write rate: 0.631 MB/s
+2026-11-25T23:58:35.772169782Z 	buffer usage: 17282 hits, 0 misses, 3 dirtied
+2026-11-25T23:58:35.772171183Z 	WAL usage: 7821 records, 1601 full page images, 3439604 bytes
+2026-11-25T23:58:35.772172539Z 	system usage: CPU: user: 0.01 s, system: 0.01 s, elapsed: 0.03 s
+2026-11-25T23:58:36.042013077Z 2026-11-25 23:58:36.041 UTC [10457] LOG:  automatic analyze of table "zirv_flow.public.ingest_inbox"
+2026-11-25T23:58:36.042048344Z 	avg read rate: 0.000 MB/s, avg write rate: 0.116 MB/s
+2026-11-25T23:58:36.042052178Z 	buffer usage: 4224 hits, 0 misses, 4 dirtied
+2026-11-25T23:58:36.042054093Z 	system usage: CPU: user: 0.25 s, system: 0.00 s, elapsed: 0.26 s
+2026-11-25T23:58:36.166380832Z 2026-11-25 23:58:36.166 UTC [96] LOG:  process 96 still waiting for ExclusiveLock on advisory lock [16384,3526365414,3920151321,1] after 1000.059 ms
+2026-11-25T23:58:36.166404101Z 2026-11-25 23:58:36.166 UTC [96] DETAIL:  Process holding the lock: 128. Wait queue: 96.
+2026-11-25T23:58:36.166406947Z 2026-11-25 23:58:36.166 UTC [96] STATEMENT:  SELECT pg_advisory_xact_lock(hashtextextended('flow.enroll:' || $1::text || ':' || s.id, 0)) FROM (SELECT p AS id FROM unnest($2::uuid[]) AS p ORDER BY p) AS s
+2026-11-25T23:58:36.331730903Z 2026-11-25 23:58:36.331 UTC [10457] LOG:  automatic analyze of table "zirv_flow.public.step_executions"
+2026-11-25T23:58:36.331745548Z 	avg read rate: 0.000 MB/s, avg write rate: 0.108 MB/s
+2026-11-25T23:58:36.331749744Z 	buffer usage: 16382 hits, 0 misses, 4 dirtied
+2026-11-25T23:58:36.331750615Z 	system usage: CPU: user: 0.08 s, system: 0.02 s, elapsed: 0.28 s
+2026-11-25T23:58:36.351490154Z 2026-11-25 23:58:36.351 UTC [96] LOG:  process 96 acquired ExclusiveLock on advisory lock [16384,3526365414,3920151321,1] after 1185.206 ms
+2026-11-25T23:58:36.351513410Z 2026-11-25 23:58:36.351 UTC [96] STATEMENT:  SELECT pg_advisory_xact_lock(hashtextextended('flow.enroll:' || $1::text || ':' || s.id, 0)) FROM (SELECT p AS id FROM unnest($2::uuid[]) AS p ORDER BY p) AS s
+2026-11-25T23:58:36.377989538Z 2026-11-25 23:58:36.377 UTC [10457] LOG:  automatic analyze of table "zirv_flow.public.flow_entries"
+2026-11-25T23:58:36.378004149Z 	avg read rate: 0.000 MB/s, avg write rate: 0.170 MB/s
+2026-11-25T23:58:36.378005490Z 	buffer usage: 1288 hits, 0 misses, 1 dirtied
+2026-11-25T23:58:36.378006378Z 	system usage: CPU: user: 0.02 s, system: 0.00 s, elapsed: 0.04 s
+2026-11-25T23:58:37.133942157Z 2026-11-25 23:58:37.133 UTC [10457] LOG:  automatic analyze of table "zirv_flow.public.enrollments"
+2026-11-25T23:58:37.133959738Z 	avg read rate: 0.000 MB/s, avg write rate: 0.093 MB/s
+2026-11-25T23:58:37.133961145Z 	buffer usage: 11744 hits, 0 misses, 9 dirtied
+2026-11-25T23:58:37.133962306Z 	system usage: CPU: user: 0.30 s, system: 0.00 s, elapsed: 0.75 s
+2026-11-25T23:59:11.820697621Z 2026-11-25 23:59:11.820 UTC [9448] ERROR:  canceling statement due to statement timeout
+2026-11-25T23:59:11.820722477Z 2026-11-25 23:59:11.820 UTC [9448] STATEMENT:  WITH RECURSIVE kinds (kind) AS ( (SELECT kind FROM jobs WHERE state = 'ready' ORDER BY kind LIMIT 1) UNION ALL SELECT (SELECT j.kind FROM jobs j WHERE j.state = 'ready' AND j.kind > k.kind ORDER BY j.kind LIMIT 1) FROM kinds k WHERE k.kind IS NOT NULL) SELECT k.kind, 'ready' AS state, (SELECT count(*) FROM (SELECT 1 FROM jobs j WHERE j.state = 'ready' AND j.kind = k.kind ORDER BY j.run_at LIMIT $1) c) AS count FROM kinds k WHERE k.kind IS NOT NULL UNION ALL SELECT kind, 'running', count(*) FROM jobs WHERE state = 'running' GROUP BY kind UNION ALL SELECT kind, 'dead', count(*) FROM jobs WHERE state = 'dead' GROUP BY kind
+## crash: every line from 00:09:00 to the end of the log
+2026-11-26T00:09:03.464120928Z 2026-11-26 00:09:03.464 UTC [1] LOG:  server process (PID 14707) was terminated by signal 11: Segmentation fault
+2026-11-26T00:09:03.464141805Z 2026-11-26 00:09:03.464 UTC [1] DETAIL:  Failed process was running: WITH ev AS (
+2026-11-26T00:09:03.464143219Z 	  SELECT id, received_at, message_id FROM events
+2026-11-26T00:09:03.464144467Z 	  WHERE workspace_id = '2240cb6b-57b0-4eb3-b15a-6c62f606b895'::uuid AND name = 'bench_flow_trigger' AND received_at >= '2026-11-26T00:06:10.243276Z'::timestamptz
+2026-11-26T00:09:03.464145634Z 	),
+2026-11-26T00:09:03.464146545Z 	enr AS (
+2026-11-26T00:09:03.464147692Z 	  SELECT e.id, e.state, e.created_at, e.ended_at, ev.received_at AS arrived
+2026-11-26T00:09:03.464148897Z 	  FROM enrollments e JOIN ev ON ev.id = e.occurrence_id
+2026-11-26T00:09:03.464149926Z 	  WHERE e.flow_id = '01a2150e-d74a-7666-bd84-686bea57221b'::uuid
+2026-11-26T00:09:03.464150931Z 	),
+2026-11-26T00:09:03.464151799Z 	st AS (
+2026-11-26T00:09:03.464152698Z 	  SELECT s.enrollment_id,
+2026-11-26T00:09:03.464153652Z 	         min(s.started_at) FILTER (WHERE s.node_id = 'b1')      AS t_b1,
+2026-11-26T00:09:03.464154630Z 	         min(s.started_at) FILTER (WHERE s.node_id = 'a_trait') AS t_trait,
+2026-11-26T00:09:03.464155604Z 	         min(s.started_at) FILTER (WHERE s.node_id = 'a_list')  AS t_list,
+2026-11-26T00:09:03.464156537Z 	         min(s.started_at) FILTER (WHERE s.node_id = 'w1')      AS t_w1,
+2026-11-26T00:09:03.464157474Z 	         min(s.started_at) FILTER (WHERE s.node_id = 'a_after') AS t_after,
+2026-11-26T00:09:03.464158447Z 	         min(s.started_at) FILTER (WHERE s.node_id = 'x1')      AS t_x1
+2026-11-26T00:09:03.464166109Z 	  FROM step_executions s JOIN enr ON enr.id = s.enrollment_id
+2026-11-26T00:09:03.464167322Z 	  GROUP BY s.enrollment_id
+2026-11-26T00:09:03.464168289Z 	),
+2026-11-26T00:09:03.464169206Z 	j AS (
+2026-11-26T00:09:03.464170116Z 	  SELECT 
+2026-11-26T00:09:03.464171042Z 2026-11-26 00:09:03.464 UTC [1] LOG:  terminating any other active server processes
+2026-11-26T00:09:03.614342622Z 2026-11-26 00:09:03.614 UTC [14739] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.642306272Z 2026-11-26 00:09:03.642 UTC [14740] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.665531673Z 2026-11-26 00:09:03.665 UTC [14741] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.669978182Z 2026-11-26 00:09:03.669 UTC [14742] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.683737752Z 2026-11-26 00:09:03.683 UTC [14743] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.708841744Z 2026-11-26 00:09:03.708 UTC [14744] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.710256426Z 2026-11-26 00:09:03.710 UTC [14745] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.759244155Z 2026-11-26 00:09:03.758 UTC [14746] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.795503578Z 2026-11-26 00:09:03.795 UTC [14747] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.851593755Z 2026-11-26 00:09:03.851 UTC [14748] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.878430189Z 2026-11-26 00:09:03.878 UTC [14750] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.880721551Z 2026-11-26 00:09:03.880 UTC [14749] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.890591326Z 2026-11-26 00:09:03.890 UTC [14751] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.891036399Z 2026-11-26 00:09:03.890 UTC [14752] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.892990400Z 2026-11-26 00:09:03.892 UTC [14753] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.907612529Z 2026-11-26 00:09:03.907 UTC [14754] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.909165734Z 2026-11-26 00:09:03.909 UTC [14755] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.914057640Z 2026-11-26 00:09:03.913 UTC [14756] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.917292018Z 2026-11-26 00:09:03.917 UTC [14757] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.921619261Z 2026-11-26 00:09:03.921 UTC [14758] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.924701722Z 2026-11-26 00:09:03.924 UTC [14759] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.931735607Z 2026-11-26 00:09:03.931 UTC [14760] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.933032361Z 2026-11-26 00:09:03.932 UTC [14761] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.936871152Z 2026-11-26 00:09:03.936 UTC [14762] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.940643308Z 2026-11-26 00:09:03.940 UTC [14763] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.941630095Z 2026-11-26 00:09:03.941 UTC [14764] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.942255425Z 2026-11-26 00:09:03.942 UTC [14765] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.943334810Z 2026-11-26 00:09:03.943 UTC [14766] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.944623502Z 2026-11-26 00:09:03.944 UTC [14767] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.945413622Z 2026-11-26 00:09:03.945 UTC [14768] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.946415310Z 2026-11-26 00:09:03.946 UTC [14769] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.948536013Z 2026-11-26 00:09:03.948 UTC [14770] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.952508058Z 2026-11-26 00:09:03.952 UTC [14771] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.953096286Z 2026-11-26 00:09:03.953 UTC [14772] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.953330615Z 2026-11-26 00:09:03.953 UTC [14773] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.955323107Z 2026-11-26 00:09:03.955 UTC [14774] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.955536184Z 2026-11-26 00:09:03.955 UTC [14775] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:03.956217818Z 2026-11-26 00:09:03.956 UTC [1] LOG:  all server processes terminated; reinitializing
+2026-11-26T00:09:04.182784350Z 2026-11-26 00:09:04.182 UTC [14776] LOG:  database system was interrupted; last known up at 2026-11-26 00:08:14 UTC
+2026-11-26T00:09:04.183157790Z 2026-11-26 00:09:04.183 UTC [14779] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.183310673Z 2026-11-26 00:09:04.183 UTC [14780] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.183391218Z 2026-11-26 00:09:04.183 UTC [14781] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.183619339Z 2026-11-26 00:09:04.183 UTC [14782] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.183824074Z 2026-11-26 00:09:04.183 UTC [14783] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.184284180Z 2026-11-26 00:09:04.184 UTC [14784] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.184505097Z 2026-11-26 00:09:04.184 UTC [14785] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.184834573Z 2026-11-26 00:09:04.184 UTC [14786] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.185049264Z 2026-11-26 00:09:04.184 UTC [14787] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.185214330Z 2026-11-26 00:09:04.185 UTC [14788] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.185476291Z 2026-11-26 00:09:04.185 UTC [14789] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.185977811Z 2026-11-26 00:09:04.185 UTC [14791] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.185982325Z 2026-11-26 00:09:04.185 UTC [14790] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.186157505Z 2026-11-26 00:09:04.186 UTC [14792] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.186538726Z 2026-11-26 00:09:04.186 UTC [14793] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.186934251Z 2026-11-26 00:09:04.186 UTC [14794] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.186937750Z 2026-11-26 00:09:04.186 UTC [14795] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.187182634Z 2026-11-26 00:09:04.187 UTC [14796] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.187402803Z 2026-11-26 00:09:04.187 UTC [14797] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.187963723Z 2026-11-26 00:09:04.187 UTC [14798] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.188266961Z 2026-11-26 00:09:04.188 UTC [14799] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.188547414Z 2026-11-26 00:09:04.188 UTC [14800] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.188680451Z 2026-11-26 00:09:04.188 UTC [14801] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.189165106Z 2026-11-26 00:09:04.189 UTC [14803] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.189169992Z 2026-11-26 00:09:04.189 UTC [14802] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.189356143Z 2026-11-26 00:09:04.189 UTC [14804] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.189675677Z 2026-11-26 00:09:04.189 UTC [14805] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.194854780Z 2026-11-26 00:09:04.194 UTC [14806] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.196806505Z 2026-11-26 00:09:04.196 UTC [14807] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.196953292Z 2026-11-26 00:09:04.196 UTC [14808] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.198861473Z 2026-11-26 00:09:04.198 UTC [14809] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.199102125Z 2026-11-26 00:09:04.198 UTC [14810] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.199238762Z 2026-11-26 00:09:04.199 UTC [14811] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.199491608Z 2026-11-26 00:09:04.199 UTC [14812] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.200207436Z 2026-11-26 00:09:04.200 UTC [14813] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.200401127Z 2026-11-26 00:09:04.200 UTC [14814] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.200634943Z 2026-11-26 00:09:04.200 UTC [14815] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.200807730Z 2026-11-26 00:09:04.200 UTC [14816] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.201140023Z 2026-11-26 00:09:04.201 UTC [14817] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.201288731Z 2026-11-26 00:09:04.201 UTC [14818] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.206091800Z 2026-11-26 00:09:04.205 UTC [14819] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.206240987Z 2026-11-26 00:09:04.206 UTC [14820] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.217497572Z 2026-11-26 00:09:04.217 UTC [14821] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.218237933Z 2026-11-26 00:09:04.218 UTC [14822] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.218439847Z 2026-11-26 00:09:04.218 UTC [14823] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.220306497Z 2026-11-26 00:09:04.220 UTC [14824] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.220548352Z 2026-11-26 00:09:04.220 UTC [14825] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.220655374Z 2026-11-26 00:09:04.220 UTC [14826] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.221229225Z 2026-11-26 00:09:04.221 UTC [14827] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.221338189Z 2026-11-26 00:09:04.221 UTC [14828] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.222107208Z 2026-11-26 00:09:04.221 UTC [14829] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.222217855Z 2026-11-26 00:09:04.222 UTC [14830] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.222402590Z 2026-11-26 00:09:04.222 UTC [14831] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.222600007Z 2026-11-26 00:09:04.222 UTC [14832] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.223118934Z 2026-11-26 00:09:04.223 UTC [14833] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.225607404Z 2026-11-26 00:09:04.225 UTC [14834] FATAL:  the database system is in recovery mode
+2026-11-26T00:09:04.226270999Z 2026-11-26 00:09:04.226 UTC [14835] FATAL:  the database system is in recovery mode

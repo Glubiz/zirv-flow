@@ -62,6 +62,8 @@ pub struct Config {
     pub batch_size: u32,
     /// A safety cap on requests in flight, not a pacing device.
     pub max_in_flight: u32,
+    /// Replaces the event name of every track item.
+    pub event: Option<String>,
 }
 
 impl Config {
@@ -81,19 +83,24 @@ impl Config {
                 } else {
                     Kind::Track
                 };
-                item(self.seed, &self.run_id, self.people, first_seq, kind, false)
+                self.item(first_seq, kind, false)
             }
             Mode::Batch => {
                 let items: Vec<_> = (first_seq..first_seq + count)
-                    .map(|seq| {
-                        let kind = batch_kind(self.seed, seq);
-                        item(self.seed, &self.run_id, self.people, seq, kind, true)
-                    })
+                    .map(|seq| self.item(seq, batch_kind(self.seed, seq), true))
                     .collect();
                 json!({ "batch": items })
             }
         };
         serde_json::to_vec(&value).expect("a JSON value serialises")
+    }
+
+    fn item(&self, seq: u64, kind: Kind, typed: bool) -> serde_json::Value {
+        let mut value = item(self.seed, &self.run_id, self.people, seq, kind, typed);
+        if let (Kind::Track, Some(event)) = (kind, &self.event) {
+            value["event"] = event.as_str().into();
+        }
+        value
     }
 }
 
@@ -561,6 +568,7 @@ mod tests {
             people: 10,
             batch_size: 4,
             max_in_flight,
+            event: None,
         })
     }
 
@@ -575,6 +583,23 @@ mod tests {
             rate,
             duration_s,
         }
+    }
+
+    #[test]
+    fn an_event_override_renames_every_track_item_and_no_identify() {
+        let mut config = Arc::into_inner(config(String::new(), Mode::Batch, 1)).unwrap();
+        config.event = Some("bench_flow_trigger".to_owned());
+        let body: serde_json::Value = serde_json::from_slice(&config.body(0, 50)).unwrap();
+        let items = body["batch"].as_array().unwrap();
+        let tracks: Vec<_> = items.iter().filter(|i| i["type"] == "track").collect();
+        assert!(!tracks.is_empty() && tracks.len() < items.len());
+        assert!(tracks.iter().all(|i| i["event"] == "bench_flow_trigger"));
+        assert!(
+            items
+                .iter()
+                .filter(|i| i["type"] == "identify")
+                .all(|i| i.get("event").is_none())
+        );
     }
 
     #[tokio::test]
