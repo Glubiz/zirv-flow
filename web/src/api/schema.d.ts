@@ -12439,6 +12439,8 @@ export interface operations {
             /** @description The database is unavailable; nothing was stored */
             503: {
                 headers: {
+                    /** @description Whole seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -12537,6 +12539,8 @@ export interface operations {
             /** @description The database is unavailable; nothing was stored */
             503: {
                 headers: {
+                    /** @description Whole seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -12635,6 +12639,8 @@ export interface operations {
             /** @description The database is unavailable; nothing was stored */
             503: {
                 headers: {
+                    /** @description Whole seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
