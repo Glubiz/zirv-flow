@@ -1186,7 +1186,9 @@ mod tests {
     use sqlx::PgPool;
 
     use super::*;
-    use crate::flows::tests_support::{create, publish, trace, waiting_enrollment, workspace};
+    use crate::flows::tests_support::{
+        create, publish, trace, uuid_list, waiting_enrollment, workspace,
+    };
     use crate::flows::{FlowPatch, update_flow_draft};
 
     async fn person(pool: &PgPool, ws: WorkspaceId) -> Uuid {
@@ -1248,13 +1250,13 @@ mod tests {
         let seeded = crate::flows::tests_support::seed_stale_in_flight(&pool, ws, flow.id).await;
         let mut people: Vec<Uuid> = seeded.in_flight[..25].to_vec();
         people.extend(&seeded.completed[..25]);
-        let list = |items: Vec<String>| format!("'{{{}}}'", items.join(","));
+        let events: Vec<Uuid> = people.iter().map(|_| Uuid::now_v7()).collect();
+        let names = vec!["order"; people.len()].join(",");
         let args = format!(
-            "'{}', {}, {}, {}",
+            "'{}', {}, {}, '{{{names}}}'",
             ws.as_uuid(),
-            list(people.iter().map(|_| Uuid::now_v7().to_string()).collect()),
-            list(people.iter().map(Uuid::to_string).collect()),
-            list(people.iter().map(|_| "order".to_owned()).collect()),
+            uuid_list(&events),
+            uuid_list(&people),
         );
         for mode in ["force_generic_plan", "force_custom_plan"] {
             let buffers = crate::flows::tests_support::plan_buffers(
@@ -1296,11 +1298,6 @@ mod tests {
         drop(connection);
         publish(pool, ws, flow.id).await.unwrap();
         flow.id
-    }
-
-    fn uuid_list(items: &[Uuid]) -> String {
-        let list: Vec<String> = items.iter().map(Uuid::to_string).collect();
-        format!("'{{{}}}'", list.join(","))
     }
 
     /// The segment goal and leave lookups read a bounded number of buffers when the statistics

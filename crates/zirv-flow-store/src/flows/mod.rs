@@ -265,6 +265,12 @@ pub(crate) mod tests_support {
         }
     }
 
+    /// A quoted PostgreSQL `uuid[]` literal of `items`, for the arguments of [`plan_buffers`].
+    pub(crate) fn uuid_list(items: &[Uuid]) -> String {
+        let list: Vec<String> = items.iter().map(Uuid::to_string).collect();
+        format!("'{{{}}}'", list.join(","))
+    }
+
     /// The shared buffers (hits and reads) the top plan node of `sql` touches when it runs with
     /// the literal `args` as a prepared statement of parameter `types`, in the given
     /// `plan_cache_mode`.

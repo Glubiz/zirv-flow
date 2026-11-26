@@ -777,7 +777,7 @@ mod tests {
     use zirv_flow_core::Cause;
 
     use super::*;
-    use crate::flows::tests_support::{create, publish, trace, workspace};
+    use crate::flows::tests_support::{create, publish, trace, uuid_list, workspace};
     use crate::flows::{FlowPatch, update_flow_draft};
 
     const NOW: OffsetDateTime = datetime!(2030-01-01 00:00 UTC);
@@ -909,12 +909,7 @@ mod tests {
         let seeded = crate::flows::tests_support::seed_stale_in_flight(&pool, ws, flow).await;
         let mut asked: Vec<Uuid> = seeded.in_flight[..25].to_vec();
         asked.extend(&seeded.completed[..25]);
-        let list = asked
-            .iter()
-            .map(Uuid::to_string)
-            .collect::<Vec<_>>()
-            .join(",");
-        let args = format!("'{flow}', '{{{list}}}'");
+        let args = format!("'{flow}', {}", uuid_list(&asked));
         for mode in ["force_generic_plan", "force_custom_plan"] {
             let buffers = crate::flows::tests_support::plan_buffers(
                 &pool,
