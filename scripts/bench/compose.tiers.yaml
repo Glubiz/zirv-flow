@@ -1,8 +1,9 @@
 # Resource tiers for the capacity benchmarks. The tier budget is for zirv-flow only: serve, worker
 # and scheduler share one cpuset of N logical CPUs and a memory budget split worker 50%, serve 40%,
 # scheduler 10%, like one VM of that size. PostgreSQL is not part of the budget: it has no memory
-# limit and its own cpuset that excludes the app's CPUs (default 8-31), and one fixed
-# configuration in every tier, sized so that it is not the constraint. Layer this file on the
+# limit (BENCH_PG_MEMORY sets one, such as 16g) and its own cpuset that excludes the app's CPUs
+# (default 8-31), and one fixed configuration in every tier, sized so that it is not the
+# constraint unless capped. Layer this file on the
 # other two and set the tier's variables (scripts/bench/tier.sh does this for S, M and L):
 #
 #   BENCH_APP_CPUSET=0-3 BENCH_MEM_WORKER=4096m BENCH_MEM_SERVE=3277m BENCH_MEM_SCHEDULER=819m \
@@ -13,6 +14,7 @@
 services:
   postgres:
     cpuset: ${BENCH_PG_CPUSET:-8-31}
+    mem_limit: ${BENCH_PG_MEMORY:-0}
     # Docker's default (64 MB) is too small for parallel queries over a million rows; the OQ-1
     # run sets BENCH_PG_SHM=1gb, every other test keeps the default.
     shm_size: ${BENCH_PG_SHM:-64mb}
@@ -28,6 +30,9 @@ services:
       - max_wal_size=8GB
       - -c
       - checkpoint_timeout=15min
+      # Raise for a high worker.concurrency: a worker's pools reach D + 3 x C + 1 connections.
+      - -c
+      - max_connections=${BENCH_PG_MAX_CONNECTIONS:-100}
 
   zirv-flow:
     cpuset: ${BENCH_APP_CPUSET:?set BENCH_APP_CPUSET, such as 0-3}

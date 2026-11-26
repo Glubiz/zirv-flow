@@ -1,0 +1,279 @@
+{
+  "label": "warmup",
+  "flow_id": "01a21437-9978-778d-a4ca-785754678b66",
+  "since": "2026-11-25T19:38:43.441180Z",
+  "generator_seconds": 60,
+  "wait_s": 30,
+  "target_background_rate": 0,
+  "target_trigger_rate": 50,
+  "waited_for_enrollments_s": 32,
+  "drain_cap_s": 300,
+  "trigger_generator": {
+    "target_rate": 50,
+    "items_offered": 3000,
+    "items_accepted": 3000,
+    "achieved_rate": 49.99032370630899,
+    "late_dispatch": 0,
+    "abandoned_requests": 0,
+    "gave_up_after_retries": 0,
+    "retries_after_429": 0,
+    "status": {
+      "accepted_202": 3000,
+      "rate_limited_429": 0,
+      "server_5xx": 0,
+      "other": 0,
+      "transport_errors": 0
+    },
+    "api_p50_from_schedule_ms": 11.066,
+    "api_p99_from_schedule_ms": 19.151,
+    "dispatch_lag_p99_ms": 15.92
+  },
+  "background_generator": null,
+  "triggers": {
+    "offered": 3000,
+    "accepted": 3000,
+    "stored_as_events": 3000
+  },
+  "counts": {
+    "trigger_events_stored": 3000,
+    "trigger_events_with_run_prefix": 3000,
+    "enrollments_created": 2976,
+    "enrollments_by_state": {
+      "completed": 2976
+    },
+    "completed": 2976,
+    "failed": 0,
+    "still_active_or_waiting": 0,
+    "refused_by_reason": {
+      "already_active": 24
+    },
+    "refused_total": 24,
+    "refused_reentry": 24,
+    "deferred_by_warmup": 0,
+    "dead_jobs_since": 0,
+    "wake_times_captured": 2976,
+    "wake_times_estimated": 0
+  },
+  "latency_s": {
+    "trigger_to_enrollment": {
+      "n": 2976,
+      "max": 0.035,
+      "min": 0.006,
+      "p50": 0.008,
+      "p95": 0.014,
+      "p99": 0.018
+    },
+    "end_to_end": {
+      "n": 2976,
+      "max": 31.006,
+      "min": 30.012,
+      "p50": 30.033,
+      "p95": 30.856,
+      "p99": 30.957
+    },
+    "end_to_end_minus_wait": {
+      "n": 2976,
+      "max": 1.006,
+      "min": 0.012,
+      "p50": 0.033,
+      "p95": 0.856,
+      "p99": 0.957
+    },
+    "wake_lateness": {
+      "n": 2976,
+      "max": 0.952,
+      "min": 0.001,
+      "p50": 0.017,
+      "p95": 0.809,
+      "p99": 0.914
+    },
+    "wake_lateness_captured_only": {
+      "n": 2976,
+      "max": 0.952,
+      "min": 0.001,
+      "p50": 0.017,
+      "p95": 0.809,
+      "p99": 0.914
+    }
+  },
+  "nodes_queue_delay_s": {
+    "a_after": {
+      "n": 2976,
+      "max": 0.952,
+      "min": 0.001,
+      "p50": 0.017,
+      "p95": 0.809,
+      "p99": 0.914
+    },
+    "a_list": {
+      "n": 2296,
+      "max": 0.000,
+      "min": 0.000,
+      "p50": 0.000,
+      "p95": 0.000,
+      "p99": 0.000
+    },
+    "a_trait": {
+      "n": 680,
+      "max": 0.000,
+      "min": 0.000,
+      "p50": 0.000,
+      "p95": 0.000,
+      "p99": 0.000
+    },
+    "b1": {
+      "n": 2976,
+      "max": 0.015,
+      "min": 0.004,
+      "p50": 0.005,
+      "p95": 0.007,
+      "p99": 0.009
+    },
+    "w1": {
+      "n": 2976,
+      "max": 0.000,
+      "min": 0.000,
+      "p50": 0.000,
+      "p95": 0.000,
+      "p99": 0.000
+    },
+    "x1": {
+      "n": 2976,
+      "max": 0.000,
+      "min": 0.000,
+      "p50": 0.000,
+      "p95": 0.000,
+      "p99": 0.000
+    }
+  },
+  "job_metrics_delta": {
+    "duration_seconds": {
+      "flow.step": {
+        "count": 5952,
+        "mean_s": 0.0048,
+        "p50_le_s": 0.005,
+        "p95_le_s": 0.025,
+        "p99_le_s": 0.025
+      },
+      "flow.enroll": {
+        "count": 3000,
+        "mean_s": 0.0040,
+        "p50_le_s": 0.005,
+        "p95_le_s": 0.025,
+        "p99_le_s": 0.025
+      }
+    },
+    "claim_lag_seconds": {
+      "flow.step": {
+        "count": 5952,
+        "mean_s": 0.1124,
+        "p50_le_s": 0.005,
+        "p95_le_s": 1,
+        "p99_le_s": 1
+      },
+      "flow.enroll": {
+        "count": 3000,
+        "mean_s": 0.0045,
+        "p50_le_s": 0.005,
+        "p95_le_s": 0.025,
+        "p99_le_s": 0.025
+      }
+    },
+    "enroll_skips_by_reason": {
+      "already_active": 24
+    }
+  },
+  "throughput": {
+    "generator_window_s": 60,
+    "enrollments_created_in_window": 2976,
+    "enrollments_per_s": 49.60,
+    "step_executions_in_window": 11916,
+    "step_executions_per_s": 198.60,
+    "step_executions_total": 14880,
+    "span_first_enrollment_to_last_end_s": 90.9
+  },
+  "step_outcomes": {
+    "w1/done": 2976,
+    "b1/done": 2976,
+    "a_list/done": 2296,
+    "a_after/done": 2976,
+    "a_trait/done": 680,
+    "x1/done": 2976
+  },
+  "ingest_applied_latency_ms_track": {
+    "items": 3000,
+    "p50_ms": 3.8,
+    "p95_ms": 5.2,
+    "p99_ms": 6.7,
+    "max_ms": 17.8
+  },
+  "containers": {
+    "during_generators": {
+      "zirv-flow": {
+        "avg_cores": 0.03,
+        "peak_cores": 0.04,
+        "peak_mem_mib": 15,
+        "samples": 19
+      },
+      "postgres": {
+        "avg_cores": 0.74,
+        "peak_cores": 0.89,
+        "peak_mem_mib": 1118,
+        "samples": 19
+      },
+      "zirv-flow-scheduler": {
+        "avg_cores": 0.00,
+        "peak_cores": 0.00,
+        "peak_mem_mib": 3,
+        "samples": 19
+      },
+      "zirv-flow-worker": {
+        "avg_cores": 0.29,
+        "peak_cores": 0.35,
+        "peak_mem_mib": 11,
+        "samples": 19
+      }
+    },
+    "including_drain": {
+      "zirv-flow": {
+        "avg_cores": 0.02,
+        "peak_cores": 0.04,
+        "peak_mem_mib": 15,
+        "samples": 31
+      },
+      "postgres": {
+        "avg_cores": 0.50,
+        "peak_cores": 0.89,
+        "peak_mem_mib": 1126,
+        "samples": 31
+      },
+      "zirv-flow-scheduler": {
+        "avg_cores": 0.00,
+        "peak_cores": 0.00,
+        "peak_mem_mib": 3,
+        "samples": 31
+      },
+      "zirv-flow-worker": {
+        "avg_cores": 0.19,
+        "peak_cores": 0.35,
+        "peak_mem_mib": 12,
+        "samples": 31
+      }
+    }
+  },
+  "backlog": {
+    "samples": 19,
+    "due_ready_peak": 45,
+    "due_ready_final": 0,
+    "running_peak": 3,
+    "oldest_due_age_peak_s": 0.9,
+    "oldest_due_age_final_s": 0,
+    "oldest_due_age_at_generators_stop_s": 0,
+    "oldest_due_age_mid_window_s": 0,
+    "inbox_rows_peak": 1,
+    "inbox_oldest_age_peak_s": 0,
+    "enrollment_states_final": {
+      "completed": 2976
+    }
+  }
+}

@@ -73,6 +73,9 @@ struct Args {
     /// not collide with the earlier run's deduplication records; pass one to repeat a run exactly.
     #[arg(long)]
     run_id: Option<String>,
+    /// Event name of every track item, in place of the built-in mix (track and batch modes).
+    #[arg(long)]
+    event: Option<String>,
     /// Write the JSON report here instead of standard output.
     #[arg(long)]
     out: Option<PathBuf>,
@@ -175,6 +178,7 @@ async fn run(args: Args) -> Result<(), String> {
         people: args.people,
         batch_size: args.batch_size,
         max_in_flight: args.max_in_flight,
+        event: args.event.clone(),
     });
 
     let mut phases = Vec::new();

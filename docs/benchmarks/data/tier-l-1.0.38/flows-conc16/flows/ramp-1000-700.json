@@ -1,0 +1,298 @@
+{
+  "label": "ramp-1000-700",
+  "flow_id": "01a214f0-c776-73c4-be36-35022dcd4413",
+  "since": "2026-11-25T23:25:00.215893Z",
+  "generator_seconds": 120,
+  "wait_s": 30,
+  "target_background_rate": 1000,
+  "target_trigger_rate": 700,
+  "waited_for_enrollments_s": 35,
+  "drain_cap_s": 300,
+  "trigger_generator": {
+    "target_rate": 700,
+    "items_offered": 83999,
+    "items_accepted": 83999,
+    "achieved_rate": 699.9164209853013,
+    "late_dispatch": 0,
+    "abandoned_requests": 0,
+    "gave_up_after_retries": 0,
+    "retries_after_429": 0,
+    "status": {
+      "accepted_202": 83999,
+      "rate_limited_429": 0,
+      "server_5xx": 0,
+      "other": 0,
+      "transport_errors": 0
+    },
+    "api_p50_from_schedule_ms": 7.413,
+    "api_p99_from_schedule_ms": 19.38,
+    "dispatch_lag_p99_ms": 6.046
+  },
+  "background_generator": {
+    "target_rate": 1000,
+    "items_offered": 119998,
+    "items_accepted": 119996,
+    "achieved_rate": 999.8279788613388,
+    "late_dispatch": 0,
+    "abandoned_requests": 0,
+    "gave_up_after_retries": 0,
+    "retries_after_429": 0,
+    "status": {
+      "accepted_202": 119996,
+      "rate_limited_429": 0,
+      "server_5xx": 0,
+      "other": 2,
+      "transport_errors": 2
+    },
+    "api_p50_from_schedule_ms": 6.861,
+    "api_p99_from_schedule_ms": 18.795,
+    "dispatch_lag_p99_ms": 4.843
+  },
+  "triggers": {
+    "offered": 83999,
+    "accepted": 83999,
+    "stored_as_events": 83999
+  },
+  "counts": {
+    "trigger_events_stored": 83999,
+    "trigger_events_with_run_prefix": 83999,
+    "enrollments_created": 69917,
+    "enrollments_by_state": {
+      "completed": 69917
+    },
+    "completed": 69917,
+    "failed": 0,
+    "still_active_or_waiting": 0,
+    "refused_by_reason": {
+      "already_active": 14072
+    },
+    "refused_total": 14072,
+    "refused_reentry": 14072,
+    "deferred_by_warmup": 0,
+    "dead_jobs_since": 0,
+    "wake_times_captured": 69917,
+    "wake_times_estimated": 0
+  },
+  "latency_s": {
+    "trigger_to_enrollment": {
+      "n": 69917,
+      "max": 5.271,
+      "min": 0.011,
+      "p50": 2.894,
+      "p95": 4.964,
+      "p99": 5.084
+    },
+    "end_to_end": {
+      "n": 69917,
+      "max": 42.032,
+      "min": 30.035,
+      "p50": 37.791,
+      "p95": 41.180,
+      "p99": 41.540
+    },
+    "end_to_end_minus_wait": {
+      "n": 69917,
+      "max": 12.032,
+      "min": 0.035,
+      "p50": 7.791,
+      "p95": 11.180,
+      "p99": 11.540
+    },
+    "wake_lateness": {
+      "n": 69917,
+      "max": 5.185,
+      "min": 0.001,
+      "p50": 2.396,
+      "p95": 4.711,
+      "p99": 4.931
+    },
+    "wake_lateness_captured_only": {
+      "n": 69917,
+      "max": 5.185,
+      "min": 0.001,
+      "p50": 2.396,
+      "p95": 4.711,
+      "p99": 4.931
+    }
+  },
+  "nodes_queue_delay_s": {
+    "a_after": {
+      "n": 69917,
+      "max": 5.185,
+      "min": 0.001,
+      "p50": 2.396,
+      "p95": 4.711,
+      "p99": 4.931
+    },
+    "a_list": {
+      "n": 53231,
+      "max": 0.000,
+      "min": 0.000,
+      "p50": 0.000,
+      "p95": 0.000,
+      "p99": 0.000
+    },
+    "a_trait": {
+      "n": 16686,
+      "max": 0.000,
+      "min": 0.000,
+      "p50": 0.000,
+      "p95": 0.000,
+      "p99": 0.000
+    },
+    "b1": {
+      "n": 69917,
+      "max": 5.183,
+      "min": 0.006,
+      "p50": 2.611,
+      "p95": 4.710,
+      "p99": 4.939
+    },
+    "w1": {
+      "n": 69917,
+      "max": 0.000,
+      "min": 0.000,
+      "p50": 0.000,
+      "p95": 0.000,
+      "p99": 0.000
+    },
+    "x1": {
+      "n": 69917,
+      "max": 0.000,
+      "min": 0.000,
+      "p50": 0.000,
+      "p95": 0.000,
+      "p99": 0.000
+    }
+  },
+  "job_metrics_delta": {
+    "duration_seconds": {
+      "flow.step": {
+        "count": 139834,
+        "mean_s": 0.0103,
+        "p50_le_s": 0.025,
+        "p95_le_s": 0.025,
+        "p99_le_s": 0.025
+      },
+      "flow.enroll": {
+        "count": 29636,
+        "mean_s": 0.0156,
+        "p50_le_s": 0.025,
+        "p95_le_s": 0.025,
+        "p99_le_s": 0.1
+      }
+    },
+    "claim_lag_seconds": {
+      "flow.step": {
+        "count": 139834,
+        "mean_s": 2.1970,
+        "p50_le_s": 5,
+        "p95_le_s": 5,
+        "p99_le_s": 5
+      },
+      "flow.enroll": {
+        "count": 29636,
+        "mean_s": 2.4222,
+        "p50_le_s": 5,
+        "p95_le_s": 5,
+        "p99_le_s": 15
+      }
+    },
+    "enroll_skips_by_reason": {
+      "already_active": 14072
+    }
+  },
+  "throughput": {
+    "generator_window_s": 120,
+    "enrollments_created_in_window": 67614,
+    "enrollments_per_s": 563.45,
+    "step_executions_in_window": 289456,
+    "step_executions_per_s": 2412.13,
+    "step_executions_total": 349585,
+    "span_first_enrollment_to_last_end_s": 154.6
+  },
+  "step_outcomes": {
+    "w1/done": 69917,
+    "b1/done": 69917,
+    "a_list/done": 53231,
+    "a_after/done": 69917,
+    "a_trait/done": 16686,
+    "x1/done": 69917
+  },
+  "ingest_applied_latency_ms_track": {
+    "items": 203995,
+    "p50_ms": 23.0,
+    "p95_ms": 45.3,
+    "p99_ms": 104.5,
+    "max_ms": 411.3
+  },
+  "containers": {
+    "during_generators": {
+      "zirv-flow": {
+        "avg_cores": 0.95,
+        "peak_cores": 1.08,
+        "peak_mem_mib": 43,
+        "samples": 36
+      },
+      "postgres": {
+        "avg_cores": 7.29,
+        "peak_cores": 7.67,
+        "peak_mem_mib": 6090,
+        "samples": 36
+      },
+      "zirv-flow-scheduler": {
+        "avg_cores": 0.00,
+        "peak_cores": 0.00,
+        "peak_mem_mib": 4,
+        "samples": 36
+      },
+      "zirv-flow-worker": {
+        "avg_cores": 2.69,
+        "peak_cores": 3.18,
+        "peak_mem_mib": 26,
+        "samples": 36
+      }
+    },
+    "including_drain": {
+      "zirv-flow": {
+        "avg_cores": 0.70,
+        "peak_cores": 1.08,
+        "peak_mem_mib": 43,
+        "samples": 49
+      },
+      "postgres": {
+        "avg_cores": 5.77,
+        "peak_cores": 7.67,
+        "peak_mem_mib": 6209,
+        "samples": 49
+      },
+      "zirv-flow-scheduler": {
+        "avg_cores": 0.00,
+        "peak_cores": 0.00,
+        "peak_mem_mib": 4,
+        "samples": 49
+      },
+      "zirv-flow-worker": {
+        "avg_cores": 2.16,
+        "peak_cores": 3.18,
+        "peak_mem_mib": 27,
+        "samples": 49
+      }
+    }
+  },
+  "backlog": {
+    "samples": 28,
+    "due_ready_peak": 6258,
+    "due_ready_final": 0,
+    "running_peak": 488,
+    "oldest_due_age_peak_s": 4.7,
+    "oldest_due_age_final_s": 0,
+    "oldest_due_age_at_generators_stop_s": 4.7,
+    "oldest_due_age_mid_window_s": 2.9,
+    "inbox_rows_peak": 86,
+    "inbox_oldest_age_peak_s": 0.2,
+    "enrollment_states_final": {
+      "completed": 313164
+    }
+  }
+}

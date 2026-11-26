@@ -46,6 +46,8 @@ services:
     environment:
       <<: *bench-env
       ZIRV_FLOW_DATABASE__MIGRATE_ON_START: "true"
+      # The shipped pool is 10; docs/operations/sizing.md recommends about 24-32 for serve.
+      ZIRV_FLOW_DATABASE__MAX_CONNECTIONS: ${BENCH_SERVE_DB_CONNECTIONS:-10}
 
   zirv-flow-worker:
     <<: *bench-role

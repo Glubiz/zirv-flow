@@ -1,0 +1,1 @@
+{"test":"track1","ceiling_items_per_s":4250,"warmup_s":90,"warmup_rate":1000,"transport_tolerance":0.0001,"serve_db_connections":32,"note":"held"}
