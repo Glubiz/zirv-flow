@@ -322,7 +322,8 @@ struct Accepted {
         (status = 413, description = "The body is over ingest.max_request_bytes", body = Problem, content_type = "application/problem+json"),
         (status = 429, description = "The key is over its rate limit", body = Problem, content_type = "application/problem+json",
             headers(("Retry-After" = u64, description = "Whole seconds until the request's items fit"))),
-        (status = 503, description = "The database is unavailable; nothing was stored", body = Problem, content_type = "application/problem+json")
+        (status = 503, description = "The database is unavailable; nothing was stored", body = Problem, content_type = "application/problem+json",
+            headers(("Retry-After" = u64, description = "Whole seconds to wait before retrying")))
     ),
     security(("api_key" = []))
 )]
@@ -349,7 +350,8 @@ pub(crate) async fn identify(
         (status = 413, description = "The body is over ingest.max_request_bytes", body = Problem, content_type = "application/problem+json"),
         (status = 429, description = "The key is over its rate limit", body = Problem, content_type = "application/problem+json",
             headers(("Retry-After" = u64, description = "Whole seconds until the request's items fit"))),
-        (status = 503, description = "The database is unavailable; nothing was stored", body = Problem, content_type = "application/problem+json")
+        (status = 503, description = "The database is unavailable; nothing was stored", body = Problem, content_type = "application/problem+json",
+            headers(("Retry-After" = u64, description = "Whole seconds to wait before retrying")))
     ),
     security(("api_key" = []))
 )]
@@ -377,7 +379,8 @@ pub(crate) async fn track(
         (status = 413, description = "The body is over ingest.max_request_bytes", body = Problem, content_type = "application/problem+json"),
         (status = 429, description = "The key is over its rate limit", body = Problem, content_type = "application/problem+json",
             headers(("Retry-After" = u64, description = "Whole seconds until the request's items fit"))),
-        (status = 503, description = "The database is unavailable; nothing was stored", body = Problem, content_type = "application/problem+json")
+        (status = 503, description = "The database is unavailable; nothing was stored", body = Problem, content_type = "application/problem+json",
+            headers(("Retry-After" = u64, description = "Whole seconds to wait before retrying")))
     ),
     security(("api_key" = []))
 )]
@@ -519,7 +522,11 @@ pub(crate) fn unavailable() -> ApiError {
         StatusCode::SERVICE_UNAVAILABLE,
         "ingestion is unavailable; nothing was stored, so retry",
     )
+    .with_retry_after(UNAVAILABLE_RETRY_AFTER)
 }
+
+/// Seconds a client waits after a 503: the pool's acquire timeout, so one retry meets a freed pool.
+const UNAVAILABLE_RETRY_AFTER: u64 = 5;
 
 /// A 400 that lists the invalid fields.
 fn invalid(errors: Vec<ItemError>) -> ApiError {

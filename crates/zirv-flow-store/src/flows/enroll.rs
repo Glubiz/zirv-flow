@@ -570,9 +570,11 @@ async fn entries_of(
     Ok(rows.into_iter().collect())
 }
 
-/// The people of `$2` who have an in-flight enrollment of the flow `$1`.
-const IN_FLIGHT_SQL: &str = "SELECT person_id FROM enrollments \
-     WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')";
+/// The people of `$2` who have an in-flight enrollment of the flow `$1`. One probe per person: a
+/// set-wide plan reads every in-flight enrollment when the statistics were taken with none in flight.
+const IN_FLIGHT_SQL: &str = "SELECT p.id FROM unnest($2::uuid[]) AS p(id) \
+     CROSS JOIN LATERAL (SELECT 1 FROM enrollments e WHERE e.flow_id = $1 AND e.person_id = p.id \
+                         AND e.state IN ('active', 'waiting', 'held', 'failed') LIMIT 1) AS f";
 
 async fn in_flight_of(
     connection: &mut PgConnection,

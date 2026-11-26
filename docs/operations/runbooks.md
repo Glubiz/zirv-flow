@@ -593,7 +593,8 @@ the one HTTP and admin work use, limited by `database.max_connections`.
 
 ### User-visible effect
 
-Requests wait for a connection, answer slowly or time out; `/readyz` can time out and answer
+Requests wait up to 5 seconds for a connection (the pool's acquire timeout), then are refused: an ingestion
+request answers `503` with `Retry-After: 5`. Others answer slowly or time out; `/readyz` can time out and answer
 503. Workers use pools of their own, so a saturated main pool alone does not stop jobs.
 
 ### Confirm

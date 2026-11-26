@@ -800,6 +800,16 @@
           },
           "503": {
             "description": "The database is unavailable; nothing was stored",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 0
+                },
+                "description": "Whole seconds to wait before retrying"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -926,6 +936,16 @@
           },
           "503": {
             "description": "The database is unavailable; nothing was stored",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 0
+                },
+                "description": "Whole seconds to wait before retrying"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1052,6 +1072,16 @@
           },
           "503": {
             "description": "The database is unavailable; nothing was stored",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 0
+                },
+                "description": "Whole seconds to wait before retrying"
+              }
+            },
             "content": {
               "application/problem+json": {
                 "schema": {

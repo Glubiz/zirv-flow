@@ -33,9 +33,14 @@ pub async fn commit(tx: Tx) -> Result<(), StoreError> {
     tx.commit().await.map_err(StoreError::query)
 }
 
+/// How long a request waits for a connection before the pool refuses it: under overload a client
+/// gets its 503 in seconds, not after sqlx's default 30 s, when clients have given up.
+const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub async fn connect(url: &str, max_connections: u32) -> Result<PgPool, StoreError> {
     PgPoolOptions::new()
         .max_connections(max_connections)
+        .acquire_timeout(ACQUIRE_TIMEOUT)
         .connect(url)
         .await
         .map_err(StoreError::connect)

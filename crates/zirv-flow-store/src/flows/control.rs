@@ -863,7 +863,9 @@ pub async fn hand_on_settle_rest(
     Ok(enqueued)
 }
 
-/// The in-flight enrollments of the arrivals' people whose flow version names the event.
+/// The in-flight enrollments of the arrivals' people whose flow version names the event. One probe
+/// per person (`OFFSET 0` keeps the planner from flattening it): a set-wide plan reads every
+/// in-flight enrollment when the statistics were taken with none in flight.
 const SETTLE_LOOKUP_SQL: &str = "SELECT e.id, e.person_id, t.event_id, t.name, \
             COALESCE(v.settings -> 'goal' ->> 'type' = 'event' \
                      AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, \
@@ -871,8 +873,9 @@ const SETTLE_LOOKUP_SQL: &str = "SELECT e.id, e.person_id, t.event_id, t.name, \
                      jsonb_build_array(jsonb_build_object('type', 'event', 'event', t.name)), \
                      false) AS exit \
      FROM unnest($2::uuid[], $3::uuid[], $4::text[]) AS t(event_id, person_id, name) \
-     JOIN enrollments e ON e.workspace_id = $1 AND e.person_id = t.person_id \
-                       AND e.state IN ('active', 'waiting', 'held') \
+     CROSS JOIN LATERAL (SELECT e.id, e.person_id, e.flow_id, e.flow_version FROM enrollments e \
+                         WHERE e.workspace_id = $1 AND e.person_id = t.person_id \
+                           AND e.state IN ('active', 'waiting', 'held') OFFSET 0) AS e \
      JOIN flow_versions v ON v.flow_id = e.flow_id AND v.version = e.flow_version \
      WHERE (v.settings -> 'goal' ->> 'type' = 'event' \
             AND v.settings -> 'goal' ->> 'event' = t.name) \
@@ -896,13 +899,13 @@ pub(crate) async fn enqueue_event_settles(
     let people: Vec<Uuid> = arrivals.iter().map(|a| a.person_id).collect();
     let names: Vec<&str> = arrivals.iter().map(|a| a.name.as_str()).collect();
     let rows: Vec<(Uuid, Uuid, Uuid, String, bool, bool)> = sqlx::query_as(SETTLE_LOOKUP_SQL)
-    .bind(workspace.as_uuid())
-    .bind(&events)
-    .bind(&people)
-    .bind(&names)
-    .fetch_all(&mut *connection)
-    .await
-    .map_err(StoreError::query)?;
+        .bind(workspace.as_uuid())
+        .bind(&events)
+        .bind(&people)
+        .bind(&names)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
     let items: Vec<SettleItem> = rows
         .into_iter()
         .map(
