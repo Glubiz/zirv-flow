@@ -1,0 +1,454 @@
+2026-11-26T21:36:04.723906Z 1.912 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-26T21:36:06.882221Z 1.666 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:36:06.907776Z 2.753 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:36:07.235368Z 1.323 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:36:07.474470Z 1.509 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-26T21:36:08.786877Z 1.853 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:36:10.214463Z 1.625 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-26T21:36:11.643257Z 1.729 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:36:13.913103Z 2.060 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:36:14.654159Z 3.410 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:36:15.193814Z 1.049 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:36:15.672084Z 3.041 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:36:16.521630Z 2.192 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-26T21:36:17.565843Z 1.673 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:36:17.727345Z 1.519 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:36:19.212237Z 1.806 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:36:19.397281Z 1.550 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, traits ->> 'timezone' AS zone FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT 
+2026-11-26T21:36:19.653035Z 1.340 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-26T21:36:20.951544Z 1.578 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:36:20.961501Z 1.242 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, traits ->> 'timezone' AS zone FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT 
+2026-11-26T21:36:21.446108Z 1.240 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:36:21.446161Z 1.667 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:36:22.306151Z 2.905 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:36:22.611193Z 1.473 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:36:24.597402Z 1.192 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:36:24.878567Z 1.014 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:36:25.646406Z 1.814 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:36:26.588005Z 2.104 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:36:26.595703Z 2.100 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, traits ->> 'timezone' AS zone FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT 
+2026-11-26T21:36:29.152539Z 1.551 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:36:30.560570Z 3.058 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:36:30.563783Z 1.853 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:36:30.581445Z 1.807 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, traits ->> 'timezone' AS zone FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT 
+2026-11-26T21:36:30.643915Z 1.365 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:36:30.744398Z 1.318 WITH RECURSIVE bands (priority) AS ( (SELECT priority FROM jobs WHERE state = 'ready' ORDER BY priority LIMIT 1) UNION ALL SELECT (SELECT j.priority FROM jobs j
+2026-11-26T21:36:33.191819Z 1.083 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:36:33.321829Z 1.806 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:36:33.402733Z 1.072 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, traits ->> 'timezone' AS zone FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT 
+2026-11-26T21:47:00.831134Z 1.048 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-26T21:47:00.963387Z 1.007 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:00.971565Z 1.005 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:01.019346Z 1.003 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:01.089063Z 1.052 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:01.094283Z 1.064 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:01.101605Z 1.312 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-26T21:47:01.114858Z 1.095 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:01.116534Z 1.113 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:01.124227Z 1.101 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:01.125628Z 1.086 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:01.132110Z 1.092 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:01.149830Z 1.125 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:01.160253Z 1.379 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:47:01.176155Z 1.157 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:02.005780Z 1.138 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:02.009086Z 1.264 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:02.063302Z 1.237 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:02.095012Z 1.332 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:02.178809Z 1.151 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:02.193240Z 1.345 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:02.285440Z 1.275 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:02.295833Z 1.235 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:02.356126Z 1.277 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:02.372562Z 1.219 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:02.384432Z 1.308 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:02.405403Z 1.328 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:02.410529Z 1.240 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:47:02.416428Z 1.256 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:02.423995Z 1.287 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:02.441659Z 1.358 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:02.479589Z 1.306 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:02.536250Z 1.360 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:02.548735Z 1.287 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:02.556432Z 1.402 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:02.556745Z 1.339 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:02.574376Z 1.230 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:02.575770Z 1.342 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:02.584997Z 1.291 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:02.586093Z 1.292 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:02.651145Z 1.389 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:02.661653Z 1.429 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:02.685820Z 1.391 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:02.702797Z 1.378 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:02.722011Z 1.377 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:02.774170Z 1.449 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:02.774878Z 1.507 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:02.775616Z 1.475 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:03.505289Z 1.329 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:03.527972Z 1.427 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:03.703609Z 1.535 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:03.714466Z 1.459 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:03.717121Z 1.504 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:03.749164Z 1.194 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:03.780119Z 1.224 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:03.784705Z 1.510 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:03.930115Z 1.459 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:04.111964Z 1.511 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:04.174168Z 1.597 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:04.362899Z 1.724 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:04.378127Z 1.727 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:04.407023Z 1.667 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:04.418139Z 1.707 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:04.453699Z 1.768 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:04.454003Z 1.737 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:04.476174Z 1.823 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:04.488338Z 1.760 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:04.492504Z 1.677 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:04.518620Z 1.848 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:04.523702Z 1.691 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:04.548684Z 1.715 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:04.555656Z 1.806 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:04.560687Z 1.866 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:04.562784Z 1.755 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:04.637576Z 1.877 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:04.637845Z 1.995 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:04.702704Z 1.978 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:04.722354Z 1.868 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:04.737094Z 2.032 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:04.782076Z 2.054 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-26T21:47:05.365270Z 1.655 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:05.471651Z 1.613 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:05.492702Z 1.560 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:05.495672Z 1.470 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:05.524598Z 1.653 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:05.562400Z 1.634 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:05.765843Z 1.740 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:05.771908Z 1.551 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:05.868447Z 1.485 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:05.895388Z 1.718 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:05.922866Z 1.732 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:05.923725Z 1.389 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:06.137170Z 1.328 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:06.149122Z 1.392 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:06.326191Z 1.420 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:06.358565Z 1.442 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:06.387550Z 1.508 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:06.478287Z 1.535 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:06.479215Z 1.553 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:06.481199Z 1.515 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:06.504929Z 1.598 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:06.568716Z 1.620 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:06.573179Z 1.590 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:06.578103Z 1.578 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:06.599900Z 1.651 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:06.626873Z 1.625 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:06.661163Z 1.690 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:06.691839Z 1.733 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:06.703353Z 1.668 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:06.715265Z 1.725 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:06.722857Z 1.748 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:06.724890Z 1.680 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:06.967210Z 1.576 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:07.165535Z 1.572 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:07.199260Z 1.569 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:07.254485Z 1.673 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:07.326265Z 1.589 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:07.411602Z 1.646 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:07.509287Z 1.660 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:07.617850Z 1.586 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:07.628775Z 1.789 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:07.713060Z 1.683 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:07.716089Z 1.694 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:07.721328Z 1.614 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:07.886293Z 1.532 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:07.924493Z 1.643 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:08.114747Z 1.543 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:08.213604Z 1.715 WITH held AS ( SELECT j.id, j.purge_on_release FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease
+2026-11-26T21:47:08.383646Z 1.584 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:08.420173Z 1.617 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:08.451646Z 1.476 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:08.454599Z 1.562 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:08.584429Z 1.457 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:08.592959Z 1.483 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:08.602784Z 1.556 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:08.654121Z 1.527 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:08.673403Z 1.429 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:08.687072Z 1.497 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:08.695378Z 1.362 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:08.720893Z 1.536 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:08.746559Z 1.388 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:08.861248Z 1.261 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:08.868304Z 1.365 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:08.951320Z 1.054 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:08.962228Z 1.219 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:09.010041Z 1.111 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:09.050997Z 1.103 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:09.062208Z 1.216 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:09.108817Z 1.207 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:09.128011Z 1.154 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:09.177188Z 1.133 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:09.402127Z 1.068 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:09.421445Z 1.042 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:09.438256Z 1.182 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:09.609372Z 1.024 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:09.641495Z 1.032 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:09.649879Z 1.019 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:09.672411Z 1.063 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:09.908462Z 1.021 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:09.913461Z 1.017 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:09.931979Z 1.008 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:09.960128Z 1.028 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:10.082913Z 1.003 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:11.634457Z 1.037 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:12.088658Z 1.265 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:12.114142Z 1.314 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:12.143981Z 1.373 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:12.193156Z 1.345 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:12.304656Z 1.292 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:12.331297Z 1.304 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:12.335264Z 1.431 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:12.350427Z 1.425 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:12.431079Z 1.414 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:12.438607Z 1.385 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:12.444872Z 1.536 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:12.491899Z 1.445 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:12.545701Z 1.505 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:12.558686Z 1.396 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:12.559442Z 1.397 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:12.590373Z 1.342 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:12.606807Z 1.428 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:12.607501Z 1.359 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:12.634495Z 1.380 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:12.642324Z 1.479 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:12.675733Z 1.420 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:12.694967Z 1.528 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:12.725488Z 1.458 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:12.729646Z 1.482 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:12.767975Z 1.495 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:12.768904Z 1.482 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:12.835828Z 1.259 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:12.890555Z 1.212 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:12.891361Z 1.286 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:13.252470Z 1.113 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:13.367524Z 1.062 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:13.478574Z 1.062 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:13.482797Z 1.056 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:13.532519Z 1.107 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:14.895635Z 1.032 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:14.967546Z 1.043 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:14.982201Z 1.108 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:15.018131Z 1.111 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:15.029433Z 1.097 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:15.078210Z 1.149 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:15.083139Z 1.137 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:15.086934Z 1.134 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:15.112898Z 1.103 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:15.126657Z 1.190 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:15.167678Z 1.222 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:15.227700Z 1.115 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:15.231554Z 1.026 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:15.233401Z 1.118 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:15.547577Z 1.037 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:19.460400Z 1.009 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:19.519109Z 1.002 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:19.520843Z 1.047 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:19.522151Z 1.086 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:19.536647Z 1.051 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:19.546273Z 1.084 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:19.558045Z 1.075 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:19.585181Z 1.116 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:19.586158Z 1.106 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:19.686669Z 1.015 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:19.686787Z 1.060 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:19.770700Z 1.099 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:19.782498Z 1.111 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:19.787796Z 1.116 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:19.946914Z 1.024 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:20.007326Z 1.017 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:24.522420Z 1.031 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:25.128521Z 1.158 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:25.658701Z 1.351 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:25.746940Z 1.422 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:25.747042Z 1.314 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:25.750869Z 1.378 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:25.784939Z 1.417 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:25.800966Z 1.446 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:25.917698Z 1.514 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:25.919773Z 1.433 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:25.926075Z 1.548 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:25.977418Z 1.452 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:25.980028Z 1.513 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:26.093806Z 1.658 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:26.129642Z 1.649 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:26.145343Z 1.572 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:26.191131Z 1.639 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:26.205982Z 1.635 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:26.276343Z 1.661 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:26.311140Z 1.751 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:26.329935Z 1.790 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:26.331854Z 1.692 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:26.949060Z 1.637 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:26.983947Z 1.681 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:27.022224Z 1.688 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:27.022690Z 1.684 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:27.024066Z 1.677 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:27.025124Z 1.714 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:27.069637Z 1.710 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:27.100323Z 1.753 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:27.151311Z 1.847 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:27.164439Z 1.840 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:27.177710Z 1.847 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:27.206473Z 1.876 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:27.378488Z 1.623 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:27.480941Z 1.552 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:27.604774Z 1.709 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:27.731049Z 1.665 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:27.763799Z 1.879 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:27.876564Z 1.813 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:27.882035Z 1.761 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:27.907787Z 1.968 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:27.912335Z 1.239 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:47:27.944432Z 2.045 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:28.049391Z 1.993 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:28.054257Z 1.838 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:28.156547Z 2.034 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:28.383885Z 2.106 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:28.424531Z 2.146 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:28.480867Z 2.206 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:28.482463Z 2.108 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:28.485925Z 2.087 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:28.513235Z 2.187 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:28.622949Z 2.210 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:28.648277Z 2.201 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:29.270575Z 2.182 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:29.284804Z 2.279 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:29.369436Z 2.302 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:29.387542Z 2.299 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:29.416303Z 2.247 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:29.430645Z 2.328 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:29.490387Z 2.275 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:29.492270Z 1.045 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-26T21:47:29.515839Z 2.358 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:29.517012Z 2.419 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:29.539631Z 2.299 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:29.571281Z 2.301 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:29.572257Z 2.328 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:29.778310Z 2.325 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:29.855237Z 2.045 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:29.861408Z 2.286 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:29.934300Z 2.080 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:29.945060Z 2.249 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:29.947699Z 1.997 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:30.058955Z 2.087 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:30.096329Z 2.051 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:30.118172Z 1.992 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:30.209022Z 2.200 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:30.262812Z 2.034 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:30.266775Z 1.356 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:47:30.277175Z 2.039 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:30.510056Z 2.000 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:30.665137Z 2.093 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:30.696525Z 2.086 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:30.706384Z 2.028 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:30.720551Z 2.109 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:30.722524Z 2.159 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:30.889201Z 2.094 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:31.431078Z 2.038 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:31.435319Z 1.900 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-26T21:47:31.586323Z 2.200 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:31.591555Z 2.113 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:31.797803Z 2.209 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:31.847296Z 2.197 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:31.867727Z 2.198 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:31.874202Z 2.240 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:31.931076Z 2.446 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:31.939549Z 2.368 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:31.965905Z 2.317 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:32.020385Z 2.357 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:32.061997Z 2.161 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:32.110846Z 2.357 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:32.169627Z 2.209 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:32.237711Z 2.246 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:32.325288Z 2.266 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:32.356564Z 2.314 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:32.600059Z 2.263 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:32.610338Z 2.378 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:32.636254Z 2.714 WITH held AS ( SELECT j.id, j.purge_on_release FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease
+2026-11-26T21:47:32.645942Z 2.434 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:32.757371Z 2.771 WITH held AS ( SELECT j.id, j.purge_on_release FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease
+2026-11-26T21:47:32.775339Z 2.348 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:32.808983Z 2.479 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:32.959582Z 2.388 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:32.966914Z 2.818 WITH held AS ( SELECT j.id, j.purge_on_release FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease
+2026-11-26T21:47:33.095419Z 2.291 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:33.138856Z 2.324 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:33.335864Z 2.481 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:33.392142Z 2.583 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:33.404502Z 2.412 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:33.414494Z 2.574 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:33.903843Z 2.409 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:34.156282Z 2.481 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:34.188180Z 2.520 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:34.409741Z 2.549 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:34.436517Z 2.484 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:34.452795Z 2.480 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:34.597657Z 2.566 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:34.637546Z 2.625 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:34.661096Z 2.595 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:34.732983Z 2.613 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:34.756206Z 2.716 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:34.766888Z 2.738 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:34.839122Z 2.600 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:34.849323Z 2.533 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:34.883543Z 2.634 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:34.892308Z 2.476 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:34.928346Z 2.827 WITH held AS ( SELECT j.id, j.purge_on_release FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease
+2026-11-26T21:47:35.032729Z 2.608 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:35.263907Z 2.586 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:35.325840Z 2.617 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:35.412627Z 2.525 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:35.463761Z 2.972 WITH held AS ( SELECT j.id, j.purge_on_release FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease
+2026-11-26T21:47:35.482103Z 2.652 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:35.541135Z 2.689 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:35.571547Z 3.181 WITH held AS ( SELECT j.id, j.purge_on_release FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease
+2026-11-26T21:47:35.588265Z 2.692 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:35.651673Z 3.156 WITH held AS ( SELECT j.id, j.purge_on_release FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease
+2026-11-26T21:47:35.700133Z 2.587 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:35.846568Z 2.447 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:35.871910Z 2.421 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:35.907981Z 2.425 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:36.005245Z 2.465 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:36.169939Z 2.770 WITH held AS ( SELECT j.id, j.purge_on_release FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease
+2026-11-26T21:47:36.233331Z 2.729 WITH held AS ( SELECT j.id, j.purge_on_release FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease
+2026-11-26T21:47:36.234004Z 2.195 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:36.354464Z 2.805 WITH held AS ( SELECT j.id, j.purge_on_release FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease
+2026-11-26T21:47:36.368615Z 2.843 WITH held AS ( SELECT j.id, j.purge_on_release FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease
+2026-11-26T21:47:36.397905Z 2.102 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:36.412951Z 2.114 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:36.447829Z 2.926 WITH held AS ( SELECT j.id, j.purge_on_release FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease
+2026-11-26T21:47:36.552212Z 2.016 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:36.582957Z 1.761 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:36.655974Z 1.942 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:36.678748Z 1.723 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:36.689863Z 1.732 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:36.707613Z 1.733 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:36.709915Z 1.858 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:36.777396Z 1.618 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:36.797379Z 1.639 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:36.881042Z 1.868 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:36.927404Z 1.554 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:36.955828Z 1.381 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:36.979968Z 1.324 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:36.999710Z 1.561 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:37.044443Z 1.524 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:37.079123Z 1.318 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:37.125806Z 1.510 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:37.155076Z 1.490 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:37.204118Z 1.377 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:37.205702Z 1.466 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:37.265662Z 1.297 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:37.296925Z 1.255 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:37.324984Z 1.230 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:37.325390Z 1.049 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:37.325736Z 1.323 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id
+2026-11-26T21:47:37.405122Z 1.061 WITH held AS ( SELECT j.id FROM jobs j JOIN unnest($1::uuid[], $2::uuid[]) AS t (id, lease_token) ON j.id = t.id AND j.lease_token = t.lease_token ORDER BY j.id

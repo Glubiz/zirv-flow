@@ -272,7 +272,7 @@ The run cleans up after itself: a global teardown asks the server to stop (`POST
 
 Reports record their environment and limitations; development-machine results are not reference-hardware guarantees. The load generator is `tools/loadgen`; see the [benchmark runbook](scripts/bench/README.md).
 The [M8 driver](scripts/bench/README.md#13-m8-reference-resource-emulation-issue-393) adds resumable scale seeds and reference-resource emulation; its Docker smoke run and hardware validation remain outstanding.
-Reports: [m2-ingestion](docs/benchmarks/m2-ingestion.md), [m4-segments](docs/benchmarks/m4-segments.md), [m5-flows](docs/benchmarks/m5-flows.md), [m6-send](docs/benchmarks/m6-send.md), [m7-render](docs/benchmarks/m7-render.md), [m8-validation](docs/benchmarks/m8-validation.md), [simulated-5x](docs/benchmarks/simulated-5x.md), [tier-l-capacity](docs/benchmarks/tier-l-capacity.md).
+Reports: [m2-ingestion](docs/benchmarks/m2-ingestion.md), [m4-segments](docs/benchmarks/m4-segments.md), [m5-flows](docs/benchmarks/m5-flows.md), [m6-send](docs/benchmarks/m6-send.md), [m7-render](docs/benchmarks/m7-render.md), [m8-validation](docs/benchmarks/m8-validation.md), [simulated-5x](docs/benchmarks/simulated-5x.md), [tier-l-capacity](docs/benchmarks/tier-l-capacity.md), [tier-l-1.0.39-rerun](docs/benchmarks/tier-l-1.0.39-rerun.md).
 
 The published 1.0.0 image ran on the simulated production stack at the x5 load: 500k people (1.62M by the end) and a daily-curve peak of 6,500 events/s, about 4,400/s through the ingest API.
 The stack was PostgreSQL 16 with 8 CPUs and 10 GB, 2 `serve`, 4 workers and a scheduler, on one capped development machine, not reference hardware ([#606](https://github.com/Glubiz/zirv-flow/issues/606)).

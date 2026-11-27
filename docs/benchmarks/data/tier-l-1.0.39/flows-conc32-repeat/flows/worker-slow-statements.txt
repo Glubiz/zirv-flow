@@ -1,0 +1,218 @@
+2026-11-27T00:00:40.244361Z 1.036 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:00:42.718987Z 2.456 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:00:45.259202Z 1.882 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:00:46.757834Z 1.595 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:00:48.312129Z 2.248 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:00:48.433875Z 1.324 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:00:48.997090Z 1.848 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:00:50.907725Z 1.613 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:00:53.213465Z 1.822 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:00:54.766467Z 1.393 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:00:55.332812Z 2.672 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:00:59.141974Z 1.040 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:00:59.866097Z 3.023 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:00:59.970443Z 1.117 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:01:01.241224Z 2.224 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:01:01.416655Z 1.401 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:01:02.604120Z 1.154 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:01:03.003492Z 2.223 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:01:03.166322Z 1.513 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:01:04.847641Z 1.227 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:01:06.120972Z 1.883 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:01:06.750413Z 2.068 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:01:07.082227Z 2.115 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:01:07.491443Z 1.087 UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, lease_token = gen_random_uuid(), lease_expires_at = (SELECT clock_timestamp()) + mak
+2026-11-27T00:01:07.648897Z 2.789 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:01:10.093264Z 1.001 UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, lease_token = gen_random_uuid(), lease_expires_at = (SELECT clock_timestamp()) + mak
+2026-11-27T00:01:10.390158Z 1.022 UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, lease_token = gen_random_uuid(), lease_expires_at = (SELECT clock_timestamp()) + mak
+2026-11-27T00:01:10.531272Z 3.235 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:01:10.660095Z 1.067 UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, lease_token = gen_random_uuid(), lease_expires_at = (SELECT clock_timestamp()) + mak
+2026-11-27T00:01:10.936542Z 1.125 UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, lease_token = gen_random_uuid(), lease_expires_at = (SELECT clock_timestamp()) + mak
+2026-11-27T00:01:10.981469Z 2.310 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:01:10.983616Z 1.101 UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, lease_token = gen_random_uuid(), lease_expires_at = (SELECT clock_timestamp()) + mak
+2026-11-27T00:01:11.051171Z 1.181 UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, lease_token = gen_random_uuid(), lease_expires_at = (SELECT clock_timestamp()) + mak
+2026-11-27T00:14:26.405957Z 1.179 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:14:29.237042Z 1.167 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:14:29.237172Z 1.989 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:14:29.608747Z 1.620 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:14:30.535198Z 1.137 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:14:31.000729Z 1.316 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:14:32.218410Z 1.947 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:14:32.717028Z 2.412 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:14:34.588296Z 1.493 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:14:37.652582Z 2.067 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:14:37.964666Z 1.827 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:14:40.422490Z 1.167 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:14:41.013949Z 1.230 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:14:41.969190Z 1.005 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:14:42.069098Z 1.537 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:14:42.927061Z 1.116 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:14:43.259294Z 1.073 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:14:43.707123Z 1.365 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:14:44.735137Z 2.468 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:14:44.868801Z 2.237 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:14:44.868870Z 1.824 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:14:46.157764Z 1.042 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:14:46.769285Z 2.390 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:14:47.305089Z 2.643 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:14:47.433271Z 1.273 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:14:47.750827Z 1.317 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:14:48.404931Z 1.128 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:14:48.405436Z 2.548 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:14:48.439064Z 2.234 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:14:48.535057Z 2.233 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, traits ->> 'timezone' AS zone FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT 
+2026-11-27T00:14:49.271739Z 2.846 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:14:49.953406Z 1.906 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:14:50.119138Z 1.479 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:14:51.467768Z 1.704 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:14:52.007509Z 1.336 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:14:52.608439Z 1.108 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:14:52.608512Z 2.268 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:14:52.833518Z 2.806 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:14:52.849130Z 1.355 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:14:52.914221Z 2.440 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:14:53.530579Z 2.410 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:14:55.123629Z 1.095 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:14:55.389331Z 1.336 WITH RECURSIVE bands (priority) AS ( (SELECT priority FROM jobs WHERE state = 'ready' ORDER BY priority LIMIT 1) UNION ALL SELECT (SELECT j.priority FROM jobs j
+2026-11-27T00:14:55.881534Z 1.804 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:14:56.716057Z 1.068 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:14:59.035001Z 1.167 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:14:59.904807Z 2.157 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:14:59.904840Z 2.861 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:15:00.263006Z 1.020 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:15:01.426139Z 2.207 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:15:01.839496Z 2.118 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:15:02.082469Z 1.387 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:15:02.658382Z 1.011 UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, lease_token = gen_random_uuid(), lease_expires_at = (SELECT clock_timestamp()) + mak
+2026-11-27T00:15:03.902608Z 1.378 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:15:03.902654Z 1.140 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:15:04.173302Z 1.630 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:15:04.181724Z 1.613 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:15:04.607186Z 1.814 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:15:04.753772Z 2.552 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:15:06.190243Z 2.320 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:15:06.441237Z 2.093 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:15:06.480301Z 1.829 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:15:07.210224Z 3.702 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:15:08.465558Z 1.737 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:15:08.465897Z 1.575 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:15:08.996014Z 1.065 WITH RECURSIVE bands (priority) AS ( (SELECT priority FROM jobs WHERE state = 'ready' ORDER BY priority LIMIT 1) UNION ALL SELECT (SELECT j.priority FROM jobs j
+2026-11-27T00:15:09.726665Z 1.179 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:15:11.126019Z 1.090 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:15:11.466992Z 3.870 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:15:11.531353Z 1.860 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:17:30.240716Z 1.330 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:17:30.364214Z 1.100 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:17:31.149231Z 3.376 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:17:31.855980Z 2.529 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:17:32.514098Z 1.328 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:17:33.797628Z 1.034 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:17:35.211488Z 1.107 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:17:36.440448Z 1.229 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:17:37.113274Z 1.412 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:17:38.261242Z 1.977 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:17:40.607765Z 1.177 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:17:41.014167Z 1.205 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:17:41.455229Z 1.428 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:17:43.316300Z 2.939 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:17:43.443620Z 2.385 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, traits ->> 'timezone' AS zone FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT 
+2026-11-27T00:17:45.517840Z 1.475 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:17:46.119774Z 1.912 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:17:46.582381Z 1.053 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:17:47.348002Z 3.035 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:17:47.379063Z 1.181 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:17:47.379096Z 1.996 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:17:48.869108Z 2.795 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:17:49.177646Z 1.338 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:17:51.060155Z 2.318 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:17:51.525405Z 1.571 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:17:51.607657Z 2.210 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:17:51.607691Z 2.373 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:17:51.912000Z 2.757 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:17:52.578426Z 1.552 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:17:52.708882Z 1.004 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:17:53.547173Z 1.411 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:17:55.896096Z 1.813 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:17:56.302672Z 1.259 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:17:57.871920Z 1.166 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:17:59.931105Z 1.531 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:18:00.040409Z 1.016 UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, lease_token = gen_random_uuid(), lease_expires_at = (SELECT clock_timestamp()) + mak
+2026-11-27T00:18:01.945071Z 2.187 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:18:02.984842Z 1.005 UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, lease_token = gen_random_uuid(), lease_expires_at = (SELECT clock_timestamp()) + mak
+2026-11-27T00:18:03.542823Z 1.004 UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, lease_token = gen_random_uuid(), lease_expires_at = (SELECT clock_timestamp()) + mak
+2026-11-27T00:18:03.972821Z 1.053 UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, lease_token = gen_random_uuid(), lease_expires_at = (SELECT clock_timestamp()) + mak
+2026-11-27T00:18:04.122643Z 1.067 UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, lease_token = gen_random_uuid(), lease_expires_at = (SELECT clock_timestamp()) + mak
+2026-11-27T00:18:04.193832Z 1.973 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:18:05.677040Z 1.468 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:18:06.357708Z 1.738 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:18:06.493988Z 1.126 UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, lease_token = gen_random_uuid(), lease_expires_at = (SELECT clock_timestamp()) + mak
+2026-11-27T00:18:06.531865Z 1.212 UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, lease_token = gen_random_uuid(), lease_expires_at = (SELECT clock_timestamp()) + mak
+2026-11-27T00:18:07.817805Z 1.032 UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, lease_token = gen_random_uuid(), lease_expires_at = (SELECT clock_timestamp()) + mak
+2026-11-27T00:18:07.979625Z 1.126 UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, lease_token = gen_random_uuid(), lease_expires_at = (SELECT clock_timestamp()) + mak
+2026-11-27T00:18:07.992410Z 1.138 UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, lease_token = gen_random_uuid(), lease_expires_at = (SELECT clock_timestamp()) + mak
+2026-11-27T00:18:08.000744Z 1.096 UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, lease_token = gen_random_uuid(), lease_expires_at = (SELECT clock_timestamp()) + mak
+2026-11-27T00:18:08.101956Z 1.312 UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, lease_token = gen_random_uuid(), lease_expires_at = (SELECT clock_timestamp()) + mak
+2026-11-27T00:18:08.396207Z 1.252 UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, lease_token = gen_random_uuid(), lease_expires_at = (SELECT clock_timestamp()) + mak
+2026-11-27T00:18:08.396349Z 1.308 UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, lease_token = gen_random_uuid(), lease_expires_at = (SELECT clock_timestamp()) + mak
+2026-11-27T00:18:08.430193Z 1.094 UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, lease_token = gen_random_uuid(), lease_expires_at = (SELECT clock_timestamp()) + mak
+2026-11-27T00:18:08.451759Z 1.074 UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, lease_token = gen_random_uuid(), lease_expires_at = (SELECT clock_timestamp()) + mak
+2026-11-27T00:18:10.085497Z 1.871 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:18:11.110305Z 1.488 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:18:11.988927Z 3.091 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:20:31.901154Z 1.017 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:20:32.478484Z 1.454 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:20:33.277966Z 1.055 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:20:34.418166Z 1.679 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:20:34.668967Z 1.123 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:20:35.144795Z 1.645 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:20:35.690280Z 2.044 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:20:35.996768Z 1.183 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:20:36.169972Z 1.271 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:20:37.095621Z 3.006 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:20:37.311381Z 1.192 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:20:37.461322Z 1.131 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:20:39.503393Z 2.016 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:20:40.189254Z 1.598 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:20:41.024359Z 3.103 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:20:42.659961Z 2.196 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:20:43.276435Z 1.264 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:20:43.276788Z 1.249 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:20:43.752944Z 1.594 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:20:43.991567Z 1.723 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:20:44.003492Z 1.083 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:20:44.868703Z 2.731 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:20:46.300082Z 1.190 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:20:46.964483Z 1.601 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:20:46.980528Z 1.198 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:20:48.448880Z 1.191 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:20:48.851011Z 1.657 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:20:49.695096Z 1.241 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:20:49.742762Z 1.570 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:20:50.101846Z 2.337 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:20:52.142965Z 3.029 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:20:52.269147Z 1.493 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:20:52.899533Z 1.658 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:20:53.706229Z 2.608 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:20:54.771618Z 3.163 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:20:54.853476Z 2.518 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:20:55.071852Z 2.325 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:20:55.083668Z 1.454 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, traits ->> 'timezone' AS zone FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT 
+2026-11-27T00:20:55.427312Z 1.392 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:20:56.590724Z 1.012 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:20:56.784628Z 1.208 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:20:57.524712Z 1.546 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:20:57.702416Z 1.047 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:21:00.344332Z 1.767 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:21:00.772876Z 2.231 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:21:00.839464Z 2.184 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:21:01.357317Z 1.403 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:21:01.357432Z 1.554 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:21:02.039348Z 1.433 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:21:04.603886Z 4.328 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-27T00:21:04.604281Z 1.869 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:21:05.942845Z 1.002 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:21:06.587514Z 1.014 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:21:08.306914Z 1.240 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:21:10.306997Z 1.134 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:21:10.860626Z 2.397 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-27T00:21:11.125854Z 1.628 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr

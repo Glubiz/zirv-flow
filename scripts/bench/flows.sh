@@ -15,7 +15,8 @@
 # reports; default /tmp/zirv-bench-flows), BENCH_DATA (default docs/benchmarks/data/tier-l-1.0.38;
 # results go to $BENCH_DATA/flows), BENCH_HOST (default 127.0.0.1), BENCH_FLOW_DRAIN_CAP (seconds a
 # window waits for its enrollments to finish, default 300), BENCH_SEED_FACTOR (identify items per
-# person, default 3), BENCH_SEED_RATE (default 2000). Needs bash, docker compose, jq, awk, curl.
+# person, default 3), BENCH_SEED_RATE (default 2000), BENCH_ANALYZE_IDLE (set: ANALYZE enrollments
+# before each window, while nothing is in flight). Needs bash, docker compose, jq, awk, curl.
 
 set -uo pipefail
 
@@ -192,6 +193,20 @@ wait_empty() {
 idle_sql() {
   q -Atc "select (select count(*) from ingest_inbox) + (select count(*) from jobs where kind = 'flow.enroll' and state in ('ready','running')) + (select count(*) from enrollments where flow_id = '$flow' and state in ('active','waiting'))"
 }
+# state_stats_json: the planner's view of enrollments.state now, as JSON: the in-flight share in the
+# column statistics and the analyze counters. A share of 0 with rows in flight is the stale case.
+state_stats_json() {
+  q -At -c "select json_build_object(
+      'in_flight_share', (select coalesce(sum(u.f), 0) from pg_stats s,
+          unnest(s.most_common_vals::text::text[], s.most_common_freqs) as u(v, f)
+        where s.schemaname = 'public' and s.tablename = 'enrollments' and s.attname = 'state'
+          and u.v in ('active', 'waiting', 'held', 'failed')),
+      'has_state_stats', exists (select 1 from pg_stats where schemaname = 'public' and tablename = 'enrollments' and attname = 'state'),
+      'in_flight_rows', (select count(*) from enrollments where state in ('active', 'waiting', 'held', 'failed')),
+      'analyze_count', t.analyze_count, 'autoanalyze_count', t.autoanalyze_count,
+      'last_autoanalyze', t.last_autoanalyze, 'n_mod_since_analyze', t.n_mod_since_analyze)
+    from pg_stat_user_tables t where t.relname = 'enrollments'"
+}
 # wait_idle <cap_s>: seconds waited, or "null" at the cap.
 wait_idle() {
   local started=$SECONDS
@@ -337,6 +352,13 @@ run_window() {
   need_pg; load_state; [ -n "$flow" ] || die "no flow: run flows.sh setup"
   local raw="$scratch/raw/$label"; mkdir -p "$raw"
   local idle; idle="$(wait_idle 300)"; [ "$idle" != null ] || die "the flow is not idle before $label (inbox, flow.enroll jobs or active enrollments left)"
+  # BENCH_ANALYZE_IDLE=1: analyze enrollments now, while nothing is in flight, so the window starts
+  # on the statistics that caused the tier L stalls (docs/benchmarks/tier-l-capacity.md section 6).
+  local analyzed=false
+  if [ -n "${BENCH_ANALYZE_IDLE:-}" ]; then
+    q -qc "ANALYZE enrollments" >/dev/null || die "ANALYZE enrollments failed"; analyzed=true
+  fi
+  local stats_start; stats_start="$(state_stats_json)"
   local seed; seed=$(cksum <<<"$label" | cut -d' ' -f1)
   scrape "$raw/metrics-before.txt"
   start_samplers "$label"
@@ -358,6 +380,7 @@ run_window() {
   t2h=$(date +%s)
   stop_samplers
   scrape "$raw/metrics-after.txt"
+  local stats_end; stats_end="$(state_stats_json)"
 
   q -At -v ON_ERROR_STOP=1 -v ws="$ws" -v flow="$flow" -v since="$since" -v t1="$t1" -v secs="$secs" -v wait_s="$wait_s" \
     -v trig="$trig_event" -v prefix="lg-$label-trig-" -f - <"$here/flows/metrics.sql" >"$raw/sql.json" || die "metrics.sql failed"
@@ -386,7 +409,8 @@ run_window() {
     --argjson usage_gen "$(usage_json "$t0h" "$t1h")" --argjson usage_all "$(usage_json "$t0h" "$t2h")" \
     --argjson dur "$(hist_json "$raw/metrics-before.txt" "$raw/metrics-after.txt" zirv_flow_job_duration_seconds)" \
     --argjson lag "$(hist_json "$raw/metrics-before.txt" "$raw/metrics-after.txt" zirv_flow_job_claim_lag_seconds)" \
-    --argjson skips "$(counter_json "$raw/metrics-before.txt" "$raw/metrics-after.txt" zirv_flow_flow_enroll_skips_total reason)" '
+    --argjson skips "$(counter_json "$raw/metrics-before.txt" "$raw/metrics-after.txt" zirv_flow_flow_enroll_skips_total reason)" \
+    --argjson analyzed "$analyzed" --argjson stats_start "$stats_start" --argjson stats_end "$stats_end" '
     ($sql[0]) as $s
     | ($applied | if . == "" then null else split(",") | map(tonumber? // null) | {items: .[0], p50_ms: .[1], p95_ms: .[2], p99_ms: .[3], max_ms: .[4]} end) as $ap
     | {label: $label, flow_id: $flow, since: $s.since, generator_seconds: $secs, wait_s: $wait,
@@ -406,7 +430,9 @@ run_window() {
        throughput: $s.throughput, step_outcomes: $s.step_outcomes,
        ingest_applied_latency_ms_track: $ap,
        containers: {during_generators: $usage_gen, including_drain: $usage_all},
-       backlog: $backlog[0]}' >"$data/$label.json" || die "assembling $label.json failed"
+       backlog: $backlog[0],
+       enrollments_state_statistics: {analyzed_before_window: $analyzed, at_start: $stats_start, at_end: $stats_end}}' \
+    >"$data/$label.json" || die "assembling $label.json failed"
   log "wrote $data/$label.json"
 }
 

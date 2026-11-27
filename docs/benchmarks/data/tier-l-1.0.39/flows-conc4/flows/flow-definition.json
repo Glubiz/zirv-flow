@@ -1,0 +1,112 @@
+{
+  "flow_id": "01a219d8-c6e1-7219-ba70-6b00cf0bdc6f",
+  "list_id": "01a219d8-c633-7754-b1d2-7c8348cf70ed",
+  "warmup": {
+    "enabled": false,
+    "seconds": 300,
+    "started_at": "2026-11-26T21:52:47.039918Z",
+    "ends_at": "2026-11-26T21:57:47.039918Z",
+    "opened_at": null,
+    "admitted": 0,
+    "waiting": 0
+  },
+  "request": {
+    "name": "bench-flow",
+    "graph": {
+      "v": 1,
+      "nodes": [
+        {
+          "id": "b1",
+          "type": "branch",
+          "conditions": [
+            {
+              "trait": "plan",
+              "op": "eq",
+              "value": "pro"
+            }
+          ]
+        },
+        {
+          "id": "a_trait",
+          "type": "action.update_trait",
+          "key": "bench_flow_tier",
+          "change": {
+            "op": "set",
+            "value": "priority"
+          }
+        },
+        {
+          "id": "a_list",
+          "type": "action.list",
+          "list_id": "01a219d8-c633-7754-b1d2-7c8348cf70ed",
+          "change": "add"
+        },
+        {
+          "id": "w1",
+          "type": "wait.duration",
+          "seconds": 30
+        },
+        {
+          "id": "a_after",
+          "type": "action.update_trait",
+          "key": "bench_flow_runs",
+          "change": {
+            "op": "increment",
+            "by": 1
+          }
+        },
+        {
+          "id": "x1",
+          "type": "exit"
+        }
+      ],
+      "edges": [
+        {
+          "id": "e1",
+          "from": "b1",
+          "port": "case_0",
+          "to": "a_trait"
+        },
+        {
+          "id": "e2",
+          "from": "b1",
+          "port": "else",
+          "to": "a_list"
+        },
+        {
+          "id": "e3",
+          "from": "a_trait",
+          "port": "next",
+          "to": "w1"
+        },
+        {
+          "id": "e4",
+          "from": "a_list",
+          "port": "next",
+          "to": "w1"
+        },
+        {
+          "id": "e5",
+          "from": "w1",
+          "port": "next",
+          "to": "a_after"
+        },
+        {
+          "id": "e6",
+          "from": "a_after",
+          "port": "next",
+          "to": "x1"
+        }
+      ]
+    },
+    "settings": {
+      "trigger": {
+        "type": "event",
+        "event": "bench_flow_trigger"
+      },
+      "reentry": {
+        "mode": "once_at_a_time"
+      }
+    }
+  }
+}

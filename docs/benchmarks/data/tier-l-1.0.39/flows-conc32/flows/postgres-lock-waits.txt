@@ -1,0 +1,90 @@
+2026-11-26 21:36:03.811 UTC [134] LOG:  process 134 still waiting for ShareLock on transaction 3476480 after 1000.078 ms
+2026-11-26 21:36:04.723 UTC [134] LOG:  process 134 acquired ShareLock on transaction 3476480 after 1911.785 ms
+2026-11-26 21:36:05.154 UTC [109] LOG:  process 109 still waiting for ShareLock on transaction 3480191 after 1000.045 ms
+2026-11-26 21:36:06.216 UTC [117] LOG:  process 117 still waiting for ShareLock on transaction 3479853 after 1000.162 ms
+2026-11-26 21:36:06.881 UTC [117] LOG:  process 117 acquired ShareLock on transaction 3479853 after 1665.422 ms
+2026-11-26 21:36:06.907 UTC [109] LOG:  process 109 acquired ShareLock on transaction 3480191 after 2752.426 ms
+2026-11-26 21:36:06.912 UTC [138] LOG:  process 138 still waiting for ShareLock on transaction 3485094 after 1000.110 ms
+2026-11-26 21:36:06.965 UTC [136] LOG:  process 136 still waiting for ShareLock on transaction 3480371 after 1000.034 ms
+2026-11-26 21:36:07.234 UTC [138] LOG:  process 138 acquired ShareLock on transaction 3485094 after 1322.017 ms
+2026-11-26 21:36:07.474 UTC [136] LOG:  process 136 acquired ShareLock on transaction 3480371 after 1508.373 ms
+2026-11-26 21:36:07.934 UTC [135] LOG:  process 135 still waiting for ShareLock on transaction 3484462 after 1000.043 ms
+2026-11-26 21:36:08.786 UTC [135] LOG:  process 135 acquired ShareLock on transaction 3484462 after 1851.904 ms
+2026-11-26 21:36:09.589 UTC [6805] LOG:  process 6805 still waiting for ShareLock on transaction 3489544 after 1000.084 ms
+2026-11-26 21:36:10.214 UTC [6805] LOG:  process 6805 acquired ShareLock on transaction 3489544 after 1624.417 ms
+2026-11-26 21:36:10.914 UTC [6806] LOG:  process 6806 still waiting for ShareLock on transaction 3489215 after 1000.049 ms
+2026-11-26 21:36:11.642 UTC [6806] LOG:  process 6806 acquired ShareLock on transaction 3489215 after 1727.885 ms
+2026-11-26 21:36:12.244 UTC [6824] LOG:  process 6824 still waiting for ShareLock on transaction 3497131 after 1000.051 ms
+2026-11-26 21:36:12.853 UTC [120] LOG:  process 120 still waiting for ShareLock on transaction 3498816 after 1000.048 ms
+2026-11-26 21:36:13.631 UTC [6823] LOG:  process 6823 still waiting for ShareLock on transaction 3499705 after 1000.140 ms
+2026-11-26 21:36:13.912 UTC [120] LOG:  process 120 acquired ShareLock on transaction 3498816 after 2059.190 ms
+2026-11-26 21:36:14.653 UTC [6824] LOG:  process 6824 acquired ShareLock on transaction 3497131 after 3409.242 ms
+2026-11-26 21:36:15.145 UTC [128] LOG:  process 128 still waiting for ShareLock on transaction 3500690 after 1000.067 ms
+2026-11-26 21:36:15.193 UTC [128] LOG:  process 128 acquired ShareLock on transaction 3500690 after 1047.808 ms
+2026-11-26 21:36:15.331 UTC [98] LOG:  process 98 still waiting for ShareLock on transaction 3504863 after 1000.059 ms
+2026-11-26 21:36:15.671 UTC [6823] LOG:  process 6823 acquired ShareLock on transaction 3499705 after 3039.867 ms
+2026-11-26 21:36:16.521 UTC [98] LOG:  process 98 acquired ShareLock on transaction 3504863 after 2190.192 ms
+2026-11-26 21:36:16.893 UTC [6824] LOG:  process 6824 still waiting for ShareLock on transaction 3507160 after 1000.370 ms
+2026-11-26 21:36:17.209 UTC [118] LOG:  process 118 still waiting for ShareLock on transaction 3509651 after 1000.169 ms
+2026-11-26 21:36:17.565 UTC [6824] LOG:  process 6824 acquired ShareLock on transaction 3507160 after 1672.291 ms
+2026-11-26 21:36:17.726 UTC [118] LOG:  process 118 acquired ShareLock on transaction 3509651 after 1518.015 ms
+2026-11-26 21:36:18.406 UTC [121] LOG:  process 121 still waiting for ShareLock on transaction 3510328 after 1000.074 ms
+2026-11-26 21:36:18.848 UTC [6823] LOG:  process 6823 still waiting for ShareLock on transaction 3514636 after 1000.091 ms
+2026-11-26 21:36:19.211 UTC [121] LOG:  process 121 acquired ShareLock on transaction 3510328 after 1805.183 ms
+2026-11-26 21:36:19.313 UTC [114] LOG:  process 114 still waiting for ShareLock on transaction 3512281 after 1000.048 ms
+2026-11-26 21:36:19.397 UTC [6823] LOG:  process 6823 acquired ShareLock on transaction 3514636 after 1549.151 ms
+2026-11-26 21:36:19.652 UTC [114] LOG:  process 114 acquired ShareLock on transaction 3512281 after 1339.126 ms
+2026-11-26 21:36:20.374 UTC [6802] LOG:  process 6802 still waiting for ShareLock on transaction 3515649 after 1000.387 ms
+2026-11-26 21:36:20.401 UTC [100] LOG:  process 100 still waiting for ShareLock on transaction 3518274 after 1000.042 ms
+2026-11-26 21:36:20.719 UTC [130] LOG:  process 130 still waiting for ShareLock on transaction 3520681 after 1000.044 ms
+2026-11-26 21:36:20.780 UTC [6805] LOG:  process 6805 still waiting for ShareLock on transaction 3517056 after 1000.054 ms
+2026-11-26 21:36:20.950 UTC [6802] LOG:  process 6802 acquired ShareLock on transaction 3515649 after 1576.776 ms
+2026-11-26 21:36:20.961 UTC [130] LOG:  process 130 acquired ShareLock on transaction 3520681 after 1241.484 ms
+2026-11-26 21:36:21.206 UTC [114] LOG:  process 114 still waiting for ShareLock on transaction 3517056 after 1000.057 ms
+2026-11-26 21:36:21.445 UTC [114] LOG:  process 114 acquired ShareLock on transaction 3517056 after 1239.217 ms
+2026-11-26 21:36:21.445 UTC [6805] LOG:  process 6805 acquired ShareLock on transaction 3517056 after 1665.721 ms
+2026-11-26 21:36:22.138 UTC [101] LOG:  process 101 still waiting for ShareLock on transaction 3518453 after 1000.101 ms
+2026-11-26 21:36:22.305 UTC [100] LOG:  process 100 acquired ShareLock on transaction 3518274 after 2904.256 ms
+2026-11-26 21:36:22.610 UTC [101] LOG:  process 101 acquired ShareLock on transaction 3518453 after 1472.713 ms
+2026-11-26 21:36:24.405 UTC [133] LOG:  process 133 still waiting for ShareLock on transaction 3524035 after 1000.050 ms
+2026-11-26 21:36:24.596 UTC [133] LOG:  process 133 acquired ShareLock on transaction 3524035 after 1191.717 ms
+2026-11-26 21:36:24.836 UTC [6802] LOG:  process 6802 still waiting for ShareLock on transaction 3527694 after 1000.034 ms
+2026-11-26 21:36:24.866 UTC [138] LOG:  process 138 still waiting for ShareLock on transaction 3525020 after 1000.070 ms
+2026-11-26 21:36:24.878 UTC [138] LOG:  process 138 acquired ShareLock on transaction 3525020 after 1011.974 ms
+2026-11-26 21:36:25.484 UTC [109] LOG:  process 109 still waiting for ShareLock on transaction 3530357 after 1000.722 ms
+2026-11-26 21:36:25.496 UTC [98] LOG:  process 98 still waiting for ShareLock on transaction 3537060 after 1000.048 ms
+2026-11-26 21:36:25.645 UTC [6802] LOG:  process 6802 acquired ShareLock on transaction 3527694 after 1808.500 ms
+2026-11-26 21:36:26.587 UTC [109] LOG:  process 109 acquired ShareLock on transaction 3530357 after 2103.172 ms
+2026-11-26 21:36:26.595 UTC [98] LOG:  process 98 acquired ShareLock on transaction 3537060 after 2099.181 ms
+2026-11-26 21:36:28.502 UTC [105] LOG:  process 105 still waiting for ShareLock on transaction 3542320 after 1000.040 ms
+2026-11-26 21:36:28.601 UTC [6804] LOG:  process 6804 still waiting for ShareLock on transaction 3538342 after 1000.066 ms
+2026-11-26 21:36:29.152 UTC [6804] LOG:  process 6804 acquired ShareLock on transaction 3538342 after 1550.775 ms
+2026-11-26 21:36:29.710 UTC [118] LOG:  process 118 still waiting for ShareLock on transaction 3542320 after 1000.039 ms
+2026-11-26 21:36:29.774 UTC [6802] LOG:  process 6802 still waiting for ShareLock on transaction 3548933 after 1000.500 ms
+2026-11-26 21:36:30.279 UTC [100] LOG:  process 100 still waiting for ShareLock on transaction 3550153 after 1000.056 ms
+2026-11-26 21:36:30.560 UTC [105] LOG:  process 105 acquired ShareLock on transaction 3542320 after 3057.423 ms
+2026-11-26 21:36:30.560 UTC [118] LOG:  process 118 acquired ShareLock on transaction 3542320 after 1849.647 ms
+2026-11-26 21:36:30.581 UTC [6802] LOG:  process 6802 acquired ShareLock on transaction 3548933 after 1807.092 ms
+2026-11-26 21:36:30.643 UTC [100] LOG:  process 100 acquired ShareLock on transaction 3550153 after 1364.377 ms
+2026-11-26 21:36:32.515 UTC [6804] LOG:  process 6804 still waiting for ShareLock on transaction 3550371 after 1000.065 ms
+2026-11-26 21:36:33.109 UTC [103] LOG:  process 103 still waiting for ShareLock on transaction 3549926 after 1000.412 ms
+2026-11-26 21:36:33.191 UTC [103] LOG:  process 103 acquired ShareLock on transaction 3549926 after 1081.753 ms
+2026-11-26 21:36:33.321 UTC [6804] LOG:  process 6804 acquired ShareLock on transaction 3550371 after 1806.080 ms
+2026-11-26 21:36:33.331 UTC [6803] LOG:  process 6803 still waiting for ShareLock on transaction 3558720 after 1000.043 ms
+2026-11-26 21:36:33.402 UTC [6803] LOG:  process 6803 acquired ShareLock on transaction 3558720 after 1071.437 ms
+2026-11-26 21:47:00.781 UTC [101] LOG:  process 101 still waiting for ShareLock on transaction 6365767 after 1000.047 ms
+2026-11-26 21:47:00.783 UTC [122] LOG:  process 122 still waiting for ShareLock on transaction 6365188 after 1000.077 ms
+2026-11-26 21:47:00.790 UTC [103] LOG:  process 103 still waiting for ShareLock on transaction 6365662 after 1000.110 ms
+2026-11-26 21:47:00.831 UTC [122] LOG:  process 122 acquired ShareLock on transaction 6365188 after 1047.600 ms
+2026-11-26 21:47:01.101 UTC [103] LOG:  process 103 acquired ShareLock on transaction 6365662 after 1311.166 ms
+2026-11-26 21:47:01.159 UTC [101] LOG:  process 101 acquired ShareLock on transaction 6365767 after 1378.688 ms
+2026-11-26 21:47:03.728 UTC [110] LOG:  process 110 still waiting for ShareLock on transaction 6370648 after 1000.064 ms
+2026-11-26 21:47:04.781 UTC [110] LOG:  process 110 acquired ShareLock on transaction 6370648 after 2053.351 ms
+2026-11-26 21:47:27.674 UTC [11242] LOG:  process 11242 still waiting for ShareLock on transaction 6390904 after 1000.071 ms
+2026-11-26 21:47:27.912 UTC [11242] LOG:  process 11242 acquired ShareLock on transaction 6390904 after 1237.493 ms
+2026-11-26 21:47:29.451 UTC [11242] LOG:  process 11242 still waiting for ShareLock on transaction 6392563 after 1000.120 ms
+2026-11-26 21:47:29.492 UTC [11242] LOG:  process 11242 acquired ShareLock on transaction 6392563 after 1040.632 ms
+2026-11-26 21:47:29.910 UTC [6803] LOG:  process 6803 still waiting for ShareLock on transaction 6393182 after 1000.050 ms
+2026-11-26 21:47:30.266 UTC [6803] LOG:  process 6803 acquired ShareLock on transaction 6393182 after 1356.126 ms
+2026-11-26 21:47:30.535 UTC [11278] LOG:  process 11278 still waiting for ShareLock on transaction 6393836 after 1000.045 ms
+2026-11-26 21:47:31.435 UTC [11278] LOG:  process 11278 acquired ShareLock on transaction 6393836 after 1899.915 ms
