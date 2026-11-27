@@ -323,8 +323,8 @@ scripts/bench/flows.sh down
 - Each window records the planner's view of `enrollments.state` at its start and end under
   `enrollments_state_statistics`: the in-flight share in the column statistics, the rows in flight
   and the analyze counters. A share of 0 with rows in flight is the stale case behind the tier L
-  stalls (`docs/benchmarks/tier-l-capacity.md` section 6, item 9). `BENCH_ANALYZE_IDLE=1` forces it:
-  it runs `ANALYZE enrollments` before each window, while nothing is in flight.
+  stalls (`docs/benchmarks/tier-l-capacity.md` section 6, item 9). Setting `BENCH_ANALYZE_IDLE` to
+  any value forces it: it runs `ANALYZE enrollments` before each window, while nothing is in flight.
 
 ## 9. Segment benchmarks (M4, issue #127)
 

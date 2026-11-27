@@ -586,7 +586,7 @@ or 32.
     rerun](tier-l-1.0.39-rerun.md), section 4. Overload is now refused with 503, but only after up
     to about 10 s, because an ingest request waits for two connections, one after the other. The 30 s
     transport errors here and on 1.0.39 coincide with the load-generator host running out of
-    ephemeral ports: Windows logged Tcpip event 4227 at 23:28:16 UTC, 26 s into this step.
+    ephemeral ports: Windows logged Tcpip event 4227 at 23:28:16 UTC, 25 s into this step.
 11. **PostgreSQL crash in the c32 run, step 1,000.** At 2026-11-26T00:09:03Z a PostgreSQL 16.16
     backend running the benchmark's own `scripts/bench/flows/metrics.sql` died with signal 11 (a
     segmentation fault). The postmaster then ended every other session and entered recovery mode

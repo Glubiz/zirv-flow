@@ -29,18 +29,18 @@ has cpuset 8-15 and 16 GB. The serve pool is 32. The load generator runs on the 
   - concurrency 16 step 400: p95 12.6 and 13.7 s;
   - concurrency 32 step 400: p95 6.1 and 5.4 s.
 
-  In the 34 steps run below saturation, a step stalled if and only if the first autovacuum pass
-  inside it came 45 s or more after the step began (5 of 5 such steps stalled). Of the other 29 steps,
-  only the one where overload began went above 3 s. Every stall drained within about 15 to 35 s after
-  that pass, which analyzes `jobs`, `flow_entries` and `enrollments`. So the stalls are still a
+  Below saturation, at 200 triggers/s and up, a step stalled when the first autovacuum pass inside
+  it came 45 s or more after the step began: 5 of 5 such steps stalled. Of the other 29 such steps,
+  only the one where overload began went above 3 s. Every stall drained 9 to 36 s after that pass,
+  which analyzes `jobs`, `flow_entries` and `enrollments`. So the stalls are still a
   stale-statistics effect from the idle gap between steps, but in some query other than the ones 0116
   fixed. Which query is not established (section 3.2).
 - **Overload is now refused, but late, and the 30 s timeouts come from the load-generator host.** In
   the two steps that overloaded, serve answered 503 (29,631 and 29,858 refusals) where 1.0.38 answered
   none. No pool wait exceeded 5.0 s. A refusal still takes about 9 to 10 s, because each ingest request
   takes two connections one after the other, and each may wait 5 s. The 30 s transport errors line up
-  with Windows Tcpip events 4227 and 4231, "all ephemeral ports in use", in both 1.0.39 overload steps
-  and in the 1.0.38 collapse. At about 9.5 s per request the two generators hold more connections than
+  with Windows Tcpip event 4227 in both 1.0.39 overload steps and in the 1.0.38 collapse. One step also
+  has 4231, "all such ports being in use". At about 9.5 s per request the two generators hold more connections than
   the host's 16,384 dynamic ports (section 4).
 - **Capacity is unchanged within run-to-run variation.** At equal steps, enrollments/s and PostgreSQL
   CPU match 1.0.38 (section 5). The onset of overload varied between runs. At concurrency 16, run 1
@@ -129,29 +129,34 @@ all but one, which is in concurrency 32 step 400.
 | `flows-conc32` | 400 | 0.060 / 6.09 | 4.0 | 0.051 / 0.091 | 50 |
 | `flows-conc32-repeat` | 400 | 0.059 / 5.38 | 5.3 | 0.055 / 0.091 | 49 |
 | `flows-conc16-stale` | 500 | 2.69 / 14.2 | 14.6 | 0.078 / 1.06 | 49 |
-| `flows-conc4` `ramp-1000` | 200 | 1.89 / 9.17 | 9.7 | 0.050 / 6.85 | 51 |
-| `flows-conc4` `ramp-2000` | 200 | 6.78 / 8.78 | 9.0 | 0.214 / 23.6 | 53 |
 
 The pass time is that of the first `automatic analyze of table "…jobs"` after the step's `since`
 (`autovacuum.txt`, which lists every autovacuum and autoanalyze of a `public` table). The same pass
-analyzes `flow_entries` and `enrollments` 1 to 9 s later. Concurrency 4 `ramp-0` step 250 and
+analyzes `flow_entries` and `enrollments` within 9 s. Concurrency 4 `ramp-0` step 250 and
 concurrency 16 step 400 stalled on 1.0.38 too. Concurrency 32 stalled at 700 on 1.0.38 and at 400 here.
+
+Concurrency 4 step 200 at 1,000 and at 2,000 events/s also had a late first pass (51 and 53 s) and a
+p95 near 9 s. They are not in the table, because they are the onset of saturation, not a stall the
+pass ended. Enrollments/s were 183.7 and 174.7 against 200, every later step was slower, and the queue
+drained 72 and 77 s after the pass.
 
 **The timing follows the autovacuum cycle.** Autovacuum visits the database once a minute. One step
 with its drain and the gap lasts about 165 s, so the offset of the first pass inside a step moves back
 about 15 s per step: 10, 25, 35, 50, then 10 again. Concurrency 16 run 1 shows it: 11, 26, 36, 51
 (stall), 10, 24, 36, 40, 45 s.
 
-Of the 34 steps run below saturation (p50 under 1 s, at least 200 triggers/s), 5 had their first
-pass 45 s or more after the start, and all 5 stalled (p95 5.4 to 13.7 s). Of the other 29, one went
+Below saturation there were 34 steps with p50 under 1 s at 200 triggers/s or more: 31 on 1.0.39 and
+3 from the 1.0.38 control's early steps. Of these, 5 had their first pass 45 s or more after the
+start, and all 5 stalled (p95 5.4 to 13.7 s). Of the other 29, one went
 above 3 s: concurrency 32 run 1 step 800 (3.2 s), the step where overload began.
 
-In the samples (`*-samples.ndjson`), each stall builds from about 15 to 35 s into the step and peaks
-at or just before the first pass. It drains within about 15 to 35 s after the pass. For example, concurrency
-16 run 1, step 400 started at 20:07:10:
-- the due queue reached 5,729 jobs at 20:07:58;
+In the samples (`*-samples.ndjson`), each of the six stalls builds from about 15 to 35 s into the
+step. The oldest due job's age peaks around the first pass, up to 12 s before it, and the queue drains
+9 to 36 s after the pass. For example, concurrency 16 run 1, step 400 started at 20:07:10:
+- the oldest due job reached 11.9 s at 20:07:58;
 - `jobs` was vacuumed and analyzed at 20:08:01;
 - `enrollments` was analyzed at 20:08:04;
+- the due queue peaked at 6,466 jobs at 20:08:05;
 - the queue was at 3 jobs by 20:08:22.
 
 **During a stall no single statement is slow.**
@@ -208,7 +213,7 @@ warnings, per second). The 1.0.38 column is from `data/tier-l-1.0.38/flows-conc1
   - 4227 (local endpoint recently used) at 20:21:28 UTC and 4231 ("all such ports being in use") at
     20:21:45 UTC, both in this step;
   - 4227 at 21:47:07 UTC, 13 s into concurrency 32 step 800;
-  - 4227 at 2026-11-25 23:28:16 UTC, 26 s into the 1.0.38 concurrency 16 step 800, the collapse of the
+  - 4227 at 2026-11-25 23:28:16 UTC, 25 s into the 1.0.38 concurrency 16 step 800, the collapse of the
     1.0.38 report.
 
   The host has 16,384 dynamic TCP ports. The two generators open about 1,900 requests/s, and each
@@ -302,6 +307,9 @@ Every run directory `data/tier-l-1.0.39/<run>/flows/` has these files:
 - `autovacuum.txt`: every autovacuum and autoanalyze of a `public` table, one line each, in UTC;
 - `worker-slow-statements.txt`: the worker's statements over 1 s, as time, seconds, statement;
 - `postgres-lock-waits.txt`: lock waits over 1 s.
+
+`flows-conc4` has neither of the last two, because its worker logged no slow statement and PostgreSQL
+logged no lock wait.
 
 `serve-slow-acquires.txt` is in the two runs with overload steps, and `postgres-crash.txt` is in the
 two runs that lost a step. `windows-tcpip-events.txt` at the top holds the port-exhaustion events. The
