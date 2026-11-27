@@ -320,6 +320,11 @@ scripts/bench/flows.sh down
   generators' stop and older than mid-window, either generator is late (`late_dispatch` above 0 or
   achieved below 98% of target), or the window has no queue sample. At high trigger rates many triggers are refused as
   `already_active` (about rate x 31 s / 100,000 of them); they are counted, not failures.
+- Each window records the planner's view of `enrollments.state` at its start and end under
+  `enrollments_state_statistics`: the in-flight share in the column statistics, the rows in flight
+  and the analyze counters. A share of 0 with rows in flight is the stale case behind the tier L
+  stalls (`docs/benchmarks/tier-l-capacity.md` section 6, item 9). `BENCH_ANALYZE_IDLE=1` forces it:
+  it runs `ANALYZE enrollments` before each window, while nothing is in flight.
 
 ## 9. Segment benchmarks (M4, issue #127)
 

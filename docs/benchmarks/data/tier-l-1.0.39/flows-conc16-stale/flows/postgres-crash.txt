@@ -1,0 +1,24 @@
+2026-11-26 20:48:42.915 UTC [1] LOG:  server process (PID 9042) was terminated by signal 11: Segmentation fault
+2026-11-26 20:48:42.915 UTC [1] DETAIL:  Failed process was running: WITH ev AS (
+	  SELECT id, received_at, message_id FROM events
+	  WHERE workspace_id = 'a7dc9f39-1c6c-46dc-b9d8-359d27de142d'::uuid AND name = 'bench_flow_trigger' AND received_at >= '2026-11-26T20:45:49.255577Z'::timestamptz
+	),
+	enr AS (
+	  SELECT e.id, e.state, e.created_at, e.ended_at, ev.received_at AS arrived
+	  FROM enrollments e JOIN ev ON ev.id = e.occurrence_id
+	  WHERE e.flow_id = '01a2198a-93dd-7401-abcf-b702c304ebfb'::uuid
+	),
+	st AS (
+	  SELECT s.enrollment_id,
+	         min(s.started_at) FILTER (WHERE s.node_id = 'b1')      AS t_b1,
+	         min(s.started_at) FILTER (WHERE s.node_id = 'a_trait') AS t_trait,
+	         min(s.started_at) FILTER (WHERE s.node_id = 'a_list')  AS t_list,
+	         min(s.started_at) FILTER (WHERE s.node_id = 'w1')      AS t_w1,
+	         min(s.started_at) FILTER (WHERE s.node_id = 'a_after') AS t_after,
+	         min(s.started_at) FILTER (WHERE s.node_id = 'x1')      AS t_x1
+	  FROM step_executions s JOIN enr ON enr.id = s.enrollment_id
+	  GROUP BY s.enrollment_id
+	),
+	j AS (
+	  SELECT 
+... then 158 connection attempts refused with 'FATAL: the database system is in recovery mode' (2026-11-26 20:48:42 to 2026-11-26 20:48:43 UTC)

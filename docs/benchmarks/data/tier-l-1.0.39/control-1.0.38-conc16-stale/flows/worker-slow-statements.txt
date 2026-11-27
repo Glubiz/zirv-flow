@@ -1,0 +1,501 @@
+2026-11-26T21:04:53.442942Z 1.137 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-26T21:04:53.443369Z 1.126 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:04:57.533007Z 1.301 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:05:00.745222Z 1.166 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:05:04.596074Z 1.162 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:05:09.734775Z 1.097 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:05:16.648367Z 2.844 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:05:16.920793Z 1.817 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-26T21:05:18.917228Z 1.026 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:05:27.969838Z 1.150 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:08:15.088942Z 1.044 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:08:25.463580Z 1.173 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:08:25.839886Z 1.832 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-26T21:11:01.110835Z 1.187 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:11:04.630888Z 1.198 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-26T21:11:08.043399Z 1.101 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:13:47.096941Z 1.117 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-26T21:13:57.507174Z 1.315 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:14:06.623396Z 1.669 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:14:29.461251Z 1.009 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:30.337823Z 1.274 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:14:32.098080Z 1.035 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:32.108225Z 1.023 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:33.382970Z 1.077 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:33.430916Z 1.086 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:33.465822Z 1.090 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:33.477778Z 1.112 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:33.480528Z 1.102 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:33.493963Z 1.100 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:33.495685Z 1.111 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:33.522678Z 1.147 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:33.540104Z 1.097 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:33.629201Z 1.101 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:33.683590Z 1.072 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:33.772743Z 1.034 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:33.849575Z 1.020 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:33.921991Z 1.080 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:33.934725Z 1.045 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:33.935158Z 1.024 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:33.948352Z 1.037 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:33.993953Z 1.019 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:34.772671Z 1.016 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:34.947637Z 1.007 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:34.958933Z 1.010 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:34.986767Z 1.065 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:35.004411Z 1.038 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:35.211278Z 1.024 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:35.248592Z 1.100 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:35.263086Z 1.074 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:35.337081Z 1.109 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:35.365246Z 1.149 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:35.396185Z 1.037 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:35.436738Z 1.065 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:35.453452Z 1.049 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:35.507714Z 1.081 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:35.589021Z 1.068 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:35.621349Z 1.068 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:35.642467Z 1.141 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:35.644608Z 1.085 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:35.766270Z 1.089 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:35.833351Z 1.153 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:35.922777Z 1.057 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:35.992371Z 1.049 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:36.061810Z 1.138 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:36.097260Z 1.121 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:36.121331Z 1.103 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:36.254028Z 1.025 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:36.269979Z 1.043 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:38.854296Z 1.074 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:38.871788Z 1.021 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:38.879119Z 1.050 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:38.904341Z 1.086 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:38.915581Z 1.066 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:38.939641Z 1.043 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:38.970132Z 1.006 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:39.070155Z 1.024 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:39.111163Z 1.005 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:41.860868Z 1.045 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:42.043285Z 1.059 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:42.094199Z 1.067 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:42.255494Z 1.024 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:42.343059Z 1.147 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:42.360821Z 1.086 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:42.410468Z 1.079 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:42.518999Z 1.097 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:42.529660Z 1.073 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:42.532790Z 1.023 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-26T21:14:42.605439Z 1.054 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:42.698540Z 1.117 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:42.704646Z 1.085 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:42.774023Z 1.104 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:42.778035Z 1.058 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:42.839975Z 1.144 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:43.009720Z 1.133 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:43.049349Z 1.061 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:43.055861Z 1.000 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:43.091748Z 1.039 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:43.127622Z 1.079 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:43.212916Z 1.135 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:43.398130Z 1.038 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:45.016641Z 1.081 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:45.903646Z 1.004 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:45.999847Z 1.019 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:47.116964Z 1.028 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:47.304033Z 1.033 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:47.319809Z 1.044 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:47.325373Z 1.011 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:47.333204Z 1.036 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:47.341872Z 1.027 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:47.465419Z 1.032 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:47.471101Z 1.033 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:47.690863Z 1.026 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:47.723365Z 1.096 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:47.724709Z 1.149 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:47.734764Z 1.032 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:47.750017Z 1.015 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:47.842274Z 1.139 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:47.888412Z 1.100 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:48.040769Z 1.000 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:48.111651Z 1.059 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:48.115246Z 1.011 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:48.122645Z 1.068 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, traits ->> 'timezone' AS zone FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT 
+2026-11-26T21:14:48.352962Z 1.035 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:48.473143Z 1.005 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:48.718581Z 1.013 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:48.752856Z 1.001 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:48.856962Z 1.102 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:48.899498Z 1.035 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:48.936762Z 1.073 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:49.086780Z 1.085 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:49.241559Z 1.103 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:49.257220Z 1.089 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:49.283045Z 1.069 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:49.285044Z 1.116 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:49.351070Z 1.086 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:49.421465Z 1.169 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:49.424944Z 1.157 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:49.479444Z 1.136 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:49.496817Z 1.156 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:49.499990Z 1.167 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:49.567836Z 1.136 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:49.570382Z 1.199 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:49.608055Z 1.191 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:49.654495Z 1.068 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:49.834237Z 1.133 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:49.877776Z 1.140 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:49.901670Z 1.030 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:49.997644Z 1.081 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:50.138338Z 1.045 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:50.297407Z 1.100 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:50.321740Z 1.066 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:50.401453Z 1.091 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:50.436062Z 1.065 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:50.476478Z 1.065 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:50.503999Z 1.055 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:50.614691Z 1.082 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:50.646150Z 1.017 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:50.675589Z 1.047 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:50.685850Z 1.100 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:50.939564Z 1.056 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:51.026138Z 1.308 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, traits ->> 'timezone' AS zone FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT 
+2026-11-26T21:14:52.459326Z 1.015 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:52.601427Z 1.005 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:52.724388Z 1.043 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:52.737556Z 1.066 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:52.758558Z 1.110 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:52.759526Z 1.039 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:52.790186Z 1.139 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:52.860003Z 1.151 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:52.865575Z 1.203 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, traits ->> 'timezone' AS zone FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT 
+2026-11-26T21:14:52.916003Z 1.135 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:52.975442Z 1.137 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:53.061815Z 1.127 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:53.068403Z 1.140 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:14:53.104849Z 1.191 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:53.142850Z 1.142 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:53.168494Z 1.145 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:53.199491Z 1.089 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:53.384192Z 1.072 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:53.409488Z 1.016 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:53.426008Z 1.163 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:53.541299Z 1.156 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:53.562706Z 1.092 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:54.729265Z 1.014 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:54.783973Z 1.072 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:54.835823Z 1.102 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:54.887252Z 1.123 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:54.899353Z 1.116 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:54.979343Z 1.149 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:54.981107Z 1.121 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:55.062185Z 1.123 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:55.136724Z 1.280 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:55.214222Z 1.166 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:55.216878Z 1.252 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:55.266156Z 1.242 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:55.320431Z 1.232 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:55.339090Z 1.216 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:55.435118Z 1.154 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:55.477527Z 1.172 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:55.496219Z 1.152 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:55.526317Z 1.285 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:55.575121Z 1.174 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:55.674664Z 1.093 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:55.717361Z 1.190 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:55.895944Z 1.164 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:55.972298Z 1.068 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:55.977028Z 1.735 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:14:55.998185Z 1.142 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:56.018167Z 1.020 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:56.071254Z 1.062 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:56.111638Z 1.030 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:56.156136Z 1.091 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:56.253350Z 1.024 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:56.292668Z 1.059 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:56.521940Z 1.048 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:56.562342Z 1.050 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:56.563802Z 1.110 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:56.690615Z 1.004 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:56.919240Z 1.001 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:57.025042Z 1.107 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:57.046630Z 1.063 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:57.189750Z 1.027 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:57.195281Z 1.062 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:57.206888Z 1.163 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:57.301306Z 1.022 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:57.324317Z 1.113 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:57.329670Z 1.010 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, traits ->> 'timezone' AS zone FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT 
+2026-11-26T21:14:57.337210Z 1.096 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:57.358265Z 1.041 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:57.523100Z 1.183 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:57.582414Z 1.145 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:57.711713Z 1.146 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:57.780942Z 1.243 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:57.816703Z 1.322 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:57.900683Z 1.313 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:57.902888Z 1.327 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:57.917529Z 1.335 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:57.927173Z 1.208 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:57.942567Z 1.332 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:57.994738Z 1.275 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:58.183190Z 1.134 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:58.229971Z 1.244 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:58.288654Z 1.366 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:58.289390Z 1.216 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:58.421721Z 1.104 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:58.469393Z 1.248 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:58.475517Z 1.180 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:58.498205Z 1.120 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:58.542658Z 1.105 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:58.602557Z 1.249 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:58.618866Z 1.134 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:58.674105Z 1.134 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:14:58.788449Z 1.006 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:58.796380Z 1.046 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:59.146571Z 1.011 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:14:59.637051Z 1.003 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:00.302094Z 1.057 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:00.332831Z 1.052 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:00.494185Z 1.056 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:00.500599Z 1.131 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:00.513515Z 1.187 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:00.516842Z 1.111 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:00.541681Z 1.047 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:00.543154Z 1.147 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:00.694828Z 1.114 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:00.712964Z 1.058 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:00.719036Z 1.105 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:00.730773Z 1.101 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:00.764401Z 1.043 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:00.795959Z 1.142 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:00.890816Z 1.115 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:00.903327Z 1.083 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:00.908973Z 1.007 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:01.095498Z 1.067 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:01.095642Z 1.127 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:01.189402Z 1.115 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:01.203936Z 1.084 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:01.332002Z 1.016 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:01.644012Z 1.089 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:01.645652Z 1.089 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:01.676155Z 1.140 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:01.677460Z 1.160 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:01.678342Z 1.146 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, traits ->> 'timezone' AS zone FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT 
+2026-11-26T21:15:01.689695Z 1.120 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:01.694081Z 1.044 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:01.780146Z 1.053 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:01.862217Z 1.072 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:01.888399Z 1.107 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:01.899287Z 1.183 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:01.902539Z 1.092 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:01.988647Z 1.155 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:02.000174Z 1.086 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:02.080973Z 1.166 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:02.087038Z 1.430 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, traits ->> 'timezone' AS zone FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT 
+2026-11-26T21:15:02.274737Z 1.165 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:02.358456Z 1.129 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:02.380144Z 1.211 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:02.507389Z 1.159 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:02.793827Z 1.291 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:02.866952Z 1.309 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:02.910651Z 1.253 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:02.949484Z 1.300 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:02.954288Z 1.263 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:02.960957Z 1.165 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:02.978839Z 1.284 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:03.009884Z 1.300 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:03.077176Z 1.173 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:03.111290Z 1.208 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:03.119603Z 1.278 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:03.214065Z 1.282 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:03.256481Z 1.334 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:03.267187Z 1.255 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:03.355309Z 1.208 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:03.514707Z 1.177 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:03.619881Z 1.090 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:04.897799Z 1.012 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:04.965984Z 1.034 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:04.975778Z 1.060 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:04.984974Z 1.075 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:05.109000Z 1.065 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:05.220798Z 1.020 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:05.264466Z 1.125 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:05.402264Z 1.021 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:05.471106Z 1.093 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:05.640498Z 1.017 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:06.750384Z 1.050 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:06.770955Z 1.076 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:06.900737Z 1.039 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:06.941327Z 1.110 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:06.962497Z 1.076 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:06.973706Z 1.066 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:06.980831Z 1.101 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:07.000022Z 1.036 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:07.043971Z 1.094 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:07.072090Z 1.052 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:07.079203Z 1.102 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:07.083046Z 1.073 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:07.159934Z 1.049 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:08.614078Z 1.012 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:09.226240Z 1.040 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:09.422392Z 1.121 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:09.522399Z 1.050 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:09.547380Z 1.025 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:09.584054Z 1.007 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:09.584358Z 1.072 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:09.592890Z 1.018 SELECT pg_advisory_xact_lock(hashtextextended('flow.enroll:' || $1::text || ':' || s.id, 0)) FROM (SELECT p AS id FROM unnest($2::uuid[]) AS p ORDER BY p) AS s
+2026-11-26T21:15:09.717616Z 1.007 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:11.527074Z 1.014 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:11.730179Z 1.002 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:12.289043Z 1.052 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:15:13.080914Z 1.062 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:13.216703Z 1.082 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:13.226095Z 1.071 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:15:13.339410Z 1.064 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:13.393514Z 1.028 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:13.432051Z 1.151 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:13.448782Z 1.152 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:13.451233Z 1.096 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:13.455269Z 1.116 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:13.499307Z 1.131 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:13.513992Z 1.165 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:13.559799Z 1.091 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:13.560557Z 1.011 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:13.585835Z 1.001 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:13.611538Z 1.029 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:15.109791Z 1.033 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:15.150613Z 1.071 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:15.333091Z 1.111 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:15.353255Z 1.066 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:15.394365Z 1.111 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:15.569546Z 1.180 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:15.747883Z 1.185 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:15.747974Z 1.210 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:15.771893Z 1.123 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:15.774261Z 1.123 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-26T21:15:15.863009Z 1.233 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:15.903387Z 1.246 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:15.943439Z 1.191 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:15.961367Z 1.118 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:16.010133Z 1.084 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:16.053327Z 1.182 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:16.083572Z 1.103 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:16.127043Z 1.190 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:16.153218Z 1.094 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:16.179797Z 1.015 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:16.197909Z 1.086 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:16.519861Z 1.018 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:17.247160Z 1.029 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:17.547685Z 1.005 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:17.633320Z 1.069 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:17.715326Z 1.053 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:17.754859Z 1.170 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:17.766893Z 1.044 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:17.773299Z 1.040 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:17.788753Z 1.041 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:17.888422Z 1.073 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:17.901644Z 1.083 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:18.075128Z 1.043 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:18.083318Z 1.072 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, created_at FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT id, merged_into, cr
+2026-11-26T21:15:18.181266Z 1.047 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:18.190786Z 1.051 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:18.378339Z 1.052 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:18.824947Z 1.708 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, traits ->> 'timezone' AS zone FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT 
+2026-11-26T21:15:18.921464Z 1.349 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-26T21:15:20.125228Z 1.007 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:20.125478Z 1.018 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:20.145533Z 1.040 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:20.816598Z 1.022 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:20.863208Z 1.012 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:20.957934Z 1.089 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:21.171657Z 1.033 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:21.185132Z 1.026 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:21.543552Z 1.004 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:21.687521Z 1.082 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:21.705027Z 1.012 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:21.777807Z 1.031 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:21.784231Z 1.029 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-26T21:15:21.832333Z 1.025 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:21.882614Z 1.004 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:23.072283Z 1.039 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:23.113516Z 1.038 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:23.158604Z 1.086 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:23.453764Z 1.054 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:23.475025Z 1.118 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:23.475619Z 1.081 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:23.508258Z 1.058 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:23.515975Z 1.059 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:26.234656Z 1.051 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:26.283319Z 1.002 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:26.330656Z 1.001 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:26.408966Z 1.094 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:26.418158Z 1.153 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:26.431297Z 1.128 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:26.439551Z 1.153 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:26.442339Z 1.097 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, traits ->> 'timezone' AS zone FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT 
+2026-11-26T21:15:26.446742Z 1.100 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:26.451787Z 1.173 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:26.456291Z 1.107 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:26.458343Z 1.134 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:26.469363Z 1.073 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:26.504291Z 1.174 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:26.513136Z 1.088 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:26.605743Z 1.072 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:26.620340Z 1.073 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:26.623690Z 1.021 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:26.638897Z 1.095 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:26.654176Z 1.030 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:27.961588Z 1.303 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, traits ->> 'timezone' AS zone FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT 
+2026-11-26T21:15:29.050035Z 1.062 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:29.061838Z 1.074 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:29.080870Z 1.034 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:29.095249Z 1.038 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:29.100303Z 1.097 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-26T21:15:29.171279Z 1.048 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:29.207742Z 1.110 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:29.218671Z 1.018 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:29.300649Z 1.077 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:29.313928Z 1.119 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:29.398510Z 1.066 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:29.750394Z 1.082 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:29.827283Z 1.110 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:29.836518Z 1.157 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:30.093886Z 1.176 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:30.125886Z 1.149 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:30.153225Z 1.056 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:30.191948Z 1.119 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:30.204647Z 1.211 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:30.226062Z 1.231 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:30.237661Z 1.175 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:30.301699Z 1.193 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:30.316050Z 1.090 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:30.345726Z 1.201 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:30.349331Z 1.212 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:30.355666Z 1.255 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:30.358336Z 1.220 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:30.408719Z 1.085 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:31.036977Z 1.005 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:31.124986Z 1.008 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:31.469481Z 1.043 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:31.847210Z 1.058 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:32.162620Z 1.010 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:32.172371Z 1.025 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:32.173139Z 1.078 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:32.189388Z 1.083 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:32.201459Z 1.004 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:32.372455Z 1.007 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:33.070070Z 1.035 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:33.096403Z 1.068 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:33.259794Z 1.051 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:33.262294Z 1.060 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into, traits ->> 'timezone' AS zone FROM people WHERE id = ANY($2) ORDER BY id FOR UPDATE) SELECT 
+2026-11-26T21:15:33.292500Z 1.099 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:33.353607Z 1.137 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:33.424294Z 1.100 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:33.427035Z 1.100 WITH locked AS MATERIALIZED ( SELECT id, workspace_id, merged_into FROM people WHERE id = ANY($2) ORDER BY id FOR KEY SHARE) SELECT id, merged_into FROM locked 
+2026-11-26T21:15:33.436148Z 1.030 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:33.499768Z 1.087 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:33.642038Z 1.222 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:33.863223Z 1.035 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 
+2026-11-26T21:15:33.889840Z 1.060 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:33.945937Z 1.095 SELECT person_id FROM enrollments WHERE flow_id = $1 AND person_id = ANY($2) AND state IN ('active', 'waiting', 'held', 'failed')
+2026-11-26T21:15:34.097305Z 1.005 SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.settings -> 'goal' ->> 'event' = t.name, false) AS goal, 

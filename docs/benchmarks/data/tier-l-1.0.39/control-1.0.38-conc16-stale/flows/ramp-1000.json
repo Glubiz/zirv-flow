@@ -1,0 +1,1034 @@
+{
+  "background_rate": 1000,
+  "seconds_per_step": 120,
+  "last_held_trigger_rate": 700,
+  "verdict": "failed at 800 triggers/s: trigger_to_enrollment_p95_gt_60s",
+  "steps": [
+    {
+      "trigger_rate": 100,
+      "held": true,
+      "reasons": [],
+      "accepted": 12000,
+      "enrollments_created": 11697,
+      "refused": {
+        "already_active": 303
+      },
+      "completed": 11697,
+      "still_active": 0,
+      "failed": 0,
+      "trigger_to_enrollment_s": {
+        "n": 11697,
+        "max": 0.536,
+        "min": 0.007,
+        "p50": 0.017,
+        "p95": 0.056,
+        "p99": 0.148
+      },
+      "end_to_end_minus_wait_s": {
+        "n": 11697,
+        "max": 1.048,
+        "min": 0.018,
+        "p50": 0.054,
+        "p95": 0.772,
+        "p99": 0.914
+      },
+      "wake_lateness_s": {
+        "n": 11697,
+        "max": 0.956,
+        "min": 0.001,
+        "p50": 0.009,
+        "p95": 0.719,
+        "p99": 0.854
+      },
+      "enrollments_per_s": 97.48,
+      "step_executions_per_s": 438.74,
+      "backlog": {
+        "samples": 28,
+        "due_ready_peak": 74,
+        "due_ready_final": 0,
+        "running_peak": 97,
+        "oldest_due_age_peak_s": 0.8,
+        "oldest_due_age_final_s": 0,
+        "oldest_due_age_at_generators_stop_s": 0.0,
+        "oldest_due_age_mid_window_s": 0.0,
+        "inbox_rows_peak": 50,
+        "inbox_oldest_age_peak_s": 0.1,
+        "enrollment_states_final": {
+          "completed": 14673
+        }
+      },
+      "trigger_generator": {
+        "target_rate": 100,
+        "items_offered": 12000,
+        "items_accepted": 12000,
+        "achieved_rate": 99.99319654623466,
+        "late_dispatch": 0,
+        "abandoned_requests": 0,
+        "gave_up_after_retries": 0,
+        "retries_after_429": 0,
+        "status": {
+          "accepted_202": 12000,
+          "rate_limited_429": 0,
+          "server_5xx": 0,
+          "other": 0,
+          "transport_errors": 0
+        },
+        "api_p50_from_schedule_ms": 8.906,
+        "api_p99_from_schedule_ms": 20.386,
+        "dispatch_lag_p99_ms": 14.594
+      },
+      "background_generator": {
+        "target_rate": 1000,
+        "items_offered": 120000,
+        "items_accepted": 120000,
+        "achieved_rate": 999.8667152671882,
+        "late_dispatch": 0,
+        "abandoned_requests": 0,
+        "gave_up_after_retries": 0,
+        "retries_after_429": 0,
+        "status": {
+          "accepted_202": 120000,
+          "rate_limited_429": 0,
+          "server_5xx": 0,
+          "other": 0,
+          "transport_errors": 0
+        },
+        "api_p50_from_schedule_ms": 4.511,
+        "api_p99_from_schedule_ms": 11.924,
+        "dispatch_lag_p99_ms": 3.739
+      },
+      "ingest_applied_latency_ms_track": {
+        "items": 132000,
+        "p50_ms": 10.1,
+        "p95_ms": 29.9,
+        "p99_ms": 47.5,
+        "max_ms": 117.3
+      },
+      "containers": {
+        "zirv-flow": {
+          "avg_cores": 0.60,
+          "peak_cores": 0.68,
+          "peak_mem_mib": 20,
+          "samples": 36
+        },
+        "postgres": {
+          "avg_cores": 5.42,
+          "peak_cores": 7.02,
+          "peak_mem_mib": 1597,
+          "samples": 36
+        },
+        "zirv-flow-scheduler": {
+          "avg_cores": 0.00,
+          "peak_cores": 0.00,
+          "peak_mem_mib": 4,
+          "samples": 36
+        },
+        "zirv-flow-worker": {
+          "avg_cores": 1.87,
+          "peak_cores": 2.17,
+          "peak_mem_mib": 18,
+          "samples": 36
+        }
+      },
+      "result_file": "D:/GitHub/zirv-flow/.zirv/worktrees/bench-l2/docs/benchmarks/data/tier-l-1.0.39/control-1.0.38-conc16-stale/flows/ramp-1000-100.json"
+    },
+    {
+      "trigger_rate": 200,
+      "held": true,
+      "reasons": [],
+      "accepted": 23999,
+      "enrollments_created": 22785,
+      "refused": {
+        "already_active": 1213
+      },
+      "completed": 22785,
+      "still_active": 0,
+      "failed": 0,
+      "trigger_to_enrollment_s": {
+        "n": 22785,
+        "max": 0.100,
+        "min": 0.008,
+        "p50": 0.020,
+        "p95": 0.035,
+        "p99": 0.049
+      },
+      "end_to_end_minus_wait_s": {
+        "n": 22785,
+        "max": 1.062,
+        "min": 0.020,
+        "p50": 0.049,
+        "p95": 0.636,
+        "p99": 0.883
+      },
+      "wake_lateness_s": {
+        "n": 22785,
+        "max": 0.977,
+        "min": 0.001,
+        "p50": 0.006,
+        "p95": 0.570,
+        "p99": 0.810
+      },
+      "enrollments_per_s": 189.88,
+      "step_executions_per_s": 854.83,
+      "backlog": {
+        "samples": 27,
+        "due_ready_peak": 138,
+        "due_ready_final": 0,
+        "running_peak": 167,
+        "oldest_due_age_peak_s": 0.7,
+        "oldest_due_age_final_s": 0,
+        "oldest_due_age_at_generators_stop_s": 0,
+        "oldest_due_age_mid_window_s": 0,
+        "inbox_rows_peak": 34,
+        "inbox_oldest_age_peak_s": 0,
+        "enrollment_states_final": {
+          "completed": 37458
+        }
+      },
+      "trigger_generator": {
+        "target_rate": 200,
+        "items_offered": 23999,
+        "items_accepted": 23999,
+        "achieved_rate": 199.97628399096138,
+        "late_dispatch": 0,
+        "abandoned_requests": 0,
+        "gave_up_after_retries": 0,
+        "retries_after_429": 0,
+        "status": {
+          "accepted_202": 23999,
+          "rate_limited_429": 0,
+          "server_5xx": 0,
+          "other": 0,
+          "transport_errors": 0
+        },
+        "api_p50_from_schedule_ms": 6.934,
+        "api_p99_from_schedule_ms": 19.699,
+        "dispatch_lag_p99_ms": 14.831
+      },
+      "background_generator": {
+        "target_rate": 1000,
+        "items_offered": 120000,
+        "items_accepted": 120000,
+        "achieved_rate": 999.8631045762562,
+        "late_dispatch": 0,
+        "abandoned_requests": 0,
+        "gave_up_after_retries": 0,
+        "retries_after_429": 0,
+        "status": {
+          "accepted_202": 120000,
+          "rate_limited_429": 0,
+          "server_5xx": 0,
+          "other": 0,
+          "transport_errors": 0
+        },
+        "api_p50_from_schedule_ms": 4.626,
+        "api_p99_from_schedule_ms": 11.558,
+        "dispatch_lag_p99_ms": 3.637
+      },
+      "ingest_applied_latency_ms_track": {
+        "items": 143999,
+        "p50_ms": 11.1,
+        "p95_ms": 21.1,
+        "p99_ms": 28.1,
+        "max_ms": 58.0
+      },
+      "containers": {
+        "zirv-flow": {
+          "avg_cores": 0.64,
+          "peak_cores": 0.73,
+          "peak_mem_mib": 22,
+          "samples": 35
+        },
+        "postgres": {
+          "avg_cores": 5.75,
+          "peak_cores": 6.52,
+          "peak_mem_mib": 2087,
+          "samples": 35
+        },
+        "zirv-flow-scheduler": {
+          "avg_cores": 0.00,
+          "peak_cores": 0.00,
+          "peak_mem_mib": 4,
+          "samples": 35
+        },
+        "zirv-flow-worker": {
+          "avg_cores": 2.28,
+          "peak_cores": 2.49,
+          "peak_mem_mib": 20,
+          "samples": 35
+        }
+      },
+      "result_file": "D:/GitHub/zirv-flow/.zirv/worktrees/bench-l2/docs/benchmarks/data/tier-l-1.0.39/control-1.0.38-conc16-stale/flows/ramp-1000-200.json"
+    },
+    {
+      "trigger_rate": 300,
+      "held": true,
+      "reasons": [],
+      "accepted": 35998,
+      "enrollments_created": 33335,
+      "refused": {
+        "already_active": 2662
+      },
+      "completed": 33335,
+      "still_active": 0,
+      "failed": 0,
+      "trigger_to_enrollment_s": {
+        "n": 33335,
+        "max": 0.183,
+        "min": 0.009,
+        "p50": 0.028,
+        "p95": 0.055,
+        "p99": 0.079
+      },
+      "end_to_end_minus_wait_s": {
+        "n": 33335,
+        "max": 0.927,
+        "min": 0.022,
+        "p50": 0.067,
+        "p95": 0.214,
+        "p99": 0.517
+      },
+      "wake_lateness_s": {
+        "n": 33335,
+        "max": 0.731,
+        "min": 0.001,
+        "p50": 0.005,
+        "p95": 0.124,
+        "p99": 0.435
+      },
+      "enrollments_per_s": 277.79,
+      "step_executions_per_s": 1252.43,
+      "backlog": {
+        "samples": 27,
+        "due_ready_peak": 25,
+        "due_ready_final": 0,
+        "running_peak": 189,
+        "oldest_due_age_peak_s": 0.1,
+        "oldest_due_age_final_s": 0,
+        "oldest_due_age_at_generators_stop_s": 0.0,
+        "oldest_due_age_mid_window_s": 0.0,
+        "inbox_rows_peak": 50,
+        "inbox_oldest_age_peak_s": 0.1,
+        "enrollment_states_final": {
+          "completed": 70793
+        }
+      },
+      "trigger_generator": {
+        "target_rate": 300,
+        "items_offered": 35998,
+        "items_accepted": 35998,
+        "achieved_rate": 299.98242488655666,
+        "late_dispatch": 0,
+        "abandoned_requests": 0,
+        "gave_up_after_retries": 0,
+        "retries_after_429": 0,
+        "status": {
+          "accepted_202": 35998,
+          "rate_limited_429": 0,
+          "server_5xx": 0,
+          "other": 0,
+          "transport_errors": 0
+        },
+        "api_p50_from_schedule_ms": 6.652,
+        "api_p99_from_schedule_ms": 19.429,
+        "dispatch_lag_p99_ms": 11.675
+      },
+      "background_generator": {
+        "target_rate": 1000,
+        "items_offered": 120000,
+        "items_accepted": 120000,
+        "achieved_rate": 999.9050048582677,
+        "late_dispatch": 0,
+        "abandoned_requests": 0,
+        "gave_up_after_retries": 0,
+        "retries_after_429": 0,
+        "status": {
+          "accepted_202": 120000,
+          "rate_limited_429": 0,
+          "server_5xx": 0,
+          "other": 0,
+          "transport_errors": 0
+        },
+        "api_p50_from_schedule_ms": 5.57,
+        "api_p99_from_schedule_ms": 16.519,
+        "dispatch_lag_p99_ms": 4.782
+      },
+      "ingest_applied_latency_ms_track": {
+        "items": 155998,
+        "p50_ms": 15.1,
+        "p95_ms": 30.7,
+        "p99_ms": 41.5,
+        "max_ms": 84.5
+      },
+      "containers": {
+        "zirv-flow": {
+          "avg_cores": 0.75,
+          "peak_cores": 0.84,
+          "peak_mem_mib": 25,
+          "samples": 35
+        },
+        "postgres": {
+          "avg_cores": 6.36,
+          "peak_cores": 7.08,
+          "peak_mem_mib": 2822,
+          "samples": 35
+        },
+        "zirv-flow-scheduler": {
+          "avg_cores": 0.00,
+          "peak_cores": 0.00,
+          "peak_mem_mib": 4,
+          "samples": 35
+        },
+        "zirv-flow-worker": {
+          "avg_cores": 2.44,
+          "peak_cores": 2.68,
+          "peak_mem_mib": 22,
+          "samples": 35
+        }
+      },
+      "result_file": "D:/GitHub/zirv-flow/.zirv/worktrees/bench-l2/docs/benchmarks/data/tier-l-1.0.39/control-1.0.38-conc16-stale/flows/ramp-1000-300.json"
+    },
+    {
+      "trigger_rate": 400,
+      "held": true,
+      "reasons": [],
+      "accepted": 48000,
+      "enrollments_created": 43410,
+      "refused": {
+        "already_active": 4589
+      },
+      "completed": 43410,
+      "still_active": 0,
+      "failed": 0,
+      "trigger_to_enrollment_s": {
+        "n": 43410,
+        "max": 2.153,
+        "min": 0.009,
+        "p50": 0.040,
+        "p95": 0.140,
+        "p99": 0.422
+      },
+      "end_to_end_minus_wait_s": {
+        "n": 43410,
+        "max": 2.445,
+        "min": 0.028,
+        "p50": 0.105,
+        "p95": 0.426,
+        "p99": 0.792
+      },
+      "wake_lateness_s": {
+        "n": 43410,
+        "max": 1.028,
+        "min": 0.001,
+        "p50": 0.006,
+        "p95": 0.121,
+        "p99": 0.510
+      },
+      "enrollments_per_s": 361.74,
+      "step_executions_per_s": 1631.19,
+      "backlog": {
+        "samples": 28,
+        "due_ready_peak": 29,
+        "due_ready_final": 0,
+        "running_peak": 139,
+        "oldest_due_age_peak_s": 0.1,
+        "oldest_due_age_final_s": 0,
+        "oldest_due_age_at_generators_stop_s": 0.0,
+        "oldest_due_age_mid_window_s": 0.0,
+        "inbox_rows_peak": 161,
+        "inbox_oldest_age_peak_s": 0.1,
+        "enrollment_states_final": {
+          "completed": 114203
+        }
+      },
+      "trigger_generator": {
+        "target_rate": 400,
+        "items_offered": 48000,
+        "items_accepted": 48000,
+        "achieved_rate": 399.9503844883443,
+        "late_dispatch": 0,
+        "abandoned_requests": 0,
+        "gave_up_after_retries": 0,
+        "retries_after_429": 0,
+        "status": {
+          "accepted_202": 48000,
+          "rate_limited_429": 0,
+          "server_5xx": 0,
+          "other": 0,
+          "transport_errors": 0
+        },
+        "api_p50_from_schedule_ms": 6.969,
+        "api_p99_from_schedule_ms": 20.54,
+        "dispatch_lag_p99_ms": 8.5
+      },
+      "background_generator": {
+        "target_rate": 1000,
+        "items_offered": 120000,
+        "items_accepted": 120000,
+        "achieved_rate": 999.8643392396722,
+        "late_dispatch": 0,
+        "abandoned_requests": 0,
+        "gave_up_after_retries": 0,
+        "retries_after_429": 0,
+        "status": {
+          "accepted_202": 120000,
+          "rate_limited_429": 0,
+          "server_5xx": 0,
+          "other": 0,
+          "transport_errors": 0
+        },
+        "api_p50_from_schedule_ms": 6.235,
+        "api_p99_from_schedule_ms": 19.565,
+        "dispatch_lag_p99_ms": 5.549
+      },
+      "ingest_applied_latency_ms_track": {
+        "items": 168000,
+        "p50_ms": 20.3,
+        "p95_ms": 51.1,
+        "p99_ms": 85.8,
+        "max_ms": 2148.0
+      },
+      "containers": {
+        "zirv-flow": {
+          "avg_cores": 0.79,
+          "peak_cores": 0.90,
+          "peak_mem_mib": 28,
+          "samples": 36
+        },
+        "postgres": {
+          "avg_cores": 6.83,
+          "peak_cores": 7.58,
+          "peak_mem_mib": 3627,
+          "samples": 36
+        },
+        "zirv-flow-scheduler": {
+          "avg_cores": 0.00,
+          "peak_cores": 0.00,
+          "peak_mem_mib": 4,
+          "samples": 36
+        },
+        "zirv-flow-worker": {
+          "avg_cores": 2.34,
+          "peak_cores": 2.81,
+          "peak_mem_mib": 23,
+          "samples": 36
+        }
+      },
+      "result_file": "D:/GitHub/zirv-flow/.zirv/worktrees/bench-l2/docs/benchmarks/data/tier-l-1.0.39/control-1.0.38-conc16-stale/flows/ramp-1000-400.json"
+    },
+    {
+      "trigger_rate": 500,
+      "held": true,
+      "reasons": [],
+      "accepted": 60000,
+      "enrollments_created": 50906,
+      "refused": {
+        "already_active": 9078
+      },
+      "completed": 50906,
+      "still_active": 0,
+      "failed": 0,
+      "trigger_to_enrollment_s": {
+        "n": 50906,
+        "max": 23.627,
+        "min": 0.012,
+        "p50": 3.835,
+        "p95": 20.415,
+        "p99": 22.122
+      },
+      "end_to_end_minus_wait_s": {
+        "n": 50906,
+        "max": 33.913,
+        "min": 1.145,
+        "p50": 15.312,
+        "p95": 29.802,
+        "p99": 31.289
+      },
+      "wake_lateness_s": {
+        "n": 50906,
+        "max": 18.746,
+        "min": 0.001,
+        "p50": 1.866,
+        "p95": 15.340,
+        "p99": 16.210
+      },
+      "enrollments_per_s": 415.96,
+      "step_executions_per_s": 1833.49,
+      "backlog": {
+        "samples": 27,
+        "due_ready_peak": 7879,
+        "due_ready_final": 0,
+        "running_peak": 421,
+        "oldest_due_age_peak_s": 15.9,
+        "oldest_due_age_final_s": 0,
+        "oldest_due_age_at_generators_stop_s": 2.3,
+        "oldest_due_age_mid_window_s": 14.6,
+        "inbox_rows_peak": 17307,
+        "inbox_oldest_age_peak_s": 12.6,
+        "enrollment_states_final": {
+          "completed": 165109
+        }
+      },
+      "trigger_generator": {
+        "target_rate": 500,
+        "items_offered": 60000,
+        "items_accepted": 60000,
+        "achieved_rate": 499.9600506921494,
+        "late_dispatch": 0,
+        "abandoned_requests": 0,
+        "gave_up_after_retries": 0,
+        "retries_after_429": 0,
+        "status": {
+          "accepted_202": 60000,
+          "rate_limited_429": 0,
+          "server_5xx": 0,
+          "other": 0,
+          "transport_errors": 0
+        },
+        "api_p50_from_schedule_ms": 6.529,
+        "api_p99_from_schedule_ms": 20.308,
+        "dispatch_lag_p99_ms": 7.066
+      },
+      "background_generator": {
+        "target_rate": 1000,
+        "items_offered": 119999,
+        "items_accepted": 119999,
+        "achieved_rate": 999.8832318298828,
+        "late_dispatch": 0,
+        "abandoned_requests": 0,
+        "gave_up_after_retries": 0,
+        "retries_after_429": 0,
+        "status": {
+          "accepted_202": 119999,
+          "rate_limited_429": 0,
+          "server_5xx": 0,
+          "other": 0,
+          "transport_errors": 0
+        },
+        "api_p50_from_schedule_ms": 5.787,
+        "api_p99_from_schedule_ms": 19.361,
+        "dispatch_lag_p99_ms": 5.136
+      },
+      "ingest_applied_latency_ms_track": {
+        "items": 179999,
+        "p50_ms": 36.3,
+        "p95_ms": 10266.8,
+        "p99_ms": 12328.4,
+        "max_ms": 13740.8
+      },
+      "containers": {
+        "zirv-flow": {
+          "avg_cores": 0.84,
+          "peak_cores": 1.01,
+          "peak_mem_mib": 31,
+          "samples": 35
+        },
+        "postgres": {
+          "avg_cores": 6.61,
+          "peak_cores": 7.62,
+          "peak_mem_mib": 4699,
+          "samples": 35
+        },
+        "zirv-flow-scheduler": {
+          "avg_cores": 0.00,
+          "peak_cores": 0.00,
+          "peak_mem_mib": 5,
+          "samples": 35
+        },
+        "zirv-flow-worker": {
+          "avg_cores": 1.75,
+          "peak_cores": 3.00,
+          "peak_mem_mib": 24,
+          "samples": 35
+        }
+      },
+      "result_file": "D:/GitHub/zirv-flow/.zirv/worktrees/bench-l2/docs/benchmarks/data/tier-l-1.0.39/control-1.0.38-conc16-stale/flows/ramp-1000-500.json"
+    },
+    {
+      "trigger_rate": 600,
+      "held": true,
+      "reasons": [],
+      "accepted": 71998,
+      "enrollments_created": 57416,
+      "refused": {
+        "already_active": 14565
+      },
+      "completed": 57416,
+      "still_active": 0,
+      "failed": 0,
+      "trigger_to_enrollment_s": {
+        "n": 57416,
+        "max": 37.303,
+        "min": 0.077,
+        "p50": 10.164,
+        "p95": 35.008,
+        "p99": 36.500
+      },
+      "end_to_end_minus_wait_s": {
+        "n": 57416,
+        "max": 49.561,
+        "min": 9.369,
+        "p50": 25.536,
+        "p95": 46.160,
+        "p99": 46.977
+      },
+      "wake_lateness_s": {
+        "n": 57416,
+        "max": 23.376,
+        "min": 0.001,
+        "p50": 6.048,
+        "p95": 16.976,
+        "p99": 21.118
+      },
+      "enrollments_per_s": 439.41,
+      "step_executions_per_s": 1744.43,
+      "backlog": {
+        "samples": 27,
+        "due_ready_peak": 15086,
+        "due_ready_final": 0,
+        "running_peak": 470,
+        "oldest_due_age_peak_s": 19.8,
+        "oldest_due_age_final_s": 0,
+        "oldest_due_age_at_generators_stop_s": 9.0,
+        "oldest_due_age_mid_window_s": 19.8,
+        "inbox_rows_peak": 40327,
+        "inbox_oldest_age_peak_s": 26.6,
+        "enrollment_states_final": {
+          "completed": 222525
+        }
+      },
+      "trigger_generator": {
+        "target_rate": 600,
+        "items_offered": 72000,
+        "items_accepted": 71998,
+        "achieved_rate": 599.9315257464846,
+        "late_dispatch": 0,
+        "abandoned_requests": 0,
+        "gave_up_after_retries": 0,
+        "retries_after_429": 0,
+        "status": {
+          "accepted_202": 71998,
+          "rate_limited_429": 0,
+          "server_5xx": 0,
+          "other": 2,
+          "transport_errors": 2
+        },
+        "api_p50_from_schedule_ms": 6.019,
+        "api_p99_from_schedule_ms": 15.749,
+        "dispatch_lag_p99_ms": 5.39
+      },
+      "background_generator": {
+        "target_rate": 1000,
+        "items_offered": 119998,
+        "items_accepted": 119995,
+        "achieved_rate": 999.8244710008463,
+        "late_dispatch": 0,
+        "abandoned_requests": 0,
+        "gave_up_after_retries": 0,
+        "retries_after_429": 0,
+        "status": {
+          "accepted_202": 119995,
+          "rate_limited_429": 0,
+          "server_5xx": 0,
+          "other": 3,
+          "transport_errors": 3
+        },
+        "api_p50_from_schedule_ms": 5.815,
+        "api_p99_from_schedule_ms": 15.228,
+        "dispatch_lag_p99_ms": 4.606
+      },
+      "ingest_applied_latency_ms_track": {
+        "items": 191993,
+        "p50_ms": 237.6,
+        "p95_ms": 24349.5,
+        "p99_ms": 27183.0,
+        "max_ms": 29428.2
+      },
+      "containers": {
+        "zirv-flow": {
+          "avg_cores": 0.90,
+          "peak_cores": 1.05,
+          "peak_mem_mib": 33,
+          "samples": 35
+        },
+        "postgres": {
+          "avg_cores": 6.49,
+          "peak_cores": 7.72,
+          "peak_mem_mib": 5554,
+          "samples": 35
+        },
+        "zirv-flow-scheduler": {
+          "avg_cores": 0.00,
+          "peak_cores": 0.00,
+          "peak_mem_mib": 5,
+          "samples": 35
+        },
+        "zirv-flow-worker": {
+          "avg_cores": 1.60,
+          "peak_cores": 3.00,
+          "peak_mem_mib": 25,
+          "samples": 35
+        }
+      },
+      "result_file": "D:/GitHub/zirv-flow/.zirv/worktrees/bench-l2/docs/benchmarks/data/tier-l-1.0.39/control-1.0.38-conc16-stale/flows/ramp-1000-600.json"
+    },
+    {
+      "trigger_rate": 700,
+      "held": true,
+      "reasons": [],
+      "accepted": 83999,
+      "enrollments_created": 63891,
+      "refused": {
+        "already_active": 20068
+      },
+      "completed": 63891,
+      "still_active": 0,
+      "failed": 0,
+      "trigger_to_enrollment_s": {
+        "n": 63891,
+        "max": 44.870,
+        "min": 0.124,
+        "p50": 13.500,
+        "p95": 42.775,
+        "p99": 43.815
+      },
+      "end_to_end_minus_wait_s": {
+        "n": 63891,
+        "max": 59.858,
+        "min": 2.486,
+        "p50": 33.158,
+        "p95": 56.423,
+        "p99": 57.623
+      },
+      "wake_lateness_s": {
+        "n": 63891,
+        "max": 17.033,
+        "min": 0.001,
+        "p50": 9.028,
+        "p95": 12.750,
+        "p99": 14.544
+      },
+      "enrollments_per_s": 482.09,
+      "step_executions_per_s": 1757.27,
+      "backlog": {
+        "samples": 29,
+        "due_ready_peak": 20343,
+        "due_ready_final": 0,
+        "running_peak": 485,
+        "oldest_due_age_peak_s": 13.6,
+        "oldest_due_age_final_s": 0,
+        "oldest_due_age_at_generators_stop_s": 11.7,
+        "oldest_due_age_mid_window_s": 13.6,
+        "inbox_rows_peak": 62930,
+        "inbox_oldest_age_peak_s": 39.4,
+        "enrollment_states_final": {
+          "completed": 286416
+        }
+      },
+      "trigger_generator": {
+        "target_rate": 700,
+        "items_offered": 83999,
+        "items_accepted": 83999,
+        "achieved_rate": 699.9179501416278,
+        "late_dispatch": 0,
+        "abandoned_requests": 0,
+        "gave_up_after_retries": 0,
+        "retries_after_429": 0,
+        "status": {
+          "accepted_202": 83999,
+          "rate_limited_429": 0,
+          "server_5xx": 0,
+          "other": 0,
+          "transport_errors": 0
+        },
+        "api_p50_from_schedule_ms": 6.011,
+        "api_p99_from_schedule_ms": 16.66,
+        "dispatch_lag_p99_ms": 5.389
+      },
+      "background_generator": {
+        "target_rate": 1000,
+        "items_offered": 119999,
+        "items_accepted": 119999,
+        "achieved_rate": 999.8193261430539,
+        "late_dispatch": 0,
+        "abandoned_requests": 0,
+        "gave_up_after_retries": 0,
+        "retries_after_429": 0,
+        "status": {
+          "accepted_202": 119999,
+          "rate_limited_429": 0,
+          "server_5xx": 0,
+          "other": 0,
+          "transport_errors": 0
+        },
+        "api_p50_from_schedule_ms": 5.987,
+        "api_p99_from_schedule_ms": 16.164,
+        "dispatch_lag_p99_ms": 4.828
+      },
+      "ingest_applied_latency_ms_track": {
+        "items": 203998,
+        "p50_ms": 3784.6,
+        "p95_ms": 35310.5,
+        "p99_ms": 38267.6,
+        "max_ms": 40448.8
+      },
+      "containers": {
+        "zirv-flow": {
+          "avg_cores": 0.96,
+          "peak_cores": 1.12,
+          "peak_mem_mib": 39,
+          "samples": 36
+        },
+        "postgres": {
+          "avg_cores": 6.47,
+          "peak_cores": 7.71,
+          "peak_mem_mib": 6137,
+          "samples": 36
+        },
+        "zirv-flow-scheduler": {
+          "avg_cores": 0.00,
+          "peak_cores": 0.00,
+          "peak_mem_mib": 5,
+          "samples": 36
+        },
+        "zirv-flow-worker": {
+          "avg_cores": 1.53,
+          "peak_cores": 2.99,
+          "peak_mem_mib": 24,
+          "samples": 36
+        }
+      },
+      "result_file": "D:/GitHub/zirv-flow/.zirv/worktrees/bench-l2/docs/benchmarks/data/tier-l-1.0.39/control-1.0.38-conc16-stale/flows/ramp-1000-700.json"
+    },
+    {
+      "trigger_rate": 800,
+      "held": false,
+      "reasons": [
+        "trigger_to_enrollment_p95_gt_60s"
+      ],
+      "accepted": 95999,
+      "enrollments_created": 72061,
+      "refused": {
+        "already_active": 23866
+      },
+      "completed": 72061,
+      "still_active": 0,
+      "failed": 0,
+      "trigger_to_enrollment_s": {
+        "n": 72061,
+        "max": 91.214,
+        "min": 0.156,
+        "p50": 58.401,
+        "p95": 87.948,
+        "p99": 90.035
+      },
+      "end_to_end_minus_wait_s": {
+        "n": 72061,
+        "max": 91.889,
+        "min": 3.525,
+        "p50": 64.134,
+        "p95": 89.574,
+        "p99": 90.856
+      },
+      "wake_lateness_s": {
+        "n": 72061,
+        "max": 17.662,
+        "min": 0.001,
+        "p50": 0.118,
+        "p95": 10.510,
+        "p99": 13.313
+      },
+      "enrollments_per_s": 192.09,
+      "step_executions_per_s": 861.38,
+      "backlog": {
+        "samples": 30,
+        "due_ready_peak": 21976,
+        "due_ready_final": 0,
+        "running_peak": 428,
+        "oldest_due_age_peak_s": 12.6,
+        "oldest_due_age_final_s": 0,
+        "oldest_due_age_at_generators_stop_s": 0,
+        "oldest_due_age_mid_window_s": 12.6,
+        "inbox_rows_peak": 159714,
+        "inbox_oldest_age_peak_s": 90.8,
+        "enrollment_states_final": {
+          "completed": 358477
+        }
+      },
+      "trigger_generator": {
+        "target_rate": 800,
+        "items_offered": 95999,
+        "items_accepted": 95999,
+        "achieved_rate": 799.8812450604892,
+        "late_dispatch": 0,
+        "abandoned_requests": 0,
+        "gave_up_after_retries": 0,
+        "retries_after_429": 0,
+        "status": {
+          "accepted_202": 95999,
+          "rate_limited_429": 0,
+          "server_5xx": 0,
+          "other": 0,
+          "transport_errors": 0
+        },
+        "api_p50_from_schedule_ms": 4.838,
+        "api_p99_from_schedule_ms": 11.532,
+        "dispatch_lag_p99_ms": 4.218
+      },
+      "background_generator": {
+        "target_rate": 1000,
+        "items_offered": 119998,
+        "items_accepted": 119998,
+        "achieved_rate": 999.8750360349512,
+        "late_dispatch": 0,
+        "abandoned_requests": 0,
+        "gave_up_after_retries": 0,
+        "retries_after_429": 0,
+        "status": {
+          "accepted_202": 119998,
+          "rate_limited_429": 0,
+          "server_5xx": 0,
+          "other": 0,
+          "transport_errors": 0
+        },
+        "api_p50_from_schedule_ms": 4.684,
+        "api_p99_from_schedule_ms": 11.328,
+        "dispatch_lag_p99_ms": 3.964
+      },
+      "ingest_applied_latency_ms_track": {
+        "items": 215997,
+        "p50_ms": 48536.6,
+        "p95_ms": 86281.1,
+        "p99_ms": 89404.4,
+        "max_ms": 90774.3
+      },
+      "containers": {
+        "zirv-flow": {
+          "avg_cores": 1.00,
+          "peak_cores": 1.19,
+          "peak_mem_mib": 42,
+          "samples": 36
+        },
+        "postgres": {
+          "avg_cores": 5.71,
+          "peak_cores": 6.43,
+          "peak_mem_mib": 6447,
+          "samples": 36
+        },
+        "zirv-flow-scheduler": {
+          "avg_cores": 0.00,
+          "peak_cores": 0.00,
+          "peak_mem_mib": 5,
+          "samples": 36
+        },
+        "zirv-flow-worker": {
+          "avg_cores": 0.56,
+          "peak_cores": 1.40,
+          "peak_mem_mib": 25,
+          "samples": 36
+        }
+      },
+      "result_file": "D:/GitHub/zirv-flow/.zirv/worktrees/bench-l2/docs/benchmarks/data/tier-l-1.0.39/control-1.0.38-conc16-stale/flows/ramp-1000-800.json"
+    }
+  ]
+}

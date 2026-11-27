@@ -40,7 +40,8 @@ entries per day), and trigger-to-enrollment at 50 triggers/s stays the same (`bg
 4, 16 and 32, section 5). After that PostgreSQL's 8 cores are the limit: it reaches 7 to 8 cores while
 the worker averages 1.8 to 2.8. The soak above is the production-load latency answer and ran at concurrency 4; it was
 not repeated at 16 or 32. Section 5 has the data and the caveats (stalls at c16 step 400 and c32 step
-700, and a collapse at c16 step 800).
+700, and a collapse at c16 step 800). [The 1.0.39 rerun](tier-l-1.0.39-rerun.md) re-measures both
+after the fixes.
 
 | Question | Result | Source |
 |---|---|---|
@@ -471,8 +472,9 @@ or 32.
    due 0.4 s). In `flows-run2/flows/ramp-0-250-samples.ndjson` the due queue is near zero until about
    27 s into the step, then grows from 228 jobs (33 s) to 6,350 jobs (60 s) and drains to 1 by 82 s,
    about 45 s in all. No error was found in the PostgreSQL log, and a timed checkpoint was in progress.
-   The same kind of stall appeared later in the pass 3 runs; item 9 gives the cause, found after the
-   run. This step is why section 1 gives the practical limit at no background load
+   The same kind of stall appeared later in the pass 3 runs (item 9). It recurred at this step on
+   1.0.39, so the cause item 9 gives does not account for it ([the 1.0.39
+   rerun](tier-l-1.0.39-rerun.md), section 3.2). This step is why section 1 gives the practical limit at no background load
    as 300, with 200 if this step is counted.
 2. **`ramp-2000` step 100 is slower than step 150.** Trigger-to-enrollment p95 0.748 s (p99 1.66 s)
    against 0.143 s (0.274 s) at step 150; end-to-end minus wait p95 1.52 against 0.799 s. Step 100 is
@@ -504,7 +506,7 @@ or 32.
    ramps (track 2,750, identify 2,000), so the lowest steps of the tables differ; the ceilings are not
    affected.
 
-9. **Transient stalls in held steps recur, at different concurrencies; cause found after the run.** All
+9. **Transient stalls in held steps recur, at different concurrencies; partly explained after the run.** All
    three are steps that held under the 60 s criterion but have a p95 far above their neighbours:
 
    | Run | Step | Step start (UTC) | trig-to-enroll p95 (s) | Neighbours | Ingest applied p95 (ms) |
@@ -535,7 +537,7 @@ or 32.
    directory); c16 step 400 began at 23:16:44Z, during a checkpoint that ran from 23:12:20 to 23:19:36
    (`flows-conc16/flows/postgres.log`).
 
-   **Cause, found after the run.** Each step ends with no enrollment in flight, because the runner
+   **A cause, found after the run.** Each step ends with no enrollment in flight, because the runner
    waits for that. When autoanalyze samples `enrollments` in that gap, it records `state` as 100 percent
    `completed`, and the planner then believes the in-flight partial index `enrollments_in_flight_idx` is
    empty. Under that belief the re-entry check (`flow_id = $1 AND person_id = ANY($2)`) and the goal/exit
@@ -556,7 +558,12 @@ or 32.
    statistics they read about 121 to 180 buffers on 16 and 18, in both plan modes. Still exposed: the
    flow-scoped in-flight counts (a flow's people-in-flow count and the summary rollup) scan the
    in-flight index in full under stale statistics, about 20,120 buffers against 316 to 527. They run
-   once per request or per rollup, not once per event. The fix was not re-benchmarked.
+   once per request or per rollup, not once per event. Re-benchmarked in [the 1.0.39
+   rerun](tier-l-1.0.39-rerun.md), section 3. With the statistics forced stale before every step,
+   1.0.38 got slower step after step and failed, and 1.0.39 recovered by the next step. Single-step
+   stalls of the kind in the table still occur on 1.0.39, at c4 `ramp-0` step 250 and at c16 and c32
+   step 400. They end at the first autovacuum pass inside the step, so some stale-statistics effect
+   remains, in a query 0116 did not change; which query is not established.
 10. **Concurrency 16 collapses at step 800; it is not a plateau.** Enrollments/s fall from 563 (step 700)
     to 406 (step 800). In `ramp-1000-800.json` the trigger generator's API p99 from schedule is
     30,003 ms, the generator's request timeout, and the background generator's is 30,003 ms too: the
@@ -575,8 +582,11 @@ or 32.
     A request that could not get a connection waited 30 s, so the 503 the code returns on a pool
     timeout came no earlier than the generator's own 30 s timeout, and the generator recorded transport
     errors, not refusals. In 1.0.39 a request waits at most 5 s for a connection, and an ingestion
-    request then gets a 503 with `Retry-After: 5`. Not re-benchmarked: whether step 800 now refuses
-    instead of hanging, and what that does to throughput, is not measured.
+    request then gets a 503 with `Retry-After: 5`. Re-benchmarked in [the 1.0.39
+    rerun](tier-l-1.0.39-rerun.md), section 4. Overload is now refused with 503, but only after up
+    to about 10 s, because an ingest request waits for two connections, one after the other. The 30 s
+    transport errors here and on 1.0.39 coincide with the load-generator host running out of
+    ephemeral ports: Windows logged Tcpip event 4227 at 23:28:16 UTC, 26 s into this step.
 11. **PostgreSQL crash in the c32 run, step 1,000.** At 2026-11-26T00:09:03Z a PostgreSQL 16.16
     backend running the benchmark's own `scripts/bench/flows/metrics.sql` died with signal 11 (a
     segmentation fault). The postmaster then ended every other session and entered recovery mode
@@ -588,7 +598,8 @@ or 32.
     The crash happened in a benchmark query, not in a product request, so it is not evidence about the
     product. It is why the c32 ramp stops at 900 with the ceiling not reached. Investigated again after
     the run: there is no core file and no hardware event, so the cause is still not established, and no
-    product change follows from it.
+    product change follows from it. The same query failed twice more on 1.0.39 ([the
+    rerun](tier-l-1.0.39-rerun.md), section 6).
 12. **Pass 3 limits.** One ramp per concurrency. The c32 run had diagnostic logging on and the c16 run
     did not, so their PostgreSQL overhead differs slightly. The step-to-step comparison with c4 uses
     passes 1 and 2, which have steps at different rates (section 5.1). The 1-hour soak was not run at

@@ -1,0 +1,29 @@
+test=flows tier=L app_cpuset=0-7 pg_cpuset=8-15 pg_memory=16g
+mem_worker=8192m mem_serve=6554m mem_scheduler=1638m
+image=sha256:8329ab73283dac890ca319a0ecbae661fb19819f05e4ed2780b9745cea19c236 created=2026-11-26T11:02:14.627701688Z
+version=zirv-flow 1.0.39
+/zirv-flow-bench-postgres-1 cpuset=8-15 mem_limit_bytes=17179869184
+/zirv-flow-bench-zirv-flow-1 cpuset=0-7 mem_limit_bytes=6872367104
+/zirv-flow-bench-zirv-flow-scheduler-1 cpuset=0-7 mem_limit_bytes=1717567488
+/zirv-flow-bench-zirv-flow-worker-1 cpuset=0-7 mem_limit_bytes=8589934592
+pg.server_version=16.16 (Debian 16.16-1.pgdg13+1)
+pg.shared_buffers=4GB
+pg.effective_cache_size=16GB
+pg.maintenance_work_mem=1GB
+pg.max_connections=100
+pg.synchronous_commit=on
+pg.wal_level=replica
+pg.fsync=on
+pg.work_mem=4MB
+pg.max_wal_size=8GB
+pg.checkpoint_timeout=15min
+serve_db_max_connections=32 (BENCH_SERVE_DB_CONNECTIONS)
+ZIRV_FLOW_DATABASE__MAX_CONNECTIONS=32
+ZIRV_FLOW_DATABASE__MIGRATE_ON_START=true
+ZIRV_FLOW_INGEST__BURST_PER_KEY=20000
+ZIRV_FLOW_INGEST__DRAIN_SHARDS=8
+ZIRV_FLOW_INGEST__RATE_PER_KEY=10000
+ZIRV_FLOW_LOG__FILTER=warn
+ZIRV_FLOW_SERVER__BIND=0.0.0.0:8080
+ZIRV_FLOW_SERVER__COOKIE_SECURE=false
+ZIRV_FLOW_WORKER__CONCURRENCY=4
