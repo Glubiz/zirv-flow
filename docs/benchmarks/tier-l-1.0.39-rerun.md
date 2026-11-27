@@ -150,7 +150,7 @@ Below saturation there were 34 steps with p50 under 1 s at 200 triggers/s or mor
 start, and all 5 stalled (p95 5.4 to 13.7 s). Of the other 29, one went
 above 3 s: concurrency 32 run 1 step 800 (3.2 s), the step where overload began.
 
-In the samples (`*-samples.ndjson`), each of the six stalls builds from about 15 to 35 s into the
+In the samples (`*-samples.ndjson`), each of the six stalls builds from 12 to 39 s into the
 step. The oldest due job's age peaks around the first pass, up to 12 s before it, and the queue drains
 9 to 36 s after the pass. For example, concurrency 16 run 1, step 400 started at 20:07:10:
 - the oldest due job reached 11.9 s at 20:07:58;
